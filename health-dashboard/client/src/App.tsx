@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import {
@@ -136,7 +136,63 @@ function SleepPanel({ sleep }: { sleep: Snapshot["sleep"] }) {
   );
 }
 
-function StrengthPanel({ strength }: { strength: Snapshot["strengthTraining"] }) {
+// Polls background sync tasks by their real lifecycle status instead of
+// guessing with a fixed timer: agent sync tasks routinely take longer than
+// the old 60-second blind poll, which is why finished syncs looked lost.
+// Stops when every task reaches a terminal state (or after 5 minutes) and
+// reports when a task ended without saving its snapshot.
+function useTaskPolling() {
+  const queryClient = useQueryClient();
+  const [taskIds, setTaskIds] = useState<string[]>([]);
+  const [failureNote, setFailureNote] = useState<string | null>(null);
+  const syncing = taskIds.length > 0;
+
+  useEffect(() => {
+    if (taskIds.length === 0) return;
+    let cancelled = false;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      void (async () => {
+        const results = await Promise.all(taskIds.map(async (taskId) => {
+          try {
+            return await api.getRefreshStatus({ taskId });
+          } catch {
+            return null;
+          }
+        }));
+        if (cancelled) return;
+        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        // Only completed/failed settle the poll. unknown/not_found mean the
+        // status endpoint cannot see the task yet — treating them as done
+        // would silently drop a sync that is still running.
+        const settled = results.every((result) => result !== null && (result.status === "completed" || result.status === "failed"));
+        if (settled) {
+          const failed = results.some((result) => result === null || result.status === "failed" || (result.status === "completed" && !result.contractSatisfied));
+          setFailureNote(failed ? "同步未完成，请再点一次同步" : null);
+          setTaskIds([]);
+        } else if (Date.now() - startedAt > 5 * 60_000) {
+          setFailureNote("同步超时，请再点一次同步");
+          setTaskIds([]);
+        }
+      })();
+    }, 4_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [queryClient, taskIds]);
+
+  const startPolling = (ids: Array<string | null>) => {
+    const next = ids.filter((id): id is string => id !== null);
+    if (next.length === 0) return;
+    setFailureNote(null);
+    setTaskIds(next);
+  };
+
+  return { syncing, failureNote, startPolling };
+}
+
+function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["strengthTraining"]; onSync: () => void; syncing: boolean }) {
   const workouts = [...strength.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const latest = workouts[0];
   const currentWeek = strength.weeklyTrend[strength.weeklyTrend.length - 1];
@@ -150,6 +206,10 @@ function StrengthPanel({ strength }: { strength: Snapshot["strengthTraining"] })
       <div className="section-heading">
         <div><p className="section-kicker">训练记录</p><h2 id="strength-title">力量训练</h2></div>
         <span className="record-count">{currentWeek?.sessions ?? 0} 次 / 本周</span>
+      </div>
+      <div className="strength-sync-row">
+        <span>{strength.updatedAt ? `训练数据更新于 ${updatedLabel(strength.updatedAt)}` : "训练数据尚未同步"}</span>
+        <button className="sync-button" type="button" aria-label="同步训练记录" onClick={onSync} disabled={syncing}>{syncing ? "同步中…" : "同步训练"}</button>
       </div>
       {latest ? (
         <>
@@ -232,11 +292,11 @@ function ReadinessPanel({ readiness }: { readiness: Readiness }) {
   );
 }
 
-function TodayView({ snapshot, readiness }: { snapshot: Snapshot; readiness: Readiness | null }) {
+function TodayView({ snapshot, readiness, onSyncStrength, strengthSyncing }: { snapshot: Snapshot; readiness: Readiness | null; onSyncStrength: () => void; strengthSyncing: boolean }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
-  const stepsBaselineMissing = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null;
-  const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineMissing || snapshot.steps.status === "数据缺失" ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
-  const stepStatus: Status = snapshot.steps.value === null ? "数据缺失" : stepsBaselineMissing ? "基线不足" : snapshot.steps.status;
+  const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
+  const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineIncomplete ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
+  const stepStatus: Status = snapshot.steps.value === null ? "数据缺失" : stepsBaselineIncomplete ? "基线不足" : snapshot.steps.status;
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
@@ -252,7 +312,7 @@ function TodayView({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
         <Kpi label="HRV" value={numberLabel(snapshot.hrv.value, 1)} unit="ms" detail={`基线约 ${snapshot.hrv.baseline} · 常见 ${snapshot.hrv.usualMin}–${snapshot.hrv.usualMax}`} status={snapshot.hrv.status} />
         <Kpi label="睡眠" value={sleepHours.toFixed(1)} unit="h" detail={`质量 ${numberLabel(snapshot.sleep.quality)} · 效率 ${snapshot.sleep.efficiency?.toFixed(1) ?? "—"}%`} status={snapshot.sleep.status} />
       </section>
-      <StrengthPanel strength={snapshot.strengthTraining} />
+      <StrengthPanel strength={snapshot.strengthTraining} onSync={onSyncStrength} syncing={strengthSyncing} />
       {snapshot.morningReference ? (
         <section className="morning-strip" aria-label="今晨参考">
           <div><span>今晨参考 · {dateLabel(snapshot.morningReference.date)}</span><strong>HRV {numberLabel(snapshot.morningReference.hrvMs, 1)} ms</strong></div>
@@ -362,30 +422,28 @@ function HistoryView({ snapshot }: { snapshot: Snapshot }) {
 
 function Dashboard({ snapshot, readiness }: { snapshot: Snapshot; readiness: Readiness | null }) {
   const [tab, setTab] = useState<Tab>("today");
-  const [waitingForSync, setWaitingForSync] = useState(false);
+  const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
+  const polling = useTaskPolling();
   const refresh = useMutation({
     mutationFn: () => api.refreshHealthData({}),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      setWaitingForSync(result.accepted);
+      setLastSyncMessage(result.message);
+      if (result.accepted) polling.startPolling([result.taskId, result.strengthTaskId]);
     },
-    onError: () => setWaitingForSync(false),
+  });
+  const strengthRefresh = useMutation({
+    mutationFn: () => api.refreshStrengthTraining({}),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      setLastSyncMessage(result.message);
+      if (result.accepted) polling.startPolling([result.strengthTaskId]);
+    },
   });
 
-  useEffect(() => {
-    if (!waitingForSync) return;
-    const interval = window.setInterval(() => {
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-    }, 4_000);
-    const timeout = window.setTimeout(() => setWaitingForSync(false), 60_000);
-    return () => {
-      window.clearInterval(interval);
-      window.clearTimeout(timeout);
-    };
-  }, [queryClient, waitingForSync]);
-
-  const isSyncing = refresh.isPending || waitingForSync;
+  const isSyncing = refresh.isPending || strengthRefresh.isPending || polling.syncing;
+  const syncMessage = polling.failureNote ?? (polling.syncing ? "同步进行中，完成后会自动更新" : lastSyncMessage);
   return (
     <>
       <header className="page-meta">
@@ -397,8 +455,8 @@ function Dashboard({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
         <button type="button" className={tab === "trends" ? "selected" : ""} onClick={() => setTab("trends")}>趋势</button>
         <button type="button" className={tab === "history" ? "selected" : ""} onClick={() => setTab("history")}>历史</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} />}
-      {refresh.data ? <p className="refresh-note" role="status">{waitingForSync ? `${refresh.data.message}，完成后会自动更新` : refresh.data.message}</p> : null}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} />}
+      {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
 }
@@ -406,29 +464,28 @@ function Dashboard({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
 export function App() {
   const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: () => api.getDashboard({}) });
   const queryClient = useQueryClient();
-  const [waitingForFirstSync, setWaitingForFirstSync] = useState(false);
+  const polling = useTaskPolling();
+  // When getDashboard kicks off a background strength auto-sync (stale local
+  // training data), it returns the task id; poll it here so the fresh numbers
+  // land in this same session instead of waiting for the next open.
+  const autoSyncStartedRef = useRef<string | null>(null);
+  const autoSyncTaskId = dashboard.data?.strengthSyncTaskId ?? null;
+  useEffect(() => {
+    if (autoSyncTaskId && autoSyncStartedRef.current !== autoSyncTaskId) {
+      autoSyncStartedRef.current = autoSyncTaskId;
+      polling.startPolling([autoSyncTaskId]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSyncTaskId]);
   const firstSync = useMutation({
     mutationFn: () => api.refreshHealthData({}),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      setWaitingForFirstSync(result.accepted);
+      if (result.accepted) polling.startPolling([result.taskId, result.strengthTaskId]);
     },
-    onError: () => setWaitingForFirstSync(false),
   });
 
-  useEffect(() => {
-    if (!waitingForFirstSync) return;
-    const interval = window.setInterval(() => {
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-    }, 4_000);
-    const timeout = window.setTimeout(() => setWaitingForFirstSync(false), 60_000);
-    return () => {
-      window.clearInterval(interval);
-      window.clearTimeout(timeout);
-    };
-  }, [queryClient, waitingForFirstSync]);
-
-  const firstSyncing = firstSync.isPending || waitingForFirstSync;
+  const firstSyncing = firstSync.isPending || polling.syncing;
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
       {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} /> : (
@@ -436,7 +493,7 @@ export function App() {
           <h1>还没有健康数据</h1>
           <p>尚未同步过 Apple 健康。点击下方按钮，从 HealthKit 同步最近的完整日数据后，这里会显示步数、心率、HRV 与睡眠。</p>
           <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={() => firstSync.mutate()} disabled={firstSyncing}>{firstSyncing ? "同步中…" : "同步 Apple 健康"}</button>
-          {firstSync.data ? <p role="status">{waitingForFirstSync ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
+          {polling.failureNote ? <p role="status">{polling.failureNote}</p> : firstSync.data ? <p role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
         </div>
       )}
       <footer>仅供健康参考，不做医疗诊断；身体不适请及时看医生。</footer>

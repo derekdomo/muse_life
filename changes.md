@@ -57,3 +57,10 @@
 - schema/migration 兼容策略：无变化——本轮仅客户端展示派生与仓库验证脚本；快照 schema、payload JSON blob、旧数字快照兼容与上轮相同。回滚 revert 本次提交即可，客户端回旧版只会恢复旧文案逻辑，不涉及数据。
 - 验证证据（均为 synthetic 数据）：`node health-dashboard/validate-steps-contract.mjs`（临时目录、zod 取自 artifact 已装依赖）14/14 PASS；`node health-dashboard/validate-steps-display.mjs` 7/7 PASS；仓库外临时副本 `bun x tsc --noEmit -p client/tsconfig.json` 与 `-p server/tsconfig.json` 均退出 0。artifact 构建审计 verdict pass（source 对照确认三处改动均在 TodayView 内）；上线后以非 owner 上下文 `invoke_action getDashboard` 仍返回 `forbidden: true`、snapshot/readiness 为 null，权限路径未破坏。仍缺（本条不自行勾选 `L0.4`）：新 null/零/旧数字快照经受信 owner callback 保存再回读的运行证据、三视口（390×844 / 430×932 / 桌面）目视证据、owner 刷新成功/配置缺失/首次空库证据——本轮 invoke 上下文为非 owner、构建审计沙箱同样只能看到 owner 门禁页，留 PM 以 owner 会话验收。
 - 修改文件：`health-dashboard/client/src/App.tsx`、`health-dashboard/validate-steps-contract.mjs`、`health-dashboard/validate-steps-display.mjs`（新增）、`changes.md`。不在本次范围：`L0.1/F0.1` 三身份与后台受信链证据、`OPS-001` 托管 Gate 触发证据、服务端 status 生成口径（客户端已按原始值/基线完整性覆盖显示，服务端 status 未动）。
+
+## 2026-10-14（space-4 力量同步及时性修复回灌）
+
+- 用户反馈健康看板力量训练数据不及时更新。根因：力量同步任务挂固定每日 dedupeKey，早上定时同步后白天再触发会被判为重复任务吞掉；前端只等 60 秒就放弃，任务完成时页面已不再刷新。
+- artifact 侧修复（经 inspect 修复并审计通过后回灌本仓）：`server/src/actions.ts` 新增 `refreshStrengthTraining`、`getRefreshStatus` 两个 action，手动/全部同步改用 allowParallel 每次真正发起新任务；`getDashboard` 在力量数据超过 5 分钟未同步时自动发起力量同步并回传 taskId。`client/src/App.tsx` 在同一会话内轮询到终态（只认 completed/failed）后重绘，力量面板新增独立「同步训练」按钮与"训练数据更新于"时间，同步失败/超时明确提示。`client/src/theme.css`、`DATA-PLAN.md` 随之同步。
+- 验证证据：构建审计两轮 pass、无控制台错误、双视口正常；非 owner 调用新 action 全部 forbidden 且零数据，owner 门禁未削弱。已知限制：审计环境为非 owner，owner 会话下"打开看板→自动同步→新数据即时显示"未实测；后台自动同步失败提示在已有数据视图下不显示（P2 小注记，手动同步提示正常）。
+- 本条只回灌代码与文档，未改 `plans.md` 勾选（归 PM 验收）。修改文件：`health-dashboard/server/src/actions.ts`、`health-dashboard/client/src/App.tsx`、`health-dashboard/client/src/theme.css`、`health-dashboard/DATA-PLAN.md`。

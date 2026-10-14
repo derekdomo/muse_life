@@ -147,6 +147,8 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .kpi p { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.45; }
 
 .strength-panel { margin-top: 16px; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.strength-sync-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 10px; }
+.strength-sync-row span { color: var(--dim); font-size: 11px; }
 .strength-latest { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: center; gap: 16px; margin-top: 20px; }
 .routine-badge { display: grid; width: 72px; height: 76px; align-content: center; justify-items: center; border-radius: 10px; background: var(--strength-soft); color: var(--strength); }
 .routine-badge span { font-size: 10px; font-weight: 700; }
