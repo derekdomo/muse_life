@@ -833,6 +833,15 @@ export function App() {
     );
   }
 
+  if (dashboard.data.forbidden) {
+    return (
+      <main className="loading-shell">
+        <h1>无权访问此训练记录</h1>
+        <p>此页面仅对所有者开放。</p>
+      </main>
+    );
+  }
+
   return (
     <div className="app-root">
       <SafeAreaTopScrim backgroundColor="var(--bg)" />

@@ -137,8 +137,8 @@ const excludedLiveSources = new Set([
   "bonds",
 ]);
 
-function isSignedInGuest(ctx: Ctx): boolean {
-  return ctx.viewer != null && !ctx.viewer.isOwner;
+function isOwner(ctx: Ctx): boolean {
+  return ctx.viewer?.isOwner === true;
 }
 
 function displayLabel(source: string): string {
@@ -575,7 +575,7 @@ export const Actions = {
       }),
     }),
     async handler(ctx) {
-      if (isSignedInGuest(ctx)) {
+      if (!isOwner(ctx)) {
         return {
           access: "guest_denied" as const,
           data: null,
@@ -605,7 +605,7 @@ export const Actions = {
     request: z.object({}),
     response: refreshResponse,
     async handler(ctx): Promise<z.infer<typeof refreshResponse>> {
-      if (isSignedInGuest(ctx)) {
+      if (!isOwner(ctx)) {
         return { ok: false, status: "forbidden", message: "财务数据仅所有者可更新" };
       }
       const state = await getState(ctx);
@@ -615,7 +615,7 @@ export const Actions = {
       await writeState(ctx, { status: "running", message: "正在同步 Firance 与 Plaid" });
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
-        `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 在设备 b447fdcb-b143-4324-26cb-84f5eb0a73ee 上，先用文件列表工具列出 /Users/xiangyusun/Library/Application Support/Firance/FinanceData/，再读取全部文件名符合 YYYY-MM-DD 的无扩展名文件。每条记录是连续三行 key/value，key 为 finance_source、type、number，但三行顺序会变化，必须按 key 解析。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income 且 number 为有限数字的记录。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后返回 ticker/name/institution_value；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。不要发送聊天消息。`,
+        `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 先定位目标设备：用设备列表工具列出当前可访问的设备，按设备名找到用户的 Mac mini（设备名含 “Mac mini” 的那台），本次刷新只使用这个运行时解析出的设备 ID。若按设备名找不到 Mac mini，或有多台候选无法唯一确定，不要猜测、不要用任何预置或写死的 ID 兜底，立即以 success:false 回调 ingestFinanceData 并在 error 中明确说明未能按设备名定位 Mac mini。在定位到的 Mac mini 上，先用文件列表工具列出 /Users/xiangyusun/Library/Application Support/Firance/FinanceData/，再读取全部文件名符合 YYYY-MM-DD 的无扩展名文件。每条记录是连续三行 key/value，key 为 finance_source、type、number，但三行顺序会变化，必须按 key 解析。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income 且 number 为有限数字的记录。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后返回 ticker/name/institution_value；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。不要发送聊天消息。`,
         { expectsAction: "ingestFinanceData", dedupeKey: "weekly-firance-finance-refresh" },
       );
       if (!task.ok) {
@@ -643,7 +643,7 @@ export const Actions = {
     ]),
     response: ingestResponse,
     async handler(ctx, args): Promise<z.infer<typeof ingestResponse>> {
-      if (isSignedInGuest(ctx)) return { ok: false, savedMonths: 0 };
+      if (!isOwner(ctx)) return { ok: false, savedMonths: 0 };
       if (!args.success) {
         await writeState(ctx, { status: "error", message: "本次更新失败，显示上次数据" });
         ctx.invalidateQueries();

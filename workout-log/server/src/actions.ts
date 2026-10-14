@@ -80,8 +80,21 @@ async function loadWorkout(ctx: Ctx, workoutId: number) {
   };
 }
 
-const startResponse = z.object({ workout: workoutResponse });
-const doneResponse = z.object({ ok: z.literal(true) });
+const startResponse = z.object({ forbidden: z.boolean(), workout: workoutResponse.nullable() });
+const doneResponse = z.object({ ok: z.boolean(), forbidden: z.boolean() });
+const addSetResponse = z.object({ forbidden: z.boolean(), set: setResponse.nullable() });
+const dashboardResponse = z.object({
+  forbidden: z.boolean(),
+  active_workout: workoutResponse.nullable(),
+  recent_workouts: z.array(workoutResponse),
+});
+
+// Owner-only gate (AUDIT-02 / L0.1): every read, write, initialization, and
+// callback action must verify this before touching the database. A missing
+// viewer (null/undefined) is treated as not authorized, never as owner.
+function isOwner(ctx: Ctx): boolean {
+  return ctx.viewer?.isOwner === true;
+}
 
 function targetRepRange(target: string) {
   const values = target.match(/\d+/g)?.map(Number).filter(Number.isFinite) ?? [];
@@ -109,11 +122,11 @@ async function loadPreviousCompletedSets(ctx: Ctx, routine: z.infer<typeof routi
 export const Actions = {
   getDashboard: defineAction({
     request: z.object({ recent_limit: z.number().int().min(1).max(20).default(8) }),
-    response: z.object({
-      active_workout: workoutResponse.nullable(),
-      recent_workouts: z.array(workoutResponse),
-    }),
-    async handler(ctx, args) {
+    response: dashboardResponse,
+    async handler(ctx, args): Promise<z.infer<typeof dashboardResponse>> {
+      if (!isOwner(ctx)) {
+        return { forbidden: true, active_workout: null, recent_workouts: [] };
+      }
       const db = ctx.db<typeof schema>();
       const activeRows = await db
         .select({ id: schema.workouts.id })
@@ -135,7 +148,7 @@ export const Actions = {
         const loaded = await loadWorkout(ctx, row.id);
         if (loaded) recentWorkouts.push(loaded);
       }
-      return { active_workout: activeWorkout, recent_workouts: recentWorkouts };
+      return { forbidden: false, active_workout: activeWorkout, recent_workouts: recentWorkouts };
     },
   }),
 
@@ -143,6 +156,9 @@ export const Actions = {
     request: z.object({ routine: routineSchema, unit: unitSchema }),
     response: startResponse,
     async handler(ctx, args): Promise<z.infer<typeof startResponse>> {
+      if (!isOwner(ctx)) {
+        return { forbidden: true, workout: null };
+      }
       const db = ctx.db<typeof schema>();
       const existing = await db
         .select({ id: schema.workouts.id })
@@ -154,7 +170,7 @@ export const Actions = {
       if (existingId) {
         const loaded = await loadWorkout(ctx, existingId);
         if (!loaded) throw new Error("未能读取进行中的训练");
-        return { workout: loaded };
+        return { forbidden: false, workout: loaded };
       }
 
       const inserted = await db
@@ -199,7 +215,7 @@ export const Actions = {
       const workout = await loadWorkout(ctx, workoutId);
       if (!workout) throw new Error("未能读取新训练");
       ctx.invalidateQueries();
-      return { workout };
+      return { forbidden: false, workout };
     },
   }),
 
@@ -212,20 +228,26 @@ export const Actions = {
     }),
     response: doneResponse,
     async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true };
+      }
       const db = ctx.db<typeof schema>();
       await db
         .update(schema.workoutSets)
         .set({ weight: args.weight, reps: args.reps, completed: args.completed, updatedAt: new Date() })
         .where(eq(schema.workoutSets.id, args.id));
       ctx.invalidateQueries();
-      return { ok: true };
+      return { ok: true, forbidden: false };
     },
   }),
 
   addSet: defineAction({
     request: z.object({ workout_id: z.number().int().positive(), exercise_key: z.string().min(1) }),
-    response: z.object({ set: setResponse }),
-    async handler(ctx, args) {
+    response: addSetResponse,
+    async handler(ctx, args): Promise<z.infer<typeof addSetResponse>> {
+      if (!isOwner(ctx)) {
+        return { forbidden: true, set: null };
+      }
       const db = ctx.db<typeof schema>();
       const rows = await db
         .select()
@@ -249,6 +271,7 @@ export const Actions = {
       if (!row) throw new Error("未能添加一组");
       ctx.invalidateQueries();
       return {
+        forbidden: false,
         set: {
           id: row.id,
           workout_id: row.workoutId,
@@ -268,13 +291,16 @@ export const Actions = {
     request: z.object({ workout_id: z.number().int().positive() }),
     response: doneResponse,
     async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true };
+      }
       const db = ctx.db<typeof schema>();
       await db
         .update(schema.workouts)
         .set({ completedAt: new Date() })
         .where(and(eq(schema.workouts.id, args.workout_id), isNull(schema.workouts.completedAt)));
       ctx.invalidateQueries();
-      return { ok: true };
+      return { ok: true, forbidden: false };
     },
   }),
 
@@ -282,11 +308,14 @@ export const Actions = {
     request: z.object({ workout_id: z.number().int().positive() }),
     response: doneResponse,
     async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true };
+      }
       const db = ctx.db<typeof schema>();
       await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, args.workout_id));
       await db.delete(schema.workouts).where(eq(schema.workouts.id, args.workout_id));
       ctx.invalidateQueries();
-      return { ok: true };
+      return { ok: true, forbidden: false };
     },
   }),
 } satisfies ActionsModule;

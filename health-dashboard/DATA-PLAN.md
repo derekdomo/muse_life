@@ -2,13 +2,13 @@
 
 ## Context provenance
 - `我需要一个daily update的health dashboard` (current user request; establishes a daily-refreshed personal health overview)
-- Parent handoff supplied a real Apple HealthKit snapshot pulled 2026-10-02 12:12 PDT for data date 2026-10-01, including baselines, 7-day trends, last-night sleep, and workout count; these exact values seed the first view and remain editable only through later HealthKit refreshes.
+- Parent handoff supplied a real Apple HealthKit snapshot pulled 2026-10-02 12:12 PDT for data date 2026-10-01, including baselines, 7-day trends, last-night sleep, and workout count. (AUDIT-03 / L0.4, 2026-10-13: these values were originally embedded in `server/src/actions.ts` as `INITIAL_*` seed constants; they have been removed from the source. The snapshot now lives only in the database like any synced snapshot, and a database without a snapshot shows the honest empty state until the first real HealthKit sync.)
 - Parent handoff requires Simplified Chinese, daily silent refresh, KPI status chips, 7-day step/resting-HR/HRV charts, sleep staging, missing-data treatment, and a medical-reference footer.
 - `Health baseline from about two weeks of iPhone health data ... ~4,000 steps/day, resting heart rate ~65, HRV ~40ms, sleep 6.5-7h per night, twice-weekly swimming` (standing user context directly relevant to comparison ranges).
 
 ## Tested sources
 ### Apple HealthKit via `health-cli`
-**Used by**: `initializeSnapshot`, `refreshHealthData` agent task, `saveHealthSnapshot`, `getDashboard`
+**Used by**: `refreshHealthData` agent task, `saveHealthSnapshot`, `getDashboard` (`initializeSnapshot` no longer writes anything; it never seeds data)
 **Test command**: `health-cli query metrics --provider healthkit --start-date 2026-09-25 --end-date 2026-10-01 --fields step_count,resting_hr_average_bpm,heart_rate_variability_ms,hr_average_bpm,active_energy_burned_kcal,distance_walking_running_meters`
 **Sample output**: coverage.complete=true; daily records included steps 3203, 4661, 6320, 7353, 5576, 7889, 1579 for 9/25–10/01; 9/25 resting HR absent; 10/01 resting HR and HRV absent; 10/01 distance 1056.48m.
 **Processing**: use the latest completed calendar day as the daily metric date; retain nullable HR/HRV and render them as `数据缺失`, not anomalies; preserve the source coverage flag.
@@ -33,6 +33,10 @@
 ## Image slots
 Imagery not needed: the requested subject is the user’s quantitative health record, best served by deterministic charts, stage bars, and status marks rather than decorative or representational imagery.
 
+## Access control (AUDIT-02 / L0.1, 2026-10-13)
+- Every action — reads (`getDashboard`), writes (`saveMorningCheckin`), initialization (`initializeSnapshot`), refresh (`refreshHealthData`), and the agent callbacks (`saveHealthSnapshot`, `saveStrengthTrainingSnapshot`) — verifies `ctx.viewer?.isOwner === true` on the server before touching the database. A missing viewer counts as unauthorized.
+- Unauthorized calls return a stable typed state (`forbidden: true` with null/empty payload, or `ok: false` for mutations) and never return health data or perform writes.
+
 ## Long-term data behavior
 - **Refresh policy**: a silent artifact-owned daily schedule calls `refreshHealthData`; the action asks an agent to query the latest complete day, last night’s sleep, morning reference, 7-day trends, and workouts using `health-cli --provider healthkit`, then calls `saveHealthSnapshot` with validated structured data.
 - **Growth**: each refresh upserts the current snapshot and replaces the bounded 7-day trend rows; no synthetic history is generated.
@@ -43,7 +47,7 @@ Imagery not needed: the requested subject is the user’s quantitative health re
 ## Unified 30-day history (merged 2026-10-05)
 - The existing `health-cli --provider healthkit` refresh now widens its completed-day window to 30 days and adds `body_mass_average`, `apple_exercise_time_sum`, and `distance_swimming_sum` to the daily query.
 - The same refresh retrieves workout sessions for the same 30-day window and the latest 14 sleep sessions; it does not introduce another source or a second refresh path.
-- The initial history fallback uses the already tested, source-backed rows from the former Health overview artifact: 27 daily rows from 2026-09-05 through 2026-10-01, four HealthKit swimming workouts, three real weigh-ins, and seven sleep sessions. A later unified refresh replaces this bounded snapshot with newer source data.
+- (Removed 2026-10-13, AUDIT-03 / L0.4) The former initial-history fallback embedded those source-backed rows (27 daily rows from 2026-09-05 through 2026-10-01, four HealthKit swimming workouts, three real weigh-ins, and seven sleep sessions) as `INITIAL_*` constants in server source. They are deleted; stored records missing history fields now fall back to empty arrays, and a database without a snapshot renders the empty state with a HealthKit sync action.
 - **Chart encoding**: steps and active energy are rendered in separate charts. Activity energy and exercise minutes use distinct labeled left/right axes; resting heart rate and HRV also use distinct labeled axes. Missing values remain gaps.
 - **History views**: swimming rows show date, distance, duration, average heart rate, and energy; weight rows show only real weigh-ins; sleep rows show date, start/end, duration, and source quality.
 

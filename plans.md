@@ -30,10 +30,10 @@
 
 ### L0 — 隐私与权限（P0）
 
-- [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。
+- [x] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-13 完成：三个 app 全部 action 已加服务端 isOwner 校验并回灌仓库，见 changes.md）
 - [ ] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。
 - [ ] `L0.3` 无权限响应使用稳定的 typed state，不依赖前端隐藏；直接调用 action 也不能读取 payload 或修改数据。
-- [ ] `L0.4` 删除源码中的真实 HealthKit 明细、真实 workout UUID 和设备 ID；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立 synthetic fixture，且生产初始化不会写入 fixture。
+- [ ] `L0.4` 删除源码中的真实 HealthKit 明细、真实 workout UUID 和设备 ID；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立 synthetic fixture，且生产初始化不会写入 fixture。（2026-10-13 部分完成：健康看板源码中的真实健康序列与 13 个真实 workout UUID 已删除、首次启动改诚实空态，见 changes.md；未完部分——health-dashboard 与 weekly-finance 的刷新 prompt 中仍保留 health-cli 设备标识，删除将中断本机健康数据回拉，需先改为运行时注入/占位符方案后再勾选本项。）
 - [ ] `L0.5` 日志和错误文案不得包含账户余额、健康数值、训练明细、完整本地路径或上游原始 JSON。
 
 **验收**：分别以 owner、已登录非 owner、未登录三种身份直接调用每个 action；后二者全部无法读取或写入私密数据。对仓库执行个人数据扫描，不再命中真实健康时序、真实 workout UUID 或固定设备 ID。
@@ -127,7 +127,7 @@
 
 ### F0 — 权限与数据完整性（P0）
 
-- [ ] `F0.1` 修正 owner 判定：只有 `ctx.viewer?.isOwner === true` 才能读取、刷新或 ingest；匿名 `viewer === null` 必须拒绝。
+- [x] `F0.1` 修正 owner 判定：只有 `ctx.viewer?.isOwner === true` 才能读取、刷新或 ingest；匿名 `viewer === null` 必须拒绝。（2026-10-13 完成，见 changes.md）
 - [ ] `F0.2` payload JSON 损坏时返回 typed error 并保留可恢复路径，不能让 `JSON.parse` 直接使整个 action 崩溃。
 - [ ] `F0.3` 月度文件先按合法真实日期校验、再排序；同一个自然月有多个快照时明确选择月末/最新快照，不能当作多个“月份”画图。
 - [ ] `F0.4` 标记当月快照为 partial 或 complete。“本月收入/支出/储蓄率”必须显示截至日期；FIRE 年支出只使用完整且非异常月份。
@@ -179,9 +179,9 @@
 
 ### 已确认风险
 
-- [ ] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。
-- [ ] `AUDIT-02 / P0` 健康和训练 action 没有显式 owner guard；财务 ingest/refresh 也继承 `AUDIT-01`。实际平台是否另有全局拦截仍需运行时验证，但发布前必须做服务端纵深校验。
-- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。
+- [x] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。（2026-10-13 已修复：`isSignedInGuest` 改为严格 `isOwner` 校验，见 changes.md）
+- [x] `AUDIT-02 / P0` 健康和训练 action 没有显式 owner guard；财务 ingest/refresh 也继承 `AUDIT-01`。实际平台是否另有全局拦截仍需运行时验证，但发布前必须做服务端纵深校验。（2026-10-13 已修复：健康 6 个、训练 8 个 action 全部加服务端 isOwner 校验，guest 身份实测零数据暴露，见 changes.md）
+- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。（2026-10-13 部分修复：健康源码的真实序列/UUID/初始快照已删除并回灌仓库；剩余——健康与财务刷新 prompt 中的 health-cli 固定设备标识仍在，删除会中断本机数据回拉，待改运行时注入方案后关闭本项。）
 - [ ] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。
 - [ ] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。
 - [ ] `AUDIT-06 / P1` 健康前端只用固定 60 秒等待，没有可查询的来源任务状态；过早完成和超时未完成都无法准确表达。

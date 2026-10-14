@@ -403,9 +403,40 @@ function Dashboard({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
 
 export function App() {
   const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: () => api.getDashboard({}) });
+  const queryClient = useQueryClient();
+  const [waitingForFirstSync, setWaitingForFirstSync] = useState(false);
+  const firstSync = useMutation({
+    mutationFn: () => api.refreshHealthData({}),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      setWaitingForFirstSync(result.accepted);
+    },
+    onError: () => setWaitingForFirstSync(false),
+  });
+
+  useEffect(() => {
+    if (!waitingForFirstSync) return;
+    const interval = window.setInterval(() => {
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    }, 4_000);
+    const timeout = window.setTimeout(() => setWaitingForFirstSync(false), 60_000);
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
+    };
+  }, [queryClient, waitingForFirstSync]);
+
+  const firstSyncing = firstSync.isPending || waitingForFirstSync;
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} /> : <div className="empty-state"><h1>正在准备第一份健康快照</h1><p>每日同步完成后，这里会显示上一完整日的数据。</p></div>}
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} /> : (
+        <div className="empty-state">
+          <h1>还没有健康数据</h1>
+          <p>尚未同步过 Apple 健康。点击下方按钮，从 HealthKit 同步最近的完整日数据后，这里会显示步数、心率、HRV 与睡眠。</p>
+          <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={() => firstSync.mutate()} disabled={firstSyncing}>{firstSyncing ? "同步中…" : "同步 Apple 健康"}</button>
+          {firstSync.data ? <p role="status">{waitingForFirstSync ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
+        </div>
+      )}
       <footer>仅供健康参考，不做医疗诊断；身体不适请及时看医生。</footer>
     </main></div>
   );

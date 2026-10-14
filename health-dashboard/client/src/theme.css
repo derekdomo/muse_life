@@ -266,6 +266,9 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .loading span { width: 34px; height: 34px; margin: 0 auto; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 900ms linear infinite; }
 .loading p, .empty-state p { color: var(--dim); }
 .empty-state h1 { margin: 0; font-size: 22px; }
+.empty-state { justify-items: center; gap: 10px; }
+.empty-state p { margin: 0; max-width: 420px; }
+.empty-state .sync-button { font-size: 14px; }
 footer { max-width: 620px; margin: 32px auto 0; color: var(--dim); font-size: 11px; line-height: 1.6; text-align: center; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .loading span { animation: none; } }
