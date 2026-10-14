@@ -33,7 +33,7 @@
 - [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-13 PM 复核至 `d439ac6`：finance 3 个、health 6 个、workout 6 个现有 action 的严格 owner guard 静态确认；`a317191` 补齐正确路由清单及非 owner 直接调用声明，但没有 owner / guest / anonymous 分列结果、后台 schedule 与 agent callback 的受信上下文证据。本轮无 Muse builder 可独立复验，保持“运行待验”。）
 - [ ] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。
 - [ ] `L0.3` 无权限响应使用稳定的 typed state，不依赖前端隐藏；直接调用 action 也不能读取 payload 或修改数据。
-- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-14 PM 复核至 `ddb105c`：`523a4d4` 已删除源码个人步数基线/范围与绝对用户路径，说明纠错静态通过；但刷新 prompt 要求历史不足时基线/范围为 null，与 `health-dashboard/server/src/actions.ts:99-103` 的非 nullable 数字 schema 冲突，趋势组件仍按数字展示。必须先修正缺失值契约并补 synthetic 边界与 artifact 证据；owner 刷新、配置缺失及首次空库运行仍待验，不勾选。）
+- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-14 PM 复核至 `be86e01`：步数三展示字段的 nullable/nonnegative schema、旧数字快照兼容及 KPI/趋势 null 分支静态通过，原 prompt/schema 冲突关闭；93 个 tracked 文件的四项隐私扫描均为零。首页 :237,244 仍会把有步数但无基线说成“常见范围”或“未记录”，synthetic 脚本 :47 未覆盖负下界且没有派生输出断言，见本轮返工。新 null 快照的 owner 保存/回读与手机证据待验，原 owner 刷新/配置缺失/首次空库阻塞沿用；不勾选。）
 - [ ] `L0.5` 日志和错误文案不得包含账户余额、健康数值、训练明细、完整本地路径或上游原始 JSON。
 
 **验收**：分别以 owner、已登录非 owner、未登录三种身份直接调用每个 action；后二者全部无法读取或写入私密数据。对仓库执行个人数据扫描，不再命中真实健康时序、真实 workout UUID 或固定设备 ID。
@@ -236,7 +236,7 @@
 
 - [x] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。（2026-10-13 已修复：`isSignedInGuest` 改为严格 `isOwner` 校验，见 changes.md）
 - [x] `AUDIT-02 / P0` 健康和训练 action 没有显式 owner guard；财务 ingest/refresh 也继承 `AUDIT-01`。实际平台是否另有全局拦截仍需运行时验证，但发布前必须做服务端纵深校验。（2026-10-13 已修复：健康 6 个、训练 6 个 action 全部加服务端 isOwner 校验；此处仅确认静态修复，运行验收以 `L0.1/F0.1` 为准）
-- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。（2026-10-14 PM 复核至 `ddb105c`：当前源码真实种子、固定设备 UUID、个人步数基线/范围及绝对用户路径残留的已知静态返工已修正；92 个 tracked 文件的 UUID、`INITIAL_*`、绝对用户路径与固定 device flag 扫描均为零。整项仍未完成：新步数缺失值 prompt/schema 契约不一致，首次启动与真实刷新未独立运行复验，见本轮记录。）
+- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。（2026-10-14 PM 复核至 `be86e01`：已知源码脱敏及步数 null/schema 冲突静态返工已修正；93 个 tracked 文件的 UUID、`INITIAL_*`、绝对用户路径、固定 device flag 扫描均为零。仍需修正缺基线首页结论和 synthetic 边界证据，并独立运行复验首次启动、真实刷新与新快照回读；见 L0.4，本项不勾选。）
 - [ ] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。
 - [ ] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。
 - [ ] `AUDIT-06 / P1` 健康前端只用固定 60 秒等待，没有可查询的来源任务状态；过早完成和超时未完成都无法准确表达。
@@ -301,10 +301,10 @@
 
 ### 自动审查状态
 
-- 上次已审查源 commit：`ddb105ce4bb0647687aafbfd18b8477a080dda8d`
-- 上次运行：2026-10-14 02:14 PDT（自动 PM 验收；本轮开始远端 HEAD 为 `ddb105c`）
-- 上次结论：`523a4d4` 的个人基线/路径脱敏与交付说明纠错静态通过；`L0.4` 新增缺失值 prompt/schema 冲突，返工，未新增完全验收项。`L0.1/F0.1` 仍为原运行待验阻塞，新交付只重复非 owner 结果，没有新的身份/后台链证据，不重复追加；`OPS-001` 配置与本地 Gate 通过，撤回自勾选，托管 CI/交接证据待验。
-- 当前应推动：只推进 `L0.4` 的步数缺失值契约，兼容旧快照、诚实显示缺失且不影响独立 readiness；补 owner 刷新、配置缺失和首次空库的脱敏运行证据。随后仍按 `L0.1/F0.1` → `L1/H0` → `W0/W1` → `H1` 推进，保留健康/fitness 优先级。
+- 上次已审查源 commit：`be86e01557bd96c7e69c93a9887f6398cd864338`
+- 上次运行：2026-10-14 05:18 PDT（自动 PM 验收；本轮开始远端 HEAD 为 `be86e01`）
+- 上次结论：新增交付 `be86e01` 对应 `L0.4`；原步数 null/schema 冲突、零值兼容和 KPI/趋势缺基线分支静态通过，未新增完全验收项。缺基线首页结论及高方差样例/断言返工；新 null 快照 owner 保存/回读与手机显示运行待验。Handoff Gate 两个范围均通过；未把 CI、非 owner 拒绝或类型检查当作产品通过。`17e32f2` 是只改 plans 的审查提交，忽略。
+- 当前应推动：仍只推进 `L0.4` 步数缺失值边界：有原始步数但无基线时首页诚实显示“已记录、基线不足”，补真正 mean−sd<0 的 synthetic 样例和派生输出断言，再交付 owner null/零/旧数字快照保存回读及三视口证据；不改 readiness、不扩展功能。原 owner 刷新、配置缺失、首次空库及 L0.1/F0.1 后台权限证据沿用既有要求；随后按 `L0.1/F0.1` → `L1/H0` → `W0/W1` → `H1` 推进。
 
 ### 自动审查记录
 
@@ -323,11 +323,16 @@
 - 2026-10-14 02:14 PDT · `ddb105c` · `L0.4`：**运行待验（源码有进展，证据未齐）**。weekly-finance/server/src/actions.ts:618 的主目录解析成功与失败、:646-650 失败回调保留旧数据、health 首次空库 initializeSnapshot 不写入 fixture、健康 owner 同步成功均缺可复现独立运行证据。可用工具未提供 Muse web-artifact builder / invoke_action，不能走 plan → build → audit → submit，未运行本地 build、未读写 app.db。Bun 仍不可用，沿用原类型检查阻塞，本轮不重复执行四 app 失败命令。Muse 下次交付脱敏 owner 刷新成功、主目录/来源不可用失败且旧快照保持不变、首次空库前后无种子写入的操作步骤与 typed 结果；后台受信上下文仍引用既有 L0.1/F0.1 待验要求。
 - 2026-10-14 02:14 PDT · `ddb105c` · `OPS-001` / Handoff Gate：**本地检查通过，完整交接待验**。独立运行 `node --check scripts/validate-handoff.mjs` 和 `node scripts/validate-handoff.mjs d439ac6e3e9bba25d1ec8f7cdba0a9e3143d68d2 ddb105ce4bb0647687aafbfd18b8477a080dda8d` 均退出 0（8 files / 1 script / 2 implementation files）；分别检查 85af069..523a4d4 和 523a4d4..ddb105c 也退出 0。workflow 配置为 push main/PR、Node 22、fetch-depth 0 和只读 contents 权限；本地成功不能证明 GitHub 已触发运行。撤回新增交付的 OPS 自勾选，须补脱敏 push/PR Gate run 结果与一项提交到 PM 结论的交接记录。Gate 的语法/凭证/已知编号检查不代替权限、公式、schema、刷新幂等和手机运行验收。`85af069` 为仅 plans 审查提交，已忽略。本轮同步机制文字只为对齐当前授权的“需求设计/新增证据也触发，重复待验不触发”规则，不新增功能队列。
 
+- 2026-10-14 05:18 PDT · `be86e01` · `L0.4/AUDIT-03`：**静态通过（局部，不勾选）**。独立核对四文件交付 diff 和 changes 编号/范围：actions.ts:101-103 三展示字段允许 null/非负数，:655 prompt 明确完整日、14 日门槛、有效全零和非负下界；client App.tsx:86-93,248 的 null 分支不再伪造零基线。saveHealthSnapshot:618 请求与 normalizeStoredSnapshot:530 回读共用 snapshotSchema，旧数字格式为放宽兼容；schema.ts 与 migrations 未改，payload 仍为 JSON blob。readiness 函数与交付前逐字比较相同。回滚旧代码无法解析新 null 快照而显示空态，changes 已披露，不能称无损回滚。93 个 tracked blob 扫描 UUID / INITIAL_* / 绝对用户路径 / 固定 device flag 均 0，只输出命中数。原 02:14 null/schema 冲突关闭，整项未完全通过。
+- 2026-10-14 05:18 PDT · `be86e01` · `L0.4`：**返工（缺基线的结论仍不诚实）**。位置 health-dashboard/client/src/App.tsx:237,244,248；server/src/actions.ts:99-108,655。复现：明确 synthetic 的 13 个完整步数日、当日 steps.value 为合法非空数值，baseline/usualMin/usualMax 均 null，其他快照字段合法。直接用 Node 提取源码 stepSummary 表达式求值：status=正常 时仍说“步数在常见范围”；status=数据缺失 时说“步数未记录”，与已获取步数矛盾；偏低/偏高同样没有可比较范围。此为纯表达式复现，未冒称页面实机结果。预期：先区分原始值缺失与比较基线不足，有值无基线保留值、说明“基线不足，无法比较”，不输出正常/异常或未记录结论；有有效零基线时仍正常展示零。下一次只统一这个步数展示/状态边界（首页摘要、KPI 标签、趋势），不得顺带改 readiness/其他指标；提交合法完整 synthetic null/零/旧数字快照输入、预期文案断言和 artifact 三视口截图/操作证据。
+- 2026-10-14 05:18 PDT · `be86e01` · `L0.4`：**返工（synthetic 边界证据不足）**。位置 health-dashboard/validate-steps-contract.mjs:28-32,36-40,47-48。现有半数零/半数相同大值的 14 日样例，其总体均值恰等于标准差，未钳制前的下界为零，无法检出删除 max(0, …) 的回归；check 仅断言 schema 接受/拒绝，不断言派生字段与窗口。独立在内存提取交付 deriveSteps 并用 node:assert 核对：13 日为 null、14 日全零为零、原样例下界为零、14 日中 13 个零加一个正值的原始下界为负且 helper 返回零，四例算术断言通过；只证实测试 helper，不是 agent 的生产计算/保存运行。下一次将真正负下界样例纳入交付脚本，明确断言三字段期望值/缺失状态，加入无数据场景，并证明移除钳制会失败；交付可复现完整命令和脱敏结果，不能只用 safeParse 成功声称公式通过。本轮已修正前次契约缺陷，有实际进展，不触发“两轮同问题无进展”升级。
+- 2026-10-14 05:18 PDT · `be86e01` · `L0.4` 新快照 / Handoff Gate：**运行待验；本地 Gate 通过**。node --check scripts/validate-handoff.mjs、node scripts/validate-handoff.mjs ddb105ce4bb0647687aafbfd18b8477a080dda8d be86e01557bd96c7e69c93a9887f6398cd864338（5 files / 1 script / 3 implementation files）、单交付范围 17e32f241b062774ecf40400bdd42b45b2cdacd7..be86e01557bd96c7e69c93a9887f6398cd864338（4 / 1 / 3）均退出 0。直接 node health-dashboard/validate-steps-contract.mjs 退出 1：ERR_MODULE_NOT_FOUND zod；没有在仓库安装依赖或运行禁止的 build。未提供 Muse web-artifact builder / invoke_action，changes 的非 owner getDashboard 拒绝不能证明新 null 快照保存、回读或页面显示。新增必须交付：同一合法 synthetic 快照分别用 null / 有效零 / 旧数字步数范围，以受信 owner callback 保存再 getDashboard 回读，证明原始步数/独立 readiness 不受损，并在 390×844、430×932、桌面核对首页/KPI/趋势及空缺状态。changes 声称临时副本 tsc 通过，本轮未独立复验、不计运行成功。原 owner 刷新/配置缺失/首次空库、L0.1/F0.1 三身份与后台受信链、OPS 托管 Gate/即时交接阻塞无新证据，不重复追加。
+
 每轮只保留最近 20 条，格式为：时间、源 commit、涉及需求、结论（通过 / 返工 / 运行待验）、证据或阻塞原因。
 
 ## 推荐执行顺序
 
-1. `L0.4` 步数基线/范围缺失值契约返工与 owner/配置缺失/首次空库运行证据；随后 `L0.1/F0.1` 三身份、后台 schedule/callback 完整运行证据：先补齐隐私与权限门槛。
+1. `L0.4` 缺基线首页结论与 synthetic 负下界/输出断言返工，新 null 快照 owner/手机证据及原 owner/配置缺失/首次空库运行证据；随后 `L0.1/F0.1` 三身份、后台 schedule/callback 完整运行证据：先补齐隐私与权限门槛。
 2. `L1` + `H0`：统一来源级刷新状态、coverage、stale recovery 和时间语义，建立分析可信基础。
 3. `W0/W1`：修复训练记录丢失、越权目标、并发 active workout 与两套建议规则冲突。
 4. `H1.1–H1.8`：修正 readiness 的时间对齐、基线泄漏、覆盖门槛、稳健统计和缺失展示。
