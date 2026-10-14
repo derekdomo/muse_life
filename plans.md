@@ -30,10 +30,10 @@
 
 ### L0 — 隐私与权限（P0）
 
-- [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-13 PM 复核：`e54adca` 的静态代码已覆盖当前实际存在的 finance 3 个、health 6 个、workout 6 个 action；但 owner / guest / anonymous 逐 action 调用矩阵、后台 schedule 与 agent callback 的 owner 上下文仍未提供完整证据，因此撤回实现方自行勾选，保持“运行待验”。）
+- [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-13 PM 复核至 `d439ac6`：finance 3 个、health 6 个、workout 6 个现有 action 的严格 owner guard 静态确认；`a317191` 补齐正确路由清单及非 owner 直接调用声明，但没有 owner / guest / anonymous 分列结果、后台 schedule 与 agent callback 的受信上下文证据。本轮无 Muse builder 可独立复验，保持“运行待验”。）
 - [ ] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。
 - [ ] `L0.3` 无权限响应使用稳定的 typed state，不依赖前端隐藏；直接调用 action 也不能读取 payload 或修改数据。
-- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-13 PM 复核：`e54adca` 已删除 action 源码中的种子序列和固定设备 UUID，并改为空态；但 `health-dashboard/DATA-PLAN.md:3-25` 仍保存真实采集日期、逐日步数、HRV、心率、睡眠起止与分期等数据，`changes.md:19` 还写入真实 owner 健康数值。必须全部改成 synthetic 示例或脱敏范围后才能验收。）
+- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-13 PM 复核至 `d439ac6`：`a317191` 已脱敏此前指出的健康文档时序与日志数值，四组样例明确标为 synthetic；全仓 UUID 与 `INITIAL_*` 扫描为零。但 `health-dashboard/server/src/actions.ts:655` 的刷新 prompt 仍写死个人步数基线/常见范围，`weekly-finance/server/src/actions.ts:618` 仍含个人完整本地路径，须改为授权运行时配置且脱敏；首次启动/同步运行证据仍待验，保持未勾选。）
 - [ ] `L0.5` 日志和错误文案不得包含账户余额、健康数值、训练明细、完整本地路径或上游原始 JSON。
 
 **验收**：分别以 owner、已登录非 owner、未登录三种身份直接调用每个 action；后二者全部无法读取或写入私密数据。对仓库执行个人数据扫描，不再命中真实健康时序、真实 workout UUID 或固定设备 ID。
@@ -172,7 +172,7 @@
 
 ### F0 — 权限与数据完整性（P0）
 
-- [x] `F0.1` 修正 owner 判定：只有 `ctx.viewer?.isOwner === true` 才能读取、刷新或 ingest；匿名 `viewer === null` 必须拒绝。（2026-10-13 完成，见 changes.md）
+- [ ] `F0.1` 修正 owner 判定：只有 `ctx.viewer?.isOwner === true` 才能读取、刷新或 ingest；匿名 `viewer === null` 必须拒绝。（2026-10-13 PM 复核至 `d439ac6`：静态 guard 通过，非 owner 汇总证据不能替代三种身份逐 action 和受信后台 callback 验证；撤回原实现方勾选，与 `L0.1` 一致保持“运行待验”。）
 - [ ] `F0.2` payload JSON 损坏时返回 typed error 并保留可恢复路径，不能让 `JSON.parse` 直接使整个 action 崩溃。
 - [ ] `F0.3` 月度文件先按合法真实日期校验、再排序；同一个自然月有多个快照时明确选择月末/最新快照，不能当作多个“月份”画图。
 - [ ] `F0.4` 标记当月快照为 partial 或 complete。“本月收入/支出/储蓄率”必须显示截至日期；FIRE 年支出只使用完整且非异常月份。
@@ -235,8 +235,8 @@
 ### 已确认风险
 
 - [x] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。（2026-10-13 已修复：`isSignedInGuest` 改为严格 `isOwner` 校验，见 changes.md）
-- [x] `AUDIT-02 / P0` 健康和训练 action 没有显式 owner guard；财务 ingest/refresh 也继承 `AUDIT-01`。实际平台是否另有全局拦截仍需运行时验证，但发布前必须做服务端纵深校验。（2026-10-13 已修复：健康 6 个、训练 8 个 action 全部加服务端 isOwner 校验，guest 身份实测零数据暴露，见 changes.md）
-- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。（2026-10-13 部分修复：健康源码的真实序列/UUID/初始快照已删除并回灌仓库；剩余——健康与财务刷新 prompt 中的 health-cli 固定设备标识仍在，删除会中断本机数据回拉，待改运行时注入方案后关闭本项。）
+- [x] `AUDIT-02 / P0` 健康和训练 action 没有显式 owner guard；财务 ingest/refresh 也继承 `AUDIT-01`。实际平台是否另有全局拦截仍需运行时验证，但发布前必须做服务端纵深校验。（2026-10-13 已修复：健康 6 个、训练 6 个 action 全部加服务端 isOwner 校验；此处仅确认静态修复，运行验收以 `L0.1/F0.1` 为准）
+- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。（2026-10-13 PM 复核至 `d439ac6`：真实种子与文档健康时序已删除/脱敏，当前扫描无 UUID 或固定 device flag；旧“health-cli 固定设备标识仍在”的描述已失效。剩余是健康刷新 prompt 的个人步数基线/范围和财务刷新 prompt 的个人完整路径，见本轮返工记录；不得用删除数据源定位的方式破坏刷新链路。）
 - [ ] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。
 - [ ] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。
 - [ ] `AUDIT-06 / P1` 健康前端只用固定 60 秒等待，没有可查询的来源任务状态；过早完成和超时未完成都无法准确表达。
@@ -293,10 +293,10 @@
 
 ### 自动审查状态
 
-- 上次已审查源 commit：`e54adca`
-- 上次运行：2026-10-13（PM 手动验收）
-- 上次结论：`AUDIT-01/02` 静态修复方向通过；`F0.1/L0.1` 运行待验；`L0.4/AUDIT-03` 返工。实现方自行勾选的 `L0.1` 已撤回。
-- 当前应推动：先补齐 `L0.1/L0.4` 证据与脱敏返工，再完成 `L1`、`W0/W1` 和 `H0/H1`；`H3/W3` 进入下一阶段设计与实现。
+- 上次已审查源 commit：`d439ac6e3e9bba25d1ec8f7cdba0a9e3143d68d2`
+- 上次运行：2026-10-13 23:08 PDT（自动 PM 验收）
+- 上次结论：`a317191` 的文档健康明细脱敏与 action 清单纠错静态通过；没有新增完全验收项。`L0.4/AUDIT-03` 仍需清理源码个人基线/路径；`L0.1/F0.1` 运行待验，撤回 `F0.1` 原实现方勾选。
+- 当前应推动：先完成 `L0.4` 源码配置脱敏、交付说明纠错及 `L0.1/F0.1` 三身份与 schedule/callback 运行证据，再按既有顺序推进 `L1/H0`、`W0/W1`、`H1`；`H4/W5/F3` 仅新增待办，无实现可验收。
 
 ### 自动审查记录
 
@@ -305,11 +305,16 @@
 - 2026-10-13 · `e54adca` · `L0.4/AUDIT-03`：**返工**。删除 seed 代码和固定设备 UUID 的方向正确，但 `DATA-PLAN.md:3-25` 与 `changes.md:19` 仍包含真实健康明细；全部替换为 synthetic/脱敏证据，并重新做全仓个人数据扫描。
 - 2026-10-13 · `e54adca` · 交付证据：**返工**。`changes.md:19` 把 `saveMorningCheckin` 写成不存在的 `saveHealthCheckin`；`changes.md:20` 声称 workout 有 8 个 action，实际为 6 个，并列出不存在的 `getState/toggleSet/removeSet`。修正文档并提交从路由清单自动生成或逐项复制的 action 验证表。
 
+- 2026-10-13 23:08 PDT · `d439ac6`（实现证据 `a317191`）· `L0.4/AUDIT-03`、`L0.1` 交付清单：**静态通过（局部，不勾选需求）**。已核对两个 DATA-PLAN 与 changes 的脱敏改动，健康四组样例均标为 synthetic；路由自动提取为 finance 3 / health 6 / workout 6，15 个 handler 的严格 owner guard 均先于数据访问/agent 派发。全仓 89 个 tracked 文件扫描：UUID 0、`INITIAL_*` 0、固定 device flag 0；个人绝对路径仍命中源码 1 处。业务代码、schema/migration、公式与 UI 没有变化，未新增兼容性或移动端实现证据。`506335b` 为此前审查文档提交，忽略；`d439ac6` 仅扩展 H4/W5/F3 待办。
+- 2026-10-13 23:08 PDT · `d439ac6` · `L0.4/AUDIT-03`：**返工**。旧健康文档泄漏已清理，但 `health-dashboard/server/src/actions.ts:655` 仍把个人步数基线与常见范围写进 agent prompt，`weekly-finance/server/src/actions.ts:618` 仍含带用户名的完整数据目录。复现：在上述行检查刷新 prompt，并对 tracked 文件扫描个人绝对路径、对照旧健康 DATA-PLAN 的个人基线；只报告位置/命中数，不输出原值。Muse 下次必须将个人基线和数据目录改为授权运行时配置或经验证的通用解析方式，缺失配置显示诚实缺失/可重试错误，禁止以假基线替代或中断真实来源；提交全仓脱敏扫描、owner 刷新成功与配置缺失失败的脱敏 artifact 证据，以及 schema/migration 兼容策略（无变化也要说明）。首次空库不写 fixture 的运行证据仍待验。
+- 2026-10-13 23:08 PDT · `d439ac6` · `L0.1/F0.1`：**运行待验（证据有新增，未完全通过）**。`changes.md:26` 新增 15 个 action 的非 owner 直接调用汇总，但实现方明确无法区分 guest/anonymous，且没有 owner 与 schedule/callback 成功链证据；本轮重新查找可用工具，未提供 Muse web-artifact builder / invoke_action，不能执行 plan → audit 或验证数据库无写入。Muse 须按实际 15 个路由提交 owner / 已登录 guest / anonymous 分列调用矩阵、合法请求与脱敏 typed response、拒绝前后数据不变证明、后台 schedule 及三个 save/ingest callback 的受信上下文和成功结果；并补 390×844、430×932 与桌面空态/无权限/核心操作和键盘焦点证据。本轮撤回 `F0.1` 旧勾选，`L0.1` 不变。四 app 均尝试 `bun run typecheck`，均退出 127（缺 Bun）；node_modules、运行时 SDK 均缺失，未通过类型检查；没有 test script/fixture，未执行禁用的本地 build，也未读写 app.db。现有阻塞只在这条随新增证据更新，不重复追加旧记录。
+- 2026-10-13 23:08 PDT · `d439ac6` · `L0.4/L0.1/F0.1` 交付说明：**返工**。`changes.md:21` 仍称首次启动“写入空快照”，而 `health-dashboard/server/src/actions.ts:592-600` 的 initializeSnapshot 为无写入空操作；`weekly-finance/DATA-PLAN.md:17,24` 仍把 callback 写为不存在的 saveFinanceSnapshot，实际路由为 `weekly-finance/server/src/actions.ts:631` 的 ingestFinanceData。复现：逐项对照这两处文档与 Actions 路由/handler。Muse 下次只修正文档为真实行为与路由，明确本次无 schema/migration 和业务实现变化，提交可追溯的脱敏调用表；审查任务不修改 changes 或业务代码。
+
 每轮只保留最近 20 条，格式为：时间、源 commit、涉及需求、结论（通过 / 返工 / 运行待验）、证据或阻塞原因。
 
 ## 推荐执行顺序
 
-1. `L0.1/L0.4` 返工与完整运行证据：先封住权限、后台 callback 和真实数据入 Git 问题。
+1. `L0.4` 源码个人基线/路径脱敏与交付说明纠错；`L0.1/F0.1` 三身份、后台 schedule/callback 完整运行证据：先补齐隐私与权限门槛。
 2. `L1` + `H0`：统一来源级刷新状态、coverage、stale recovery 和时间语义，建立分析可信基础。
 3. `W0/W1`：修复训练记录丢失、越权目标、并发 active workout 与两套建议规则冲突。
 4. `H1.1–H1.8`：修正 readiness 的时间对齐、基线泄漏、覆盖门槛、稳健统计和缺失展示。
