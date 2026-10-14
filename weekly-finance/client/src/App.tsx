@@ -1,0 +1,499 @@
+import { useMemo, useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
+import {
+Area,
+AreaChart,
+Bar,
+CartesianGrid,
+ComposedChart,
+Line,
+LineChart,
+ReferenceLine,
+ResponsiveContainer,
+Tooltip,
+XAxis,
+YAxis,
+} from "recharts";
+import { api, type ApiResponse } from "./api";
+
+type Dashboard = NonNullable<ApiResponse<typeof api, "getDashboard">["data"]>;
+type Month = Dashboard["months"][number];
+type Account = Dashboard["accounts"][number];
+type Range = "6m" | "12m" | "year" | "all";
+
+const currency = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 0,
+});
+
+const currencyPrecise = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const compactCurrency = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+const percent = new Intl.NumberFormat("zh-CN", {
+  style: "percent",
+  maximumFractionDigits: 1,
+});
+
+const number = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 });
+const monthLabel = new Intl.DateTimeFormat("zh-CN", { month: "short", year: "2-digit" });
+const timestampLabel = new Intl.DateTimeFormat("zh-CN", {
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+function monthDate(key: string): Date {
+  return new Date(`${key}T00:00:00`);
+}
+
+function signedCurrency(value: number | null): string {
+  if (value == null) return "等待第二次周更后生成对比";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${currency.format(value)}`;
+}
+
+function valueTone(value: number | null): "neutral" | "positive" | "negative" {
+  if (value == null || value === 0) return "neutral";
+  return value > 0 ? "positive" : "negative";
+}
+
+function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number; color?: string }>; label?: string }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="chart-tooltip">
+      <div className="chart-tooltip__label">{label}</div>
+      {payload.map((item) => (
+        <div className="chart-tooltip__row" key={item.name}>
+          <span className="chart-tooltip__dot" style={{ background: item.color }} />
+          <span>{item.name}</span>
+          <strong>{currency.format(item.value ?? 0)}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Metric({ label, value, note, tone = "neutral" }: { label: string; value: ReactNode; note?: string; tone?: string }) {
+  return (
+    <div className="metric">
+      <div className="metric__label">{label}</div>
+      <div className={`metric__value ${tone}`}>{value}</div>
+      {note ? <div className="metric__note">{note}</div> : null}
+    </div>
+  );
+}
+
+function SectionTitle({ title, meta }: { title: string; meta?: string }) {
+  return (
+    <div className="section-title">
+      <h2>{title}</h2>
+      {meta ? <span>{meta}</span> : null}
+    </div>
+  );
+}
+
+function DistributionRow({ label, value, maximum, tone = "primary" }: { label: string; value: number; maximum: number; tone?: "primary" | "muted" | "danger" }) {
+  const width = maximum > 0 ? Math.max(2, Math.min(100, (Math.abs(value) / maximum) * 100)) : 0;
+  return (
+    <div className="distribution-row">
+      <div className="distribution-row__copy"><span>{label}</span><strong>{currency.format(value)}</strong></div>
+      <div className={`distribution-row__track distribution-row__track--${tone}`} aria-hidden="true"><span style={{ width: `${width}%` }} /></div>
+    </div>
+  );
+}
+
+function DistributionPanel({ current, live }: { current: Month; live: Dashboard["live"] }) {
+  const assetRows = [
+    { label: "投资", value: live.investment, tone: "primary" as const },
+    { label: "存款", value: live.deposits ?? 0, tone: "muted" as const },
+    { label: "贷款", value: live.loans ?? 0, tone: "danger" as const },
+  ];
+  const spendRows = [
+    { label: "固定支出", value: current.fixedSpend, tone: "primary" as const },
+    { label: "灵活支出", value: current.flexibleSpend, tone: "muted" as const },
+  ];
+  const assetMax = Math.max(0, ...assetRows.map((item) => Math.abs(item.value)));
+  const spendMax = Math.max(0, ...spendRows.map((item) => Math.abs(item.value)));
+
+  return (
+    <article className="chart-panel distribution-panel">
+      <div className="chart-heading"><h3>资产 / 支出分布</h3><span>当前结构</span></div>
+      <div className="distribution-group">
+        <p>资产与负债</p>
+        {assetRows.map((item) => <DistributionRow key={item.label} {...item} maximum={assetMax} />)}
+      </div>
+      <div className="distribution-group">
+        <p>本月支出</p>
+        {spendRows.map((item) => <DistributionRow key={item.label} {...item} maximum={spendMax} />)}
+      </div>
+    </article>
+  );
+}
+
+function TrendCharts({ months, current, live }: { months: Month[]; current: Month; live: Dashboard["live"] }) {
+  const anomalyMonths = months.filter((month) => month.flexibleSpendAnomaly);
+  const chartMonths = months.filter((month) => !month.flexibleSpendAnomaly);
+  const data = chartMonths.map((month) => ({
+    ...month,
+    label: monthLabel.format(monthDate(month.key)),
+    monthlySurplus: month.income - month.totalSpend,
+  }));
+  const surplusValues = data.flatMap((month) => [month.income, month.totalSpend, month.monthlySurplus]);
+  const surplusDomain = [Math.min(0, ...surplusValues), Math.max(0, ...surplusValues)] as [number, number];
+
+  return (
+    <div className="chart-stack">
+      <article className="chart-panel chart-panel--wide">
+        <div className="chart-heading"><h3>净值长期分布</h3><span>纵轴：万美元</span></div>
+        <div className="chart-frame">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={data} margin={{ top: 12, right: 6, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="netWorthFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.28} />
+                  <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid vertical={false} stroke="var(--grid)" />
+              <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={24} />
+              <YAxis tickFormatter={(value: number) => (value / 10_000).toFixed(0)} tickLine={false} axisLine={false} width={50} />
+              <Tooltip content={<ChartTooltip />} />
+              <Area type="monotone" dataKey="total" name="净资产" stroke="var(--accent)" strokeWidth={2.5} fill="url(#netWorthFill)" dot={false} activeDot={{ r: 4 }} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </article>
+
+      <article className="chart-panel">
+        <div className="chart-heading"><h3>每月结余</h3><span>收入 − 支出</span></div>
+        <div className="chart-frame chart-frame--small">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={data} margin={{ top: 10, right: 4, left: -22, bottom: 0 }}>
+              <CartesianGrid vertical={false} stroke="var(--grid)" />
+              <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={22} />
+              <YAxis domain={surplusDomain} tickFormatter={(value: number) => (value / 10_000).toFixed(1)} tickLine={false} axisLine={false} width={48} />
+              <Tooltip content={<ChartTooltip />} />
+              <ReferenceLine y={0} stroke="var(--border-strong)" />
+              <Bar dataKey="income" name="月收入" fill="var(--chart-muted)" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="totalSpend" name="月支出" fill="var(--accent-soft-strong)" radius={[3, 3, 0, 0]} />
+              <Line type="monotone" dataKey="monthlySurplus" name="月结余" stroke="var(--accent)" strokeWidth={2.5} dot={{ r: 2.5 }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </article>
+
+      <DistributionPanel current={current} live={live} />
+
+      {anomalyMonths.length > 0 ? (
+        <div className="data-anomaly" role="note" aria-label="数据异常月份">
+          <strong>数据异常</strong>
+          <span>{anomalyMonths.map((month) => monthLabel.format(monthDate(month.key))).join("、")} 仍保留在月度记录中，但不进入图表与 FIRE 年支出。</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function FireProgress({ data }: { data: Dashboard }) {
+  const rawProgress = Math.max(0, data.fire.progress ?? 0);
+  const ringProgress = Math.min(rawProgress, 1);
+  const circumference = 2 * Math.PI * 46;
+  const offset = circumference * (1 - ringProgress);
+  const years = data.fire.gap <= 0
+    ? 0
+    : data.fire.annualContribution > 0
+      ? Math.ceil(data.fire.gap / data.fire.annualContribution)
+      : null;
+  const history = data.months
+    .map((month, index) => {
+      const prior = data.months.slice(Math.max(0, index - 12), index).filter((item) => !item.flexibleSpendAnomaly);
+      const monthlySpend = prior.length > 0 ? prior.reduce((sum, item) => sum + item.totalSpend, 0) / prior.length : 0;
+      const target = monthlySpend > 0 ? monthlySpend * 12 * 25 : 0;
+      return {
+        label: monthLabel.format(monthDate(month.key)),
+        progress: target > 0 && !month.flexibleSpendAnomaly ? (month.total / target) * 100 : null,
+      };
+    })
+    .filter((item) => item.progress != null);
+
+  return (
+    <div className="fire-layout">
+      <div className="fire-overview">
+        <div className="fire-ring" role="img" aria-label={`FIRE 进度 ${percent.format(rawProgress)}`}>
+          <svg viewBox="0 0 112 112" aria-hidden="true">
+            <circle className="fire-ring__track" cx="56" cy="56" r="46" />
+            <circle className="fire-ring__value" cx="56" cy="56" r="46" strokeDasharray={circumference} strokeDashoffset={offset} />
+          </svg>
+          <div><strong>{percent.format(rawProgress)}</strong><span>已完成</span></div>
+        </div>
+        <div className="fire-copy">
+          <span>目标资产</span>
+          <strong>{currency.format(data.fire.target)}</strong>
+          <p className="fire-gap">缺口 {currency.format(data.fire.gap)}</p>
+          <p className="fire-years">{years == null ? "当前投入节奏不足以估算达标时间" : years === 0 ? "已达到目标" : `距目标还差 ${years} 年`}</p>
+          {years != null && years > 0 ? <small>按近 12 个完整月的投入节奏估算</small> : null}
+        </div>
+      </div>
+
+      <div className="fire-history">
+        <div className="chart-heading"><h3>FIRE% 历史轨迹</h3><span>观察斜率</span></div>
+        <div className="fire-history__chart">
+          {history.length > 1 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={history} margin={{ top: 8, right: 8, left: -28, bottom: 0 }}>
+                <CartesianGrid vertical={false} stroke="var(--grid)" />
+                <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={24} />
+                <YAxis tickFormatter={(value: number) => `${value.toFixed(0)}%`} tickLine={false} axisLine={false} width={48} />
+                <Tooltip formatter={(value: number) => [`${value.toFixed(1)}%`, "FIRE 进度"]} />
+                <Line type="monotone" dataKey="progress" stroke="var(--accent)" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : <p className="empty-inline">等待更多完整月份后生成轨迹。</p>}
+        </div>
+      </div>
+
+      <div className="fire-stats">
+        <div><span>年投入</span><strong>{currency.format(data.fire.annualContribution)}</strong></div>
+        <div><span>年支出</span><strong>{currency.format(data.fire.annualSpend)}</strong></div>
+      </div>
+      <p className="fire-rule">月支出每降 $1k，FI 目标减少约 $300k</p>
+    </div>
+  );
+}
+
+const sourceInstitutionRules: Array<[RegExp, string]> = [
+  [/^fidelity/i, "Fidelity"],
+  [/^robinhood/i, "Robinhood"],
+  [/^wells[ _-]?fargo/i, "Wells Fargo"],
+  [/^schwab/i, "Charles Schwab"],
+  [/^chase/i, "Chase"],
+  [/^titan/i, "Titan"],
+  [/^wealthfront/i, "Wealthfront"],
+  [/^citi/i, "Citi"],
+  [/^usbank/i, "U.S. Bank"],
+  [/^bonds/i, "Bonds"],
+];
+
+function institutionName(account: Account): string {
+  if (account.institution) return account.institution;
+  return sourceInstitutionRules.find(([pattern]) => pattern.test(account.source))?.[1] ?? "其他账户";
+}
+
+function accountTypeLabel(type: Account["type"]): string {
+  if (type === "investment") return "投资";
+  if (type === "account") return "存贷款";
+  if (type === "income") return "收入";
+  if (type === "fixed_spend") return "固定支出";
+  if (type === "investment_contribution") return "投资投入";
+  return "历史转入";
+}
+
+function DashboardView({ data }: { data: Dashboard }) {
+  const [range, setRange] = useState<Range>("12m");
+  const months = useMemo(() => {
+    if (range === "6m") return data.months.slice(-6);
+    if (range === "12m") return data.months.slice(-12);
+    if (range === "year") {
+      const year = data.months.at(-1)?.key.slice(0, 4);
+      return data.months.filter((month) => month.key.startsWith(year ?? ""));
+    }
+    return data.months;
+  }, [data.months, range]);
+  const current = data.months.at(-1);
+  const previous = data.months.at(-2);
+  if (!current) return null;
+
+  const monthDelta = previous ? current.total - previous.total : null;
+  const priorLive = data.live.weeklyDelta == null ? null : data.live.netWorth - data.live.weeklyDelta;
+  const weeklyPercent = data.live.weeklyDelta != null && priorLive != null && priorLive !== 0 ? data.live.weeklyDelta / Math.abs(priorLive) : null;
+  const savingsRate = current.income > 0 ? (current.income - current.totalSpend) / current.income : null;
+  const emergencyMonths = current.totalSpend > 0 ? (data.live.deposits ?? 0) / current.totalSpend : null;
+
+  const grouped = new Map<string, Account[]>();
+  for (const account of data.accounts) {
+    const institution = institutionName(account);
+    grouped.set(institution, [...(grouped.get(institution) ?? []), account]);
+  }
+  const accountGroups = [...grouped.entries()].sort((a, b) => {
+    const aTotal = a[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
+    const bTotal = b[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
+    return bTotal - aTotal;
+  });
+
+  return (
+    <>
+      <section className="hero" aria-labelledby="hero-title">
+        <div className="hero__main">
+          <p id="hero-title" className="eyebrow">本周实时净资产</p>
+          <div className="hero__value">{currency.format(data.live.netWorth)}</div>
+          <div className={`delta ${valueTone(data.live.weeklyDelta)}`}>
+            {data.live.weeklyDelta == null ? (
+              <span>等待第二次周更后生成对比</span>
+            ) : (
+              <><span>{signedCurrency(data.live.weeklyDelta)}</span><span>{weeklyPercent == null ? "" : `（${weeklyPercent > 0 ? "+" : ""}${percent.format(weeklyPercent)}）`}</span><span className="delta__label">较上次周更</span></>
+            )}
+          </div>
+        </div>
+        <div className="snapshot-compare">
+          <span>月度快照 · {data.sourceMonth}</span>
+          <strong>{currency.format(current.total)}</strong>
+          <small className={valueTone(monthDelta)}>{signedCurrency(monthDelta)} 环比</small>
+        </div>
+      </section>
+
+      <section className="metric-grid" aria-label="本月关键指标">
+        <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />
+        <Metric label="月支出" value={<span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} tone="negative" note={`固定 ${compactCurrency.format(current.fixedSpend)}`} />
+        <Metric label="储蓄率" value={savingsRate == null ? "—" : percent.format(savingsRate)} tone={valueTone(savingsRate)} note="（收入 − 支出）÷ 收入" />
+        <Metric label="应急金覆盖" value={emergencyMonths == null ? "—" : `${number.format(emergencyMonths)} 个月`} note="存款 ÷ 月支出" />
+        <Metric label="投资" value={<span title={currency.format(data.live.investment)}>{compactCurrency.format(data.live.investment)}</span>} note="已融合实时余额" />
+        <Metric label="存款" value={<span title={currency.format(data.live.deposits ?? 0)}>{compactCurrency.format(data.live.deposits ?? 0)}</span>} note="现金与银行账户" />
+        <Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} tone="negative" note="按未偿余额显示" />
+      </section>
+
+      <section className="section-block">
+        <div className="section-heading-row">
+          <SectionTitle title="走势" meta={`${months.filter((month) => !month.flexibleSpendAnomaly).length} 个有效快照`} />
+          <div className="range-control" aria-label="趋势时间范围">
+            {(["6m", "12m", "year", "all"] as Range[]).map((item) => (
+              <button key={item} type="button" className={range === item ? "active" : ""} onClick={() => setRange(item)} aria-pressed={range === item}>
+                {item === "6m" ? "6月" : item === "12m" ? "12月" : item === "year" ? "今年" : "全部"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <TrendCharts months={months} current={current} live={data.live} />
+      </section>
+
+      <section className="fire-section section-block">
+        <SectionTitle title="FIRE 进度" meta="4% 规则 · 近12个完整月" />
+        <FireProgress data={data} />
+      </section>
+
+      <section className="holdings-section section-block">
+        <SectionTitle title="持仓 Top 10" meta={`前三集中度 ${percent.format(data.concentrationTop3)}`} />
+        {data.holdings.length ? (
+          <div className="holding-list">
+            {data.holdings.map((holding, index) => (
+              <div className="holding-row" key={`${holding.ticker}-${index}`}>
+                <div className="holding-rank">{String(index + 1).padStart(2, "0")}</div>
+                <div className="holding-name"><strong>{holding.ticker}</strong>{holding.name ? <span>{holding.name}</span> : null}</div>
+                <div className="holding-bar" aria-hidden="true"><span style={{ width: `${Math.min(holding.share * 100, 100)}%` }} /></div>
+                <div className="holding-value"><strong>{currency.format(holding.value)}</strong><span>{percent.format(holding.share)}</span></div>
+              </div>
+            ))}
+          </div>
+        ) : <p className="empty-inline">本次同步没有返回可展示的持仓。</p>}
+        {data.cashPosition != null ? (
+          <div className="cash-position">
+            <div className="institution-icon" aria-hidden="true">$</div>
+            <div><strong>现金头寸</strong><span>CUR:USD · 与存款分开解读</span></div>
+            <b>{currency.format(data.cashPosition)}</b>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="accounts-section section-block">
+        <SectionTitle title="账户明细" meta={`快照 ${data.sourceMonth}`} />
+        <div className="account-groups">
+          {accountGroups.map(([institution, rows]) => (
+            <div className="account-group" key={institution}>
+              <div className="account-group__heading"><span className="institution-icon" aria-hidden="true">{institution.slice(0, 1).toUpperCase()}</span><h3>{institution}</h3></div>
+              <div>
+                {rows.map((account) => {
+                  const isLoan = account.type === "account" && account.value < 0;
+                  return (
+                    <div className="account-row" key={`${account.type}-${account.source}`}>
+                      <div>
+                        <strong>{account.label}</strong>
+                        <span>{accountTypeLabel(account.type)} · {account.live ? "本周实时" : "Firance 快照"}{account.mask ? ` ···${account.mask}` : ""}</span>
+                      </div>
+                      <b className={isLoan ? "negative" : "neutral"}>{currencyPrecise.format(isLoan ? Math.abs(account.value) : account.value)}</b>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+export function App() {
+  const queryClient = useQueryClient();
+  const dashboard = useQuery({
+    queryKey: ["finance-dashboard"],
+    queryFn: () => api.getDashboard({}),
+    refetchInterval: (query) => query.state.data?.refresh.status === "running" ? 3000 : false,
+  });
+  const refresh = useMutation({
+    mutationFn: () => api.refreshFinanceData({}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["finance-dashboard"] }),
+  });
+
+  const response = dashboard.data;
+  const status = response?.refresh.status ?? "idle";
+  const isRefreshing = status === "running" || refresh.isPending;
+  const guestDenied = response?.access === "guest_denied";
+
+  return (
+    <div className="app-shell">
+      <SafeAreaTopScrim backgroundColor="var(--bg)" />
+      <main>
+        {!guestDenied ? (
+          <div className="utility-row">
+            <div className={`source-status source-status--${status}`}>
+              <span className="status-dot" />
+              {status === "running" ? "正在更新" : status === "error" ? "显示上次数据" : response?.data ? "数据已同步" : "等待首次同步"}
+            </div>
+            <button type="button" className="refresh-button" onClick={() => refresh.mutate()} disabled={isRefreshing} aria-label="立即更新财务数据">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M18.5 9A7 7 0 0 0 6.4 6.4L4 9m16 6-2.4 2.6A7 7 0 0 1 5.5 15" /></svg>
+              {isRefreshing ? "更新中" : "立即更新"}
+            </button>
+          </div>
+        ) : null}
+
+        {dashboard.isPending ? (
+          <div className="state-screen"><div className="loader" /><p>正在读取财务快照…</p></div>
+        ) : dashboard.isError ? (
+          <div className="state-screen"><h1>暂时无法读取数据</h1><p>请稍后再试，已输入的内容不会丢失。</p><button type="button" onClick={() => dashboard.refetch()}>重试</button></div>
+        ) : guestDenied ? (
+          <div className="state-screen private-state"><div className="private-state__mark" aria-hidden="true">$</div><h1>财务数据仅所有者可查看</h1><p>此看板包含私人账户与持仓信息，已停止向共享访客展示。</p></div>
+        ) : response?.data ? (
+          <DashboardView data={response.data} />
+        ) : (
+          <div className="empty-state">
+            <div className="empty-state__rule" />
+            <p>首次同步会读取 Firance 月度快照，并把可匹配的账户余额更新到本周。</p>
+            <button type="button" onClick={() => refresh.mutate()} disabled={isRefreshing}>{isRefreshing ? "正在同步…" : "开始首次同步"}</button>
+            {response?.refresh.message ? <small>{response.refresh.message}</small> : null}
+          </div>
+        )}
+
+        {!guestDenied ? (
+          <footer>
+            <p>{response?.data ? `更新时间 ${timestampLabel.format(new Date(response.data.asOf))}` : "尚未完成首次更新"}</p>
+            {status === "error" ? <p className="footer-error">{response?.refresh.message ?? "本次更新失败，显示上次数据。"}</p> : null}
+            <p>月度来自 Firance 快照；投资与银行余额每周经 Plaid 刷新，非 Plaid 账户沿用快照值；银行同步可能延迟；内容仅供参考，不构成投资建议。</p>
+          </footer>
+        ) : null}
+      </main>
+    </div>
+  );
+}

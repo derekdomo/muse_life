@@ -1,0 +1,10 @@
+{
+  "entry": "client/dist/index.html",
+  "managedCronJobs": [
+    "space-4-daily-refresh"
+  ],
+  "name": "健康看板",
+  "platformVersion": 25,
+  "runtime": "typescript",
+  "slug": "space-4"
+}

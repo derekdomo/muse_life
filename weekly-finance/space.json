@@ -1,0 +1,10 @@
+{
+  "entry": "client/dist/index.html",
+  "managedCronJobs": [
+    "space-3-weekly-refresh"
+  ],
+  "name": "每周财务总览",
+  "platformVersion": 25,
+  "runtime": "typescript",
+  "slug": "space-3"
+}

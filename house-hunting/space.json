@@ -1,0 +1,8 @@
+{
+  "runtime": "typescript",
+  "platformVersion": 21,
+  "entry": "client/dist/index.html",
+  "name": "南湾看房周报",
+  "slug": "space-2",
+  "managedCronJobs": ["space-2-weekly-refresh"]
+}
