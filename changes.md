@@ -1,5 +1,9 @@
 # Changes
 
+## 2026-10-13（OPS-001：协作框架）
+
+- `OPS-001`：新增根目录 `AGENTS.md`、`scripts/validate-handoff.mjs` 与 GitHub Handoff Gate；PM 负责 plans，Muse 负责实现和交付证据，限制同时进行一项需求。三小时任务改为漏检验收；即时语义评审尚未集成，CI 不宣告产品通过。本次无 app、schema/migration 或数据变更；验证为 Node 语法、现有提交范围检查和 workflow 结构检查。回滚可 revert 本次框架提交，不影响 artifact 数据。
+
 ## 2026-10-13
 
 - 仓库建立（derekdomo/muse_life，private）。

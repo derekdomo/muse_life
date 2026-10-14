@@ -1,0 +1,24 @@
+name: Handoff Gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  handoff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate handoff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/validate-handoff.mjs "$BASE_SHA" "$HEAD_SHA"
+      - name: Explain review handoff
+        run: echo 'Checks passed. Request PM review against plans.md and changes.md; the three-hour PM watchdog catches missed handoffs. This job does not run semantic acceptance.' >> "$GITHUB_STEP_SUMMARY"
