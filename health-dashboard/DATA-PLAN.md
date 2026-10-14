@@ -2,27 +2,27 @@
 
 ## Context provenance
 - `我需要一个daily update的health dashboard` (current user request; establishes a daily-refreshed personal health overview)
-- Parent handoff supplied a real Apple HealthKit snapshot pulled 2026-10-02 12:12 PDT for data date 2026-10-01, including baselines, 7-day trends, last-night sleep, and workout count. (AUDIT-03 / L0.4, 2026-10-13: these values were originally embedded in `server/src/actions.ts` as `INITIAL_*` seed constants; they have been removed from the source. The snapshot now lives only in the database like any synced snapshot, and a database without a snapshot shows the honest empty state until the first real HealthKit sync.)
+- Parent handoff originally supplied a real Apple HealthKit snapshot (baselines, 7-day trends, last-night sleep, and workout count). (AUDIT-03 / L0.4: those real values were originally embedded in `server/src/actions.ts` as `INITIAL_*` seed constants; they have been removed from the source, and the concrete snapshot values were removed from this document on 2026-10-13 — real health values live only in the artifact database, never in Git. A database without a snapshot shows the honest empty state until the first real HealthKit sync.)
 - Parent handoff requires Simplified Chinese, daily silent refresh, KPI status chips, 7-day step/resting-HR/HRV charts, sleep staging, missing-data treatment, and a medical-reference footer.
-- `Health baseline from about two weeks of iPhone health data ... ~4,000 steps/day, resting heart rate ~65, HRV ~40ms, sleep 6.5-7h per night, twice-weekly swimming` (standing user context directly relevant to comparison ranges).
+- Personal baseline ranges are comparison inputs held in standing user context; they are intentionally not reproduced in this repository (L0.4 脱敏，2026-10-13).
 
 ## Tested sources
 ### Apple HealthKit via `health-cli`
 **Used by**: `refreshHealthData` agent task, `saveHealthSnapshot`, `getDashboard` (`initializeSnapshot` no longer writes anything; it never seeds data)
-**Test command**: `health-cli query metrics --provider healthkit --start-date 2026-09-25 --end-date 2026-10-01 --fields step_count,resting_hr_average_bpm,heart_rate_variability_ms,hr_average_bpm,active_energy_burned_kcal,distance_walking_running_meters`
-**Sample output**: coverage.complete=true; daily records included steps 3203, 4661, 6320, 7353, 5576, 7889, 1579 for 9/25–10/01; 9/25 resting HR absent; 10/01 resting HR and HRV absent; 10/01 distance 1056.48m.
+**Test command** (dates are placeholders; use a trailing 7-completed-day window at runtime): `health-cli query metrics --provider healthkit --start-date <start> --end-date <end> --fields step_count,resting_hr_average_bpm,heart_rate_variability_ms,hr_average_bpm,active_energy_burned_kcal,distance_walking_running_meters`
+**Sample output (SYNTHETIC 示例，非真实数据)**: coverage.complete=true; 7 daily records each with a step count and nullable resting HR / HRV — some days have resting HR or HRV absent (null), which must stay null.
 **Processing**: use the latest completed calendar day as the daily metric date; retain nullable HR/HRV and render them as `数据缺失`, not anomalies; preserve the source coverage flag.
 
-**Test command**: `health-cli query metrics --provider healthkit --start-date 2026-09-26 --end-date 2026-10-02 --fields step_count,resting_hr_average_bpm,heart_rate_variability_ms,hr_average_bpm,active_energy_burned_kcal,distance_walking_running_meters`
-**Sample output**: coverage.complete=false because current day 2026-10-02 had not fully synced; 10/02 partial morning record had HRV 61.44ms and average HR 61.84bpm.
-**Processing**: never treat the current partial day as a complete daily metric; show the available 10/02 HRV and average HR only as `今晨参考`; when any refresh query reports incomplete coverage, label the refresh `数据同步不完整` while preserving available values.
+**Test command**: same fields over a window ending on the current (partial) day.
+**Sample output (SYNTHETIC 示例，非真实数据)**: coverage.complete=false because the current day had not fully synced; the partial morning record may carry HRV / average HR values only.
+**Processing**: never treat the current partial day as a complete daily metric; show the available partial-day HRV and average HR only as `今晨参考`; when any refresh query reports incomplete coverage, label the refresh `数据同步不完整` while preserving available values.
 
-**Test command**: `health-cli query sessions --provider healthkit --category sleep --start-date 2026-10-01 --end-date 2026-10-02`
-**Sample output**: one session, 2026-10-02 01:02:18→07:40:20 America/Los_Angeles; core 12555.43s, deep 3356.14s, REM 7940.84s, awake 29.97s, quality 67, efficiency 99.9, awakenings 1; coverage.complete=false because 10/02 was not fully synced.
+**Test command**: `health-cli query sessions --provider healthkit --category sleep --start-date <start> --end-date <end>`
+**Sample output (SYNTHETIC 示例，非真实数据)**: one overnight session with start/end instants, core/deep/REM/awake stage seconds, quality, efficiency and awakenings; coverage.complete=false while the ending day is not fully synced.
 **Processing**: match the last overnight session ending after the latest complete day; convert stage seconds to hours/minutes; retain timezone and format bedtime/wake time locally.
 
-**Test command**: `health-cli query sessions --provider healthkit --category workout --start-date 2026-09-26 --end-date 2026-10-02`
-**Sample output**: records=[]; coverage.complete=false because the current day was not fully synced.
+**Test command**: `health-cli query sessions --provider healthkit --category workout --start-date <start> --end-date <end>`
+**Sample output (SYNTHETIC 示例，非真实数据)**: records=[]; coverage.complete=false because the current day was not fully synced.
 **Processing**: count sessions for the trailing 7 completed days only; present zero as `本周 0 次`, distinct from an unavailable query.
 
 ## Agent-task sources
@@ -47,7 +47,7 @@ Imagery not needed: the requested subject is the user’s quantitative health re
 ## Unified 30-day history (merged 2026-10-05)
 - The existing `health-cli --provider healthkit` refresh now widens its completed-day window to 30 days and adds `body_mass_average`, `apple_exercise_time_sum`, and `distance_swimming_sum` to the daily query.
 - The same refresh retrieves workout sessions for the same 30-day window and the latest 14 sleep sessions; it does not introduce another source or a second refresh path.
-- (Removed 2026-10-13, AUDIT-03 / L0.4) The former initial-history fallback embedded those source-backed rows (27 daily rows from 2026-09-05 through 2026-10-01, four HealthKit swimming workouts, three real weigh-ins, and seven sleep sessions) as `INITIAL_*` constants in server source. They are deleted; stored records missing history fields now fall back to empty arrays, and a database without a snapshot renders the empty state with a HealthKit sync action.
+- (Removed 2026-10-13, AUDIT-03 / L0.4) The former initial-history fallback embedded source-backed real rows (daily rows, HealthKit swimming workouts, real weigh-ins, and sleep sessions — counts and dates intentionally not reproduced here) as `INITIAL_*` constants in server source. They are deleted; stored records missing history fields now fall back to empty arrays, and a database without a snapshot renders the empty state with a HealthKit sync action.
 - **Chart encoding**: steps and active energy are rendered in separate charts. Activity energy and exercise minutes use distinct labeled left/right axes; resting heart rate and HRV also use distinct labeled axes. Missing values remain gaps.
 - **History views**: swimming rows show date, distance, duration, average heart rate, and energy; weight rows show only real weigh-ins; sleep rows show date, start/end, duration, and source quality.
 
@@ -60,9 +60,9 @@ Imagery not needed: the requested subject is the user’s quantitative health re
 - If the source has no workouts or cannot yet be read, the dashboard shows an honest empty state and retains HealthKit data. It does not seed or infer strength sessions.
 
 ## Rejected approaches
-- **Tried**: treating the current 10/02 partial row as today’s daily result.
-  **Why rejected**: only 18 half-hour records were present and HealthKit explicitly reported incomplete coverage, so it is shown only as `今晨参考`.
-- **Tried**: interpreting missing 10/01 HR/HRV as an abnormal physiological reading.
+- **Tried**: treating the current day's partial row as today’s daily result.
+  **Why rejected**: only part of the day's records were present and HealthKit explicitly reported incomplete coverage, so it is shown only as `今晨参考`.
+- **Tried**: interpreting a completed day's missing HR/HRV as an abnormal physiological reading.
   **Why rejected**: the fields were absent rather than out of range, so the UI uses a neutral gray missing-data state.
 - **Tried**: remote health imagery or decorative illustration.
   **Why rejected**: it would distract from the compact numeric review and add no factual value.
