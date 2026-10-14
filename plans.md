@@ -33,7 +33,7 @@
 - [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-13 PM 复核至 `d439ac6`：finance 3 个、health 6 个、workout 6 个现有 action 的严格 owner guard 静态确认；`a317191` 补齐正确路由清单及非 owner 直接调用声明，但没有 owner / guest / anonymous 分列结果、后台 schedule 与 agent callback 的受信上下文证据。本轮无 Muse builder 可独立复验，保持“运行待验”。）
 - [ ] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。
 - [ ] `L0.3` 无权限响应使用稳定的 typed state，不依赖前端隐藏；直接调用 action 也不能读取 payload 或修改数据。
-- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-14 PM 复核至 `7d848b7`：DATA-PLAN 回灌重新带入个人健康基线/日序列/晨间/睡眠明细，隐私返工重新打开；旧步数展示脚本也因变量改名失败。当前 18 个 synthetic 表达式断言通过，局部展示逻辑无已确认回归；四项窄扫描为零不能证明无个人数值。完整契约、owner 保存/回读、三视口及原运行要求继续待验，不勾选。)
+- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-14 PM 复核至 `205f544`：DATA-PLAN 回灌隐私恢复与步数展示脚本修复局部通过，11:19 两处返工关闭；文档除保留一行同步机制说明外与此前脱敏 `8b87c09` 逐字一致，展示脚本 8/8 通过。无业务/schema/UI 改动。完整契约、受信 owner null/零/旧数字快照保存回读、三视口及原运行要求继续待验，整项不勾选。）
 - [ ] `L0.5` 日志和错误文案不得包含账户余额、健康数值、训练明细、完整本地路径或上游原始 JSON。
 
 **验收**：分别以 owner、已登录非 owner、未登录三种身份直接调用每个 action；后二者全部无法读取或写入私密数据。对仓库执行个人数据扫描，不再命中真实健康时序、真实 workout UUID 或固定设备 ID。
@@ -236,7 +236,7 @@
 
 - [x] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。（2026-10-13 已修复：`isSignedInGuest` 改为严格 `isOwner` 校验，见 changes.md）
 - [x] `AUDIT-02 / P0` 健康和训练 action 没有显式 owner guard；财务 ingest/refresh 也继承 `AUDIT-01`。实际平台是否另有全局拦截仍需运行时验证，但发布前必须做服务端纵深校验。（2026-10-13 已修复：健康 6 个、训练 6 个 action 全部加服务端 isOwner 校验；此处仅确认静态修复，运行验收以 `L0.1/F0.1` 为准）
-- [ ] `AUDIT-03 / P0` 健康源码及文档不得包含真实健康序列、个人基线、workout UUID、设备 ID 或真实初始快照。（2026-10-14 PM 复核至 `7d848b7`：源码既有脱敏未发现回退，但 health DATA-PLAN:7,13,17,21 恢复四组已删除的个人健康内容，与历史 blob 比对一致，隐私返工重新打开；源日期/时间和其他行见本轮记录。首次启动及 owner 运行证据仍待验；见 L0.4，不勾选。)
+- [ ] `AUDIT-03 / P0` 健康源码及文档不得包含真实健康序列、个人基线、workout UUID、设备 ID 或真实初始快照。（2026-10-14 PM 复核至 `205f544`：health DATA-PLAN 恢复此前脱敏版本，仅保留新增同步机制说明；四组旧个人内容均不再命中，本次回灌隐私返工关闭。首次启动及 owner 运行证据仍待验，整项不勾选；见 L0.4。）
 - [ ] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。
 - [ ] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。
 - [ ] `AUDIT-06 / P1` 健康前端只用固定 60 秒等待，没有可查询的来源任务状态；过早完成和超时未完成都无法准确表达。
@@ -301,10 +301,10 @@
 
 ### 自动审查状态
 
-- 上次已审查源 commit：`7d848b7bc948f7917e5228deca0735f1245dc328`
-- 上次运行：2026-10-14 11:19 PDT（自动 PM 验收；本轮开始远端 HEAD 为 `7d848b7`）
-- 上次结论：新交付 `7d848b7` 缺需求 ID，Handoff Gate 退出 1；DATA-PLAN 回灌复现已关闭的个人健康明细泄漏，`L0.4/AUDIT-03` 隐私返工重新打开。步数展示验证脚本因变量改名退出 1；当前源码 18 个 synthetic 表达式断言通过，只确认局部展示逻辑。健康 8/8 action 严格 owner 首句 guard 静态通过；新增同步未验收、owner/后台/手机运行证据仍待验。无完全验收项；`8b87c09` 为 PM plans-only 提交，忽略。
-- 当前应推动：仍一次只推进 `L0.4`：先清除 health DATA-PLAN 回灌的个人健康内容，恢复明确 synthetic/脱敏来源文档，并修复本轮破坏的既有步数展示验证脚本；提交仅位置/计数的全仓隐私检查及可复现断言。然后补既有 null/零/旧数字快照受信 owner 保存/回读与三视口证据，不重做已确认的展示逻辑、不改 readiness、不新增功能。力量及时性交付暂只映射为 `H0.4/L1.1–L1.5` 候选范围，实现方必须在 changes 明确实际 ID、边界和证据，不能越过当前 P0。原 owner 刷新、配置缺失、首次空库及 L0.1/F0.1 后台权限证据沿用；后续顺序仍为 `L0.1/F0.1` → `L1/H0` → `W0/W1` → `H1`。
+- 上次已审查源 commit：`205f544afb97e26edbe433403fa6082ad7d6f3f6`
+- 上次运行：2026-10-14 14:13 PDT（自动 PM 验收；本轮开始远端 HEAD 为 `205f544`）
+- 上次结论：新交付 `205f544` 明确引用 `L0.4/AUDIT-03`，范围为文档脱敏恢复与既有步数展示验证脚本修复。Handoff Gate 通过，脚本 8/8 通过；DATA-PLAN 除新增同步机制一行外与此前脱敏版本逐字一致，两处 11:19 返工关闭。无完全验收项；owner/后台/手机原运行证据继续待验，不重复追加旧阻塞。`3f8fab2` 为 PM plans-only 提交，忽略。
+- 当前应推动：仍一次只推进 `L0.4`：下一次只补合法完整 synthetic null/零/旧数字快照经受信 owner callback 保存/回读与 390×844、430×932、桌面证据，原 owner 刷新成功/配置缺失失败保留缓存/首次空库不写 fixture 要求沿用。已确认的文档脱敏与展示脚本不用重做，不改 readiness、不新增功能。力量及时性交付的 `H0.4/L1` 编号/兼容与幂等证据仍按 11:19 记录待补，不能越过当前 P0；后续顺序仍为 `L0.1/F0.1` → `L1/H0` → `W0/W1` → `H1`。
 
 ### 自动审查记录
 
@@ -348,3 +348,5 @@
 
 - 2026-10-14 11:19 PDT · `7d848b7` · `L0.4/AUDIT-03`：**返工（回灌隐私回归；未完全验收）**。health-dashboard/DATA-PLAN.md:5-25、50、64-66 从已脱敏文档回退到真实来源日期/时间、个人基线、日序列、晨间指标、睡眠阶段与行为明细；:7,13,17,21 四组内容与历史 `e54adca` blob 完全一致（仅记录位置和 4 组命中，不复述原值）。复现：对比 `git diff 8b87c09..7d848b7 -- health-dashboard/DATA-PLAN.md` 的本地内容并使用不输出原值的扫描；94 个 tracked blob 的 UUID/INITIAL_*/个人绝对路径/固定 device flag 均 0，不能把窄扫描当作个人健康数值清零。预期：恢复之前明确 synthetic、占位日期及脱敏来源说明，保留本轮必要同步机制说明；禁止给真实值加 synthetic 标签冒充脱敏。另 client/src/App.tsx:297 把 stepsBaselineMissing 改名，未同步 validate-steps-display.mjs:17-24；`node health-dashboard/validate-steps-display.mjs` 退出 1（expression not found），旧 7/7 验证不再有效。独立抽取当前 stepsBaselineIncomplete/stepSummary/stepStatus 的 18 个 synthetic 边界断言退出 0，只证明表达式，不证明真实渲染。下一次仅交付 L0.4 隐私恢复及既有展示验证契约修复：changes 写明确 ID/修改范围/无 schema migration 或实际兼容策略/回滚边界，附全仓个人内容扫描的位置与计数、脚本可复现断言；不得附原始健康值。随后补原 owner null/零/旧快照保存回读与三视口证据。本次是已关闭问题的新回灌回归，尚未构成连续两轮同问题无进展。
 - 2026-10-14 11:19 PDT · `7d848b7` · 交付门槛及 `H0.4/L1` 候选范围：**不予验收／运行待验**。changes.md:61-66 新条目没有 plans 需求 ID、精确验证命令/typed 结果、schema/migration/API 兼容与回滚说明；构建审计两轮 pass/双视口/非 owner 汇总不能替代可复现证据。`node --check scripts/validate-handoff.mjs` 与 `git diff --check 8b87c09..7d848b7` 退出 0；`node scripts/validate-handoff.mjs 8b87c09f456fbf927d82f02da359d49b22f8a8ef 7d848b7bc948f7917e5228deca0735f1245dc328` 退出 1（缺已有需求 ID）。独立核对 health 现 8/8 action 首句严格 owner guard，新增 refreshStrengthTraining/getRefreshStatus 在 agent 调用前拒绝非 owner，静态局部通过。DB schema/migration 无 diff，但 response 新增必填 task 字段，须说明客户端/服务端同步发布和回滚兼容。风险复现步骤（源码推导，未冒称 artifact 实测）：从两个 owner 标签页重复同步或让自动任务运行超过两分钟再读 getDashboard，actions.ts:575-588 仅 worker 内节流且桶会变化，:701,728,730 使用 allowParallel；:539-553 两种保存均无条件 upsert，先发旧任务 A、再发新任务 B，按 B→A 顺序 callback，缺任务版本/sourceUpdatedAt 比较，会允许旧数据覆盖新数据。预期 L1.3 同源运行任务复用、幂等/旧 callback 不覆盖；不得用每次新建并行任务替代该保证。App.tsx:427,445 与 :467,474-476 使用分开的轮询实例，后台自动任务不参与 Dashboard 的按钮禁用/失败提示，已存在数据视图无法看见自动同步失败；有缓存也须展示来源级失败/旧数据。没有持久来源状态、未确认 reload 后任务恢复及两个来源部分成功表现；来源/训练量公式 prompt 既有口径未修改，本轮不重新验收公式。实现方须在 changes 引用准确已有 ID，给该最小需求提交三身份直接调用（清单现为 health 8 路由）、后台受信 callback、同源双击/跨标签页/旧 callback/超时重试/来源失败保留缓存和 390×844、430×932、桌面的 synthetic 脱敏步骤与结果。当前工具无 Muse builder/invoke_action，未运行禁止本地 build、未安装依赖、未读写 app.db；既有运行阻塞不重复追加，新同步及 API 边界保持待验。当前先完成上一条 L0.4，不并行扩展刷新需求。
+
+- 2026-10-14 14:13 PDT · `205f544` · `L0.4/AUDIT-03`：**静态/可复现脚本通过（两处返工关闭；整项运行待验）**。本轮开始远端 HEAD 为 `205f544afb97e26edbe433403fa6082ad7d6f3f6`，忽略 `3f8fab2` PM-only 提交。changes.md:68-74 已给准确 ID、三个文件范围、无 schema/migration/API/业务/UI 变化、回滚及证据限制；独立对照 diff，回滚会恢复未脱敏文档与失效脚本，不能作为安全脱敏回退。DATA-PLAN.md:5-25、50、64-66 已恢复此前脱敏文本，除 :59 一行 Timeliness fix 外与 `8b87c09` 逐字一致；四组原个人内容精确比对剩余命中 0，四处 SYNTHETIC 标签为无个人数值结构说明，未以重新标注真实值冒充脱敏。94 个 tracked 文件窄扫描 UUID/固定 device flag 均 0，源码 INITIAL_*/绝对用户路径均 0；DATA-PLAN 实际测试日期、带单位两位小数、长步数序列、精确时刻专项扫描均 0，只输出位置/计数，窄扫描不代表全仓个人数值绝对清零。validate-steps-display.mjs:21-29 已跟随当前 App.tsx:297-299 的 stepsBaselineIncomplete 绑定，:38-40 新增有值/完整基线但 status 缺失样例；独立执行 `node health-dashboard/validate-steps-display.mjs` 退出 0（8/8 synthetic 文案组），`node --check health-dashboard/validate-steps-display.mjs` 与 `git diff --check 3f8fab2..205f544` 均退出 0；`node scripts/validate-handoff.mjs 3f8fab23f7750102685d77f3e3da667b1b4bc6f1 205f544afb97e26edbe433403fa6082ad7d6f3f6` 退出 0（3 files / 1 script / 1 implementation file）。以上仅验证仓库脱敏与表达式脚本，构建方 pass/非 owner 汇总不能证明 owner 产品流程通过。无 Muse builder/invoke_action，未执行禁止本地 build、未安装依赖、未读写 app.db；既有缺 zod 的完整 contract 脚本和 owner/后台/三视口阻塞未变，不重复运行失败命令或追加记录。L0.4/AUDIT-03 不勾选，下一次只补当前应推动的受信 owner synthetic 保存回读与三视口及原运行证据；本轮有实质修复进展，不触发两轮无进展决策。
