@@ -14,14 +14,14 @@
 **Processing**: A spawned retrieval agent runs the three read-only Plaid commands. Snapshot finance sources ending in `_XXXX` are matched to account masks, preferring the same institution when available. Matched accounts receive current balances; credit and mortgage liabilities are normalized as negative net-worth values. `titan`, `titan_ira`, `wealthfront_saving`, `citi`, `usbank_cc`, `bonds`, and `fidelity_*` always retain snapshot values per the supplied contract. Holdings are joined to securities by the opaque IDs inside the action, then only ticker/name/value/share are persisted or returned; internal IDs and raw JSON are never exposed.
 
 ### Firance monthly snapshot files on the user's Mac
-**Used by**: `refreshFinanceData` background retrieval -> `saveFinanceSnapshot`; all monthly charts, monthly KPIs, FIRE calculations, and grouped account details
+**Used by**: `refreshFinanceData` background retrieval -> `ingestFinanceData`; all monthly charts, monthly KPIs, FIRE calculations, and grouped account details
 **Test command**: Source behavior was already established in the parent conversation from reads of the FinanceData directory (date-named files, one per snapshot); this builder seat has no direct device-file connector, so it will use the requested `ctx.agent.spawnTask` retrieval path at runtime.
 **Sample output**: Parent conversation reports the historical files were re-read and verified after mortgage backfill; current files use three-line records containing `finance_source`, `type`, and `number`, while field order differs across years.
 **Processing**: The retrieval agent lists files first, then reads all date-named files without writing to the Mac. The parser groups each three-line record and reads keys by name rather than position. Date filenames are parsed and sorted chronologically. Monthly rows are recomputed from source records using the exact Firance aggregation rules. If the Mac is unavailable or no valid files are returned, the action retains the last server-cached monthly dataset.
 
 ## Agent-task sources
 ### Weekly finance refresh
-**Delivered by**: `refreshFinanceData` -> detached agent task -> `saveFinanceSnapshot`
+**Delivered by**: `refreshFinanceData` -> detached agent task -> `ingestFinanceData`
 **Checked with**: The action contract will require the retrieval agent to list/read Firance files and run only `plaid accounts`, `plaid liabilities`, and `plaid investments-holdings`, then submit a strictly validated JSON payload to the save action. No browser work is required.
 
 ## Long-term data behavior
