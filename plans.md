@@ -33,7 +33,7 @@
 - [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-13 PM 复核至 `d439ac6`：finance 3 个、health 6 个、workout 6 个现有 action 的严格 owner guard 静态确认；`a317191` 补齐正确路由清单及非 owner 直接调用声明，但没有 owner / guest / anonymous 分列结果、后台 schedule 与 agent callback 的受信上下文证据。本轮无 Muse builder 可独立复验，保持“运行待验”。）
 - [ ] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。
 - [ ] `L0.3` 无权限响应使用稳定的 typed state，不依赖前端隐藏；直接调用 action 也不能读取 payload 或修改数据。
-- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-13 PM 复核至 `d439ac6`：`a317191` 已脱敏此前指出的健康文档时序与日志数值，四组样例明确标为 synthetic；全仓 UUID 与 `INITIAL_*` 扫描为零。但 `health-dashboard/server/src/actions.ts:655` 的刷新 prompt 仍写死个人步数基线/常见范围，`weekly-finance/server/src/actions.ts:618` 仍含个人完整本地路径，须改为授权运行时配置且脱敏；首次启动/同步运行证据仍待验，保持未勾选。）
+- [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-14 PM 复核至 `ddb105c`：`523a4d4` 已删除源码个人步数基线/范围与绝对用户路径，说明纠错静态通过；但刷新 prompt 要求历史不足时基线/范围为 null，与 `health-dashboard/server/src/actions.ts:99-103` 的非 nullable 数字 schema 冲突，趋势组件仍按数字展示。必须先修正缺失值契约并补 synthetic 边界与 artifact 证据；owner 刷新、配置缺失及首次空库运行仍待验，不勾选。）
 - [ ] `L0.5` 日志和错误文案不得包含账户余额、健康数值、训练明细、完整本地路径或上游原始 JSON。
 
 **验收**：分别以 owner、已登录非 owner、未登录三种身份直接调用每个 action；后二者全部无法读取或写入私密数据。对仓库执行个人数据扫描，不再命中真实健康时序、真实 workout UUID 或固定设备 ID。
@@ -236,7 +236,7 @@
 
 - [x] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。（2026-10-13 已修复：`isSignedInGuest` 改为严格 `isOwner` 校验，见 changes.md）
 - [x] `AUDIT-02 / P0` 健康和训练 action 没有显式 owner guard；财务 ingest/refresh 也继承 `AUDIT-01`。实际平台是否另有全局拦截仍需运行时验证，但发布前必须做服务端纵深校验。（2026-10-13 已修复：健康 6 个、训练 6 个 action 全部加服务端 isOwner 校验；此处仅确认静态修复，运行验收以 `L0.1/F0.1` 为准）
-- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。（2026-10-13 PM 复核至 `d439ac6`：真实种子与文档健康时序已删除/脱敏，当前扫描无 UUID 或固定 device flag；旧“health-cli 固定设备标识仍在”的描述已失效。剩余是健康刷新 prompt 的个人步数基线/范围和财务刷新 prompt 的个人完整路径，见本轮返工记录；不得用删除数据源定位的方式破坏刷新链路。）
+- [ ] `AUDIT-03 / P0` `health-dashboard/server/src/actions.ts` 内嵌真实日期健康序列、真实游泳 workout UUID 和真实初始快照；同时财务刷新 prompt 内嵌固定设备 ID，与仓库“真实个人数据不入 Git”的约定冲突。（2026-10-14 PM 复核至 `ddb105c`：当前源码真实种子、固定设备 UUID、个人步数基线/范围及绝对用户路径残留的已知静态返工已修正；92 个 tracked 文件的 UUID、`INITIAL_*`、绝对用户路径与固定 device flag 扫描均为零。整项仍未完成：新步数缺失值 prompt/schema 契约不一致，首次启动与真实刷新未独立运行复验，见本轮记录。）
 - [ ] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。
 - [ ] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。
 - [ ] `AUDIT-06 / P1` 健康前端只用固定 60 秒等待，没有可查询的来源任务状态；过早完成和超时未完成都无法准确表达。
@@ -245,7 +245,7 @@
 - [ ] `AUDIT-09 / P1` 训练 mutation 只按传入 ID 更新/删除，未验证 active workout 归属；完成不存在或已结束 workout 仍可能返回成功。并发 start 也没有数据库唯一约束或事务兜底。
 - [ ] `AUDIT-10 / P1` 自动预填按最近一次全部达到上限就加重，周复盘却要求连续两周全部达到上限，两个“下次建议”规则不一致。
 - [ ] `AUDIT-11 / P1` 财务应急金使用最新单月支出，最新快照可能是月中或异常；FIRE “还差 X 年”是忽略投资回报的线性外推，但主文案未先说明限制。
-- [ ] `AUDIT-12 / P2` 仓库没有自动测试、fixture 测试或 CI 证据；四个 app 只有 `typecheck/build` script，当前 `changes.md` 也没有逐项实现记录，因此不能证明现有功能已完成回归。
+- [ ] `AUDIT-12 / P2` 四个 app 尚缺公式 fixture、action 自动测试及可追溯 runtime 回归证据。（2026-10-14 PM 勘误：`ddb105c` 已新增确定性 Handoff Gate，本地执行通过；旧“没有 CI”描述失效。该 Gate 不检查业务公式、身份矩阵或 artifact，不能据此关闭本项。）
 
 ### 当前可保留的正确方向
 
@@ -278,7 +278,7 @@
 
 ## 异步协作框架（OPS-001）
 
-- [x] `OPS-001` 建立两个角色、一项在制需求、提交即检查、三小时漏检兜底的协作契约。根目录 `AGENTS.md` 约束职责；`.github/workflows/handoff-gate.yml` 在 push/PR 检查提交范围、语法、交付编号和明显凭证；该 gate 不代表业务验收通过。
+- [ ] `OPS-001` 建立两个角色、一项在制需求、提交即检查、三小时漏检兜底的协作契约。根目录 `AGENTS.md` 约束职责；`.github/workflows/handoff-gate.yml` 在 push/PR 检查提交范围、语法、交付编号和明显凭证；该 gate 不代表业务验收通过。（2026-10-14 PM 独立复核：契约、workflow 配置与本地 Gate 检查已确认；本轮未取得 GitHub push/PR 触发成功记录，撤回新增交付中的自勾选，完整交接链路保持待验。下一业务需求仍为 `L0.4`，不并行扩展 OPS。）
 - PM 先在本文定义一个可独立验收的需求编号、边界和证据。Muse 一次实现一项，优先使用 `muse/<id>-short-name` 分支/PR，代码与 `changes.md` 证据一起交付；PM 才能修订本文和勾选验收。
 - 正常交接：Muse 完成 → push/PR 触发 Handoff Gate → 通过后通过已授权渠道立即请求 PM → PM 在本文写通过/返工/运行待验 → Muse pull 后继续。每项最多两轮同问题无进展返工，再交由用户决策。
 - 当前已配置确定性 CI；GitHub 语义评审与自动唤醒 PM 尚未接通，不能把 CI 描述为自动产品验收。没有即时通道时，以 `changes.md` 留下交付，由三小时任务补检。GitHub CLI 认证/secret 配置当前不可用，后续接通后须用一项 PR 验证从提交到 PM 结论的完整链路。
@@ -290,21 +290,21 @@
 
 每轮自动审查按以下闭环执行：
 
-1. 先比较远端 HEAD 与上次已审查源 commit；没有新业务提交且没有新的运行证据时立即结束，避免重复读取整个仓库和消耗 token。存在变化时再安全同步 `origin/main`，读取本文件、`changes.md`、相关 `AGENTS.md` 和对应业务 diff。
-2. 没有新的业务代码时不修改仓库、不产生空提交；仅文档审查提交不算新的 Muse 实现。
+1. 先比较远端 HEAD 与上次已审查源 commit；没有新业务变更、需求设计变更或实现证据时立即结束，避免重复读取整个仓库和消耗 token。存在变化时再安全同步 `origin/main`，读取本文件、`changes.md`、相关 `AGENTS.md` 和对应业务 diff。
+2. 没有新的业务变更、需求设计变更或实现证据时不修改仓库、不产生空提交；PM 仅改 plans 的验收提交不算新交付，同一运行待验阻塞没有新证据或环境变化时不重复追加。
 3. 新实现没有需求编号或 `changes.md` 证据时，不验收；把缺失证据和下一步写入本文件的“自动审查记录”。
 4. 对有证据的实现逐项做范围审查、静态检查和可用的自动测试；需要 Muse artifact 才能确认的项目保持待验，不能用本地编译代替运行验收。
 5. 全部满足验收标准时，在对应需求上勾选，并记录通过的源 commit、证据和下一优先项。
 6. 不满足时不改业务代码、不勾选需求；写清失败条件、代码位置、复现方式和 Muse 下一次必须提交的修改。
 7. 审查只允许修改 `plans.md`；若确需修订需求，必须说明原因。自动任务不得 force push、不得覆盖用户未提交改动、不得直接替 Muse 实现 feature。
-8. 文档有实质变化时提交并推送 `main`；发生冲突、工作区不干净或验证环境缺失时停止写入并报告，不猜测通过。
+8. 文档有实质变化时提交并推送 `main`；发生冲突、工作区不干净或非 main 时保护现场，停止写入并报告。运行验证环境缺失时保持运行待验，不猜测通过；提交前重新 fetch，安全保留并发工作，不能覆盖或改写历史。
 
 ### 自动审查状态
 
-- 上次已审查源 commit：`d439ac6e3e9bba25d1ec8f7cdba0a9e3143d68d2`
-- 上次运行：2026-10-13 23:08 PDT（自动 PM 验收）
-- 上次结论：`a317191` 的文档健康明细脱敏与 action 清单纠错静态通过；没有新增完全验收项。`L0.4/AUDIT-03` 仍需清理源码个人基线/路径；`L0.1/F0.1` 运行待验，撤回 `F0.1` 原实现方勾选。
-- 当前应推动：先完成 `L0.4` 源码配置脱敏、交付说明纠错及 `L0.1/F0.1` 三身份与 schedule/callback 运行证据，再按既有顺序推进 `L1/H0`、`W0/W1`、`H1`；`H4/W5/F3` 仅新增待办，无实现可验收。
+- 上次已审查源 commit：`ddb105ce4bb0647687aafbfd18b8477a080dda8d`
+- 上次运行：2026-10-14 02:14 PDT（自动 PM 验收；本轮开始远端 HEAD 为 `ddb105c`）
+- 上次结论：`523a4d4` 的个人基线/路径脱敏与交付说明纠错静态通过；`L0.4` 新增缺失值 prompt/schema 冲突，返工，未新增完全验收项。`L0.1/F0.1` 仍为原运行待验阻塞，新交付只重复非 owner 结果，没有新的身份/后台链证据，不重复追加；`OPS-001` 配置与本地 Gate 通过，撤回自勾选，托管 CI/交接证据待验。
+- 当前应推动：只推进 `L0.4` 的步数缺失值契约，兼容旧快照、诚实显示缺失且不影响独立 readiness；补 owner 刷新、配置缺失和首次空库的脱敏运行证据。随后仍按 `L0.1/F0.1` → `L1/H0` → `W0/W1` → `H1` 推进，保留健康/fitness 优先级。
 
 ### 自动审查记录
 
@@ -318,11 +318,16 @@
 - 2026-10-13 23:08 PDT · `d439ac6` · `L0.1/F0.1`：**运行待验（证据有新增，未完全通过）**。`changes.md:26` 新增 15 个 action 的非 owner 直接调用汇总，但实现方明确无法区分 guest/anonymous，且没有 owner 与 schedule/callback 成功链证据；本轮重新查找可用工具，未提供 Muse web-artifact builder / invoke_action，不能执行 plan → audit 或验证数据库无写入。Muse 须按实际 15 个路由提交 owner / 已登录 guest / anonymous 分列调用矩阵、合法请求与脱敏 typed response、拒绝前后数据不变证明、后台 schedule 及三个 save/ingest callback 的受信上下文和成功结果；并补 390×844、430×932 与桌面空态/无权限/核心操作和键盘焦点证据。本轮撤回 `F0.1` 旧勾选，`L0.1` 不变。四 app 均尝试 `bun run typecheck`，均退出 127（缺 Bun）；node_modules、运行时 SDK 均缺失，未通过类型检查；没有 test script/fixture，未执行禁用的本地 build，也未读写 app.db。现有阻塞只在这条随新增证据更新，不重复追加旧记录。
 - 2026-10-13 23:08 PDT · `d439ac6` · `L0.4/L0.1/F0.1` 交付说明：**返工**。`changes.md:21` 仍称首次启动“写入空快照”，而 `health-dashboard/server/src/actions.ts:592-600` 的 initializeSnapshot 为无写入空操作；`weekly-finance/DATA-PLAN.md:17,24` 仍把 callback 写为不存在的 saveFinanceSnapshot，实际路由为 `weekly-finance/server/src/actions.ts:631` 的 ingestFinanceData。复现：逐项对照这两处文档与 Actions 路由/handler。Muse 下次只修正文档为真实行为与路由，明确本次无 schema/migration 和业务实现变化，提交可追溯的脱敏调用表；审查任务不修改 changes 或业务代码。
 
+- 2026-10-14 02:14 PDT · `ddb105c`（交付 `523a4d4`）· `L0.4/AUDIT-03`：**静态通过（局部，不勾选）**。两处业务 diff 均只有刷新 prompt 一行：health 的固定个人基线改为从完整日数据派生，finance 改为运行时解析主目录，解析失败要求 `success:false` callback；设备仍在运行时解析，没有靠删除来源破坏定位。92 个 tracked 文件扫描 UUID 0、`INITIAL_*` 0、绝对用户路径 0、固定 device flag 0；通过对照旧 blob 确认个人基线原句不再出现，仅输出命中数。`changes.md` 已更正 initializeSnapshot 无写入空操作，finance DATA-PLAN:17,24 已更正为 ingestFinanceData；初始化 handler:592-600 与实际 callback:631 可对应，旧文档返工关闭。本轮未改 schema/migration、UI 或 readiness；prompt 输出契约发生变化，不能按“无业务逻辑变更”跳过兼容验证。
+- 2026-10-14 02:14 PDT · `ddb105c` · `L0.4`：**返工（新的契约缺陷，静态确认，未冒称实测）**。位置：health-dashboard/server/src/actions.ts:655 要求少于 14 个完整步数日或无数据时 baseline/usualMin/usualMax 为 null，但 :99-103 三字段仍为必填非 nullable 数字，saveHealthSnapshot:618 使用该 request schema；client/src/App.tsx:86-93、279 的 MetricBars 也只接受数字，null 若仅绕过校验会被 Math.round/Math.max 当作 0。复现输入为明确 synthetic 的 13 个完整步数日（其余请求字段合法），按新 prompt 令 steps 三基线/范围字段为 null：契约静态推导该 callback 无法通过当前 request 校验；另须覆盖 14 日全零和高方差均值减标准差小于零，当前 positive/nonnegative 约束与未限定的均值±标准差不一致。预期：短历史仍能保存已获取的真实指标、基线/范围诚实标为缺失，趋势不伪造 0 基线；完整样本的有效零与非负范围有明确规则。下一次只修此原子边界：统一生成/保存/旧快照读取/前端展示的缺失值与范围契约，说明是否需要 migration 与旧数字快照兼容、回滚；不要回填个人常量或顺带修改 readiness/H1。必须交付上述 synthetic 样例的可复现命令/断言和脱敏结果，及 owner artifact callback 保存/回读、缺失态在 390×844、430×932 与桌面显示证据。
+- 2026-10-14 02:14 PDT · `ddb105c` · `L0.4`：**运行待验（源码有进展，证据未齐）**。weekly-finance/server/src/actions.ts:618 的主目录解析成功与失败、:646-650 失败回调保留旧数据、health 首次空库 initializeSnapshot 不写入 fixture、健康 owner 同步成功均缺可复现独立运行证据。可用工具未提供 Muse web-artifact builder / invoke_action，不能走 plan → build → audit → submit，未运行本地 build、未读写 app.db。Bun 仍不可用，沿用原类型检查阻塞，本轮不重复执行四 app 失败命令。Muse 下次交付脱敏 owner 刷新成功、主目录/来源不可用失败且旧快照保持不变、首次空库前后无种子写入的操作步骤与 typed 结果；后台受信上下文仍引用既有 L0.1/F0.1 待验要求。
+- 2026-10-14 02:14 PDT · `ddb105c` · `OPS-001` / Handoff Gate：**本地检查通过，完整交接待验**。独立运行 `node --check scripts/validate-handoff.mjs` 和 `node scripts/validate-handoff.mjs d439ac6e3e9bba25d1ec8f7cdba0a9e3143d68d2 ddb105ce4bb0647687aafbfd18b8477a080dda8d` 均退出 0（8 files / 1 script / 2 implementation files）；分别检查 85af069..523a4d4 和 523a4d4..ddb105c 也退出 0。workflow 配置为 push main/PR、Node 22、fetch-depth 0 和只读 contents 权限；本地成功不能证明 GitHub 已触发运行。撤回新增交付的 OPS 自勾选，须补脱敏 push/PR Gate run 结果与一项提交到 PM 结论的交接记录。Gate 的语法/凭证/已知编号检查不代替权限、公式、schema、刷新幂等和手机运行验收。`85af069` 为仅 plans 审查提交，已忽略。本轮同步机制文字只为对齐当前授权的“需求设计/新增证据也触发，重复待验不触发”规则，不新增功能队列。
+
 每轮只保留最近 20 条，格式为：时间、源 commit、涉及需求、结论（通过 / 返工 / 运行待验）、证据或阻塞原因。
 
 ## 推荐执行顺序
 
-1. `L0.4` 源码个人基线/路径脱敏与交付说明纠错；`L0.1/F0.1` 三身份、后台 schedule/callback 完整运行证据：先补齐隐私与权限门槛。
+1. `L0.4` 步数基线/范围缺失值契约返工与 owner/配置缺失/首次空库运行证据；随后 `L0.1/F0.1` 三身份、后台 schedule/callback 完整运行证据：先补齐隐私与权限门槛。
 2. `L1` + `H0`：统一来源级刷新状态、coverage、stale recovery 和时间语义，建立分析可信基础。
 3. `W0/W1`：修复训练记录丢失、越权目标、并发 active workout 与两套建议规则冲突。
 4. `H1.1–H1.8`：修正 readiness 的时间对齐、基线泄漏、覆盖门槛、稳健统计和缺失展示。
