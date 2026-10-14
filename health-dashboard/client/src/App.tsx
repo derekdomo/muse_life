@@ -84,13 +84,13 @@ function Kpi({ label, value, unit, detail, status }: { label: string; value: str
 }
 
 function MetricBars({ title, unit, points, getValue, baseline, formatValue }: {
-  title: string; unit: string; points: TrendPoint[]; getValue: (point: TrendPoint) => number | null; baseline: number; formatValue: (value: number) => string;
+  title: string; unit: string; points: TrendPoint[]; getValue: (point: TrendPoint) => number | null; baseline: number | null; formatValue: (value: number) => string;
 }) {
   const values = points.map(getValue).filter((value): value is number => value !== null);
-  const max = Math.max(...values, baseline, 1);
+  const max = Math.max(...values, ...(baseline === null ? [] : [baseline]), 1);
   return (
     <section className="trend-block" aria-label={`${title}近7天趋势`}>
-      <div className="section-line"><h3>{title}</h3><span>基线 {formatValue(baseline)} {unit}</span></div>
+      <div className="section-line"><h3>{title}</h3><span>{baseline === null ? "基线 数据不足" : `基线 ${formatValue(baseline)} ${unit}`}</span></div>
       <div className="bar-chart">
         {points.map((point) => {
           const value = getValue(point);
@@ -245,7 +245,7 @@ function TodayView({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
         {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
       </section>
       <section className="kpi-board" aria-label="关键健康指标">
-        <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={`基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={snapshot.steps.status} />
+        <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={snapshot.steps.status} />
         <Kpi label="静息心率" value={numberLabel(snapshot.restingHr.value, 1)} unit="bpm" detail={`基线约 ${snapshot.restingHr.baseline} · 常见 ${snapshot.restingHr.usualMin}–${snapshot.restingHr.usualMax}`} status={snapshot.restingHr.status} />
         <Kpi label="HRV" value={numberLabel(snapshot.hrv.value, 1)} unit="ms" detail={`基线约 ${snapshot.hrv.baseline} · 常见 ${snapshot.hrv.usualMin}–${snapshot.hrv.usualMax}`} status={snapshot.hrv.status} />
         <Kpi label="睡眠" value={sleepHours.toFixed(1)} unit="h" detail={`质量 ${numberLabel(snapshot.sleep.quality)} · 效率 ${snapshot.sleep.efficiency?.toFixed(1) ?? "—"}%`} status={snapshot.sleep.status} />
