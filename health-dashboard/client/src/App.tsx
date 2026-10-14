@@ -27,13 +27,13 @@ type TrendPoint = Snapshot["trends"][number];
 type Daily = Snapshot["historyDaily"][number];
 type StrengthWorkout = Snapshot["strengthTraining"]["workouts"][number];
 type Tab = "today" | "trends" | "history";
-type Status = "正常" | "偏低" | "偏高" | "数据缺失";
+type Status = "正常" | "偏低" | "偏高" | "数据缺失" | "基线不足";
 
 const ROUTINE_LABELS: Record<StrengthWorkout["routine"], string> = { push: "推", pull: "拉", legs: "腿" };
 
 function statusClass(status: Status): string {
   if (status === "正常") return "status-ok";
-  if (status === "数据缺失") return "status-missing";
+  if (status === "数据缺失" || status === "基线不足") return "status-missing";
   return "status-watch";
 }
 
@@ -234,7 +234,9 @@ function ReadinessPanel({ readiness }: { readiness: Readiness }) {
 
 function TodayView({ snapshot, readiness }: { snapshot: Snapshot; readiness: Readiness | null }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
-  const stepSummary = snapshot.steps.status === "正常" ? "步数在常见范围" : snapshot.steps.status === "数据缺失" ? "步数未记录" : `步数${snapshot.steps.status}`;
+  const stepsBaselineMissing = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null;
+  const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineMissing || snapshot.steps.status === "数据缺失" ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
+  const stepStatus: Status = snapshot.steps.value === null ? "数据缺失" : stepsBaselineMissing ? "基线不足" : snapshot.steps.status;
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
@@ -245,7 +247,7 @@ function TodayView({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
         {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
       </section>
       <section className="kpi-board" aria-label="关键健康指标">
-        <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={snapshot.steps.status} />
+        <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={stepStatus} />
         <Kpi label="静息心率" value={numberLabel(snapshot.restingHr.value, 1)} unit="bpm" detail={`基线约 ${snapshot.restingHr.baseline} · 常见 ${snapshot.restingHr.usualMin}–${snapshot.restingHr.usualMax}`} status={snapshot.restingHr.status} />
         <Kpi label="HRV" value={numberLabel(snapshot.hrv.value, 1)} unit="ms" detail={`基线约 ${snapshot.hrv.baseline} · 常见 ${snapshot.hrv.usualMin}–${snapshot.hrv.usualMax}`} status={snapshot.hrv.status} />
         <Kpi label="睡眠" value={sleepHours.toFixed(1)} unit="h" detail={`质量 ${numberLabel(snapshot.sleep.quality)} · 效率 ${snapshot.sleep.efficiency?.toFixed(1) ?? "—"}%`} status={snapshot.sleep.status} />
