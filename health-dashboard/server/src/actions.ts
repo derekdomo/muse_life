@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
@@ -557,50 +557,64 @@ function normalizeStoredStrength(value: unknown): StrengthTraining | null {
   return parsed.success ? parsed.data : null;
 }
 
-async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<void> {
+// Atomic conditional write (L1-RACE-001): the version comparison and the
+// write are ONE SQLite statement — INSERT … ON CONFLICT(id) DO UPDATE …
+// WHERE excluded.source_updated_at >= the stored row's source_updated_at.
+// The old two-step shape (SELECT the payload, compare updatedAt in JS, then
+// unconditionally upsert) raced: two parallel callbacks could both read the
+// same old value, and the one that landed last won even when its version was
+// older (a 01:00 read overwriting a 02:00 snapshot). Inside a single
+// statement the comparison happens at write time, so a late-finishing older
+// version is rejected by the statement itself. Equal timestamps count as an
+// idempotent rewrite (applied). RETURNING id reports whether the statement
+// actually wrote: no row back means the stored snapshot is newer and this
+// one was ignored — callers surface that as outcome "ignored" and skip the
+// saved sync-log entry.
+async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<boolean> {
   const db = ctx.db<typeof schema>();
-  // Monotonic guard: parallel sync tasks can finish out of order, and an
-  // older task's callback must never overwrite a newer snapshot.
-  const existing = await db.select({ payload: schema.healthSnapshot.payload }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
-  const existingPayload = existing[0]?.payload;
-  if (existingPayload) {
-    try {
-      const stored = normalizeStoredSnapshot(JSON.parse(existingPayload));
-      if (stored && Date.parse(snapshot.updatedAt) < Date.parse(stored.updatedAt)) return;
-    } catch {
-      // A malformed stored snapshot must not block a valid refresh.
-    }
-  }
   const now = new Date();
   const normalized = normalizeSleepSnapshot(snapshot);
-  await db.insert(schema.healthSnapshot).values({ id: 1, payload: JSON.stringify(normalized), sourceUpdatedAt: new Date(normalized.updatedAt), createdAt: now, updatedAt: now })
-    .onConflictDoUpdate({ target: schema.healthSnapshot.id, set: { payload: JSON.stringify(normalized), sourceUpdatedAt: new Date(normalized.updatedAt), updatedAt: now } });
-  await recordSyncLog(ctx, { source: "health", status: "saved", itemCount: normalized.historyDaily.length, note: `健康快照已保存 · 数据日期 ${normalized.dataDate} · ${normalized.historyDaily.length} 天明细`, sourceUpdatedAt: new Date(normalized.updatedAt) });
+  const sourceUpdatedAt = new Date(normalized.updatedAt);
+  const payload = JSON.stringify(normalized);
+  const written = await db.insert(schema.healthSnapshot).values({ id: 1, payload, sourceUpdatedAt, createdAt: now, updatedAt: now })
+    .onConflictDoUpdate({
+      target: schema.healthSnapshot.id,
+      set: { payload, sourceUpdatedAt, updatedAt: now },
+      setWhere: sql`excluded.source_updated_at >= ${schema.healthSnapshot.sourceUpdatedAt}`,
+    })
+    .returning({ id: schema.healthSnapshot.id });
+  if (written.length === 0) return false;
+  await recordSyncLog(ctx, { source: "health", status: "saved", itemCount: normalized.historyDaily.length, note: `健康快照已保存 · 数据日期 ${normalized.dataDate} · ${normalized.historyDaily.length} 天明细`, sourceUpdatedAt });
   ctx.invalidateQueries(["dashboard"]);
+  return true;
 }
 
-async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Promise<void> {
+async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Promise<boolean> {
   const db = ctx.db<typeof schema>();
-  // Monotonic guard: an older sync task finishing late must not roll the
-  // panel back to an earlier read of 训练记录.
-  if (strength.updatedAt) {
-    const existing = await db.select({ payload: schema.strengthTrainingSnapshot.payload }).from(schema.strengthTrainingSnapshot).where(eq(schema.strengthTrainingSnapshot.id, 1)).limit(1);
-    const existingPayload = existing[0]?.payload;
-    if (existingPayload) {
-      try {
-        const stored = normalizeStoredStrength(JSON.parse(existingPayload));
-        if (stored?.updatedAt && Date.parse(strength.updatedAt) < Date.parse(stored.updatedAt)) return;
-      } catch {
-        // A malformed stored snapshot must not block a valid sync.
-      }
-    }
-  }
+  // Null-version contract (L1-RACE-001): a strength snapshot whose updatedAt
+  // is null carries no source version, so it is treated as the OLDEST
+  // possible version (epoch). Under the same atomic conditional write as the
+  // health path it can then only land as the very first row — when no
+  // strength snapshot exists yet; as soon as any snapshot with a real
+  // source_updated_at is stored, a null version is ignored instead of
+  // rolling the panel back (the old code skipped every guard for null and
+  // stamped it with the write time, letting it overwrite valid snapshots).
+  // The payload keeps updatedAt: null, so freshness display still treats
+  // the version as missing.
   const now = new Date();
-  const sourceUpdatedAt = strength.updatedAt ? new Date(strength.updatedAt) : now;
-  await db.insert(schema.strengthTrainingSnapshot).values({ id: 1, payload: JSON.stringify(strength), sourceUpdatedAt, createdAt: now, updatedAt: now })
-    .onConflictDoUpdate({ target: schema.strengthTrainingSnapshot.id, set: { payload: JSON.stringify(strength), sourceUpdatedAt, updatedAt: now } });
-  await recordSyncLog(ctx, { source: "strength", status: "saved", itemCount: strength.workouts.length, note: `力量快照已保存 · ${strength.workouts.length} 次训练`, sourceUpdatedAt });
+  const sourceUpdatedAt = strength.updatedAt ? new Date(strength.updatedAt) : new Date(0);
+  const payload = JSON.stringify(strength);
+  const written = await db.insert(schema.strengthTrainingSnapshot).values({ id: 1, payload, sourceUpdatedAt, createdAt: now, updatedAt: now })
+    .onConflictDoUpdate({
+      target: schema.strengthTrainingSnapshot.id,
+      set: { payload, sourceUpdatedAt, updatedAt: now },
+      setWhere: sql`excluded.source_updated_at >= ${schema.strengthTrainingSnapshot.sourceUpdatedAt}`,
+    })
+    .returning({ id: schema.strengthTrainingSnapshot.id });
+  if (written.length === 0) return false;
+  await recordSyncLog(ctx, { source: "strength", status: "saved", itemCount: strength.workouts.length, note: `力量快照已保存 · ${strength.workouts.length} 次训练`, sourceUpdatedAt: strength.updatedAt ? sourceUpdatedAt : null });
   ctx.invalidateQueries(["dashboard"]);
+  return true;
 }
 
 const syncLogEntrySchema = z.object({
@@ -668,6 +682,13 @@ const diagnosticsResponse = z.object({
   unifiedTimeline: z.array(unifiedDaySchema).max(14),
 });
 const mutationResponse = z.object({ ok: z.boolean(), forbidden: z.boolean() });
+// Save-callback responses (L1-RACE-001): ok/forbidden keep their existing
+// meaning; outcome tells the callback whether its snapshot actually landed
+// ("applied"), was rejected by the atomic version guard because a newer
+// snapshot is already stored ("ignored"), or was refused by the gate
+// ("forbidden"). ok stays true for "ignored" — the callback itself
+// succeeded; only the write was superseded.
+const saveSnapshotResponse = z.object({ ok: z.boolean(), forbidden: z.boolean(), outcome: z.enum(["applied", "ignored", "forbidden"]) });
 const refreshResponse = z.object({ forbidden: z.boolean(), accepted: z.boolean(), taskId: z.string().nullable(), strengthTaskId: z.string().nullable(), message: z.string() });
 const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(["queued", "running", "completed", "failed", "not_found", "unknown"]), contractSatisfied: z.boolean() });
 
@@ -679,7 +700,7 @@ const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(
 // are single-flighted), silently swallowing them. Every explicit sync below
 // therefore spawns a fresh task with allowParallel, and getDashboard
 // re-syncs on every open (see maybeAutoSyncStrength).
-const STRENGTH_SYNC_PROMPT = `Synchronize the user's strength-training summary from their existing web artifact named 训练记录 (slug space-6). Treat that artifact as the only source for strength sets; do not infer workouts from Apple Health. Use its published getDashboard action with recent_limit 20. Include the active workout, if any, plus every returned recent completed workout. For each workout preserve the source id as a string, routine, unit, start and completion instants, status, all sets grouped by exercise, and completed flags. Compute completedSets and totalVolume from completed sets only; a set contributes weight × reps only when both are present. Compute durationMinutes from timestamps when completion exists; for an active workout use the current instant. Use America/Los_Angeles to derive the workout date and Monday-based week starts. Choose the most recent workout's unit as displayUnit (default lb when there are no workouts); convert mixed-unit volume exactly when aggregating weekly totals (1 lb = 0.45359237 kg) so every weeklyTrend volume is in displayUnit. Include up to the latest eight Monday-based weeks, ascending, with zero-volume intervening weeks retained. Set updatedAt to the real current instant. If the source is read successfully and contains no workouts, return empty workouts and weeklyTrend and explain in note that completed or active sets from 训练记录 will appear after synchronization. A response with forbidden: true counts as a failed read, not as an empty source. If the source cannot be read, do not replace the last successful strength snapshot with an empty one. Do not create plausible workouts or sets. Call the expected save action exactly once only after a successful source read.`;
+const STRENGTH_SYNC_PROMPT = `Synchronize the user's strength-training summary from their existing web artifact named 训练记录 (slug space-6). Treat that artifact as the only source for strength sets; do not infer workouts from Apple Health. Use its published getDashboard action with recent_limit 20. Include the active workout, if any, plus every returned recent completed workout. For each workout preserve the source id as a string, routine, unit, start and completion instants, status, all sets grouped by exercise, and completed flags. Compute completedSets and totalVolume from completed sets only; a set contributes weight × reps only when both are present. Compute durationMinutes from timestamps when completion exists; for an active workout use the current instant. Use America/Los_Angeles to derive the workout date and Monday-based week starts. Choose the most recent workout's unit as displayUnit (default lb when there are no workouts); convert mixed-unit volume exactly when aggregating weekly totals (1 lb = 0.45359237 kg) so every weeklyTrend volume is in displayUnit. Include up to the latest eight Monday-based weeks, ascending, with zero-volume intervening weeks retained. Version contract: BEFORE you call getDashboard on 训练记录, record the current instant as readStartedAt, and set the payload's updatedAt to that readStartedAt — the moment the source read began. Never set updatedAt to the instant the task finishes or to the callback instant. Why: the save versions snapshots by read-start time and applies them with an atomic compare-and-write that rejects any version older than the one already stored, so a read that started earlier can never overwrite a newer snapshot even when it finishes later; stamping the completion time instead would disguise an old read as new data and defeat that guard. If the source is read successfully and contains no workouts, return empty workouts and weeklyTrend and explain in note that completed or active sets from 训练记录 will appear after synchronization. A response with forbidden: true counts as a failed read, not as an empty source. If the source cannot be read, do not replace the last successful strength snapshot with an empty one. Do not create plausible workouts or sets. Call the expected save action exactly once only after a successful source read.`;
 
 // Every-open strength sync (2026-10-15): the user rejected the five-minute
 // staleness threshold — training data is local to the sibling artifact, so
@@ -893,11 +914,11 @@ export const Actions = {
   }),
 
   saveHealthSnapshot: defineAction({
-    request: snapshotSchema, response: mutationResponse,
-    async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
+    request: snapshotSchema, response: saveSnapshotResponse,
+    async handler(ctx, args): Promise<z.infer<typeof saveSnapshotResponse>> {
       // expectsAction callback for this artifact's own sync tasks (see
       // isOwnerOrSyncChannel): the task return channel carries no viewer.
-      if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true };
+      if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true, outcome: "forbidden" };
       let nextSnapshot = args;
       if (args.strengthTraining.updatedAt === null && args.strengthTraining.workouts.length === 0) {
         const db = ctx.db<typeof schema>();
@@ -912,19 +933,19 @@ export const Actions = {
           }
         }
       }
-      await persistSnapshot(ctx, nextSnapshot);
-      return { ok: true, forbidden: false };
+      const applied = await persistSnapshot(ctx, nextSnapshot);
+      return { ok: true, forbidden: false, outcome: applied ? "applied" : "ignored" };
     },
   }),
 
   saveStrengthTrainingSnapshot: defineAction({
-    request: strengthTrainingSchema, response: mutationResponse,
-    async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
+    request: strengthTrainingSchema, response: saveSnapshotResponse,
+    async handler(ctx, args): Promise<z.infer<typeof saveSnapshotResponse>> {
       // expectsAction callback for this artifact's own sync tasks (see
       // isOwnerOrSyncChannel): the task return channel carries no viewer.
-      if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true };
-      await persistStrengthSnapshot(ctx, args);
-      return { ok: true, forbidden: false };
+      if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true, outcome: "forbidden" };
+      const applied = await persistStrengthSnapshot(ctx, args);
+      return { ok: true, forbidden: false, outcome: applied ? "applied" : "ignored" };
     },
   }),
 
