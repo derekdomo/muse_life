@@ -80,3 +80,7 @@
 - space-6（已在 artifact 修复并回灌）：`getDashboard` 新增 `isOwnerOrSyncChannel`——接受 owner 或无 viewer 的内部同步调用；带身份的非 owner 返回 forbidden 零数据；全部写 action 保持严格 owner（同通道探针 `updateSet`、`startWorkout` 均 forbidden 且零写入）。验证：同一内部通道改前 forbidden 零数据，改后可读全部 6 次训练（含 10/13 推、10/14 拉）。修改文件：`workout-log/server/src/actions.ts`、`workout-log/DATA-PLAN.md`（新增 Cross-artifact sync read 一节）。
 - 残余风险（如实记录，PM 验收 L0.1 时需纳入）：平台没有可验证的服务凭据机制，"无 viewer"不等于身份证明；能以无身份方式调用 action 通道的调用方能读到训练历史。放行范围已最小化（space-6 仅 `getDashboard` 只读、space-4 仅不返回数据的入口与回调）；平台提供服务身份后应改为凭据校验。安全审查原评 high。
 - 本条只回灌代码与文档，未改 `plans.md` 勾选（归 PM 验收）。
+
+## 2026-10-15（数据一体原则入 plans）
+
+- 用户定调：Muse Life 四个 app 是一体的，内部数据存储也应一体；界面独立不等于数据分家。`plans.md` 仓库边界新增"数据一体原则"：同一份数据只有一个事实源，跨 app 走可靠内部通道；平台做不到物理共享时，同步链路的触发、失败与权限例外必须显式设计并记录，不得静默失败。本次只改文档，未改业务代码。
