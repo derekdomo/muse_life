@@ -139,3 +139,9 @@
 - 验证证据（均为 synthetic 数据，无真实健康数值入仓）：(1) 新增 `health-dashboard/validate-units.mjs`（纯 Node、无依赖）——源码断言 6 项 + 以 `node:module.stripTypeScriptTypes` 抽取**真实** `convertVolumeToUnit`/`sumWorkoutVolumeInUnit`/`buildUnifiedTimeline`/`calculateReadiness` 运行：同日混单位 kg 145.4 / lb 320.5、跨日混单位逐日换算（45.4 / 100）、全 lb（200 lb / 90.7 kg）、全 kg（100）、零量训练贡献 0 且 sessions=2、空列表、displayUnit 切换往返一致、聚合不改写原始记录、readiness 文案 kg 145 / lb 320、原始未换算和为错误 200 的变异基线。**25 passed, 0 failed**，退出 0。(2) artifact 构建审计 verdict pass、fix_before_attesting 为空；构建方 synthetic 复核同上 145.4 / 320.5，并以非 owner 上下文 invoke `getDashboard` 返回 `forbidden: true` 且 snapshot/readiness/dataStatus 均为 null、unifiedTimeline 为空，门禁未破坏。生产库未做任何写入。
 - 已知限制：今日页与历史页的统一时间线数值均来自同一服务端 `buildUnifiedTimeline`，一致性由同源保证，本轮未在 owner 会话做三视口目视复核；混单位真实快照在 owner 侧的页面显示仍待 PM 复核（整项不自行勾选，保持 `[ ]` 待 PM 验收）。回滚：revert 本次提交即可（actions.ts 与新增脚本），无数据迁移需回退。
 - 修改文件：`health-dashboard/server/src/actions.ts`、`health-dashboard/validate-units.mjs`（新增）、`changes.md`。不在本次范围：`H-SOURCE-001`（下一项）、`L1-RACE-001` artifact 运行证据、`L0.1/AUDIT-02` 用户拍板项。
+
+## 2026-10-15（用户指示：H-UI-001 并入 Whoop 视觉风格）
+
+- 用户 2026-10-15 在 finance dash side chat 明确：喜欢 Whoop 式界面，指示健康看板 UI 向 Whoop 看齐，并入已排队的 `H-UI-001`（健康首屏重排）一起做，不另起条目。
+- 已在 `plans.md` 的 `H-UI-001` 条目追加用户指示：首屏以恢复 / 睡眠 / 负荷三个大分数为视觉主体（大分数 + 红黄绿状态带），其余信息依次下沉，台账与诊断保持可展开；深色底一并采用。数据口径与公式不变，恢复呈现继续遵守原约束（readiness 参考 + 置信度/缺失原因，H1 通过前不包装成确定等级），原验收标准不变。
+- 本条只登记需求，未改实现代码；由后续同步轮次执行 H-UI-001 时一并交付。
