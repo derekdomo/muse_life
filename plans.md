@@ -302,10 +302,10 @@
 
 ### 自动审查状态
 
-- 上次已审查源 commit：`04bd2a23d8f19dd19cdd4509d34215d3f682ca5a`
-- 上次运行：2026-10-15 02:21 PDT（自动 PM 验收；本轮开始远端 HEAD 为 `04bd2a2`）
-- 上次结论：审查新增 `79dbd07` 同步链、`f8a195e` 数据一体原则与 `04bd2a2` 一体层。保留用户数据一体原则，但它不授权以 null viewer 代替受信上下文。新权限放行违反 L0.1，撤回 AUDIT-02 勾选；无完整验收项。新增时间线混合单位、并发旧回调覆盖风险已独立 synthetic 复现。汇总 Gate 通过但单提交 `04bd2a2` 因缺需求 ID 失败；新增 migration/owner/三视口运行待验。仅更新 plans，不替 Muse 修改实现。
-- 当前应推动：因新增隐私回归，唯一在制项调整为 `L0.1/AUDIT-02` 的四个入口受信边界：health refreshHealthData/saveHealthSnapshot/saveStrengthTrainingSnapshot、workout getDashboard。先拒绝未认证 null/undefined 调用；后台必须证明可验证的服务身份、来源/任务归属和最小权限，平台无该能力则保持拒绝并显式报告同步不可用，不把 null 当身份。只交付这一原子修复及三身份/受信后台的脱敏证据，不扩展一体层或 readiness。关闭后恢复 `L0.4` 原 synthetic null/零/旧数字快照保存回读、三视口与 owner 刷新/配置失败保留缓存/首次空库证据；之后 `L0.1/F0.1` 其余矩阵 → `L1/H0` → `W0/W1` → `H1`。已关闭的脱敏和展示脚本返工不重做。
+- 上次已审查源 commit：`89a22c64f8d67208b3d7612401f900a6bd7b2917`
+- 上次运行：2026-10-15 05:18 PDT（自动 PM 验收；本轮开始远端 HEAD 为 `89a22c6`）
+- 上次结论：仅新增 `89a22c6` 的 L0.1/AUDIT-02「需用户确认」设计标注，`e5d5134` 为 PM-only 审查提交并忽略。保留新标注，不据此撤销原权限风险、认定例外已通过或指令 Muse 立即收紧；既有用户决定与当前严格门禁标准的冲突须在本文明确解决。无新实现/changes 运行证据，所有验收勾选不变；文档 Handoff Gate 通过，不重跑既有运行阻塞。
+- 当前应推动：唯一在制项仍为 `L0.1/AUDIT-02`，先解决 `89a22c6` 标注的授权/验收边界冲突；决定明确前不执行该收紧，也不扩展无 viewer 放行。下一次在本文记录已获用户决定的可追溯出处/脱敏摘要与明确适用范围：严格门禁方案须说明后台同步不可用的可见状态与恢复条件；若批准内部同步例外，须明确 health 三入口与 workout getDashboard 的读/写/spawn 能力、可达调用方、残余风险、有效期或复审触发及回退条件，并单列例外，不能将 null 等同受信身份或声称满足原三身份标准。随后只按确定的这一个最小边界交付 changes 脱敏证据；原 owner/guest/匿名和后台 schedule→callback 运行矩阵仍待验。关闭后恢复 `L0.4` 原 null/零/旧数字快照保存回读、三视口、owner 刷新/配置失败保留缓存/首次空库证据，再按原 P0 顺序推进。
 
 ### 自动审查记录
 
@@ -331,7 +331,7 @@
 
 ## 推荐执行顺序
 
-1. `L0.4` 静态返工已关闭，先交 null/零/旧数字快照受信 owner 保存回读与三视口运行证据，原 owner 刷新/配置缺失/首次空库要求沿用；随后 `L0.1/F0.1` 三身份、后台 schedule/callback 完整运行证据：先补齐隐私与权限门槛。
+1. 先解决自动审查状态中 `L0.1/AUDIT-02` 的同步例外授权/验收边界冲突，再交付该原子边界及脱敏运行矩阵；随后恢复 `L0.4` null/零/旧数字快照受信 owner 保存回读与三视口、原 owner 刷新/配置缺失/首次空库证据，再补 `L0.1/F0.1` 其余身份与后台矩阵，先完成隐私与数据可信基础。
 2. `L1` + `H0`：统一来源级刷新状态、coverage、stale recovery 和时间语义，建立分析可信基础。
 3. `W0/W1`：修复训练记录丢失、越权目标、并发 active workout 与两套建议规则冲突。
 4. `H1.1–H1.8`：修正 readiness 的时间对齐、基线泄漏、覆盖门槛、稳健统计和缺失展示。
@@ -355,3 +355,5 @@
 - 2026-10-15 02:21 PDT · `04bd2a2`（新交付 `79dbd07`）· `L0.1/AUDIT-02`：**P0 返工；撤回 AUDIT-02 勾选**。位置 health-dashboard/server/src/actions.ts:185-187、895-925、1026-1034，workout-log/server/src/actions.ts:115-117、142-153。新 isOwnerOrSyncChannel 将 null/undefined viewer 与 owner 同等放行；两个健康 callback 可保存，健康刷新可 spawn，训练读取可返回完整历史。changes.md 自述平台无可验证服务凭据，源码/DATA-PLAN 却断言无 viewer 只有内部调用可产生，缺保证。独立 Node stdin 用 node:module.stripTypeScriptTypes 从两份实际源码抽取 guard，并以 node:vm/node:assert 检查 owner、guest、null、缺 viewer 四例：两 app 均 owner=true、guest=false、null=true、缺 viewer=true，确认谓词回归；这不是 artifact 匿名调用实测，不声称已发生外部泄漏。预期未认证调用拒绝且零读/零写/零 spawn，受信后台需可验证身份、当前 app/来源/任务归属与权限范围，不能仅凭缺 viewer、请求参数或注释。下一次只交付此四入口原子修复；按 L0.1 在 changes 引准确 ID/范围、兼容/回滚、可复现命令与脱敏三身份分列结果、拒绝前后数据不变和后台 schedule→callback 成功链。平台若无法提供受信能力，保留门禁、显式显示同步不可用并说明能力缺口，不能再次匿名放行。本轮因新隐私风险优先于 L0.4，未新建功能队列；首次回归返工，尚未达到两轮同问题无进展升级条件。
 - 2026-10-15 02:21 PDT · `04bd2a2` · `L1.1–L1.5/H0.4/H0.6/L2.1` 候选交付：**返工，不验收；先完成上一条 P0**。changes.md 最新一体层条目无准确需求编号、无完整兼容/回滚及可复现 owner 证据；不能把整组面板视为一个已批准最小需求。新后台失败 note 已由 App.tsx:554、601 透传已有数据 Dashboard，关闭旧“后台失败文案完全不可见”静态问题，运行仍待验。两条 persist 的新顺序守卫有进展，但 actions.ts:564-577、586-601 是 select→无条件 upsert，缺事务/条件写：独立 Node stdin 抽取实际函数、仅去除 TS 类型，以 synthetic mock DB 固定两请求都读旧值，延迟旧请求写入至新请求完成之后；health/strength 两例均最终退回旧版本（断言通过，只证明 mock 调度下源码竞态，非 artifact 实测）。strength updatedAt=null 还会跳过比较；相等版本仍重复写 saved 台账。actions.ts:697-715 只有 worker 内两分钟缓存/时间桶，:938、1037-1039 继续 allowParallel，无持久来源任务复用；自动 spawn 拒绝/异常直接 null，失败台账只依赖 getRefreshStatus 被客户端查询（:950-952），关页/无轮询无持久失败证据，不能声称不再静默。后续 L1 最小交付须证明同源双击/跨标签页/重启复用、超时重试、重复/晚到 callback 原子拒绝与按源失败保留缓存，task/source 关联和失败落盘不能依赖页面存活。新时间线 actions.ts:814-821 直接累加 workout.totalVolume，App.tsx:371、484 用统一 displayUnit 标注，却未逐条按 workout.unit 换算；独立抽取 buildUnifiedTimeline 的 synthetic 同日 100 lb + 100 kg、displayUnit=kg 返回 200，预期按既有系数换算为约 145.4 kg。后续在 L2.1 边界修正聚合/日期/coverage，明确只有记录日并非连续14个日历日，不能以缺记录作零；时间戳新鲜不等于来源日期新鲜。只记录此次新增风险，不并行要求实现这些扩展。
 - 2026-10-15 02:21 PDT · `04bd2a2` · 交接与运行证据：**局部检查通过；单提交 Gate 失败；运行待验**。本轮清洁 main 从 af6ecea 安全快进到起始远端 `04bd2a23d8f19dd19cdd4509d34215d3f682ca5a`，af6ecea 为 PM-only 忽略。独立执行 `node scripts/validate-handoff.mjs af6ecea 04bd2a2` 退出0（11 files/0 scripts/7 implementation files）；af6ecea..79dbd07 与79dbd07..f8a195e 单段 Gate 退出0，`node scripts/validate-handoff.mjs f8a195e 04bd2a2` 退出1：Added changes.md evidence must cite an existing plans.md requirement ID。汇总检查借前一条的 L0.1 文本通过，不代表新一体层有需求映射。`node --check scripts/validate-handoff.mjs`、`git diff --check af6ecea..04bd2a2`、`node health-dashboard/validate-steps-display.mjs` 均退出0，后者8/8 synthetic；窄扫描 tracked 文件 UUID/个人绝对路径/固定 device flag 命中文件数均0，不能据此宣称全部个人数字清零。新增0005 SQL只在 Python sqlite3.connect(':memory:') 独立空内存库解析，sync_log七列与journal末项对应，退出0；这是SQL/静态一致性，未接触 app.db，不能证明 artifact升级、旧数据兼容或回滚。台账写入/读取异常 actions.ts:723-754 被吞成无日志，需迁移成功/失败不冒充健康的运行证据。本会话仍无 Muse builder/invoke_action，未执行禁止本地build、安装依赖或访问app.db；构建方pass、非owner门禁及“两视口正常”不能证明owner面板或打开→受信同步→保存回读，也不能覆盖390×844、430×932与桌面核心流程。新增API字段与migration须在对应最小交付中补同步发布/旧客户端兼容、保留历史数据的回滚方案和脱敏运行步骤。既有L0.4 owner/空库/配置失败及三视口阻塞无新证据，不重复追加；本轮无完全通过项，19条审查记录（≤20）。
+
+- 2026-10-15 05:18 PDT · `89a22c6` · `L0.1/AUDIT-02`：**设计冲突待决；原权限返工/运行待验不变**。清洁 main 从 e5d5134 安全快进至本轮起始远端 `89a22c64f8d67208b3d7612401f900a6bd7b2917`；游标后的 e5d5134 为 PM-only 忽略，新增仅 plans.md 两处「需用户确认」标注，无业务、schema/migration、UI 或 changes.md 新证据。复核 plans.md 的 L0.1、AUDIT-02、组合成功标准及 changes.md 同步链残余风险说明：新标注声称已有用户接受内部通道/风险，但未在本文件明确改写原门禁验收与例外边界，不能据此勾选，也不由 PM 自动推翻其所述授权或要求实现方立即冻结同步。保留该标注，统一当前在制项和推荐顺序；下一次仅补既有决定的可追溯脱敏摘要及入口/能力/调用方/风险/复审与回退范围，或明确选择严格门禁及同步不可用状态，再按确定边界交付。无新修复，本轮不虚计一次失败实现返工；不重复追加旧 owner/三视口/平台阻塞。独立 `node scripts/validate-handoff.mjs e5d5134 89a22c6` 退出0（1 file/0 scripts/0 implementation），`git diff --check e5d5134..89a22c6` 退出0。工具仍无 Muse builder/invoke_action；未本地 build、未安装依赖、未访问 app.db；无运行成功结论。仅 plans.md 有实质审查变化，游标更新到起始远端，现20条审查记录（≤20）。
