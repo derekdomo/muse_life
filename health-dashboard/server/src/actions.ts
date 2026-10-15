@@ -232,6 +232,23 @@ function round(value: number, digits = 1): number {
   return Math.round(value * factor) / factor;
 }
 
+const LB_TO_KG = 0.45359237;
+type WeightUnit = "lb" | "kg";
+
+function convertVolumeToUnit(volume: number, fromUnit: WeightUnit, toUnit: WeightUnit): number {
+  if (fromUnit === toUnit) return volume;
+  if (fromUnit === "lb" && toUnit === "kg") return volume * LB_TO_KG;
+  // kg -> lb
+  return volume / LB_TO_KG;
+}
+
+function sumWorkoutVolumeInUnit(
+  workouts: ReadonlyArray<{ totalVolume: number; unit: WeightUnit }>,
+  targetUnit: WeightUnit,
+): number {
+  return workouts.reduce((sum, workout) => sum + convertVolumeToUnit(workout.totalVolume, workout.unit, targetUnit), 0);
+}
+
 function signed(value: number, digits = 1): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
 }
@@ -422,7 +439,7 @@ function calculateReadiness(snapshot: Snapshot, readinessDate: string, morningFe
   const currentWeekStart = mondayWeekStart(snapshot.dataDate);
   const strengthThroughDataDate = snapshot.strengthTraining.workouts.filter((workout) => workout.date <= snapshot.dataDate);
   const currentStrength = strengthThroughDataDate.filter((workout) => workout.date >= currentWeekStart);
-  const currentVolume = currentStrength.reduce((sum, workout) => sum + workout.totalVolume, 0);
+  const currentVolume = sumWorkoutVolumeInUnit(currentStrength, snapshot.strengthTraining.displayUnit);
   let trainingDetail = `截至 ${snapshot.dataDate.slice(5).replace("-", "/")}，近 7 天运动 ${exerciseTotal.toFixed(0)} 分钟`;
   if (currentVolume > 0) trainingDetail += `；本周力量 ${Math.round(currentVolume).toLocaleString("zh-CN")} ${snapshot.strengthTraining.displayUnit}`;
   trainingDetail += "（不计入次日训练）";
@@ -861,7 +878,7 @@ function buildUnifiedTimeline(snapshot: Snapshot | null): UnifiedDay[] {
   for (const workout of snapshot.strengthTraining.workouts) {
     const day = ensure(workout.date);
     day.strengthSessions += 1;
-    day.strengthVolume += workout.totalVolume;
+    day.strengthVolume += convertVolumeToUnit(workout.totalVolume, workout.unit, snapshot.strengthTraining.displayUnit);
     if (!day.strengthRoutines.includes(workout.routine)) day.strengthRoutines.push(workout.routine);
     day.hasStrength = true;
   }
