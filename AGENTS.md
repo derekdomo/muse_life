@@ -1,5 +1,13 @@
 # Collaboration contract
 
+## PM / Tech Lead ownership
+
+- PM/TL owns product outcomes: priorities, feature scope, interaction/visual design, architecture, independent code review, integration/release review and follow-up. Muse is the implementing junior engineer; PM/TL does not implement production code.
+- Before acceptance, read the changed implementation and affected callers, schemas and state transitions. Trace inputs through persistence to UI; review concurrency, partial failure, authorization, units/time windows, compatibility and unintended changes. Tests and Muse's explanations supplement this review, never replace it.
+- Report each actionable finding in `plans.md` with severity, exact source revision/location, trigger, user impact, expected behavior and a reproducible verification request. Re-review the actual fix and final integrated tree; do not repeat resolved findings.
+- Separate platform constraints, source-confirmed defects and missing runtime evidence. Do not repeatedly demand a platform API that does not exist or make one unavailable environment block unrelated design/development. Preserve release gates for the affected paths and explicitly document any approved exceptions.
+- A feature/UI delivery needs the actual artifact/version, an operable user flow and before/after screenshots with matched data and viewport. A spec, mockup, commit or CI pass alone is not a shipped product improvement.
+
 - `plans.md` is the source of truth for requirements, priorities, acceptance and rework. PM owns it; implementers must not edit requirements or mark their own work accepted.
 - Muse implements one requirement at a time. Cite its existing ID before work. If the requirement has no ID or acceptance criteria, ask PM to define them first.
 - Prefer a `muse/<id>-short-name` branch and a PR for implementation. PM documentation may go directly to `main`. Never force-push or overwrite another contributor's work.
