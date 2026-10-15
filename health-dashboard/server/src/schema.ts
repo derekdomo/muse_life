@@ -22,3 +22,13 @@ export const morningCheckin = sqliteTable("morning_checkin", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
+
+export const syncLog = sqliteTable("sync_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  source: text("source", { enum: ["health", "strength", "system"] }).notNull(),
+  status: text("status", { enum: ["saved", "failed", "diagnosed"] }).notNull(),
+  itemCount: integer("item_count").notNull(),
+  note: text("note").notNull(),
+  sourceUpdatedAt: integer("source_updated_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});

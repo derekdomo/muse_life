@@ -59,9 +59,41 @@ Imagery not needed: the requested subject is the user’s quantitative health re
 - Every workout preserves its routine, unit, timestamps, completion state, completed sets, weights, repetitions, and exercise names. Total volume is calculated only from completed sets with both weight and repetitions as `weight × reps`; missing values stay missing rather than becoming zero-volume work.
 - HealthKit and strength-training snapshots are persisted independently and merged only when read. This prevents the two asynchronous refresh callbacks from racing and overwriting a newly synchronized strength session with an older HealthKit payload. Existing embedded strength data is migrated into the dedicated snapshot table.
 - **Sync-channel fix (2026-10-14, second timeliness repair)**: the first timeliness fix addressed dedupe keys and client polling, but production snapshots still never updated — the L0.1 owner gate also rejected the pipeline's own machine invocations (the schedule's viewer-less `refreshHealthData` call and the tasks' viewer-less save callbacks), so every refresh after the gates shipped silently no-opped. The three pipeline entry points now accept owner-or-viewer-less invocations (see Access control), all data-returning actions keep the strict owner gate, and both persist paths reject out-of-order older writes. The remaining external link is the sync task's read of `训练记录`'s owner-gated `getDashboard`, which belongs to that artifact.
-- **Timeliness fix (2026-10-14)**: strength data is local to the sibling artifact, so it no longer waits for the daily HealthKit cadence. (a) A dedicated `refreshStrengthTraining` action spawns only the strength sync, and the strength panel has its own 同步训练 button plus its own 更新于 timestamp (`strengthTraining.updatedAt`). (b) Explicit syncs (both actions) spawn with `allowParallel: true` and no dedupeKey — the previous fixed `daily-…` dedupeKeys made the daemon return the morning task's handle for later manual syncs (single-flight covers "recently terminal" tasks), silently swallowing them. (c) `getDashboard` opportunistically spawns a strength re-sync when the stored snapshot is >5 minutes old (in-memory 2-minute spawn throttle, rotating 2-minute dedupe bucket) and returns the task id as `strengthSyncTaskId`; the client polls it so the fresh numbers repaint in the same session. (d) The client polls the new `getRefreshStatus` action (`ctx.agent.status`) every 4s until each sync task completes or fails (max 5 minutes) instead of the old blind 60-second poll — `unknown`/`not_found` keep the poll going rather than masquerading as success — and surfaces "同步未完成" when a task ends without satisfying its save contract.
+- **Timeliness fix (2026-10-14)**: strength data is local to the sibling artifact, so it no longer waits for the daily HealthKit cadence. (a) A dedicated `refreshStrengthTraining` action spawns only the strength sync, and the strength panel has its own 同步训练 button plus its own 更新于 timestamp (`strengthTraining.updatedAt`). (b) Explicit syncs (both actions) spawn with `allowParallel: true` and no dedupeKey — the previous fixed `daily-…` dedupeKeys made the daemon return the morning task's handle for later manual syncs (single-flight covers "recently terminal" tasks), silently swallowing them. (c) `getDashboard` spawns (or reuses) a strength re-sync on every owner open — the earlier >5-minute staleness threshold was removed on 2026-10-15 at the user's direction ("打开即最新"): the stored snapshot renders first, the sync repaints it when it lands. The only remaining guard is anti-spam: a spawn less than 2 minutes old is reused and its task id returned again (rotating 2-minute dedupe bucket), so refetches within one open never fan out into duplicate tasks. The task id returns as `strengthSyncTaskId` and the client polls it so the fresh numbers repaint in the same session. (d) The client polls the new `getRefreshStatus` action (`ctx.agent.status`) every 4s until each sync task completes or fails (max 5 minutes) instead of the old blind 60-second poll — `unknown`/`not_found` keep the poll going rather than masquerading as success — and surfaces "同步未完成" when a task ends without satisfying its save contract. (e) Failure surfacing fix (2026-10-15): the open-triggered background sync is polled by the App shell, whose failure note is now passed into the Dashboard view as well — previously it rendered only in the no-data empty state, so a failed background sync was invisible whenever the dashboard already had data.
 - Weekly workload is grouped into Monday-based weeks in America/Los_Angeles. When source workouts mix pounds and kilograms, totals are converted to the most recent workout's display unit using 1 lb = 0.45359237 kg before comparison.
 - If the source has no workouts or cannot yet be read, the dashboard shows an honest empty state and retains HealthKit data. It does not seed or infer strength sessions.
+
+## Unified experience layer — the alternative to a shared database (2026-10-15)
+The user asked for the four Muse Life apps to behave as one system with one
+source of truth, and declined filing a platform feature request for a truly
+shared store ("那算了，你就想别的办法来吧"). The platform still gives each
+artifact its own `app.db`, so this dashboard implements the unification at
+the experience layer instead of pretending the stores merged:
+
+- **Sync ledger (`sync_log` table, migration 0005)**: every successful
+  health/strength save writes a `saved` entry (source, item count, source
+  timestamp); a sync task that ends `failed` or completes without satisfying
+  its save contract writes a `failed` entry from `getRefreshStatus`; the
+  diagnostics action writes a `diagnosed` entry. Failures are therefore
+  durable and visible, never silent — the exact failure mode that froze the
+  strength panel in Oct 2026.
+- **Data status (`dataStatus` on `getDashboard`)**: per-source freshness
+  (fresh / today / stale / missing), age, data date, and an overall label,
+  computed server-side from the stored snapshots plus the last 8 ledger
+  entries. The client renders it as a 数据状态 panel on the 今日 view.
+- **Unified timeline (`unifiedTimeline` on `getDashboard`)**: health daily
+  rows, sleep sessions, and strength workouts merged by local calendar date
+  (latest 14 days), so a day's steps, sleep, resting HR/HRV, and strength
+  sessions/volume read as one record. Rendered on both 今日 (last 7 days)
+  and 历史 (full 14 days).
+- **One-tap diagnostics (`getSyncDiagnostics`, owner-only)**: a
+  deterministic, agent-free check of snapshot presence, per-source
+  freshness, the latest strength workout, unified overlap, and recent
+  ledger failures, returning a plain-language verdict plus per-check
+  details. It writes its own ledger entry, so even the check is auditable.
+- Access control is unchanged: all new reads/actions keep the strict owner
+  gate; a non-owner gets `forbidden: true` with no status, timeline, or
+  ledger data.
 
 ## Rejected approaches
 - **Tried**: treating the current day’s partial row as today’s daily result.

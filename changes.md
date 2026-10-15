@@ -84,3 +84,14 @@
 ## 2026-10-15（数据一体原则入 plans）
 
 - 用户定调：Muse Life 四个 app 是一体的，内部数据存储也应一体；界面独立不等于数据分家。`plans.md` 仓库边界新增"数据一体原则"：同一份数据只有一个事实源，跨 app 走可靠内部通道；平台做不到物理共享时，同步链路的触发、失败与权限例外必须显式设计并记录，不得静默失败。本次只改文档，未改业务代码。
+
+## 2026-10-15（space-4 一体层与打开即现拉回灌）
+
+- 按用户"数据一体、想别的办法"的方向，健康看板在 artifact 侧新增体验层一体（平台无共享数据库的替代实现），本次回灌本仓：
+  - 同步台账 `sync_log`（migration `0005`）：每次健康/力量快照保存成功写 `saved` 条目；同步任务失败、或完成但未满足保存契约时由 `getRefreshStatus` 写 `failed` 条目；`getSyncDiagnostics` 写 `diagnosed` 条目。失败从此有据可查，不再静默。
+  - 数据状态（`getDashboard.dataStatus`）：服务端按快照 + 最近 8 条台账计算每来源新鲜度（fresh/today/stale/missing）、年龄、数据日期与总体状态，客户端在今日页渲染「数据状态」面板。
+  - 统一时间线（`getDashboard.unifiedTimeline`）：健康日数据、睡眠、力量训练按本地日期合并（最近 14 天），今日页看 7 天、历史看 14 天。
+  - 一键体检 `getSyncDiagnostics`（owner-only）：无 agent 的确定性检查——快照存在性、每来源新鲜度、最近一次力量训练、统一时间线重叠、近期台账失败，返回白话结论与逐项明细，并自写台账。
+  - 打开即现拉：`getDashboard` 取消力量快照 >5 分钟的过期阈值，每次 owner 打开都发起（或复用 2 分钟内已发起的）力量同步任务，先渲染现有快照、落地后同页重绘；App 壳轮询到的后台同步失败提示现透传进 Dashboard，已有数据时也可见。
+- 验证（artifact 侧）：构建审计 pass、无控制台错误、双视口正常；非 owner 调用 `getDashboard`/`getSyncDiagnostics`/`logSyncEvent` 全部 forbidden 零数据，新读口未放宽门禁。未实测（如实记录）：审计为非 owner 身份，owner 打开看板后的面板渲染与"打开→同步→新训练出现"端到端链路未在审计环境验证；沙箱 `sync_log` 为 0 行，台账首行需 owner 侧真实同步后产生。
+- 本条只回灌代码、migration 与文档，未改 `plans.md` 勾选（归 PM 验收）。修改文件：`health-dashboard/server/src/actions.ts`、`health-dashboard/server/src/schema.ts`、`health-dashboard/client/src/App.tsx`、`health-dashboard/client/src/theme.css`、`health-dashboard/DATA-PLAN.md`、`health-dashboard/drizzle/0005_add_sync_log_and_unified_view_support.sql`、`health-dashboard/drizzle/meta/_journal.json`。

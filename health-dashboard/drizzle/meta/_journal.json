@@ -29,6 +29,13 @@
       "when": 1791647682777,
       "tag": "0004_add_morning_checkins",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792049562095,
+      "tag": "0005_add_sync_log_and_unified_view_support",
+      "breakpoints": true
     }
   ]
 }

@@ -165,6 +165,41 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .strength-week strong { display: block; margin-top: 3px; font-size: 16px; font-variant-numeric: tabular-nums; }
 .strength-note { margin: 12px 0 0; color: var(--dim); font-size: 10px; line-height: 1.5; }
 
+.data-status-panel { margin-top: 16px; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.data-status-rows { margin-top: 14px; border-top: 1px solid var(--border); }
+.data-status-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--border); }
+.data-status-row > div:first-child { min-width: 0; }
+.data-status-row strong { display: block; font-size: 14px; }
+.data-status-row span { display: block; margin-top: 3px; color: var(--dim); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.data-status-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex: 0 0 auto; text-align: right; }
+.data-status-meta small { color: var(--dim); font-size: 10px; }
+.data-status-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.data-status-actions span { color: var(--dim); font-size: 11px; line-height: 1.45; }
+.diagnostics-box { margin-top: 14px; padding: 13px 14px; background: var(--surface-soft); border-radius: 10px; }
+.diagnostics-box > p { margin: 0; font-size: 13px; line-height: 1.55; }
+.diagnostics-box ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 9px; }
+.diagnostics-box li { display: flex; gap: 9px; align-items: flex-start; }
+.diagnostics-box li > span { display: grid; width: 18px; height: 18px; flex: 0 0 auto; place-items: center; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 800; }
+.diagnostics-box li strong { display: block; font-size: 12px; }
+.diagnostics-box li small { display: block; margin-top: 2px; color: var(--dim); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.sync-log-details { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.sync-log-details summary { width: max-content; max-width: 100%; color: var(--accent); font-size: 11px; font-weight: 750; cursor: pointer; }
+.sync-log-list { margin-top: 10px; display: grid; }
+.sync-log-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.sync-log-row strong { display: block; font-size: 11px; }
+.sync-log-row small { display: block; margin-top: 2px; color: var(--dim); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.sync-log-row time { color: var(--dim); font-size: 10px; white-space: nowrap; }
+.unified-timeline { margin-top: 18px; }
+.unified-timeline h3 { margin: 0 0 10px; font-size: 14px; }
+.unified-list { display: grid; border-top: 1px solid var(--border); }
+.unified-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--border); }
+.unified-date { color: var(--dim); font-size: 12px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.unified-main { min-width: 0; }
+.unified-main strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.unified-main small { display: block; margin-top: 2px; color: var(--dim); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.unified-badge { padding: 3px 6px; border-radius: 4px; background: var(--slate-soft); color: var(--slate); font-size: 9px; font-weight: 800; white-space: nowrap; }
+.unified-badge.both { background: var(--accent-soft); color: var(--accent); }
+
 .morning-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; margin-top: 16px; padding: 15px 16px; background: var(--surface-soft); border-radius: 10px; }
 .morning-strip span { display: block; color: var(--dim); font-size: 11px; }
 .morning-strip strong { display: block; margin-top: 3px; font-size: 15px; font-variant-numeric: tabular-nums; }

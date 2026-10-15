@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import * as schema from "./schema";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
@@ -575,6 +575,7 @@ async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<void> {
   const normalized = normalizeSleepSnapshot(snapshot);
   await db.insert(schema.healthSnapshot).values({ id: 1, payload: JSON.stringify(normalized), sourceUpdatedAt: new Date(normalized.updatedAt), createdAt: now, updatedAt: now })
     .onConflictDoUpdate({ target: schema.healthSnapshot.id, set: { payload: JSON.stringify(normalized), sourceUpdatedAt: new Date(normalized.updatedAt), updatedAt: now } });
+  await recordSyncLog(ctx, { source: "health", status: "saved", itemCount: normalized.historyDaily.length, note: `健康快照已保存 · 数据日期 ${normalized.dataDate} · ${normalized.historyDaily.length} 天明细`, sourceUpdatedAt: new Date(normalized.updatedAt) });
   ctx.invalidateQueries(["dashboard"]);
 }
 
@@ -598,10 +599,74 @@ async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Pr
   const sourceUpdatedAt = strength.updatedAt ? new Date(strength.updatedAt) : now;
   await db.insert(schema.strengthTrainingSnapshot).values({ id: 1, payload: JSON.stringify(strength), sourceUpdatedAt, createdAt: now, updatedAt: now })
     .onConflictDoUpdate({ target: schema.strengthTrainingSnapshot.id, set: { payload: JSON.stringify(strength), sourceUpdatedAt, updatedAt: now } });
+  await recordSyncLog(ctx, { source: "strength", status: "saved", itemCount: strength.workouts.length, note: `力量快照已保存 · ${strength.workouts.length} 次训练`, sourceUpdatedAt });
   ctx.invalidateQueries(["dashboard"]);
 }
 
-const getDashboardResponse = z.object({ forbidden: z.boolean(), snapshot: snapshotSchema.nullable(), readiness: readinessSchema.nullable(), strengthSyncTaskId: z.string().nullable() });
+const syncLogEntrySchema = z.object({
+  id: z.number().int(),
+  source: z.enum(["health", "strength", "system"]),
+  status: z.enum(["saved", "failed", "diagnosed"]),
+  itemCount: z.number().int().nonnegative(),
+  note: z.string(),
+  sourceUpdatedAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+});
+
+const sourceFreshnessSchema = z.object({
+  source: z.enum(["health", "strength"]),
+  label: z.string(),
+  updatedAt: z.string().datetime().nullable(),
+  dataDate: z.string().nullable(),
+  ageMinutes: z.number().nullable(),
+  freshness: z.enum(["fresh", "today", "stale", "missing"]),
+  detail: z.string(),
+});
+
+const dataStatusSchema = z.object({
+  generatedAt: z.string().datetime(),
+  health: sourceFreshnessSchema,
+  strength: sourceFreshnessSchema,
+  overall: z.enum(["ok", "stale", "partial", "empty"]),
+  overallLabel: z.string(),
+  recentLogs: z.array(syncLogEntrySchema).max(8),
+});
+
+const unifiedDaySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  steps: z.number().nonnegative().nullable(),
+  sleepHours: z.number().nonnegative().nullable(),
+  restingHr: z.number().positive().nullable(),
+  hrvMs: z.number().nonnegative().nullable(),
+  strengthSessions: z.number().int().nonnegative(),
+  strengthVolume: z.number().nonnegative(),
+  strengthRoutines: z.array(z.string()),
+  hasHealth: z.boolean(),
+  hasStrength: z.boolean(),
+});
+
+const getDashboardResponse = z.object({
+  forbidden: z.boolean(),
+  snapshot: snapshotSchema.nullable(),
+  readiness: readinessSchema.nullable(),
+  strengthSyncTaskId: z.string().nullable(),
+  dataStatus: dataStatusSchema.nullable(),
+  unifiedTimeline: z.array(unifiedDaySchema).max(14),
+});
+
+const diagnosticsResponse = z.object({
+  forbidden: z.boolean(),
+  generatedAt: z.string().datetime(),
+  verdict: z.string(),
+  checks: z.array(z.object({
+    key: z.string(),
+    label: z.string(),
+    ok: z.boolean(),
+    detail: z.string(),
+  })),
+  dataStatus: dataStatusSchema.nullable(),
+  unifiedTimeline: z.array(unifiedDaySchema).max(14),
+});
 const mutationResponse = z.object({ ok: z.boolean(), forbidden: z.boolean() });
 const refreshResponse = z.object({ forbidden: z.boolean(), accepted: z.boolean(), taskId: z.string().nullable(), strengthTaskId: z.string().nullable(), message: z.string() });
 const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(["queued", "running", "completed", "failed", "not_found", "unknown"]), contractSatisfied: z.boolean() });
@@ -613,48 +678,167 @@ const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(
 // task's handle for later manual syncs ("active or recently terminal" tasks
 // are single-flighted), silently swallowing them. Every explicit sync below
 // therefore spawns a fresh task with allowParallel, and getDashboard
-// opportunistically re-syncs when the stored strength snapshot is stale.
+// re-syncs on every open (see maybeAutoSyncStrength).
 const STRENGTH_SYNC_PROMPT = `Synchronize the user's strength-training summary from their existing web artifact named 训练记录 (slug space-6). Treat that artifact as the only source for strength sets; do not infer workouts from Apple Health. Use its published getDashboard action with recent_limit 20. Include the active workout, if any, plus every returned recent completed workout. For each workout preserve the source id as a string, routine, unit, start and completion instants, status, all sets grouped by exercise, and completed flags. Compute completedSets and totalVolume from completed sets only; a set contributes weight × reps only when both are present. Compute durationMinutes from timestamps when completion exists; for an active workout use the current instant. Use America/Los_Angeles to derive the workout date and Monday-based week starts. Choose the most recent workout's unit as displayUnit (default lb when there are no workouts); convert mixed-unit volume exactly when aggregating weekly totals (1 lb = 0.45359237 kg) so every weeklyTrend volume is in displayUnit. Include up to the latest eight Monday-based weeks, ascending, with zero-volume intervening weeks retained. Set updatedAt to the real current instant. If the source is read successfully and contains no workouts, return empty workouts and weeklyTrend and explain in note that completed or active sets from 训练记录 will appear after synchronization. A response with forbidden: true counts as a failed read, not as an empty source. If the source cannot be read, do not replace the last successful strength snapshot with an empty one. Do not create plausible workouts or sets. Call the expected save action exactly once only after a successful source read.`;
 
-// In-memory throttle for the opportunistic getDashboard auto-sync: at most
-// one auto-spawn per artifact worker every two minutes, and only when the
-// stored strength snapshot is more than five minutes old.
+// Every-open strength sync (2026-10-15): the user rejected the five-minute
+// staleness threshold — training data is local to the sibling artifact, so
+// opening this dashboard must always pull it fresh, showing the stored
+// snapshot first and repainting when the read lands. getDashboard therefore
+// spawns (or reuses) a strength sync on every owner read, regardless of
+// how recent the stored snapshot is. The only guard left is anti-spam: a
+// spawn less than two minutes old is reused and its task id returned again,
+// so React Query refetches during one open (poll ticks, invalidations)
+// never fan out into duplicate tasks, while a genuinely new open after
+// that window starts a genuinely new read.
 let lastAutoStrengthSpawnAt = 0;
+let lastAutoStrengthTaskId: string | null = null;
 
-async function maybeAutoSyncStrength(ctx: Ctx, snapshot: Snapshot): Promise<string | null> {
-  const updatedAt = snapshot.strengthTraining.updatedAt;
-  const updatedMs = updatedAt ? Date.parse(updatedAt) : Number.NaN;
-  const stale = !updatedAt || Number.isNaN(updatedMs) || Date.now() - updatedMs > 5 * 60_000;
-  if (!stale) return null;
+async function maybeAutoSyncStrength(ctx: Ctx): Promise<string | null> {
   const now = Date.now();
-  if (now - lastAutoStrengthSpawnAt < 2 * 60_000) return null;
-  lastAutoStrengthSpawnAt = now;
+  if (lastAutoStrengthTaskId && now - lastAutoStrengthSpawnAt < 2 * 60_000) {
+    return lastAutoStrengthTaskId;
+  }
   try {
     const task = await ctx.agent.spawnTask(STRENGTH_SYNC_PROMPT, {
       expectsAction: "saveStrengthTrainingSnapshot",
       dedupeKey: `strength-autosync-${Math.floor(now / 120_000)}`,
     });
+    if (!task.ok) return null;
+    lastAutoStrengthSpawnAt = now;
+    lastAutoStrengthTaskId = task.taskId;
     // Return the task id so the client can poll this auto-sync to completion
     // and repaint the strength panel in the same session.
-    return task.ok ? task.taskId : null;
+    return task.taskId;
   } catch {
     // Auto-sync is best-effort; the manual 同步训练 button remains available.
     return null;
   }
 }
 
+type SyncLogEntry = z.infer<typeof syncLogEntrySchema>;
+type DataStatus = z.infer<typeof dataStatusSchema>;
+type UnifiedDay = z.infer<typeof unifiedDaySchema>;
+
+async function recordSyncLog(ctx: Ctx, entry: { source: "health" | "strength" | "system"; status: "saved" | "failed" | "diagnosed"; itemCount: number; note: string; sourceUpdatedAt: Date | null }): Promise<void> {
+  try {
+    const db = ctx.db<typeof schema>();
+    await db.insert(schema.syncLog).values({
+      source: entry.source,
+      status: entry.status,
+      itemCount: entry.itemCount,
+      note: entry.note.slice(0, 500),
+      sourceUpdatedAt: entry.sourceUpdatedAt,
+      createdAt: new Date(),
+    });
+  } catch {
+    // Logging must never break a save.
+  }
+}
+
+async function loadRecentLogs(ctx: Ctx): Promise<SyncLogEntry[]> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const rows = await db.select().from(schema.syncLog).orderBy(desc(schema.syncLog.id)).limit(8);
+    return rows.map((row) => ({
+      id: row.id,
+      source: row.source,
+      status: row.status,
+      itemCount: row.itemCount,
+      note: row.note,
+      sourceUpdatedAt: row.sourceUpdatedAt ? row.sourceUpdatedAt.toISOString() : null,
+      createdAt: row.createdAt.toISOString(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function freshnessFor(source: "health" | "strength", label: string, updatedAt: string | null, dataDate: string | null, detailBase: string): z.infer<typeof sourceFreshnessSchema> {
+  if (!updatedAt) {
+    return { source, label, updatedAt: null, dataDate, ageMinutes: null, freshness: "missing", detail: detailBase };
+  }
+  const ms = Date.parse(updatedAt);
+  const ageMinutes = Number.isNaN(ms) ? null : Math.max(0, Math.floor((Date.now() - ms) / 60_000));
+  const freshness: z.infer<typeof sourceFreshnessSchema>["freshness"] = ageMinutes === null ? "stale" : ageMinutes <= 120 ? "fresh" : ageMinutes <= 24 * 60 ? "today" : "stale";
+  return { source, label, updatedAt, dataDate, ageMinutes, freshness, detail: detailBase };
+}
+
+function buildDataStatus(snapshot: Snapshot | null, logs: SyncLogEntry[]): DataStatus {
+  const nowIso = new Date().toISOString();
+  if (!snapshot) {
+    return {
+      generatedAt: nowIso,
+      health: freshnessFor("health", "Apple 健康", null, null, "尚未同步过健康数据"),
+      strength: freshnessFor("strength", "训练记录", null, null, "尚未同步过训练记录"),
+      overall: "empty",
+      overallLabel: "还没有数据",
+      recentLogs: logs,
+    };
+  }
+  const health = freshnessFor("health", "Apple 健康", snapshot.updatedAt, snapshot.dataDate, `数据日期 ${snapshot.dataDate}`);
+  const strengthUpdated = snapshot.strengthTraining.updatedAt;
+  const latestStrengthDate = snapshot.strengthTraining.workouts.length ? [...snapshot.strengthTraining.workouts].sort((a, b) => b.date.localeCompare(a.date))[0]?.date ?? null : null;
+  const strength = freshnessFor("strength", "训练记录", strengthUpdated, latestStrengthDate, snapshot.strengthTraining.workouts.length ? `共 ${snapshot.strengthTraining.workouts.length} 次训练，最近 ${latestStrengthDate ?? "—"}` : "训练记录里暂无训练");
+  let overall: DataStatus["overall"] = "ok";
+  let overallLabel = "两边数据都在新鲜期内";
+  if (health.freshness === "missing" && strength.freshness === "missing") { overall = "empty"; overallLabel = "还没有数据"; }
+  else if (health.freshness === "missing" || strength.freshness === "missing") { overall = "partial"; overallLabel = "有一边还没有数据"; }
+  else if (health.freshness === "stale" || strength.freshness === "stale") { overall = "stale"; overallLabel = "有一边数据已过期，打开看板会自动补同步"; }
+  else if (health.freshness === "today" || strength.freshness === "today") { overall = "ok"; overallLabel = "数据在今天更新过"; }
+  return { generatedAt: nowIso, health, strength, overall, overallLabel, recentLogs: logs };
+}
+
+function buildUnifiedTimeline(snapshot: Snapshot | null): UnifiedDay[] {
+  if (!snapshot) return [];
+  const byDate = new Map<string, UnifiedDay>();
+  const ensure = (date: string): UnifiedDay => {
+    const existing = byDate.get(date);
+    if (existing) return existing;
+    const created: UnifiedDay = { date, steps: null, sleepHours: null, restingHr: null, hrvMs: null, strengthSessions: 0, strengthVolume: 0, strengthRoutines: [], hasHealth: false, hasStrength: false };
+    byDate.set(date, created);
+    return created;
+  };
+  for (const row of snapshot.historyDaily) {
+    const day = ensure(row.date);
+    day.steps = row.steps;
+    day.restingHr = row.restingHr;
+    day.hrvMs = row.hrvMs;
+    day.hasHealth = true;
+  }
+  for (const sleep of snapshot.historySleeps) {
+    const day = ensure(sleep.date);
+    day.sleepHours = round(totalSleepHours(sleep, sleep.totalHours), 1);
+    day.hasHealth = true;
+  }
+  for (const workout of snapshot.strengthTraining.workouts) {
+    const day = ensure(workout.date);
+    day.strengthSessions += 1;
+    day.strengthVolume += workout.totalVolume;
+    if (!day.strengthRoutines.includes(workout.routine)) day.strengthRoutines.push(workout.routine);
+    day.hasStrength = true;
+  }
+  return [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14).map((day) => ({ ...day, strengthVolume: round(day.strengthVolume, 1) }));
+}
+
 export const Actions = {
   getDashboard: defineAction({
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, strengthSyncTaskId: null };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [] };
       const db = ctx.db<typeof schema>();
       const healthRows = await db.select({ payload: schema.healthSnapshot.payload }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
       const first = healthRows[0];
-      if (!first) return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null };
+      if (!first) {
+        const logs = await loadRecentLogs(ctx);
+        return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: buildDataStatus(null, logs), unifiedTimeline: [] };
+      }
       try {
         const health = normalizeStoredSnapshot(JSON.parse(first.payload));
-        if (!health) return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null };
+        if (!health) {
+          const logs = await loadRecentLogs(ctx);
+          return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: buildDataStatus(null, logs), unifiedTimeline: [] };
+        }
         const readinessDate = health.morningReference?.date ?? shiftDate(health.dataDate, 1);
         const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
         const morningFeeling = checkinRows[0]?.feeling ?? null;
@@ -669,14 +853,16 @@ export const Actions = {
             // A malformed strength snapshot must not hide the HealthKit data.
           }
         }
-        // Strength data is local to a sibling artifact and changes as soon as
-        // the user logs a set there; if what we hold is stale, kick off a
-        // background re-sync now and hand its task id to the client, which
-        // polls it to completion and repaints with the fresh numbers.
-        const strengthSyncTaskId = await maybeAutoSyncStrength(ctx, snapshot);
-        return { forbidden: false, snapshot, readiness: calculateReadiness(snapshot, readinessDate, morningFeeling), strengthSyncTaskId };
+        // Strength data is local to a sibling artifact and changes as soon
+        // as the user logs a set there; every open kicks off (or reuses) a
+        // background re-sync — no staleness threshold — and hands its task
+        // id to the client, which polls it to completion and repaints with
+        // the fresh numbers in the same session.
+        const strengthSyncTaskId = await maybeAutoSyncStrength(ctx);
+        const logs = await loadRecentLogs(ctx);
+        return { forbidden: false, snapshot, readiness: calculateReadiness(snapshot, readinessDate, morningFeeling), strengthSyncTaskId, dataStatus: buildDataStatus(snapshot, logs), unifiedTimeline: buildUnifiedTimeline(snapshot) };
       } catch {
-        return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null };
+        return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [] };
       }
     },
   }),
@@ -762,10 +948,78 @@ export const Actions = {
       if (!isOwner(ctx)) return { forbidden: true, status: "unknown", contractSatisfied: false };
       try {
         const result = await ctx.agent.status(args.taskId);
+        if (result.status === "failed" || (result.status === "completed" && result.returnContractStatus !== "satisfied")) {
+          await recordSyncLog(ctx, { source: "system", status: "failed", itemCount: 0, note: `同步任务未完成 · 状态 ${result.status} · 契约 ${result.returnContractStatus ?? "unknown"} · ${args.taskId.slice(0, 8)}`, sourceUpdatedAt: null });
+        }
         return { forbidden: false, status: result.status, contractSatisfied: result.returnContractStatus === "satisfied" };
       } catch {
         return { forbidden: false, status: "unknown", contractSatisfied: false };
       }
+    },
+  }),
+
+  logSyncEvent: defineAction({
+    request: z.object({ source: z.enum(["health", "strength", "system"]), status: z.enum(["failed", "diagnosed"]), note: z.string().min(1).max(500) }),
+    response: mutationResponse,
+    async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true };
+      await recordSyncLog(ctx, { source: args.source, status: args.status, itemCount: 0, note: args.note, sourceUpdatedAt: null });
+      ctx.invalidateQueries(["dashboard"]);
+      return { ok: true, forbidden: false };
+    },
+  }),
+
+  getSyncDiagnostics: defineAction({
+    request: z.object({}),
+    response: diagnosticsResponse,
+    async handler(ctx): Promise<z.infer<typeof diagnosticsResponse>> {
+      const generatedAt = new Date().toISOString();
+      if (!isOwner(ctx)) {
+        return { forbidden: true, generatedAt, verdict: "仅所有者可查看数据状态", checks: [], dataStatus: null, unifiedTimeline: [] };
+      }
+      const db = ctx.db<typeof schema>();
+      const healthRows = await db.select({ payload: schema.healthSnapshot.payload }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
+      const first = healthRows[0];
+      let snapshot: Snapshot | null = null;
+      if (first) {
+        try {
+          const health = normalizeStoredSnapshot(JSON.parse(first.payload));
+          if (health) {
+            snapshot = health;
+            const strengthRows = await db.select({ payload: schema.strengthTrainingSnapshot.payload }).from(schema.strengthTrainingSnapshot).where(eq(schema.strengthTrainingSnapshot.id, 1)).limit(1);
+            const strengthPayload = strengthRows[0]?.payload;
+            if (strengthPayload) {
+              try {
+                const strength = normalizeStoredStrength(JSON.parse(strengthPayload));
+                if (strength) snapshot = { ...health, strengthTraining: strength };
+              } catch { /* keep health */ }
+            }
+          }
+        } catch { snapshot = null; }
+      }
+      const logs = await loadRecentLogs(ctx);
+      const dataStatus = buildDataStatus(snapshot, logs);
+      const timeline = buildUnifiedTimeline(snapshot);
+      const checks: z.infer<typeof diagnosticsResponse>["checks"] = [];
+      if (!snapshot) {
+        checks.push({ key: "health-present", label: "健康快照", ok: false, detail: "还没有健康快照，先点一次全部同步" });
+        checks.push({ key: "strength-present", label: "力量快照", ok: false, detail: "还没有力量快照" });
+      } else {
+        const healthAge = dataStatus.health.ageMinutes;
+        checks.push({ key: "health-fresh", label: "健康数据新鲜度", ok: dataStatus.health.freshness === "fresh" || dataStatus.health.freshness === "today", detail: healthAge === null ? "没有更新时间" : `上次保存 ${healthAge} 分钟前 · 数据日期 ${snapshot.dataDate}` });
+        const strengthAge = dataStatus.strength.ageMinutes;
+        checks.push({ key: "strength-fresh", label: "训练数据新鲜度", ok: dataStatus.strength.freshness === "fresh" || dataStatus.strength.freshness === "today", detail: strengthAge === null ? "还没有成功同步过训练记录" : `上次保存 ${strengthAge} 分钟前 · 共 ${snapshot.strengthTraining.workouts.length} 次训练` });
+        const latestStrength = snapshot.strengthTraining.workouts.length ? [...snapshot.strengthTraining.workouts].sort((a, b) => b.date.localeCompare(a.date))[0] : undefined;
+        checks.push({ key: "strength-latest", label: "最近一次力量训练", ok: Boolean(latestStrength), detail: latestStrength ? `${latestStrength.date} · ${latestStrength.routine} · ${Math.round(latestStrength.totalVolume)} ${latestStrength.unit}` : "训练记录里暂无训练，或还没同步进来" });
+        const unifiedDays = timeline.filter((d) => d.hasHealth && d.hasStrength).length;
+        checks.push({ key: "unified-overlap", label: "一体时间线重合天数", ok: timeline.length > 0, detail: `近 ${timeline.length} 天里 ${unifiedDays} 天同时有健康与力量记录，其余天只有一边有记录是正常的` });
+        const failedLogs = logs.filter((l) => l.status === "failed");
+        checks.push({ key: "recent-failures", label: "近期同步失败", ok: failedLogs.length === 0, detail: failedLogs.length ? `最近有 ${failedLogs.length} 条失败记录：${failedLogs[0]?.note ?? ""}` : "最近 8 条台账里没有失败记录" });
+      }
+      const failedCount = checks.filter((c) => !c.ok).length;
+      const verdict = !snapshot ? "还没有数据：先同步一次，台账会从第一次保存开始记录。" : failedCount === 0 ? "一体层正常：两边都有数据，近期没有静默失败。" : `发现 ${failedCount} 项需要留意：看下面每一项的说明，过期就点对应的同步，失败会留痕在台账里。`;
+      await recordSyncLog(ctx, { source: "system", status: "diagnosed", itemCount: checks.length, note: `一键体检 · ${verdict}`, sourceUpdatedAt: null });
+      return { forbidden: false, generatedAt, verdict, checks, dataStatus, unifiedTimeline: timeline };
     },
   }),
 

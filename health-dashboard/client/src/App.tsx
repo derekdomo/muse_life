@@ -26,6 +26,8 @@ type Readiness = NonNullable<DashboardResponse["readiness"]>;
 type TrendPoint = Snapshot["trends"][number];
 type Daily = Snapshot["historyDaily"][number];
 type StrengthWorkout = Snapshot["strengthTraining"]["workouts"][number];
+type DataStatus = NonNullable<DashboardResponse["dataStatus"]>;
+type UnifiedDay = DashboardResponse["unifiedTimeline"][number];
 type Tab = "today" | "trends" | "history";
 type Status = "正常" | "偏低" | "偏高" | "数据缺失" | "基线不足";
 
@@ -292,7 +294,93 @@ function ReadinessPanel({ readiness }: { readiness: Readiness }) {
   );
 }
 
-function TodayView({ snapshot, readiness, onSyncStrength, strengthSyncing }: { snapshot: Snapshot; readiness: Readiness | null; onSyncStrength: () => void; strengthSyncing: boolean }) {
+function ageLabel(minutes: number | null): string {
+  if (minutes === null) return "尚未同步";
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} 小时前`;
+  return `${Math.floor(minutes / (24 * 60))} 天前`;
+}
+
+function freshnessLabel(freshness: DataStatus["health"]["freshness"]): string {
+  if (freshness === "fresh") return "新鲜";
+  if (freshness === "today") return "今天更新";
+  if (freshness === "stale") return "已过期";
+  return "还没有";
+}
+
+function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; displayUnit: string }) {
+  const queryClient = useQueryClient();
+  const [diag, setDiag] = useState<{ verdict: string; checks: Array<{ key: string; label: string; ok: boolean; detail: string }> } | null>(null);
+  const diagnose = useMutation({
+    mutationFn: () => api.getSyncDiagnostics({}),
+    onSuccess: (result) => {
+      setDiag({ verdict: result.verdict, checks: result.checks });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+  if (!dataStatus) return null;
+  const rows = [dataStatus.health, dataStatus.strength];
+  return (
+    <section className="data-status-panel" aria-labelledby="data-status-title">
+      <div className="section-heading">
+        <div><p className="section-kicker">数据一体 · 状态</p><h2 id="data-status-title">数据状态</h2></div>
+        <span className={`status-chip ${dataStatus.overall === "ok" ? "status-ok" : dataStatus.overall === "empty" ? "status-missing" : "status-watch"}`}>{dataStatus.overallLabel}</span>
+      </div>
+      <div className="data-status-rows">
+        {rows.map((row) => (
+          <div className="data-status-row" key={row.source}>
+            <div><strong>{row.label}</strong><span>{row.detail}</span></div>
+            <div className="data-status-meta"><span className={`status-chip ${row.freshness === "fresh" || row.freshness === "today" ? "status-ok" : row.freshness === "stale" ? "status-watch" : "status-missing"}`}>{freshnessLabel(row.freshness)}</span><small>{row.updatedAt ? `${updatedLabel(row.updatedAt)} · ${ageLabel(row.ageMinutes)}` : "尚未同步"}</small></div>
+          </div>
+        ))}
+      </div>
+      <div className="data-status-actions">
+        <button className="sync-button" type="button" aria-label="检查数据状态" onClick={() => diagnose.mutate()} disabled={diagnose.isPending}>{diagnose.isPending ? "检查中…" : "一键体检"}</button>
+        <span>失败不再静默：每次保存和失败都会记进下面的台账。</span>
+      </div>
+      {diag ? (
+        <div className="diagnostics-box" role="status">
+          <p><strong>{diag.verdict}</strong></p>
+          <ul>{diag.checks.map((check) => <li key={check.key}><span aria-hidden="true">{check.ok ? "✓" : "!"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></li>)}</ul>
+        </div>
+      ) : null}
+      {dataStatus.recentLogs.length ? (
+        <details className="sync-log-details">
+          <summary>同步台账 · 最近 {dataStatus.recentLogs.length} 条</summary>
+          <div className="sync-log-list">
+            {dataStatus.recentLogs.map((log) => (
+              <div className="sync-log-row" key={log.id}>
+                <span className={`status-chip ${log.status === "saved" ? "status-ok" : log.status === "failed" ? "status-watch" : "status-missing"}`}>{log.status === "saved" ? "已保存" : log.status === "failed" ? "失败" : "体检"}</span>
+                <div><strong>{log.source === "health" ? "Apple 健康" : log.source === "strength" ? "训练记录" : "系统"}</strong><small>{log.note}</small></div>
+                <time>{updatedLabel(log.createdAt)}</time>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : <p className="empty-inline">台账还是空的：下一次同步保存后，这里会留下第一条记录，之后每次成功或失败都能查到。</p>}
+      {unifiedTimeline.length ? (
+        <div className="unified-timeline" aria-label="统一时间线">
+          <h3>统一时间线 · 最近 {Math.min(unifiedTimeline.length, 7)} 天</h3>
+          <div className="unified-list">
+            {unifiedTimeline.slice(0, 7).map((day) => (
+              <div className="unified-row" key={day.date}>
+                <span className="unified-date">{dateLabel(day.date)}</span>
+                <div className="unified-main">
+                  <strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong>
+                  <small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${displayUnit} · ${day.strengthRoutines.map((r) => ROUTINE_LABELS[r as StrengthWorkout["routine"]] ?? r).join("、")}` : "当天没有力量训练"}{day.restingHr !== null ? ` · 静息 ${day.restingHr.toFixed(0)} bpm` : ""}{day.hrvMs !== null ? ` · HRV ${day.hrvMs.toFixed(0)} ms` : ""}</small>
+                </div>
+                <span className={`unified-badge ${day.hasHealth && day.hasStrength ? "both" : ""}`}>{day.hasHealth && day.hasStrength ? "两边都有" : day.hasStrength ? "只有力量" : "只有健康"}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function TodayView({ snapshot, readiness, onSyncStrength, strengthSyncing, dataStatus, unifiedTimeline }: { snapshot: Snapshot; readiness: Readiness | null; onSyncStrength: () => void; strengthSyncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[] }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
   const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineIncomplete ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
@@ -313,6 +401,7 @@ function TodayView({ snapshot, readiness, onSyncStrength, strengthSyncing }: { s
         <Kpi label="睡眠" value={sleepHours.toFixed(1)} unit="h" detail={`质量 ${numberLabel(snapshot.sleep.quality)} · 效率 ${snapshot.sleep.efficiency?.toFixed(1) ?? "—"}%`} status={snapshot.sleep.status} />
       </section>
       <StrengthPanel strength={snapshot.strengthTraining} onSync={onSyncStrength} syncing={strengthSyncing} />
+      <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={snapshot.strengthTraining.displayUnit} />
       {snapshot.morningReference ? (
         <section className="morning-strip" aria-label="今晨参考">
           <div><span>今晨参考 · {dateLabel(snapshot.morningReference.date)}</span><strong>HRV {numberLabel(snapshot.morningReference.hrvMs, 1)} ms</strong></div>
@@ -378,13 +467,27 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
-function HistoryView({ snapshot }: { snapshot: Snapshot }) {
+function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifiedTimeline?: UnifiedDay[] }) {
   const strengths = [...snapshot.strengthTraining.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const swims = snapshot.historyWorkouts.filter((workout) => workout.type.toLowerCase().includes("swim")).slice().reverse();
   const weights = snapshot.historyDaily.filter((row): row is Daily & { weightKg: number } => row.weightKg !== null).slice().reverse();
   const sleeps = snapshot.historySleeps.slice().reverse();
   return (
     <div className="history-view">
+      {unifiedTimeline && unifiedTimeline.length ? (
+        <section className="history-section" aria-labelledby="unified-history-title">
+          <div className="section-heading"><div><p className="section-kicker">一体时间线</p><h2 id="unified-history-title">每天合在一起看</h2></div><span className="record-count">{unifiedTimeline.length} 天</span></div>
+          <div className="unified-list">
+            {unifiedTimeline.map((day) => (
+              <div className="unified-row" key={day.date}>
+                <span className="unified-date">{dateLabel(day.date)}</span>
+                <div className="unified-main"><strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong><small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${snapshot.strengthTraining.displayUnit}` : "没有力量训练"}</small></div>
+                <span className={`unified-badge ${day.hasHealth && day.hasStrength ? "both" : ""}`}>{day.hasHealth && day.hasStrength ? "两边都有" : day.hasStrength ? "只有力量" : "只有健康"}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <section className="history-section" aria-labelledby="strength-history-title">
         <div className="section-heading"><div><p className="section-kicker">训练记录</p><h2 id="strength-history-title">力量训练历史</h2></div><span className="record-count">{strengths.length} 次</span></div>
         {strengths.length ? <div className="strength-history-list">{strengths.map((workout) => (
@@ -420,7 +523,7 @@ function HistoryView({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
-function Dashboard({ snapshot, readiness }: { snapshot: Snapshot; readiness: Readiness | null }) {
+function Dashboard({ snapshot, readiness, dataStatus, unifiedTimeline, autoSyncFailureNote }: { snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null }) {
   const [tab, setTab] = useState<Tab>("today");
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -443,7 +546,12 @@ function Dashboard({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
   });
 
   const isSyncing = refresh.isPending || strengthRefresh.isPending || polling.syncing;
-  const syncMessage = polling.failureNote ?? (polling.syncing ? "同步进行中，完成后会自动更新" : lastSyncMessage);
+  // The open-triggered background strength sync is polled by the App shell,
+  // not by this component; its failure note arrives as a prop so a failed
+  // background sync is visible even when the dashboard already has data
+  // (previously that note only rendered in the empty state, so a failed
+  // auto-sync with existing data disappeared silently).
+  const syncMessage = polling.failureNote ?? autoSyncFailureNote ?? (polling.syncing ? "同步进行中，完成后会自动更新" : lastSyncMessage);
   return (
     <>
       <header className="page-meta">
@@ -455,7 +563,7 @@ function Dashboard({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
         <button type="button" className={tab === "trends" ? "selected" : ""} onClick={() => setTab("trends")}>趋势</button>
         <button type="button" className={tab === "history" ? "selected" : ""} onClick={() => setTab("history")}>历史</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -465,9 +573,11 @@ export function App() {
   const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: () => api.getDashboard({}) });
   const queryClient = useQueryClient();
   const polling = useTaskPolling();
-  // When getDashboard kicks off a background strength auto-sync (stale local
-  // training data), it returns the task id; poll it here so the fresh numbers
-  // land in this same session instead of waiting for the next open.
+  // getDashboard kicks off a background strength sync on every open (the
+  // stored snapshot is shown first); it returns the task id and we poll it
+  // here so the fresh numbers land in this same session. This shell owns
+  // that poll, so its failure note is passed into Dashboard below — with
+  // existing data on screen the failure must still be visible, not dropped.
   const autoSyncStartedRef = useRef<string | null>(null);
   const autoSyncTaskId = dashboard.data?.strengthSyncTaskId ?? null;
   useEffect(() => {
@@ -488,7 +598,7 @@ export function App() {
   const firstSyncing = firstSync.isPending || polling.syncing;
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} /> : (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} /> : (
         <div className="empty-state">
           <h1>还没有健康数据</h1>
           <p>尚未同步过 Apple 健康。点击下方按钮，从 HealthKit 同步最近的完整日数据后，这里会显示步数、心率、HRV 与睡眠。</p>
