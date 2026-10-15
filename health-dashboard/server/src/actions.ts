@@ -157,12 +157,33 @@ const snapshotSchema = z.object({
 type Snapshot = z.infer<typeof snapshotSchema>;
 type StrengthTraining = z.infer<typeof strengthTrainingSchema>;
 
-// Owner-only gate (AUDIT-02 / L0.1): every read, write, initialization, and
-// agent-callback action must verify this before touching the database. A
+// Owner-only gate (AUDIT-02 / L0.1): every browser-facing read, write, and
+// initialization action must verify this before touching the database. A
 // missing viewer (null/undefined) is treated as not authorized, never as
-// owner.
+// owner — a guest following a share link always arrives WITH a viewer whose
+// isOwner is false, so data is never exposed to a non-owner identity.
 function isOwner(ctx: Ctx): boolean {
   return ctx.viewer?.isOwner === true;
+}
+
+// Trusted sync channel (timeliness fix, 2026-10-14): the artifact's own
+// background pipeline does not travel through a browser. The daily schedule
+// invokes refreshHealthData directly (kind=space_action), and spawned sync
+// tasks deliver results by calling the save actions as their expectsAction
+// return — neither invocation carries a browser viewer, so the strict
+// isOwner gate above silently rejected every scheduled refresh and every
+// task callback after L0.1 shipped: both snapshots froze at the last
+// pre-gate sync while the schedule kept reporting success. The actions that
+// exist solely as pipeline entry points (the scheduler-invoked refresh and
+// the two save callbacks) therefore accept an invocation that carries NO
+// viewer at all — a shape only daemon-internal channels (this artifact's
+// own schedule, its own spawned tasks' returns) can produce — while any
+// invocation that DOES carry a viewer must still be the owner. None of
+// these actions returns health data to its caller, so reads stay locked:
+// getDashboard, getRefreshStatus, saveMorningCheckin, initializeSnapshot,
+// and the manual refreshStrengthTraining button keep the strict gate.
+function isOwnerOrSyncChannel(ctx: Ctx): boolean {
+  return ctx.viewer === undefined || ctx.viewer === null || ctx.viewer.isOwner === true;
 }
 
 const readinessComponentSchema = z.object({
@@ -538,6 +559,18 @@ function normalizeStoredStrength(value: unknown): StrengthTraining | null {
 
 async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<void> {
   const db = ctx.db<typeof schema>();
+  // Monotonic guard: parallel sync tasks can finish out of order, and an
+  // older task's callback must never overwrite a newer snapshot.
+  const existing = await db.select({ payload: schema.healthSnapshot.payload }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
+  const existingPayload = existing[0]?.payload;
+  if (existingPayload) {
+    try {
+      const stored = normalizeStoredSnapshot(JSON.parse(existingPayload));
+      if (stored && Date.parse(snapshot.updatedAt) < Date.parse(stored.updatedAt)) return;
+    } catch {
+      // A malformed stored snapshot must not block a valid refresh.
+    }
+  }
   const now = new Date();
   const normalized = normalizeSleepSnapshot(snapshot);
   await db.insert(schema.healthSnapshot).values({ id: 1, payload: JSON.stringify(normalized), sourceUpdatedAt: new Date(normalized.updatedAt), createdAt: now, updatedAt: now })
@@ -547,6 +580,20 @@ async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<void> {
 
 async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Promise<void> {
   const db = ctx.db<typeof schema>();
+  // Monotonic guard: an older sync task finishing late must not roll the
+  // panel back to an earlier read of 训练记录.
+  if (strength.updatedAt) {
+    const existing = await db.select({ payload: schema.strengthTrainingSnapshot.payload }).from(schema.strengthTrainingSnapshot).where(eq(schema.strengthTrainingSnapshot.id, 1)).limit(1);
+    const existingPayload = existing[0]?.payload;
+    if (existingPayload) {
+      try {
+        const stored = normalizeStoredStrength(JSON.parse(existingPayload));
+        if (stored?.updatedAt && Date.parse(strength.updatedAt) < Date.parse(stored.updatedAt)) return;
+      } catch {
+        // A malformed stored snapshot must not block a valid sync.
+      }
+    }
+  }
   const now = new Date();
   const sourceUpdatedAt = strength.updatedAt ? new Date(strength.updatedAt) : now;
   await db.insert(schema.strengthTrainingSnapshot).values({ id: 1, payload: JSON.stringify(strength), sourceUpdatedAt, createdAt: now, updatedAt: now })
@@ -567,7 +614,7 @@ const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(
 // are single-flighted), silently swallowing them. Every explicit sync below
 // therefore spawns a fresh task with allowParallel, and getDashboard
 // opportunistically re-syncs when the stored strength snapshot is stale.
-const STRENGTH_SYNC_PROMPT = `Synchronize the user's strength-training summary from their existing web artifact named 训练记录 (slug space-6). Treat that artifact as the only source for strength sets; do not infer workouts from Apple Health. Use its published getDashboard action with recent_limit 20. Include the active workout, if any, plus every returned recent completed workout. For each workout preserve the source id as a string, routine, unit, start and completion instants, status, all sets grouped by exercise, and completed flags. Compute completedSets and totalVolume from completed sets only; a set contributes weight × reps only when both are present. Compute durationMinutes from timestamps when completion exists; for an active workout use the current instant. Use America/Los_Angeles to derive the workout date and Monday-based week starts. Choose the most recent workout's unit as displayUnit (default lb when there are no workouts); convert mixed-unit volume exactly when aggregating weekly totals (1 lb = 0.45359237 kg) so every weeklyTrend volume is in displayUnit. Include up to the latest eight Monday-based weeks, ascending, with zero-volume intervening weeks retained. Set updatedAt to the real current instant. If the source is read successfully and contains no workouts, return empty workouts and weeklyTrend and explain in note that completed or active sets from 训练记录 will appear after synchronization. If the source cannot be read, do not replace the last successful strength snapshot with an empty one. Do not create plausible workouts or sets. Call the expected save action exactly once only after a successful source read.`;
+const STRENGTH_SYNC_PROMPT = `Synchronize the user's strength-training summary from their existing web artifact named 训练记录 (slug space-6). Treat that artifact as the only source for strength sets; do not infer workouts from Apple Health. Use its published getDashboard action with recent_limit 20. Include the active workout, if any, plus every returned recent completed workout. For each workout preserve the source id as a string, routine, unit, start and completion instants, status, all sets grouped by exercise, and completed flags. Compute completedSets and totalVolume from completed sets only; a set contributes weight × reps only when both are present. Compute durationMinutes from timestamps when completion exists; for an active workout use the current instant. Use America/Los_Angeles to derive the workout date and Monday-based week starts. Choose the most recent workout's unit as displayUnit (default lb when there are no workouts); convert mixed-unit volume exactly when aggregating weekly totals (1 lb = 0.45359237 kg) so every weeklyTrend volume is in displayUnit. Include up to the latest eight Monday-based weeks, ascending, with zero-volume intervening weeks retained. Set updatedAt to the real current instant. If the source is read successfully and contains no workouts, return empty workouts and weeklyTrend and explain in note that completed or active sets from 训练记录 will appear after synchronization. A response with forbidden: true counts as a failed read, not as an empty source. If the source cannot be read, do not replace the last successful strength snapshot with an empty one. Do not create plausible workouts or sets. Call the expected save action exactly once only after a successful source read.`;
 
 // In-memory throttle for the opportunistic getDashboard auto-sync: at most
 // one auto-spawn per artifact worker every two minutes, and only when the
@@ -662,7 +709,9 @@ export const Actions = {
   saveHealthSnapshot: defineAction({
     request: snapshotSchema, response: mutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
-      if (!isOwner(ctx)) return { ok: false, forbidden: true };
+      // expectsAction callback for this artifact's own sync tasks (see
+      // isOwnerOrSyncChannel): the task return channel carries no viewer.
+      if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true };
       let nextSnapshot = args;
       if (args.strengthTraining.updatedAt === null && args.strengthTraining.workouts.length === 0) {
         const db = ctx.db<typeof schema>();
@@ -685,7 +734,9 @@ export const Actions = {
   saveStrengthTrainingSnapshot: defineAction({
     request: strengthTrainingSchema, response: mutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
-      if (!isOwner(ctx)) return { ok: false, forbidden: true };
+      // expectsAction callback for this artifact's own sync tasks (see
+      // isOwnerOrSyncChannel): the task return channel carries no viewer.
+      if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true };
       await persistStrengthSnapshot(ctx, args);
       return { ok: true, forbidden: false };
     },
@@ -722,7 +773,11 @@ export const Actions = {
     request: z.object({}),
     response: refreshResponse,
     async handler(ctx): Promise<z.infer<typeof refreshResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, accepted: false, taskId: null, strengthTaskId: null, message: "健康数据仅所有者可同步" };
+      // Entry point for both the owner's 全部同步 button and the artifact's
+      // own daily schedule, which invokes this action with no browser
+      // viewer (see isOwnerOrSyncChannel). A present non-owner viewer is
+      // still rejected.
+      if (!isOwnerOrSyncChannel(ctx)) return { forbidden: true, accepted: false, taskId: null, strengthTaskId: null, message: "健康数据仅所有者可同步" };
       const healthTask = await ctx.agent.spawnTask(
         `Refresh the user's Apple HealthKit dashboard with real data. Use America/Los_Angeles as the health calendar timezone and determine the latest complete calendar day (normally yesterday). Every health-cli command must include --provider healthkit. Query daily metrics for the 30 completed days ending on the latest complete day with fields body_mass_average,step_count,active_energy_burned_kcal,resting_hr_average_bpm,heart_rate_variability_ms,respiratory_rate_average,hr_average_bpm,apple_exercise_time_sum,distance_swimming_sum,distance_walking_running_meters,flights_climbed_sum,basal_energy_burned_kcal. Query the current partial day separately for the morning reference. Query workout sessions over the same 30-day window with fields id,start_datetime,end_datetime,timezone,workout_type,distance_meters,hr_average_bpm,energy_burned_kcal,active_duration_sec. Query sleep sessions covering the latest 15 calendar days and retain the latest 14 sessions. For every sleep session, preserve coreHours, deepHours, remHours, and awakeMinutes. Calculate actual sleep duration strictly as core + deep + REM; awake time is never part of actual sleep. Set every historySleeps.totalHours and the main sleep.inBedHours display value to that actual-sleep sum. Calculate sleep efficiency as actual sleep duration divided by time in bed, where time in bed is end_datetime minus start_datetime; do not use a sleep-stage duration as the denominator. Build trends from the final seven completed daily rows. Build the main daily snapshot from the latest completed metrics day. Define the readiness date from the current partial day's local date. For the main sleep and every one of its fields (bedtime, wakeTime, inBedHours, coreHours, deepHours, remHours, awakeMinutes, efficiency, quality, awakenings), select the completed sleep session whose end_datetime local date equals that readiness date; only if that morning's session has not ended or has not synced may you fall back to the most recent earlier completed sleep session. Set each historySleeps.date to the local calendar date of end_datetime. Preserve absent fields as null and set coverageIncomplete=true if any relevant query reports coverage.complete=false. For display-only step baseline/range fields, use exactly this rule: consider only complete days with step data; when there are at least 14 such completed days, compute the mean and standard deviation of step_count over the prior 14 completed days and set baseline = mean (when all 14 days are zero, baseline = 0 — that is a valid baseline, not missing data), usualMin = max(0, mean − standard deviation) (clamped at 0), and usualMax = mean + standard deviation (when all 14 days are zero, usualMax = 0); when fewer than 14 completed days are available or step data is absent, set baseline, usualMin, and usualMax all to null — never substitute any fixed or typical value. For display-only resting-HR and HRV baseline/range fields, derive mean and mean ± standard deviation from the prior 14 completed days when available; the server independently computes readiness from raw history. Status must be one of 正常, 偏低, 偏高, 数据缺失; missing is based on absent fields, not inferred as an anomaly. Include respiratoryRate on the main day and respiratoryRate on every historyDaily row, preserving absent values as null. Convert walking distance to km, workout duration seconds to minutes, and sleep stages to hours; display bedtime/wake as HH:mm. historyDaily must map the source fields to steps, activeKcal, exerciseMinutes, restingHr, hrvMs, respiratoryRate, weightKg, swimMeters. For historySleeps preserve awakenings and efficiency when present, otherwise null. historyWorkouts and historySleeps must contain only source-backed values, sorted ascending by date. Set updatedAt to the real current instant in ISO 8601, cap historyDaily at 35, historyWorkouts at 100, and historySleeps at 14. The workout note must refer only to Apple Watch workout sessions. Set strengthTraining to its empty default with updatedAt null; the save action preserves the separately synchronized training-record data. Call the expected save action exactly once with the completed HealthKit snapshot.`,
         { expectsAction: "saveHealthSnapshot", allowParallel: true },

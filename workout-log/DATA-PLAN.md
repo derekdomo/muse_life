@@ -7,6 +7,11 @@
 - Refresh: queries invalidate immediately after each mutation.
 - Empty state: the artifact asks the user to complete a first workout and does not invent history.
 
+## Cross-artifact sync read
+
+- Consumer: 健康看板 (space-4) refreshes its strength summary by spawning a task that reads this artifact's published `getDashboard` action (`recent_limit` 20) and saves the derived summary into its own snapshot.
+- Access rule: that sync invocation travels the daemon's internal action channel and carries no browser viewer, so `getDashboard` accepts the owner or a no-viewer internal invocation. Any invocation carrying a non-owner viewer still returns `forbidden` with zero data, and all write actions remain strictly owner-only.
+
 ## Curated technique videos
 
 The exercise-guide dialogs contain original short form cues plus outbound links to public human-demonstration videos. The artifact does not fetch or embed these videos, and no external data is loaded when the page opens.
