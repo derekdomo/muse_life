@@ -31,7 +31,7 @@
 
 ### L0 — 隐私与权限（P0）
 
-- [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-15 PM 复核至 `04bd2a2`：**P0 权限回归，返工**。`79dbd07` 将 health 刷新/两个保存 callback、workout getDashboard 改为放行 null/undefined viewer；缺少可验证服务身份、任务归属及匿名不可达证据，不满足本项。撤回 AUDIT-02 静态修复结论；下一项只关闭该边界，详见本轮记录。原三身份/后台运行矩阵仍待验，不能以恢复同步替代权限验收。）（需用户确认：2026-10-15 同步 job 标注——该收紧与用户 2026-10-14/15 已拍板接受的「owner 或无身份内部同步通道」设计及残余风险保留直接冲突；平台无可验证服务凭据，执行收紧将冻结健康/力量同步与每 2 小时看门狗刷新，安全与同步可用性二选一须用户拍板，拍板前不执行。）
+- [ ] `L0.1` 健康、训练、财务的所有读 action、写 action、初始化 action 和 agent callback 均在服务端校验 `ctx.viewer?.isOwner === true`；`viewer === null` 必须按无权限处理，而不是按 owner 处理。（2026-10-15 PM 复核至 `04bd2a2`：**P0 权限回归，返工**。`79dbd07` 将 health 刷新/两个保存 callback、workout getDashboard 改为放行 null/undefined viewer；缺少可验证服务身份、任务归属及匿名不可达证据，不满足本项。撤回 AUDIT-02 静态修复结论；下一项只关闭该边界，详见本轮记录。原三身份/后台运行矩阵仍待验，不能以恢复同步替代权限验收。）（需用户确认：2026-10-15 同步 job 标注——该收紧与用户 2026-10-14/15 已拍板接受的「owner 或无身份内部同步通道」设计及残余风险保留直接冲突；平台无可验证服务凭据，执行收紧将冻结健康/力量同步与每 2 小时看门狗刷新，安全与同步可用性二选一须用户拍板，拍板前不执行。）（实现方平台限制登记 2026-10-15，用户指示：当前 Muse artifact 运行时不存在可验证服务身份机制——action ctx 只暴露浏览器 viewer 或无 viewer，后台 schedule、agent 回调与跨 app 已发布 action 调用均不携带任何可验证的调用方身份，作者无 API 可签发/校验凭据；故本项对受信后台的验收条件在当前平台不可实现，详见 changes.md 同日《致 PM：平台服务身份限制登记》。请 PM 就后台通道部分给出可执行验收口径，或明确接受其为平台限制。）
 - [ ] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。
 - [ ] `L0.3` 无权限响应使用稳定的 typed state，不依赖前端隐藏；直接调用 action 也不能读取 payload 或修改数据。
 - [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-14 PM 复核至 `205f544`：DATA-PLAN 回灌隐私恢复与步数展示脚本修复局部通过，11:19 两处返工关闭；文档除保留一行同步机制说明外与此前脱敏 `8b87c09` 逐字一致，展示脚本 8/8 通过。无业务/schema/UI 改动。完整契约、受信 owner null/零/旧数字快照保存回读、三视口及原运行要求继续待验，整项不勾选。）
@@ -236,7 +236,7 @@
 ### 已确认风险
 
 - [x] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。（2026-10-13 已修复：`isSignedInGuest` 改为严格 `isOwner` 校验，见 changes.md）
-- [ ] `AUDIT-02 / P0` 健康和训练 action 必须有显式服务端权限校验。（2026-10-15 PM 撤回此前静态修复勾选：`79dbd07` 在 health 三个入口和 workout getDashboard 新增无 viewer 放行；当前 guard 无法区分未登录与受信后台。不能以“只有内部通道会缺 viewer”的代码注释代替平台身份保证；见 L0.1 及本轮返工记录。财务既有静态结论沿用，运行验收仍以 L0.1/F0.1 为准。）（需用户确认：同 L0.1，见该条 2026-10-15 同步 job 标注。）
+- [ ] `AUDIT-02 / P0` 健康和训练 action 必须有显式服务端权限校验。（2026-10-15 PM 撤回此前静态修复勾选：`79dbd07` 在 health 三个入口和 workout getDashboard 新增无 viewer 放行；当前 guard 无法区分未登录与受信后台。不能以“只有内部通道会缺 viewer”的代码注释代替平台身份保证；见 L0.1 及本轮返工记录。财务既有静态结论沿用，运行验收仍以 L0.1/F0.1 为准。）（需用户确认：同 L0.1，见该条 2026-10-15 同步 job 标注。）（平台限制登记同 L0.1，见 changes.md 2026-10-15 条目。）
 - [ ] `AUDIT-03 / P0` 健康源码及文档不得包含真实健康序列、个人基线、workout UUID、设备 ID 或真实初始快照。（2026-10-14 PM 复核至 `205f544`：health DATA-PLAN 恢复此前脱敏版本，仅保留新增同步机制说明；四组旧个人内容均不再命中，本次回灌隐私返工关闭。首次启动及 owner 运行证据仍待验，整项不勾选；见 L0.4。）
 - [ ] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。
 - [ ] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。

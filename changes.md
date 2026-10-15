@@ -95,3 +95,16 @@
   - 打开即现拉：`getDashboard` 取消力量快照 >5 分钟的过期阈值，每次 owner 打开都发起（或复用 2 分钟内已发起的）力量同步任务，先渲染现有快照、落地后同页重绘；App 壳轮询到的后台同步失败提示现透传进 Dashboard，已有数据时也可见。
 - 验证（artifact 侧）：构建审计 pass、无控制台错误、双视口正常；非 owner 调用 `getDashboard`/`getSyncDiagnostics`/`logSyncEvent` 全部 forbidden 零数据，新读口未放宽门禁。未实测（如实记录）：审计为非 owner 身份，owner 打开看板后的面板渲染与"打开→同步→新训练出现"端到端链路未在审计环境验证；沙箱 `sync_log` 为 0 行，台账首行需 owner 侧真实同步后产生。
 - 本条只回灌代码、migration 与文档，未改 `plans.md` 勾选（归 PM 验收）。修改文件：`health-dashboard/server/src/actions.ts`、`health-dashboard/server/src/schema.ts`、`health-dashboard/client/src/App.tsx`、`health-dashboard/client/src/theme.css`、`health-dashboard/DATA-PLAN.md`、`health-dashboard/drizzle/0005_add_sync_log_and_unified_view_support.sql`、`health-dashboard/drizzle/meta/_journal.json`。
+
+## 2026-10-15（致 PM：平台服务身份限制登记）
+
+> 本条由实现方按用户 2026-10-15 明确指示登记：用户认为 PM 不了解平台限制，要求把 limitation 正式告知 PM。本条只登记事实与证据，不预设用户在 L0.1/AUDIT-02 上的最终决定。
+
+- **用户需求（原话语境）**：健康看板的力量数据来自同为用户自己的「训练记录」，应自动及时同步。用户评价：这是"这么简单的要求"，现行验收标准使它实现不了。
+- **PM 验收标准（`plans.md` L0.1 / AUDIT-02，2026-10-15 复核）**：受信后台须有可验证身份（当前 app/来源/任务归属与权限范围），不能仅凭缺 viewer、请求参数或注释；无此能力时保留门禁并明示同步不可用。
+- **平台事实（实现方核查结论，含源码与实测）**：当前 Muse artifact 运行时不存在服务身份机制——
+  1. action 的 `ctx` 只暴露浏览器侧 `viewer`（owner / 已登录非 owner / null）或完全无 viewer；后台 schedule 触发（`refreshHealthData` 定时入口）、agent task 保存回调（`saveHealthSnapshot`、`saveStrengthTrainingSnapshot`）、跨 artifact 已发布 action 调用（space-4 同步任务读 space-6 `getDashboard`）到达 handler 时，均不携带可验证的调用方身份：无 token、无签名、无 app/task 归属字段。
+  2. artifact 作者没有任何 API 为自己的后台任务签发或校验凭据。两个 save callback 的唯一期望调用方就是本 artifact 自己 spawn 的任务，但平台在回调通道上不注入身份，作者无从校验。
+  3. 实测佐证：PM 本轮以独立脚本抽取两 app 的 guard 谓词，确认四种上下文形状为 owner / guest / null / 缺 viewer——这正是运行时仅有的身份信息；space-6 修复时的独立安全审查亦明确记录"平台目前没有向 artifact 作者提供可替代的服务身份凭据机制"。
+- **结论**：L0.1 对受信后台的验收条件在当前平台**不可实现**，原因是运行时能力缺失，不是实现方未做或不愿做。严格执行的实际后果：健康/力量全部后台同步（定时刷新、保存回调、每 2 小时看门狗）被拒绝，两份快照停止更新（2026-10-13 至 10-14 已实际发生过一次，任务天天报 succeeded 而零落盘），产品只剩手动打开时的旧数据。
+- **请 PM 处理**：在平台提供服务身份能力之前，请就 L0.1 的后台通道部分给出可执行的验收口径（例如按用户批准的例外备案验收：范围、调用方、残余风险、有效期/复审触发、回退条件），或明确将"后台同步不可用"记为平台限制下的已知产品状态。用户侧最终决定仍待用户拍板，本条不代替决定。
