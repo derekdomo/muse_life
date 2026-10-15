@@ -557,20 +557,27 @@ function normalizeStoredStrength(value: unknown): StrengthTraining | null {
   return parsed.success ? parsed.data : null;
 }
 
+type PersistOutcome = "applied" | "duplicate" | "conflict" | "ignored";
+
 // Atomic conditional write (L1-RACE-001): the version comparison and the
 // write are ONE SQLite statement — INSERT … ON CONFLICT(id) DO UPDATE …
-// WHERE excluded.source_updated_at >= the stored row's source_updated_at.
+// WHERE excluded.source_updated_at > the stored row's source_updated_at.
 // The old two-step shape (SELECT the payload, compare updatedAt in JS, then
 // unconditionally upsert) raced: two parallel callbacks could both read the
 // same old value, and the one that landed last won even when its version was
 // older (a 01:00 read overwriting a 02:00 snapshot). Inside a single
 // statement the comparison happens at write time, so a late-finishing older
-// version is rejected by the statement itself. Equal timestamps count as an
-// idempotent rewrite (applied). RETURNING id reports whether the statement
-// actually wrote: no row back means the stored snapshot is newer and this
-// one was ignored — callers surface that as outcome "ignored" and skip the
-// saved sync-log entry.
-async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<boolean> {
+// version is rejected by the statement itself. Only a strictly newer
+// version counts as a new write (applied), including the very first insert.
+// RETURNING id reports whether the statement actually wrote: no row back
+// means the write did not land, and the stored row is then re-read ONLY to
+// classify the outcome — that read never decides whether to write. Same
+// version with an identical payload is a duplicate callback (duplicate);
+// same version with a different payload is a conflict and the first writer
+// wins (conflict); a newer stored version means this one was superseded
+// (ignored). Duplicate, conflict, and ignored outcomes write no saved
+// sync-log entry and do not invalidate queries.
+async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<PersistOutcome> {
   const db = ctx.db<typeof schema>();
   const now = new Date();
   const normalized = normalizeSleepSnapshot(snapshot);
@@ -580,16 +587,23 @@ async function persistSnapshot(ctx: Ctx, snapshot: Snapshot): Promise<boolean> {
     .onConflictDoUpdate({
       target: schema.healthSnapshot.id,
       set: { payload, sourceUpdatedAt, updatedAt: now },
-      setWhere: sql`excluded.source_updated_at >= ${schema.healthSnapshot.sourceUpdatedAt}`,
+      setWhere: sql`excluded.source_updated_at > ${schema.healthSnapshot.sourceUpdatedAt}`,
     })
     .returning({ id: schema.healthSnapshot.id });
-  if (written.length === 0) return false;
+  if (written.length === 0) {
+    const existingRows = await db.select({ payload: schema.healthSnapshot.payload, sourceUpdatedAt: schema.healthSnapshot.sourceUpdatedAt }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
+    const existing = existingRows[0];
+    if (existing && existing.sourceUpdatedAt.getTime() === sourceUpdatedAt.getTime()) {
+      return existing.payload === payload ? "duplicate" : "conflict";
+    }
+    return "ignored";
+  }
   await recordSyncLog(ctx, { source: "health", status: "saved", itemCount: normalized.historyDaily.length, note: `健康快照已保存 · 数据日期 ${normalized.dataDate} · ${normalized.historyDaily.length} 天明细`, sourceUpdatedAt });
   ctx.invalidateQueries(["dashboard"]);
-  return true;
+  return "applied";
 }
 
-async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Promise<boolean> {
+async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Promise<PersistOutcome> {
   const db = ctx.db<typeof schema>();
   // Null-version contract (L1-RACE-001): a strength snapshot whose updatedAt
   // is null carries no source version, so it is treated as the OLDEST
@@ -600,7 +614,9 @@ async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Pr
   // rolling the panel back (the old code skipped every guard for null and
   // stamped it with the write time, letting it overwrite valid snapshots).
   // The payload keeps updatedAt: null, so freshness display still treats
-  // the version as missing.
+  // the version as missing. The null/epoch mapping also participates in
+  // same-version classification: a repeated null-version callback whose
+  // payload matches the stored epoch row is a duplicate, not a rewrite.
   const now = new Date();
   const sourceUpdatedAt = strength.updatedAt ? new Date(strength.updatedAt) : new Date(0);
   const payload = JSON.stringify(strength);
@@ -608,13 +624,20 @@ async function persistStrengthSnapshot(ctx: Ctx, strength: StrengthTraining): Pr
     .onConflictDoUpdate({
       target: schema.strengthTrainingSnapshot.id,
       set: { payload, sourceUpdatedAt, updatedAt: now },
-      setWhere: sql`excluded.source_updated_at >= ${schema.strengthTrainingSnapshot.sourceUpdatedAt}`,
+      setWhere: sql`excluded.source_updated_at > ${schema.strengthTrainingSnapshot.sourceUpdatedAt}`,
     })
     .returning({ id: schema.strengthTrainingSnapshot.id });
-  if (written.length === 0) return false;
+  if (written.length === 0) {
+    const existingRows = await db.select({ payload: schema.strengthTrainingSnapshot.payload, sourceUpdatedAt: schema.strengthTrainingSnapshot.sourceUpdatedAt }).from(schema.strengthTrainingSnapshot).where(eq(schema.strengthTrainingSnapshot.id, 1)).limit(1);
+    const existing = existingRows[0];
+    if (existing && existing.sourceUpdatedAt.getTime() === sourceUpdatedAt.getTime()) {
+      return existing.payload === payload ? "duplicate" : "conflict";
+    }
+    return "ignored";
+  }
   await recordSyncLog(ctx, { source: "strength", status: "saved", itemCount: strength.workouts.length, note: `力量快照已保存 · ${strength.workouts.length} 次训练`, sourceUpdatedAt: strength.updatedAt ? sourceUpdatedAt : null });
   ctx.invalidateQueries(["dashboard"]);
-  return true;
+  return "applied";
 }
 
 const syncLogEntrySchema = z.object({
@@ -684,11 +707,14 @@ const diagnosticsResponse = z.object({
 const mutationResponse = z.object({ ok: z.boolean(), forbidden: z.boolean() });
 // Save-callback responses (L1-RACE-001): ok/forbidden keep their existing
 // meaning; outcome tells the callback whether its snapshot actually landed
-// ("applied"), was rejected by the atomic version guard because a newer
-// snapshot is already stored ("ignored"), or was refused by the gate
-// ("forbidden"). ok stays true for "ignored" — the callback itself
-// succeeded; only the write was superseded.
-const saveSnapshotResponse = z.object({ ok: z.boolean(), forbidden: z.boolean(), outcome: z.enum(["applied", "ignored", "forbidden"]) });
+// ("applied"), was a same-version repeat of the stored payload
+// ("duplicate"), lost a same-version race to a different payload that
+// landed first ("conflict"), was rejected by the atomic version guard
+// because a newer snapshot is already stored ("ignored"), or was refused
+// by the gate ("forbidden"). ok stays true for "duplicate", "conflict",
+// and "ignored" — the callback itself succeeded; only the write was
+// superseded or already present.
+const saveSnapshotResponse = z.object({ ok: z.boolean(), forbidden: z.boolean(), outcome: z.enum(["applied", "duplicate", "conflict", "ignored", "forbidden"]) });
 const refreshResponse = z.object({ forbidden: z.boolean(), accepted: z.boolean(), taskId: z.string().nullable(), strengthTaskId: z.string().nullable(), message: z.string() });
 const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(["queued", "running", "completed", "failed", "not_found", "unknown"]), contractSatisfied: z.boolean() });
 
@@ -933,8 +959,8 @@ export const Actions = {
           }
         }
       }
-      const applied = await persistSnapshot(ctx, nextSnapshot);
-      return { ok: true, forbidden: false, outcome: applied ? "applied" : "ignored" };
+      const outcome = await persistSnapshot(ctx, nextSnapshot);
+      return { ok: true, forbidden: false, outcome };
     },
   }),
 
@@ -944,8 +970,8 @@ export const Actions = {
       // expectsAction callback for this artifact's own sync tasks (see
       // isOwnerOrSyncChannel): the task return channel carries no viewer.
       if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true, outcome: "forbidden" };
-      const applied = await persistStrengthSnapshot(ctx, args);
-      return { ok: true, forbidden: false, outcome: applied ? "applied" : "ignored" };
+      const outcome = await persistStrengthSnapshot(ctx, args);
+      return { ok: true, forbidden: false, outcome };
     },
   }),
 
@@ -1054,7 +1080,7 @@ export const Actions = {
       // still rejected.
       if (!isOwnerOrSyncChannel(ctx)) return { forbidden: true, accepted: false, taskId: null, strengthTaskId: null, message: "健康数据仅所有者可同步" };
       const healthTask = await ctx.agent.spawnTask(
-        `Refresh the user's Apple HealthKit dashboard with real data. Use America/Los_Angeles as the health calendar timezone and determine the latest complete calendar day (normally yesterday). Every health-cli command must include --provider healthkit. Query daily metrics for the 30 completed days ending on the latest complete day with fields body_mass_average,step_count,active_energy_burned_kcal,resting_hr_average_bpm,heart_rate_variability_ms,respiratory_rate_average,hr_average_bpm,apple_exercise_time_sum,distance_swimming_sum,distance_walking_running_meters,flights_climbed_sum,basal_energy_burned_kcal. Query the current partial day separately for the morning reference. Query workout sessions over the same 30-day window with fields id,start_datetime,end_datetime,timezone,workout_type,distance_meters,hr_average_bpm,energy_burned_kcal,active_duration_sec. Query sleep sessions covering the latest 15 calendar days and retain the latest 14 sessions. For every sleep session, preserve coreHours, deepHours, remHours, and awakeMinutes. Calculate actual sleep duration strictly as core + deep + REM; awake time is never part of actual sleep. Set every historySleeps.totalHours and the main sleep.inBedHours display value to that actual-sleep sum. Calculate sleep efficiency as actual sleep duration divided by time in bed, where time in bed is end_datetime minus start_datetime; do not use a sleep-stage duration as the denominator. Build trends from the final seven completed daily rows. Build the main daily snapshot from the latest completed metrics day. Define the readiness date from the current partial day's local date. For the main sleep and every one of its fields (bedtime, wakeTime, inBedHours, coreHours, deepHours, remHours, awakeMinutes, efficiency, quality, awakenings), select the completed sleep session whose end_datetime local date equals that readiness date; only if that morning's session has not ended or has not synced may you fall back to the most recent earlier completed sleep session. Set each historySleeps.date to the local calendar date of end_datetime. Preserve absent fields as null and set coverageIncomplete=true if any relevant query reports coverage.complete=false. For display-only step baseline/range fields, use exactly this rule: consider only complete days with step data; when there are at least 14 such completed days, compute the mean and standard deviation of step_count over the prior 14 completed days and set baseline = mean (when all 14 days are zero, baseline = 0 — that is a valid baseline, not missing data), usualMin = max(0, mean − standard deviation) (clamped at 0), and usualMax = mean + standard deviation (when all 14 days are zero, usualMax = 0); when fewer than 14 completed days are available or step data is absent, set baseline, usualMin, and usualMax all to null — never substitute any fixed or typical value. For display-only resting-HR and HRV baseline/range fields, derive mean and mean ± standard deviation from the prior 14 completed days when available; the server independently computes readiness from raw history. Status must be one of 正常, 偏低, 偏高, 数据缺失; missing is based on absent fields, not inferred as an anomaly. Include respiratoryRate on the main day and respiratoryRate on every historyDaily row, preserving absent values as null. Convert walking distance to km, workout duration seconds to minutes, and sleep stages to hours; display bedtime/wake as HH:mm. historyDaily must map the source fields to steps, activeKcal, exerciseMinutes, restingHr, hrvMs, respiratoryRate, weightKg, swimMeters. For historySleeps preserve awakenings and efficiency when present, otherwise null. historyWorkouts and historySleeps must contain only source-backed values, sorted ascending by date. Set updatedAt to the real current instant in ISO 8601, cap historyDaily at 35, historyWorkouts at 100, and historySleeps at 14. The workout note must refer only to Apple Watch workout sessions. Set strengthTraining to its empty default with updatedAt null; the save action preserves the separately synchronized training-record data. Call the expected save action exactly once with the completed HealthKit snapshot.`,
+        `Refresh the user's Apple HealthKit dashboard with real data. Use America/Los_Angeles as the health calendar timezone and determine the latest complete calendar day (normally yesterday). Every health-cli command must include --provider healthkit. Query daily metrics for the 30 completed days ending on the latest complete day with fields body_mass_average,step_count,active_energy_burned_kcal,resting_hr_average_bpm,heart_rate_variability_ms,respiratory_rate_average,hr_average_bpm,apple_exercise_time_sum,distance_swimming_sum,distance_walking_running_meters,flights_climbed_sum,basal_energy_burned_kcal. Query the current partial day separately for the morning reference. Query workout sessions over the same 30-day window with fields id,start_datetime,end_datetime,timezone,workout_type,distance_meters,hr_average_bpm,energy_burned_kcal,active_duration_sec. Query sleep sessions covering the latest 15 calendar days and retain the latest 14 sessions. For every sleep session, preserve coreHours, deepHours, remHours, and awakeMinutes. Calculate actual sleep duration strictly as core + deep + REM; awake time is never part of actual sleep. Set every historySleeps.totalHours and the main sleep.inBedHours display value to that actual-sleep sum. Calculate sleep efficiency as actual sleep duration divided by time in bed, where time in bed is end_datetime minus start_datetime; do not use a sleep-stage duration as the denominator. Build trends from the final seven completed daily rows. Build the main daily snapshot from the latest completed metrics day. Define the readiness date from the current partial day's local date. For the main sleep and every one of its fields (bedtime, wakeTime, inBedHours, coreHours, deepHours, remHours, awakeMinutes, efficiency, quality, awakenings), select the completed sleep session whose end_datetime local date equals that readiness date; only if that morning's session has not ended or has not synced may you fall back to the most recent earlier completed sleep session. Set each historySleeps.date to the local calendar date of end_datetime. Preserve absent fields as null and set coverageIncomplete=true if any relevant query reports coverage.complete=false. For display-only step baseline/range fields, use exactly this rule: consider only complete days with step data; when there are at least 14 such completed days, compute the mean and standard deviation of step_count over the prior 14 completed days and set baseline = mean (when all 14 days are zero, baseline = 0 — that is a valid baseline, not missing data), usualMin = max(0, mean − standard deviation) (clamped at 0), and usualMax = mean + standard deviation (when all 14 days are zero, usualMax = 0); when fewer than 14 completed days are available or step data is absent, set baseline, usualMin, and usualMax all to null — never substitute any fixed or typical value. For display-only resting-HR and HRV baseline/range fields, derive mean and mean ± standard deviation from the prior 14 completed days when available; the server independently computes readiness from raw history. Status must be one of 正常, 偏低, 偏高, 数据缺失; missing is based on absent fields, not inferred as an anomaly. Include respiratoryRate on the main day and respiratoryRate on every historyDaily row, preserving absent values as null. Convert walking distance to km, workout duration seconds to minutes, and sleep stages to hours; display bedtime/wake as HH:mm. historyDaily must map the source fields to steps, activeKcal, exerciseMinutes, restingHr, hrvMs, respiratoryRate, weightKg, swimMeters. For historySleeps preserve awakenings and efficiency when present, otherwise null. historyWorkouts and historySleeps must contain only source-backed values, sorted ascending by date. Version contract: BEFORE you run any health-cli query, record the current instant as readStartedAt, and set the payload's updatedAt to that readStartedAt in ISO 8601 — the moment the source read began. Never set updatedAt to the instant the task finishes or to the callback instant. Why: the save versions snapshots by read-start time and applies them with an atomic compare-and-write that rejects any version older than the one already stored, so a read that started earlier can never overwrite a newer snapshot even when it finishes later; stamping the completion time instead would disguise an old read as new data and defeat that guard. Cap historyDaily at 35, historyWorkouts at 100, and historySleeps at 14. The workout note must refer only to Apple Watch workout sessions. Set strengthTraining to its empty default with updatedAt null; the save action preserves the separately synchronized training-record data. Call the expected save action exactly once with the completed HealthKit snapshot.`,
         { expectsAction: "saveHealthSnapshot", allowParallel: true },
       );
       const strengthTask = await ctx.agent.spawnTask(STRENGTH_SYNC_PROMPT, { expectsAction: "saveStrengthTrainingSnapshot", allowParallel: true });
