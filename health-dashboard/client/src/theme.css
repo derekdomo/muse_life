@@ -306,6 +306,11 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .empty-state { justify-items: center; gap: 10px; }
 .empty-state p { margin: 0; max-width: 420px; }
 .empty-state .sync-button { font-size: 14px; }
+.strength-only-view { display: grid; gap: 0; }
+.source-notice { padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.source-notice h1 { margin: 4px 0 8px; font-size: 20px; }
+.source-notice p { margin: 0 0 14px; color: var(--dim); font-size: 13px; line-height: 1.6; }
+.source-notice .sync-button { font-size: 14px; }
 footer { max-width: 620px; margin: 32px auto 0; color: var(--dim); font-size: 11px; line-height: 1.6; text-align: center; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .loading span { animation: none; } }

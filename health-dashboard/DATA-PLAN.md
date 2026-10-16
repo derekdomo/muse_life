@@ -95,6 +95,50 @@ the experience layer instead of pretending the stores merged:
   gate; a non-owner gets `forbidden: true` with no status, timeline, or
   ledger data.
 
+## Per-source independence (H-SOURCE-001, 2026-10-15)
+The two snapshots are now loaded, validated, and reported independently —
+one source missing or corrupt can no longer swallow the other:
+
+- **Independent loads**: `loadHealthSnapshot` / `loadStrengthSnapshot` each
+  return `ok` / `missing` (no row) / `corrupt` (JSON parse or schema
+  failure). A parse failure marks only its own source corrupt; `getDashboard`
+  no longer has a catch-all that nulls the whole response.
+- **Per-source status**: `buildDataStatus` computes health freshness from
+  the health load alone and strength freshness from the strength load alone
+  (standalone row first; the health snapshot's embedded `strengthTraining`
+  is only a legacy fallback when the standalone row is missing). A corrupt
+  source counts as missing for freshness but its detail reads
+  「快照损坏，等待重新同步」. Overall is `empty` only when both sides are
+  missing, `partial` when exactly one side is usable.
+- **Additive response fields**: `getDashboard` also returns `healthState`,
+  `strengthState` (`ok`/`missing`/`corrupt`), and `strength` (the standalone
+  strength snapshot; the embedded copy when the standalone row is missing
+  and the health snapshot carries one; null otherwise). When health is ok,
+  the merged snapshot still lets a valid standalone strength override the
+  embedded copy, but a corrupt standalone row is replaced with an honest
+  empty placeholder （训练快照已损坏，重新同步后恢复） instead of the stale
+  embedded data. When health is missing/corrupt, `snapshot` and `readiness`
+  stay null — no fabricated health snapshot — while `strength`,
+  `dataStatus`, and `unifiedTimeline` reflect the strength source as-is.
+  The morning check-in is read only when health is ok.
+- **Auto-sync on every path**: `maybeAutoSyncStrength` now runs on every
+  owner open, including health missing/corrupt paths, and its task id is
+  returned as `strengthSyncTaskId` (2-minute anti-spam reuse unchanged).
+- **Diagnostics**: `getSyncDiagnostics` loads both sources independently —
+  health checks reflect only health, strength checks only strength, and the
+  recent-failures and timeline-overlap checks run on whatever data is
+  available; the verdict can express partial states (only one side has
+  data, or one side is corrupt).
+- **Client**: when the health snapshot is null but `strength` is present,
+  the app renders a strength-only view (explanation keyed to `healthState`,
+  the strength panel, the per-source data-status panel, and both sync
+  entry points) instead of the "no health data" empty state; when both are
+  missing the empty state remains and now also shows the data-status panel
+  so the user can see which side is missing.
+- Permissions are unchanged: `getDashboard` and `getSyncDiagnostics` keep
+  the strict owner gate; non-owners still get `forbidden: true` with zero
+  data. No schema or migration changes.
+
 ## Rejected approaches
 - **Tried**: treating the current day’s partial row as today’s daily result.
   **Why rejected**: only partial half-hour records were present and HealthKit explicitly reported incomplete coverage, so it is shown only as `今晨参考`.

@@ -26,7 +26,7 @@ const near = (a, b, eps = 0.051) => Math.abs(a - b) <= eps;
 // ---------------------------------------------------------------- source
 check('single conversion constant 1 lb = 0.45359237 kg', src.includes('const LB_TO_KG = 0.45359237;'));
 check('buildUnifiedTimeline converts per-workout before summing',
-  src.includes('day.strengthVolume += convertVolumeToUnit(workout.totalVolume, workout.unit, snapshot.strengthTraining.displayUnit);'));
+  src.includes('day.strengthVolume += convertVolumeToUnit(workout.totalVolume, workout.unit, strengthData.displayUnit);'));
 check('buildUnifiedTimeline no longer adds the raw totalVolume',
   !src.includes('day.strengthVolume += workout.totalVolume;'));
 check('readiness currentVolume uses the shared unit-aware sum',
@@ -69,6 +69,13 @@ if (!lbDecl) throw new Error('LB_TO_KG declaration not found');
 const code = `${lbDecl}\n${FN.map((n) => extractFunction(src, n)).join('\n')}`;
 const stripped = stripTypeScriptTypes(code);
 const impl = new Function(`${stripped}\nreturn { convertVolumeToUnit, sumWorkoutVolumeInUnit, buildUnifiedTimeline, calculateReadiness };`)();
+// H-SOURCE-001 changed buildUnifiedTimeline's signature to
+// (healthSnapshot, strengthData): adapt this script's single-argument
+// fixture calls by passing the fixture's own embedded strengthTraining
+// as the strength source, which is exactly the merged-snapshot case the
+// assertions below exercise.
+const rawBuildUnifiedTimeline = impl.buildUnifiedTimeline;
+impl.buildUnifiedTimeline = (s) => rawBuildUnifiedTimeline(s, s ? s.strengthTraining : null);
 
 // ------------------------------------------------------------- fixtures
 function workout(id, date, unit, totalVolume) {
@@ -169,7 +176,7 @@ check('convert same unit is identity', impl.convertVolumeToUnit(100, 'kg', 'kg')
     .reduce((s, x) => s + x.totalVolume, 0);
   check('mutation baseline: raw sum is the buggy 200 that the assertions above reject', raw === 200);
   const mutatedSrc = src.replace(
-    'day.strengthVolume += convertVolumeToUnit(workout.totalVolume, workout.unit, snapshot.strengthTraining.displayUnit);',
+    'day.strengthVolume += convertVolumeToUnit(workout.totalVolume, workout.unit, strengthData.displayUnit);',
     'day.strengthVolume += workout.totalVolume;');
   check('mutation setup: removing the timeline conversion changes the source', mutatedSrc !== src);
 }

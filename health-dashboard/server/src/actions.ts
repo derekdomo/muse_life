@@ -574,6 +574,72 @@ function normalizeStoredStrength(value: unknown): StrengthTraining | null {
   return parsed.success ? parsed.data : null;
 }
 
+// Honest placeholder merged into a valid health snapshot when the standalone
+// strength snapshot is corrupt (H-SOURCE-001): it must never be filled with
+// the health snapshot's embedded (stale) strength data, because that would
+// present old training numbers as the current strength state.
+const CORRUPT_STRENGTH_PLACEHOLDER: StrengthTraining = {
+  updatedAt: null,
+  displayUnit: "lb",
+  workouts: [],
+  weeklyTrend: [],
+  note: "训练快照已损坏，重新同步后恢复。",
+};
+
+// Independent per-source loading (H-SOURCE-001): the health snapshot and
+// the standalone strength snapshot are read and validated separately, and
+// each outcome is one of ok / missing (no row) / corrupt (unparseable JSON
+// or schema mismatch). A failure in one source is recorded on that source
+// only — it can never make the other source disappear.
+type SourceState = "ok" | "missing" | "corrupt";
+
+interface HealthLoad {
+  state: SourceState;
+  snapshot: Snapshot | null;
+}
+
+interface StrengthLoad {
+  state: SourceState;
+  strength: StrengthTraining | null;
+}
+
+async function loadHealthSnapshot(ctx: Ctx): Promise<HealthLoad> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select({ payload: schema.healthSnapshot.payload }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
+  const row = rows[0];
+  if (!row) return { state: "missing", snapshot: null };
+  try {
+    const snapshot = normalizeStoredSnapshot(JSON.parse(row.payload));
+    return snapshot ? { state: "ok", snapshot } : { state: "corrupt", snapshot: null };
+  } catch {
+    return { state: "corrupt", snapshot: null };
+  }
+}
+
+async function loadStrengthSnapshot(ctx: Ctx): Promise<StrengthLoad> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select({ payload: schema.strengthTrainingSnapshot.payload }).from(schema.strengthTrainingSnapshot).where(eq(schema.strengthTrainingSnapshot.id, 1)).limit(1);
+  const row = rows[0];
+  if (!row) return { state: "missing", strength: null };
+  try {
+    const strength = normalizeStoredStrength(JSON.parse(row.payload));
+    return strength ? { state: "ok", strength } : { state: "corrupt", strength: null };
+  } catch {
+    return { state: "corrupt", strength: null };
+  }
+}
+
+// The strength data a reader should actually see: the standalone snapshot
+// wins when it loads; a missing standalone row falls back to the health
+// snapshot's embedded strengthTraining (legacy format compatibility); a
+// corrupt standalone row yields null rather than resurrecting stale
+// embedded data as if it were current.
+function effectiveStrength(health: HealthLoad, strength: StrengthLoad): StrengthTraining | null {
+  if (strength.state === "ok") return strength.strength;
+  if (strength.state === "missing" && health.state === "ok" && health.snapshot) return health.snapshot.strengthTraining;
+  return null;
+}
+
 type PersistOutcome = "applied" | "duplicate" | "conflict" | "ignored";
 
 // Atomic conditional write (L1-RACE-001): the version comparison and the
@@ -706,6 +772,14 @@ const getDashboardResponse = z.object({
   strengthSyncTaskId: z.string().nullable(),
   dataStatus: dataStatusSchema.nullable(),
   unifiedTimeline: z.array(unifiedDaySchema).max(14),
+  // Per-source load states (H-SOURCE-001): each source reports its own
+  // outcome so one missing/corrupt source never hides the other. `strength`
+  // is the standalone strength snapshot when it parses; when the standalone
+  // row is absent but the health snapshot embeds strength data, that
+  // embedded copy is returned; otherwise null.
+  healthState: z.enum(["ok", "missing", "corrupt"]),
+  strengthState: z.enum(["ok", "missing", "corrupt"]),
+  strength: strengthTrainingSchema.nullable(),
 });
 
 const diagnosticsResponse = z.object({
@@ -828,33 +902,47 @@ function freshnessFor(source: "health" | "strength", label: string, updatedAt: s
   return { source, label, updatedAt, dataDate, ageMinutes, freshness, detail: detailBase };
 }
 
-function buildDataStatus(snapshot: Snapshot | null, logs: SyncLogEntry[]): DataStatus {
+// Per-source data status (H-SOURCE-001): the health side is computed from
+// the health load alone and the strength side from the strength load alone
+// (with the legacy embedded fallback only when the standalone row is
+// missing). A corrupt source counts as missing for freshness, but its
+// detail says the snapshot is damaged so the user can tell "never synced"
+// apart from "synced but unreadable".
+function buildDataStatus(health: HealthLoad, strength: StrengthLoad, logs: SyncLogEntry[]): DataStatus {
   const nowIso = new Date().toISOString();
-  if (!snapshot) {
-    return {
-      generatedAt: nowIso,
-      health: freshnessFor("health", "Apple 健康", null, null, "尚未同步过健康数据"),
-      strength: freshnessFor("strength", "训练记录", null, null, "尚未同步过训练记录"),
-      overall: "empty",
-      overallLabel: "还没有数据",
-      recentLogs: logs,
-    };
+  const healthFresh = health.state === "ok" && health.snapshot
+    ? freshnessFor("health", "Apple 健康", health.snapshot.updatedAt, health.snapshot.dataDate, `数据日期 ${health.snapshot.dataDate}`)
+    : health.state === "corrupt"
+      ? freshnessFor("health", "Apple 健康", null, null, "健康快照损坏，等待重新同步")
+      : freshnessFor("health", "Apple 健康", null, null, "尚未同步过健康数据");
+  let strengthFresh: z.infer<typeof sourceFreshnessSchema>;
+  if (strength.state === "corrupt") {
+    strengthFresh = freshnessFor("strength", "训练记录", null, null, "训练快照损坏，等待重新同步");
+  } else {
+    const strengthData = effectiveStrength(health, strength);
+    if (strengthData) {
+      const latestStrengthDate = strengthData.workouts.length ? [...strengthData.workouts].sort((a, b) => b.date.localeCompare(a.date))[0]?.date ?? null : null;
+      strengthFresh = freshnessFor("strength", "训练记录", strengthData.updatedAt, latestStrengthDate, strengthData.workouts.length ? `共 ${strengthData.workouts.length} 次训练，最近 ${latestStrengthDate ?? "—"}` : "训练记录里暂无训练");
+    } else {
+      strengthFresh = freshnessFor("strength", "训练记录", null, null, "尚未同步过训练记录");
+    }
   }
-  const health = freshnessFor("health", "Apple 健康", snapshot.updatedAt, snapshot.dataDate, `数据日期 ${snapshot.dataDate}`);
-  const strengthUpdated = snapshot.strengthTraining.updatedAt;
-  const latestStrengthDate = snapshot.strengthTraining.workouts.length ? [...snapshot.strengthTraining.workouts].sort((a, b) => b.date.localeCompare(a.date))[0]?.date ?? null : null;
-  const strength = freshnessFor("strength", "训练记录", strengthUpdated, latestStrengthDate, snapshot.strengthTraining.workouts.length ? `共 ${snapshot.strengthTraining.workouts.length} 次训练，最近 ${latestStrengthDate ?? "—"}` : "训练记录里暂无训练");
   let overall: DataStatus["overall"] = "ok";
   let overallLabel = "两边数据都在新鲜期内";
-  if (health.freshness === "missing" && strength.freshness === "missing") { overall = "empty"; overallLabel = "还没有数据"; }
-  else if (health.freshness === "missing" || strength.freshness === "missing") { overall = "partial"; overallLabel = "有一边还没有数据"; }
-  else if (health.freshness === "stale" || strength.freshness === "stale") { overall = "stale"; overallLabel = "有一边数据已过期，打开看板会自动补同步"; }
-  else if (health.freshness === "today" || strength.freshness === "today") { overall = "ok"; overallLabel = "数据在今天更新过"; }
-  return { generatedAt: nowIso, health, strength, overall, overallLabel, recentLogs: logs };
+  if (healthFresh.freshness === "missing" && strengthFresh.freshness === "missing") { overall = "empty"; overallLabel = "还没有数据"; }
+  else if (healthFresh.freshness === "missing" || strengthFresh.freshness === "missing") { overall = "partial"; overallLabel = "有一边还没有数据"; }
+  else if (healthFresh.freshness === "stale" || strengthFresh.freshness === "stale") { overall = "stale"; overallLabel = "有一边数据已过期，打开看板会自动补同步"; }
+  else if (healthFresh.freshness === "today" || strengthFresh.freshness === "today") { overall = "ok"; overallLabel = "数据在今天更新过"; }
+  return { generatedAt: nowIso, health: healthFresh, strength: strengthFresh, overall, overallLabel, recentLogs: logs };
 }
 
-function buildUnifiedTimeline(snapshot: Snapshot | null): UnifiedDay[] {
-  if (!snapshot) return [];
+// Unified timeline built from whichever sources are usable (H-SOURCE-001):
+// health days come from the health snapshot, strength days from the
+// effective strength data (standalone first, embedded fallback), and the
+// two merge by date when both are present. Strength volume is converted
+// into the strength data's displayUnit (H-UNITS-001).
+function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: StrengthTraining | null): UnifiedDay[] {
+  if (!healthSnapshot && !strengthData) return [];
   const byDate = new Map<string, UnifiedDay>();
   const ensure = (date: string): UnifiedDay => {
     const existing = byDate.get(date);
@@ -863,24 +951,28 @@ function buildUnifiedTimeline(snapshot: Snapshot | null): UnifiedDay[] {
     byDate.set(date, created);
     return created;
   };
-  for (const row of snapshot.historyDaily) {
-    const day = ensure(row.date);
-    day.steps = row.steps;
-    day.restingHr = row.restingHr;
-    day.hrvMs = row.hrvMs;
-    day.hasHealth = true;
+  if (healthSnapshot) {
+    for (const row of healthSnapshot.historyDaily) {
+      const day = ensure(row.date);
+      day.steps = row.steps;
+      day.restingHr = row.restingHr;
+      day.hrvMs = row.hrvMs;
+      day.hasHealth = true;
+    }
+    for (const sleep of healthSnapshot.historySleeps) {
+      const day = ensure(sleep.date);
+      day.sleepHours = round(totalSleepHours(sleep, sleep.totalHours), 1);
+      day.hasHealth = true;
+    }
   }
-  for (const sleep of snapshot.historySleeps) {
-    const day = ensure(sleep.date);
-    day.sleepHours = round(totalSleepHours(sleep, sleep.totalHours), 1);
-    day.hasHealth = true;
-  }
-  for (const workout of snapshot.strengthTraining.workouts) {
-    const day = ensure(workout.date);
-    day.strengthSessions += 1;
-    day.strengthVolume += convertVolumeToUnit(workout.totalVolume, workout.unit, snapshot.strengthTraining.displayUnit);
-    if (!day.strengthRoutines.includes(workout.routine)) day.strengthRoutines.push(workout.routine);
-    day.hasStrength = true;
+  if (strengthData) {
+    for (const workout of strengthData.workouts) {
+      const day = ensure(workout.date);
+      day.strengthSessions += 1;
+      day.strengthVolume += convertVolumeToUnit(workout.totalVolume, workout.unit, strengthData.displayUnit);
+      if (!day.strengthRoutines.includes(workout.routine)) day.strengthRoutines.push(workout.routine);
+      day.hasStrength = true;
+    }
   }
   return [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14).map((day) => ({ ...day, strengthVolume: round(day.strengthVolume, 1) }));
 }
@@ -889,45 +981,44 @@ export const Actions = {
   getDashboard: defineAction({
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [] };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null };
+      // Independent per-source loads (H-SOURCE-001): each snapshot is read
+      // and validated on its own, so a missing or corrupt health snapshot
+      // can no longer swallow a valid strength snapshot (or vice versa),
+      // and no parse failure can drop the whole response into a catch-all.
+      const healthLoad = await loadHealthSnapshot(ctx);
+      const strengthLoad = await loadStrengthSnapshot(ctx);
+      const strength = effectiveStrength(healthLoad, strengthLoad);
+      // Strength data is local to a sibling artifact and changes as soon
+      // as the user logs a set there; every owner open kicks off (or
+      // reuses) a background re-sync — on every path, including when the
+      // health snapshot is missing or corrupt — and hands its task id to
+      // the client, which polls it to completion and repaints.
+      const strengthSyncTaskId = await maybeAutoSyncStrength(ctx);
+      const logs = await loadRecentLogs(ctx);
+      const dataStatus = buildDataStatus(healthLoad, strengthLoad, logs);
+      const unifiedTimeline = buildUnifiedTimeline(healthLoad.snapshot, strength);
+      if (healthLoad.state !== "ok" || !healthLoad.snapshot) {
+        // Never fabricate a health snapshot: snapshot and readiness stay
+        // null, while the strength side is returned exactly as it loaded.
+        return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
+      }
+      const health = healthLoad.snapshot;
+      // Merge for the combined views: a valid standalone strength snapshot
+      // overrides the embedded copy; a corrupt standalone row is replaced
+      // with an honest empty placeholder instead of the stale embedded data.
+      let snapshot = health;
+      if (strengthLoad.state === "ok" && strengthLoad.strength) {
+        snapshot = { ...health, strengthTraining: strengthLoad.strength };
+      } else if (strengthLoad.state === "corrupt") {
+        snapshot = { ...health, strengthTraining: CORRUPT_STRENGTH_PLACEHOLDER };
+      }
+      // Morning check-in is read only when the health snapshot is usable.
+      const readinessDate = health.morningReference?.date ?? shiftDate(health.dataDate, 1);
       const db = ctx.db<typeof schema>();
-      const healthRows = await db.select({ payload: schema.healthSnapshot.payload }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
-      const first = healthRows[0];
-      if (!first) {
-        const logs = await loadRecentLogs(ctx);
-        return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: buildDataStatus(null, logs), unifiedTimeline: [] };
-      }
-      try {
-        const health = normalizeStoredSnapshot(JSON.parse(first.payload));
-        if (!health) {
-          const logs = await loadRecentLogs(ctx);
-          return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: buildDataStatus(null, logs), unifiedTimeline: [] };
-        }
-        const readinessDate = health.morningReference?.date ?? shiftDate(health.dataDate, 1);
-        const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
-        const morningFeeling = checkinRows[0]?.feeling ?? null;
-        const strengthRows = await db.select({ payload: schema.strengthTrainingSnapshot.payload }).from(schema.strengthTrainingSnapshot).where(eq(schema.strengthTrainingSnapshot.id, 1)).limit(1);
-        const strengthPayload = strengthRows[0]?.payload;
-        let snapshot = health;
-        if (strengthPayload) {
-          try {
-            const strength = normalizeStoredStrength(JSON.parse(strengthPayload));
-            if (strength) snapshot = { ...health, strengthTraining: strength };
-          } catch {
-            // A malformed strength snapshot must not hide the HealthKit data.
-          }
-        }
-        // Strength data is local to a sibling artifact and changes as soon
-        // as the user logs a set there; every open kicks off (or reuses) a
-        // background re-sync — no staleness threshold — and hands its task
-        // id to the client, which polls it to completion and repaints with
-        // the fresh numbers in the same session.
-        const strengthSyncTaskId = await maybeAutoSyncStrength(ctx);
-        const logs = await loadRecentLogs(ctx);
-        return { forbidden: false, snapshot, readiness: calculateReadiness(snapshot, readinessDate, morningFeeling), strengthSyncTaskId, dataStatus: buildDataStatus(snapshot, logs), unifiedTimeline: buildUnifiedTimeline(snapshot) };
-      } catch {
-        return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [] };
-      }
+      const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
+      const morningFeeling = checkinRows[0]?.feeling ?? null;
+      return { forbidden: false, snapshot, readiness: calculateReadiness(snapshot, readinessDate, morningFeeling), strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
     },
   }),
 
@@ -1041,47 +1132,56 @@ export const Actions = {
       if (!isOwner(ctx)) {
         return { forbidden: true, generatedAt, verdict: "仅所有者可查看数据状态", checks: [], dataStatus: null, unifiedTimeline: [] };
       }
-      const db = ctx.db<typeof schema>();
-      const healthRows = await db.select({ payload: schema.healthSnapshot.payload }).from(schema.healthSnapshot).where(eq(schema.healthSnapshot.id, 1)).limit(1);
-      const first = healthRows[0];
-      let snapshot: Snapshot | null = null;
-      if (first) {
-        try {
-          const health = normalizeStoredSnapshot(JSON.parse(first.payload));
-          if (health) {
-            snapshot = health;
-            const strengthRows = await db.select({ payload: schema.strengthTrainingSnapshot.payload }).from(schema.strengthTrainingSnapshot).where(eq(schema.strengthTrainingSnapshot.id, 1)).limit(1);
-            const strengthPayload = strengthRows[0]?.payload;
-            if (strengthPayload) {
-              try {
-                const strength = normalizeStoredStrength(JSON.parse(strengthPayload));
-                if (strength) snapshot = { ...health, strengthTraining: strength };
-              } catch { /* keep health */ }
-            }
-          }
-        } catch { snapshot = null; }
-      }
+      // Independent per-source loads (H-SOURCE-001): health checks reflect
+      // only the health snapshot and strength checks only the strength
+      // snapshot, so a missing or corrupt health snapshot no longer skips
+      // the strength checks, the failure scan, or the timeline overlap.
+      const healthLoad = await loadHealthSnapshot(ctx);
+      const strengthLoad = await loadStrengthSnapshot(ctx);
+      const strength = effectiveStrength(healthLoad, strengthLoad);
       const logs = await loadRecentLogs(ctx);
-      const dataStatus = buildDataStatus(snapshot, logs);
-      const timeline = buildUnifiedTimeline(snapshot);
+      const dataStatus = buildDataStatus(healthLoad, strengthLoad, logs);
+      const timeline = buildUnifiedTimeline(healthLoad.snapshot, strength);
       const checks: z.infer<typeof diagnosticsResponse>["checks"] = [];
-      if (!snapshot) {
-        checks.push({ key: "health-present", label: "健康快照", ok: false, detail: "还没有健康快照，先点一次全部同步" });
-        checks.push({ key: "strength-present", label: "力量快照", ok: false, detail: "还没有力量快照" });
-      } else {
+      if (healthLoad.state === "ok" && healthLoad.snapshot) {
         const healthAge = dataStatus.health.ageMinutes;
-        checks.push({ key: "health-fresh", label: "健康数据新鲜度", ok: dataStatus.health.freshness === "fresh" || dataStatus.health.freshness === "today", detail: healthAge === null ? "没有更新时间" : `上次保存 ${healthAge} 分钟前 · 数据日期 ${snapshot.dataDate}` });
-        const strengthAge = dataStatus.strength.ageMinutes;
-        checks.push({ key: "strength-fresh", label: "训练数据新鲜度", ok: dataStatus.strength.freshness === "fresh" || dataStatus.strength.freshness === "today", detail: strengthAge === null ? "还没有成功同步过训练记录" : `上次保存 ${strengthAge} 分钟前 · 共 ${snapshot.strengthTraining.workouts.length} 次训练` });
-        const latestStrength = snapshot.strengthTraining.workouts.length ? [...snapshot.strengthTraining.workouts].sort((a, b) => b.date.localeCompare(a.date))[0] : undefined;
-        checks.push({ key: "strength-latest", label: "最近一次力量训练", ok: Boolean(latestStrength), detail: latestStrength ? `${latestStrength.date} · ${latestStrength.routine} · ${Math.round(latestStrength.totalVolume)} ${latestStrength.unit}` : "训练记录里暂无训练，或还没同步进来" });
-        const unifiedDays = timeline.filter((d) => d.hasHealth && d.hasStrength).length;
-        checks.push({ key: "unified-overlap", label: "一体时间线重合天数", ok: timeline.length > 0, detail: `近 ${timeline.length} 天里 ${unifiedDays} 天同时有健康与力量记录，其余天只有一边有记录是正常的` });
-        const failedLogs = logs.filter((l) => l.status === "failed");
-        checks.push({ key: "recent-failures", label: "近期同步失败", ok: failedLogs.length === 0, detail: failedLogs.length ? `最近有 ${failedLogs.length} 条失败记录：${failedLogs[0]?.note ?? ""}` : "最近 8 条台账里没有失败记录" });
+        checks.push({ key: "health-fresh", label: "健康数据新鲜度", ok: dataStatus.health.freshness === "fresh" || dataStatus.health.freshness === "today", detail: healthAge === null ? "没有更新时间" : `上次保存 ${healthAge} 分钟前 · 数据日期 ${healthLoad.snapshot.dataDate}` });
+      } else if (healthLoad.state === "corrupt") {
+        checks.push({ key: "health-present", label: "健康快照", ok: false, detail: "健康快照损坏，等待重新同步" });
+      } else {
+        checks.push({ key: "health-present", label: "健康快照", ok: false, detail: "还没有健康快照，先点一次全部同步" });
       }
+      if (strengthLoad.state === "corrupt") {
+        checks.push({ key: "strength-present", label: "力量快照", ok: false, detail: "训练快照损坏，等待重新同步" });
+      } else if (strength) {
+        const strengthAge = dataStatus.strength.ageMinutes;
+        checks.push({ key: "strength-fresh", label: "训练数据新鲜度", ok: dataStatus.strength.freshness === "fresh" || dataStatus.strength.freshness === "today", detail: strengthAge === null ? "还没有成功同步过训练记录" : `上次保存 ${strengthAge} 分钟前 · 共 ${strength.workouts.length} 次训练` });
+        const latestStrength = strength.workouts.length ? [...strength.workouts].sort((a, b) => b.date.localeCompare(a.date))[0] : undefined;
+        checks.push({ key: "strength-latest", label: "最近一次力量训练", ok: Boolean(latestStrength), detail: latestStrength ? `${latestStrength.date} · ${latestStrength.routine} · ${Math.round(latestStrength.totalVolume)} ${latestStrength.unit}` : "训练记录里暂无训练，或还没同步进来" });
+      } else {
+        checks.push({ key: "strength-present", label: "力量快照", ok: false, detail: "还没有力量快照" });
+      }
+      const failedLogs = logs.filter((l) => l.status === "failed");
+      checks.push({ key: "recent-failures", label: "近期同步失败", ok: failedLogs.length === 0, detail: failedLogs.length ? `最近有 ${failedLogs.length} 条失败记录：${failedLogs[0]?.note ?? ""}` : "最近 8 条台账里没有失败记录" });
+      const unifiedDays = timeline.filter((d) => d.hasHealth && d.hasStrength).length;
+      checks.push({ key: "unified-overlap", label: "一体时间线重合天数", ok: timeline.length > 0, detail: timeline.length ? `近 ${timeline.length} 天里 ${unifiedDays} 天同时有健康与力量记录，其余天只有一边有记录是正常的` : "统一时间线还没有任何一天的记录" });
       const failedCount = checks.filter((c) => !c.ok).length;
-      const verdict = !snapshot ? "还没有数据：先同步一次，台账会从第一次保存开始记录。" : failedCount === 0 ? "一体层正常：两边都有数据，近期没有静默失败。" : `发现 ${failedCount} 项需要留意：看下面每一项的说明，过期就点对应的同步，失败会留痕在台账里。`;
+      const healthUsable = healthLoad.state === "ok";
+      const strengthUsable = strength !== null;
+      const anyCorrupt = healthLoad.state === "corrupt" || strengthLoad.state === "corrupt";
+      let verdict: string;
+      if (!healthUsable && !strengthUsable && !anyCorrupt) {
+        verdict = "还没有数据：先同步一次，台账会从第一次保存开始记录。";
+      } else if (anyCorrupt) {
+        const corruptLabels = [healthLoad.state === "corrupt" ? "健康快照" : null, strengthLoad.state === "corrupt" ? "训练快照" : null].filter(Boolean).join("与");
+        verdict = `${corruptLabels}已损坏，等待重新同步；另一边的数据不受影响，照常可用。看下面每一项的说明，损坏的一边重新同步后会恢复。`;
+      } else if (!healthUsable || !strengthUsable) {
+        verdict = `只有一边有数据：${healthUsable ? "健康" : "训练记录"}这边有数据，${healthUsable ? "训练记录" : "健康"}这边还没有。看下面每一项的说明，缺失的一边点对应的同步即可。`;
+      } else if (failedCount === 0) {
+        verdict = "一体层正常：两边都有数据，近期没有静默失败。";
+      } else {
+        verdict = `发现 ${failedCount} 项需要留意：看下面每一项的说明，过期就点对应的同步，失败会留痕在台账里。`;
+      }
       await recordSyncLog(ctx, { source: "system", status: "diagnosed", itemCount: checks.length, note: `一键体检 · ${verdict}`, sourceUpdatedAt: null });
       return { forbidden: false, generatedAt, verdict, checks, dataStatus, unifiedTimeline: timeline };
     },

@@ -28,6 +28,8 @@ type Daily = Snapshot["historyDaily"][number];
 type StrengthWorkout = Snapshot["strengthTraining"]["workouts"][number];
 type DataStatus = NonNullable<DashboardResponse["dataStatus"]>;
 type UnifiedDay = DashboardResponse["unifiedTimeline"][number];
+type StrengthTraining = NonNullable<DashboardResponse["strength"]>;
+type SourceState = DashboardResponse["healthState"];
 type Tab = "today" | "trends" | "history";
 type Status = "正常" | "偏低" | "偏高" | "数据缺失" | "基线不足";
 
@@ -569,6 +571,30 @@ function Dashboard({ snapshot, readiness, dataStatus, unifiedTimeline, autoSyncF
   );
 }
 
+// Shown when the health snapshot is missing or corrupt but a standalone
+// strength snapshot exists (H-SOURCE-001): the training data is real and
+// must stay visible instead of being swallowed by the health empty state.
+function StrengthOnlyView({ strength, healthState, dataStatus, unifiedTimeline, onSyncHealth, healthSyncing, onSyncStrength, strengthSyncing }: {
+  strength: StrengthTraining; healthState: SourceState; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[];
+  onSyncHealth: () => void; healthSyncing: boolean; onSyncStrength: () => void; strengthSyncing: boolean;
+}) {
+  const corrupt = healthState === "corrupt";
+  return (
+    <div className="strength-only-view">
+      <section className="source-notice" aria-labelledby="strength-only-title">
+        <p className="section-kicker">只有训练数据</p>
+        <h1 id="strength-only-title">{corrupt ? "健康快照损坏" : "健康数据尚未同步"}</h1>
+        <p>{corrupt
+          ? "保存的健康快照已损坏，暂时读不出来；训练记录是独立保存的，不受影响，照常显示在下面。重新同步 Apple 健康后健康数据会恢复。"
+          : "还没有同步过 Apple 健康，所以步数、心率与睡眠暂时看不到；训练记录是独立同步的，已有训练照常显示在下面。"}</p>
+        <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={onSyncHealth} disabled={healthSyncing}>{healthSyncing ? "同步中…" : "同步 Apple 健康"}</button>
+      </section>
+      <StrengthPanel strength={strength} onSync={onSyncStrength} syncing={strengthSyncing} />
+      <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={strength.displayUnit} />
+    </div>
+  );
+}
+
 export function App() {
   const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: () => api.getDashboard({}) });
   const queryClient = useQueryClient();
@@ -594,17 +620,33 @@ export function App() {
       if (result.accepted) polling.startPolling([result.taskId, result.strengthTaskId]);
     },
   });
+  const strengthRefresh = useMutation({
+    mutationFn: () => api.refreshStrengthTraining({}),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      if (result.accepted) polling.startPolling([result.strengthTaskId]);
+    },
+  });
 
   const firstSyncing = firstSync.isPending || polling.syncing;
+  const strengthSyncing = strengthRefresh.isPending || polling.syncing;
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} /> : (
-        <div className="empty-state">
-          <h1>还没有健康数据</h1>
-          <p>尚未同步过 Apple 健康。点击下方按钮，从 HealthKit 同步最近的完整日数据后，这里会显示步数、心率、HRV 与睡眠。</p>
-          <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={() => firstSync.mutate()} disabled={firstSyncing}>{firstSyncing ? "同步中…" : "同步 Apple 健康"}</button>
-          {polling.failureNote ? <p role="status">{polling.failureNote}</p> : firstSync.data ? <p role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
-        </div>
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} /> : dashboard.data.strength ? (
+        <>
+          <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
+          {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
+        </>
+      ) : (
+        <>
+          <div className="empty-state">
+            <h1>还没有健康数据</h1>
+            <p>尚未同步过 Apple 健康。点击下方按钮，从 HealthKit 同步最近的完整日数据后，这里会显示步数、心率、HRV 与睡眠。</p>
+            <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={() => firstSync.mutate()} disabled={firstSyncing}>{firstSyncing ? "同步中…" : "同步 Apple 健康"}</button>
+            {polling.failureNote ? <p role="status">{polling.failureNote}</p> : firstSync.data ? <p role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
+          </div>
+          {dashboard.data.dataStatus ? <DataStatusPanel dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} displayUnit="lb" /> : null}
+        </>
       )}
       <footer>仅供健康参考，不做医疗诊断；身体不适请及时看医生。</footer>
     </main></div>
