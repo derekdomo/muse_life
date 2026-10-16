@@ -633,14 +633,65 @@ function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: W
   );
 }
 
-function WhoopHero({ snapshot, readiness }: { snapshot: Snapshot; readiness: Readiness | null }) {
+type HeroActionKind = "sync-health" | "sync-strength" | "view-status";
+type HeroSource = { dataDateLine: string; healthLine: string; strengthLine: string; action: { kind: HeroActionKind; label: string } };
+
+// H-UI-001 source strip: the hero must open with the data date and each
+// source's own status before any score is shown. The snapshot's dataDate is
+// the last complete day; the readiness reference may carry a different date
+// and is always labelled separately — the two clocks are never merged. The
+// whole strip reduces to exactly one primary action: retry whichever source
+// is missing/stale (health first), otherwise jump to the data-status panel.
+// No cross-artifact URL is guessed: opening the workout log from here is not
+// a platform capability, so the action stays inside this artifact.
+function heroSourceStatus(snapshot: Snapshot, readiness: Readiness | null, dataStatus: DataStatus | null): HeroSource {
+  const readinessDate = readiness?.date ?? null;
+  const dataDateLine = readinessDate === null
+    ? `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考缺失`
+    : readinessDate === snapshot.dataDate
+      ? `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考同日`
+      : `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考日期 ${readinessDate}`;
+  const sourceLine = (row: DataStatus["health"] | null): string => row === null
+    ? "来源状态未知"
+    : `${freshnessLabel(row.freshness)} · ${row.updatedAt ? `更新于 ${updatedLabel(row.updatedAt)}` : "尚未同步"}`;
+  const healthLine = sourceLine(dataStatus?.health ?? null);
+  const strengthLine = sourceLine(dataStatus?.strength ?? null);
+  const healthBad = dataStatus === null || dataStatus.health.freshness === "missing" || dataStatus.health.freshness === "stale";
+  const strengthBad = dataStatus !== null && (dataStatus.strength.freshness === "missing" || dataStatus.strength.freshness === "stale");
+  const action: { kind: HeroActionKind; label: string } = readiness === null || healthBad
+    ? { kind: "sync-health", label: "重新同步健康数据" }
+    : strengthBad
+      ? { kind: "sync-strength", label: "同步训练记录" }
+      : { kind: "view-status", label: "查看数据状态" };
+  return { dataDateLine, healthLine, strengthLine, action };
+}
+
+function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing }: { snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null; onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean }) {
   const recovery = recoveryScore(readiness);
   const sleep = sleepScore(snapshot, readiness);
   const strain = strainScore(snapshot);
   const load = weekLoad(snapshot, readiness);
   const sleepHours = actualSleepHours(snapshot.sleep);
+  const hero = heroSourceStatus(snapshot, readiness, dataStatus);
+  const heroActionBusy = syncing && hero.action.kind !== "view-status";
   return (
     <section className="whoop-hero" aria-labelledby="whoop-title">
+      <div className="whoop-source-strip">
+        <p className="whoop-source-date">{hero.dataDateLine}</p>
+        <p>Apple 健康 · {hero.healthLine}</p>
+        <p>训练记录 · {hero.strengthLine}</p>
+        <button
+          className="sync-button"
+          type="button"
+          aria-label={hero.action.label}
+          disabled={heroActionBusy}
+          onClick={() => {
+            if (hero.action.kind === "sync-health") onSyncHealth();
+            else if (hero.action.kind === "sync-strength") onSyncStrength();
+            else document.getElementById("data-status-panel")?.scrollIntoView({ behavior: "smooth" });
+          }}
+        >{heroActionBusy ? "同步中…" : hero.action.label}</button>
+      </div>
       <div className="whoop-head">
         <div>
           <p className="whoop-kicker">{dateLabel(readiness?.date ?? snapshot.dataDate)} · 今日状态</p>
@@ -776,7 +827,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   if (!dataStatus) return null;
   const rows = [dataStatus.health, dataStatus.strength];
   return (
-    <section className="data-status-panel" aria-labelledby="data-status-title">
+    <section className="data-status-panel" id="data-status-panel" aria-labelledby="data-status-title">
       <div className="section-heading">
         <div><p className="section-kicker">数据一体 · 状态</p><h2 id="data-status-title">数据状态</h2></div>
         <span className={`status-chip ${dataStatus.overall === "ok" ? "status-ok" : dataStatus.overall === "empty" ? "status-missing" : "status-watch"}`}>{dataStatus.overallLabel}</span>
@@ -834,7 +885,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, onSyncStrength, strengthSyncing, dataStatus, unifiedTimeline }: { snapshot: Snapshot; readiness: Readiness | null; onSyncStrength: () => void; strengthSyncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[] }) {
+function TodayView({ snapshot, readiness, onSyncStrength, onSyncHealth, strengthSyncing, dataStatus, unifiedTimeline }: { snapshot: Snapshot; readiness: Readiness | null; onSyncStrength: () => void; onSyncHealth: () => void; strengthSyncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[] }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
   const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineIncomplete ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
@@ -842,7 +893,7 @@ function TodayView({ snapshot, readiness, onSyncStrength, strengthSyncing, dataS
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={strengthSyncing} />
       {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
       <section className="verdict" aria-labelledby="verdict-title">
         <p>昨日概览</p>
@@ -1018,7 +1069,7 @@ function Dashboard({ snapshot, readiness, dataStatus, unifiedTimeline, autoSyncF
         <button type="button" className={tab === "trends" ? "selected" : ""} onClick={() => setTab("trends")}>趋势</button>
         <button type="button" className={tab === "history" ? "selected" : ""} onClick={() => setTab("history")}>历史</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} onSyncStrength={() => strengthRefresh.mutate()} onSyncHealth={() => refresh.mutate()} strengthSyncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );

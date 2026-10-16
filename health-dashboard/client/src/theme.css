@@ -110,6 +110,10 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .readiness-compact-head span { color: var(--dim); font-size: 11px; font-weight: 700; }
 
 .whoop-hero { --whoop-dim: #9aa79d; margin-top: 16px; padding: 22px 20px 18px; background: #101410; border: 1px solid #2a332c; border-radius: var(--radius); color: #f2f5f0; }
+.whoop-source-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #2a332c; }
+.whoop-source-strip p { margin: 0; color: var(--whoop-dim); font-size: 11px; font-weight: 600; }
+.whoop-source-strip .whoop-source-date { color: #dfe8df; font-weight: 700; }
+.whoop-source-strip .sync-button { margin-left: auto; min-height: 44px; }
 .whoop-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .whoop-kicker { margin: 0; color: var(--whoop-dim); font-size: 11px; font-weight: 700; }
 .whoop-head h1 { margin: 5px 0 0; font-size: clamp(27px, 7.4vw, 38px); line-height: 1.12; letter-spacing: -.03em; }
