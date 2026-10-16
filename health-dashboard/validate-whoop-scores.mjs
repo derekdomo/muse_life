@@ -43,8 +43,14 @@ function extractFunction(source, name) {
 
 check('source: WhoopHero driver hides missing sleep (hasSleepSession gate)',
   clientSrc.includes('hasSleepSession(snapshot) ? `${sleepHours.toFixed(1)} h` : "—"'));
-check('source: strain note states same-date + completeness rule',
-  clientSrc.includes('三项齐全时才换算'));
+check('source: strain note states unreviewed-formula downgrade',
+  clientSrc.includes('负荷评分公式未经审定'));
+check('source: readiness trend note states single-day interface, no stored history claim',
+  clientSrc.includes('当前接口仅返回单日恢复参考，历史未提供'));
+check('source: strain ring has no /21 suffix',
+  clientSrc.includes('score={strain} suffix=""'));
+check('source: no 0-21 strain formula or band labels remain',
+  !clientSrc.includes('负荷较轻') && !clientSrc.includes('负荷过高') && !clientSrc.includes('/ 21'));
 
 const FN_NAMES = ['numberLabel', 'actualSleepHours', 'percentBand', 'hasSleepSession', 'sleepScore', 'strainScore'];
 function buildFns(src) {
@@ -125,32 +131,34 @@ function readiness(over = {}) {
 // ------------------------------------------------------------ strainScore
 {
   const r = strainScore(snapshot({ historyDaily: [{ date: '2026-10-13', exerciseMinutes: 60, activeKcal: 300 }] }));
-  check('strain: no row on dataDate -> 数据不足, no cross-date splice',
-    r.pct === null && r.band === 'slate' && r.detail.includes('活动记录缺失'));
+  check('strain: no row on dataDate -> neutral 评分未确认, no cross-date splice',
+    r.pct === null && r.display === '—' && r.band === 'slate' && r.bandLabel === '评分未确认' && r.detail.includes('活动记录缺失'));
 }
 {
   const r = strainScore(snapshot({ historyDaily: [{ date: '2026-10-14', exerciseMinutes: null, activeKcal: 300 }] }));
-  check('strain: exercise null -> 数据不足 naming 运动时长缺失',
-    r.pct === null && r.detail.includes('运动时长缺失'));
+  check('strain: exercise null -> neutral, detail names 运动时长缺失 and keeps known facts',
+    r.pct === null && r.bandLabel === '评分未确认' && r.detail.includes('运动时长缺失') && r.detail.includes('活动 300 kcal'));
   const r2 = strainScore(snapshot({ historyDaily: [{ date: '2026-10-14', exerciseMinutes: 30, activeKcal: null }] }));
-  check('strain: kcal null -> 数据不足 naming 活动能量缺失',
-    r2.pct === null && r2.detail.includes('活动能量缺失'));
+  check('strain: kcal null -> neutral naming 活动能量缺失',
+    r2.pct === null && r2.bandLabel === '评分未确认' && r2.detail.includes('活动能量缺失'));
   const r3 = strainScore(snapshot({ steps: { value: null } }));
-  check('strain: steps null -> 数据不足 naming 步数缺失',
-    r3.pct === null && r3.detail.includes('步数缺失'));
+  check('strain: steps null -> neutral naming 步数缺失',
+    r3.pct === null && r3.bandLabel === '评分未确认' && r3.detail.includes('步数缺失'));
 }
 {
   const r = strainScore(snapshot({
     historyDaily: [{ date: '2026-10-14', exerciseMinutes: 0, activeKcal: 0 }],
     steps: { value: 0 },
   }));
-  check('strain: all three truly zero -> complete score 0.0 (valid zero is not missing)',
-    r.pct === 0 && r.display === '0.0' && r.band === 'blue');
+  check('strain: all three truly zero -> still neutral (no 0.0 score), facts show real zeros',
+    r.pct === null && r.display === '—' && r.band === 'slate' && r.bandLabel === '评分未确认'
+    && r.detail.includes('运动 0 分钟') && r.detail.includes('活动 0 kcal'));
 }
 {
   const r = strainScore(snapshot());
-  check('strain: complete data 60min/300kcal/6000 steps -> 10.5, pct 50, green',
-    r.display === '10.5' && r.pct === 50 && r.band === 'green');
+  check('strain: complete data 60min/300kcal/6000 steps -> still neutral, facts preserved, no numeric score',
+    r.pct === null && r.display === '—' && r.bandLabel === '评分未确认'
+    && r.detail.includes('运动 60 分钟') && r.detail.includes('活动 300 kcal'));
 }
 
 // ------------------------------------------------------------ mutation sensitivity
@@ -166,13 +174,15 @@ function readiness(over = {}) {
     '.find((daily) => daily.date === snapshot.dataDate) ?? snapshot.historyDaily[snapshot.historyDaily.length - 1]',
   ));
   const otherDay = snapshot({ historyDaily: [{ date: '2026-10-13', exerciseMinutes: 60, activeKcal: 300 }] });
-  check('mutation: restoring cross-date fallback flips no-row case to a score',
-    strainScore(otherDay).pct === null && withFallback.strainScore(otherDay).pct === 50);
+  check('mutation: restoring cross-date fallback flips no-row detail from 缺失 to spliced facts',
+    strainScore(otherDay).detail.includes('活动记录缺失') && withFallback.strainScore(otherDay).detail.includes('运动 60 分钟'));
 
-  const noMissingGate = buildFns(clientSrc.replace('if (missing) {', 'if (false) {'));
-  const partial = snapshot({ historyDaily: [{ date: '2026-10-14', exerciseMinutes: null, activeKcal: 300 }] });
-  check('mutation: removing strain missing-item gate flips exercise-null case to a score',
-    strainScore(partial).pct === null && noMissingGate.strainScore(partial).pct !== null);
+  const scored = buildFns(clientSrc.replace(
+    'return { ...neutral, detail: missing ? `${present} · ${missing}` : present };',
+    'return { pct: 50, display: "10.5", band: "green", bandLabel: "负荷适中", detail: present };',
+  ));
+  check('mutation: restoring a scored strain return flips complete case to a numeric score',
+    strainScore(snapshot()).pct === null && scored.strainScore(snapshot()).pct === 50);
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

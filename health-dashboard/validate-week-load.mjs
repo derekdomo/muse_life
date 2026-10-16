@@ -53,7 +53,7 @@ check('source: WeekLoad carries window ranges + readinessTrend, WhoopHero render
   clientSrc.includes('readinessTrend: ReadinessTrendPoint[];')
   && clientSrc.includes('currentWindow: { start: string; end: string }')
   && clientSrc.includes('load.readinessTrend.map')
-  && clientSrc.includes('服务端只保存最新一天分数，其余日期为缺口，不复制今日值'));
+  && clientSrc.includes('当前接口仅返回单日恢复参考，历史未提供，其余日期为缺口，不复制今日值'));
 check('source: no date-based HK strength dedup remains in weekLoad',
   !extractFunction(clientSrc, 'weekLoad').includes('strengthDates.has(session.date)'));
 check('source: no exerciseMinutes aggregation remains in weekLoad',
