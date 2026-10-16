@@ -50,8 +50,17 @@ function buildFns(src) {
 }
 const { heroSourceStatus } = buildFns(clientSrc);
 
+// Producer side: the REAL server freshnessFor from server/src/actions.ts —
+// buildDataStatus feeds it a corrupt-specific detailBase ("…快照损坏，等待
+// 重新同步") or a never-synced one ("尚未同步过…") with updatedAt null, and
+// both come out as freshness "missing". Feeding those producer rows into
+// the hero proves the corrupt vs never-synced distinction survives the
+// producer -> hero chain instead of being rewritten to 尚未同步.
+const serverSrc = readFileSync(new URL('./server/src/actions.ts', import.meta.url), 'utf8');
+const { freshnessFor } = new Function(`${stripTypeScriptTypes(extractFunction(serverSrc, 'freshnessFor'))}\nreturn { freshnessFor };`)();
+
 // ------------------------------------------------------------ synthetic data
-const row = (freshness, updatedAt = '2026-10-16T15:00:00Z') => ({ source: 'x', label: 'x', detail: '', freshness, updatedAt, ageMinutes: 30, dataDate: '2026-10-14' });
+const row = (freshness, updatedAt = '2026-10-16T15:00:00Z', detail = '') => ({ source: 'x', label: 'x', detail, freshness, updatedAt, ageMinutes: 30, dataDate: '2026-10-14' });
 const status = (health, strength) => ({ health, strength, overall: 'ok', overallLabel: '', recentLogs: [] });
 const snap = { dataDate: '2026-10-14' };
 const rd = (date = '2026-10-14') => ({ date });
@@ -86,9 +95,41 @@ const rd = (date = '2026-10-14') => ({ date });
 }
 {
   const r = heroSourceStatus(snap, rd(), status(row('fresh'), row('missing', null)));
-  check('health fresh + strength missing/never synced: line says 尚未同步, action syncs strength',
-    r.strengthLine.includes('还没有') && r.strengthLine.includes('尚未同步') && r.action.kind === 'sync-strength' && r.action.label === '同步训练记录');
+  check('health fresh + strength missing with empty detail: line falls back to 尚未同步, action syncs strength',
+    r.strengthLine === '尚未同步' && r.action.kind === 'sync-strength' && r.action.label === '同步训练记录');
 }
+{
+  // producer -> hero: corrupt strength snapshot (server detail) must NOT
+  // read as never synced.
+  const corruptStrength = freshnessFor('strength', '训练记录', null, null, '训练快照损坏，等待重新同步');
+  const neverStrength = freshnessFor('strength', '训练记录', null, null, '尚未同步过训练记录');
+  check('producer: corrupt and never-synced rows share freshness missing but keep distinct details',
+    corruptStrength.freshness === 'missing' && neverStrength.freshness === 'missing' && corruptStrength.detail !== neverStrength.detail);
+  const rc = heroSourceStatus(snap, rd(), status(row('fresh'), corruptStrength));
+  const rn = heroSourceStatus(snap, rd(), status(row('fresh'), neverStrength));
+  check('hero: corrupt strength line shows the damage reason, never-synced line differs, both keep the strength sync action',
+    rc.strengthLine === '训练快照损坏，等待重新同步' && rn.strengthLine === '尚未同步过训练记录'
+    && rc.strengthLine !== rn.strengthLine && rc.action.kind === 'sync-strength' && rn.action.kind === 'sync-strength');
+}
+{
+  const corruptHealth = freshnessFor('health', 'Apple 健康', null, null, '健康快照损坏，等待重新同步');
+  const neverHealth = freshnessFor('health', 'Apple 健康', null, null, '尚未同步过健康数据');
+  const rc = heroSourceStatus(snap, rd(), status(corruptHealth, row('fresh')));
+  const rn = heroSourceStatus(snap, rd(), status(neverHealth, row('fresh')));
+  check('hero: corrupt health line shows the damage reason vs never-synced, action retries health sync',
+    rc.healthLine === '健康快照损坏，等待重新同步' && rn.healthLine === '尚未同步过健康数据' && rc.action.kind === 'sync-health');
+}
+{
+  const partial = { dataDate: '2026-10-14', coverageIncomplete: true };
+  const rp = heroSourceStatus(partial, rd(), status(row('fresh'), row('fresh')));
+  check('partial coverage with fresh timestamps: coverage gap is visible on the first layer, action unchanged',
+    rp.coverageLine === '健康数据覆盖不完整：还没同步完（更新时间新鲜不代表覆盖完整）' && rp.action.kind === 'view-status');
+  const rf = heroSourceStatus(snap, rd(), status(row('fresh'), row('fresh')));
+  check('complete coverage: no coverage line',
+    rf.coverageLine === null);
+}
+check('source: coverage line renders inside the strip before the primary action',
+  clientSrc.includes('whoop-source-coverage') && clientSrc.indexOf('whoop-source-coverage') > clientSrc.indexOf('hero.strengthLine') && clientSrc.indexOf('whoop-source-coverage') < clientSrc.indexOf('heroActionBusy ? "同步中…"'));
 {
   const r = heroSourceStatus(snap, rd(), status(row('today'), row('stale')));
   check('health today + strength stale: action syncs strength',
@@ -109,6 +150,17 @@ const rd = (date = '2026-10-14') => ({ date });
   const both = [snap, rd(), status(row('stale'), row('missing'))];
   check('mutation: letting strength outrank health flips both-bad action to sync-strength',
     heroSourceStatus(...both).action.kind === 'sync-health' && strengthFirst.heroSourceStatus(...both).action.kind === 'sync-strength');
+
+  const noDetail = buildFns(clientSrc.replace('if (row.freshness === "missing") return row.detail ? row.detail : "尚未同步";', 'if (row.freshness === "missing") return "尚未同步";'));
+  const corruptStrength = freshnessFor('strength', '训练记录', null, null, '训练快照损坏，等待重新同步');
+  const cInput = [snap, rd(), status(row('fresh'), corruptStrength)];
+  check('mutation: dropping the detail passthrough rewrites the corrupt line back to 尚未同步',
+    heroSourceStatus(...cInput).strengthLine === '训练快照损坏，等待重新同步' && noDetail.heroSourceStatus(...cInput).strengthLine === '尚未同步');
+
+  const noCoverage = buildFns(clientSrc.replace('snapshot.coverageIncomplete ? "健康数据覆盖不完整', 'false ? "健康数据覆盖不完整'));
+  const pInput = [{ dataDate: '2026-10-14', coverageIncomplete: true }, rd(), status(row('fresh'), row('fresh'))];
+  check('mutation: dropping the coverageIncomplete gate hides the partial-coverage line',
+    heroSourceStatus(...pInput).coverageLine !== null && noCoverage.heroSourceStatus(...pInput).coverageLine === null);
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

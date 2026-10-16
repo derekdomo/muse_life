@@ -634,7 +634,7 @@ function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: W
 }
 
 type HeroActionKind = "sync-health" | "sync-strength" | "view-status";
-type HeroSource = { dataDateLine: string; healthLine: string; strengthLine: string; action: { kind: HeroActionKind; label: string } };
+type HeroSource = { dataDateLine: string; healthLine: string; strengthLine: string; coverageLine: string | null; action: { kind: HeroActionKind; label: string } };
 
 // H-UI-001 source strip: the hero must open with the data date and each
 // source's own status before any score is shown. The snapshot's dataDate is
@@ -651,11 +651,22 @@ function heroSourceStatus(snapshot: Snapshot, readiness: Readiness | null, dataS
     : readinessDate === snapshot.dataDate
       ? `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考同日`
       : `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考日期 ${readinessDate}`;
-  const sourceLine = (row: DataStatus["health"] | null): string => row === null
-    ? "来源状态未知"
-    : `${freshnessLabel(row.freshness)} · ${row.updatedAt ? `更新于 ${updatedLabel(row.updatedAt)}` : "尚未同步"}`;
+  // A missing freshness is not always "never synced": the server's
+  // buildDataStatus already distinguishes a corrupt snapshot (detail
+  // "…快照损坏，等待重新同步") from never synced (detail "尚未同步过…").
+  // The strip must surface that detail verbatim instead of rewriting both
+  // states to 尚未同步 (H-UI-001 source fidelity rework).
+  const sourceLine = (row: DataStatus["health"] | null): string => {
+    if (row === null) return "来源状态未知";
+    if (row.freshness === "missing") return row.detail ? row.detail : "尚未同步";
+    return `${freshnessLabel(row.freshness)} · ${row.updatedAt ? `更新于 ${updatedLabel(row.updatedAt)}` : "尚未同步"}`;
+  };
   const healthLine = sourceLine(dataStatus?.health ?? null);
   const strengthLine = sourceLine(dataStatus?.strength ?? null);
+  // Coverage is a separate axis from freshness: a source can be freshly
+  // updated yet still incomplete, and the strip must say so instead of
+  // letting a fresh timestamp read as complete data.
+  const coverageLine = snapshot.coverageIncomplete ? "健康数据覆盖不完整：还没同步完（更新时间新鲜不代表覆盖完整）" : null;
   const healthBad = dataStatus === null || dataStatus.health.freshness === "missing" || dataStatus.health.freshness === "stale";
   const strengthBad = dataStatus !== null && (dataStatus.strength.freshness === "missing" || dataStatus.strength.freshness === "stale");
   const action: { kind: HeroActionKind; label: string } = readiness === null || healthBad
@@ -663,7 +674,7 @@ function heroSourceStatus(snapshot: Snapshot, readiness: Readiness | null, dataS
     : strengthBad
       ? { kind: "sync-strength", label: "同步训练记录" }
       : { kind: "view-status", label: "查看数据状态" };
-  return { dataDateLine, healthLine, strengthLine, action };
+  return { dataDateLine, healthLine, strengthLine, coverageLine, action };
 }
 
 function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing }: { snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null; onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean }) {
@@ -680,6 +691,7 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
         <p className="whoop-source-date">{hero.dataDateLine}</p>
         <p>Apple 健康 · {hero.healthLine}</p>
         <p>训练记录 · {hero.strengthLine}</p>
+        {hero.coverageLine ? <p className="whoop-source-coverage">{hero.coverageLine}</p> : null}
         <button
           className="sync-button"
           type="button"
