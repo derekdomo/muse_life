@@ -277,7 +277,216 @@ function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["stre
   );
 }
 
-function ReadinessPanel({ readiness }: { readiness: Readiness }) {
+type WhoopBand = "green" | "yellow" | "red" | "blue" | "slate";
+
+interface WhoopScore {
+  pct: number | null;
+  display: string;
+  band: WhoopBand;
+  bandLabel: string;
+  detail: string;
+}
+
+function percentBand(pct: number): WhoopBand {
+  return pct >= 67 ? "green" : pct >= 34 ? "yellow" : "red";
+}
+
+function recoveryScore(readiness: Readiness | null): WhoopScore {
+  if (!readiness || readiness.score === null) {
+    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: "信号不足，暂不评分" };
+  }
+  const pct = Math.round(readiness.score * 10);
+  return {
+    pct,
+    display: String(pct),
+    band: percentBand(pct),
+    bandLabel: pct >= 67 ? "恢复良好" : pct >= 34 ? "恢复一般" : "需要恢复",
+    detail: readiness.status,
+  };
+}
+
+function sleepScore(snapshot: Snapshot, readiness: Readiness | null): WhoopScore {
+  const hours = actualSleepHours(snapshot.sleep);
+  const detail = `${hours.toFixed(1)} 小时 · ${snapshot.sleep.bedtime}–${snapshot.sleep.wakeTime}`;
+  const radarSleep = readiness?.radar.find((dimension) => dimension.key === "sleep");
+  if (radarSleep) {
+    const pct = Math.round(radarSleep.score * 10);
+    return {
+      pct,
+      display: String(pct),
+      band: percentBand(pct),
+      bandLabel: pct >= 67 ? "睡眠充足" : pct >= 34 ? "睡眠一般" : "睡眠不足",
+      detail,
+    };
+  }
+  // Fallback without readiness: duration against the personal mean of the
+  // stored sleep history (the same need estimate the server uses). Fewer
+  // than 8 nights means no honest score.
+  const history = snapshot.historySleeps.map((row) => row.totalHours);
+  if (history.length >= 8) {
+    const need = history.reduce((sum, value) => sum + value, 0) / history.length;
+    const pct = Math.max(0, Math.min(100, Math.round((hours / Math.max(need, 0.1)) * 100)));
+    return {
+      pct,
+      display: String(pct),
+      band: percentBand(pct),
+      bandLabel: pct >= 67 ? "睡眠充足" : pct >= 34 ? "睡眠一般" : "睡眠不足",
+      detail,
+    };
+  }
+  return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail };
+}
+
+function strainScore(snapshot: Snapshot): WhoopScore {
+  const row = snapshot.historyDaily.find((daily) => daily.date === snapshot.dataDate)
+    ?? snapshot.historyDaily[snapshot.historyDaily.length - 1];
+  const exercise = row?.exerciseMinutes ?? null;
+  const kcal = row?.activeKcal ?? null;
+  const steps = snapshot.steps.value;
+  if (exercise === null && kcal === null && steps === null) {
+    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: "最近完整日没有活动记录" };
+  }
+  // Whoop-style 0–21 day strain, built only from recorded quantities:
+  // exercise minutes up to 8 points, active energy up to 7, steps up to 6.
+  const value = Math.min(exercise ?? 0, 120) / 120 * 8
+    + Math.min(kcal ?? 0, 600) / 600 * 7
+    + Math.min(steps ?? 0, 12000) / 12000 * 6;
+  const band: WhoopBand = value < 7 ? "blue" : value < 14 ? "green" : value < 18 ? "yellow" : "red";
+  return {
+    pct: Math.round((value / 21) * 100),
+    display: value.toFixed(1),
+    band,
+    bandLabel: value < 7 ? "负荷较轻" : value < 14 ? "负荷适中" : value < 18 ? "负荷偏高" : "负荷过高",
+    detail: `运动 ${exercise === null ? "—" : `${Math.round(exercise)} 分钟`} · 活动 ${kcal === null ? "—" : `${Math.round(kcal)} kcal`} · ${steps === null ? "—" : `${numberLabel(steps)} 步`}`,
+  };
+}
+
+function mondayOf(date: string): string {
+  const parsed = new Date(`${date}T12:00:00Z`);
+  const weekday = parsed.getUTCDay();
+  parsed.setUTCDate(parsed.getUTCDate() + (weekday === 0 ? -6 : 1 - weekday));
+  return parsed.toISOString().slice(0, 10);
+}
+
+function shiftDateStr(date: string, days: number): string {
+  const parsed = new Date(`${date}T12:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
+interface WeekLoad {
+  band: WhoopBand;
+  verdict: string;
+  detail: string;
+}
+
+// H-LOAD-001: this week's load next to the recovery signals, with a
+// three-tier verdict. Thresholds follow the registered draft: rest when
+// HRV is suppressed with resting HR up, sleep debt ≥ 5h, or load up ≥ 40%
+// while recovery markers worsen; watch at +20–40%, HRV z ≤ −0.5, or debt
+// 3–5h. Insufficient coverage means no verdict, never a guessed one.
+function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
+  const weekStart = mondayOf(snapshot.dataDate);
+  const prevStart = shiftDateStr(weekStart, -7);
+  const sumExercise = (from: string, to: string) => {
+    const rows = snapshot.historyDaily.filter((row) => row.date >= from && row.date <= to && row.exerciseMinutes !== null);
+    return { total: rows.reduce((sum, row) => sum + (row.exerciseMinutes ?? 0), 0), days: rows.length };
+  };
+  const current = sumExercise(weekStart, snapshot.dataDate);
+  // Compare against the same weekday span of last week (上周同期), not the
+  // full previous week: the current week is still partial, so a full-week
+  // baseline would systematically fake a large drop early in the week.
+  const elapsedDays = Math.round((Date.parse(`${snapshot.dataDate}T12:00:00Z`) - Date.parse(`${weekStart}T12:00:00Z`)) / 86_400_000) + 1;
+  const previous = sumExercise(prevStart, shiftDateStr(prevStart, elapsedDays - 1));
+  const change = previous.total > 0 && previous.days >= elapsedDays - 1
+    ? Math.round(((current.total - previous.total) / previous.total) * 100)
+    : null;
+  const strengthCurrent = snapshot.strengthTraining.weeklyTrend.find((week) => week.weekStart === weekStart);
+  const recovery = recoveryScore(readiness);
+  const hrvZ = readiness?.components.find((component) => component.key === "hrv")?.zScore ?? null;
+  const restingZ = readiness?.components.find((component) => component.key === "restingHr")?.zScore ?? null;
+  const debt = readiness?.sleepDebtHours ?? null;
+
+  const detailParts = [
+    `本周运动 ${Math.round(current.total)} 分钟${change === null ? "" : `（较上周 ${change > 0 ? "+" : ""}${change}%）`}`,
+    strengthCurrent ? `力量 ${strengthCurrent.sessions} 次 · ${volumeLabel(strengthCurrent.volume)} ${snapshot.strengthTraining.displayUnit}` : "力量 本周暂无记录",
+    `恢复 ${recovery.display === "—" ? "—" : `${recovery.display}%`}${debt === null ? "" : ` · 睡眠债 ${debt.toFixed(1)}h`}`,
+  ];
+  const detail = detailParts.join(" · ");
+
+  if (!readiness || readiness.score === null) {
+    return { band: "slate", verdict: "恢复数据不足，先不下结论", detail };
+  }
+  const recoveryWorsening = (hrvZ !== null && hrvZ < 0) || (restingZ !== null && restingZ < 0) || (debt !== null && debt >= 3);
+  if ((hrvZ !== null && restingZ !== null && hrvZ <= -1 && restingZ <= -0.5)
+    || (debt !== null && debt >= 5)
+    || (change !== null && change >= 40 && recoveryWorsening)) {
+    return { band: "red", verdict: "该歇了：负荷或睡眠债已经压过恢复", detail };
+  }
+  if ((change !== null && change >= 20) || (hrvZ !== null && hrvZ <= -0.5) || (debt !== null && debt >= 3)) {
+    return { band: "yellow", verdict: "负荷偏高：今天降强度、早点睡", detail };
+  }
+  return { band: "green", verdict: "状态稳定，可以按计划训练", detail };
+}
+
+function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: WhoopScore; suffix: string; bandKind: "recovery" | "strain" }) {
+  const radius = 40;
+  const circumference = 2 * Math.PI * radius;
+  const filled = score.pct === null ? 0 : score.pct / 100;
+  return (
+    <div className={`whoop-score whoop-${score.band}`}>
+      <div className="whoop-ring" role="img" aria-label={`${label} ${score.display}${suffix}，${score.bandLabel}。${score.detail}`}>
+        <svg viewBox="0 0 96 96" aria-hidden="true">
+          <circle className="whoop-ring-track" cx="48" cy="48" r={radius} />
+          <circle className="whoop-ring-value" cx="48" cy="48" r={radius} strokeDasharray={circumference} strokeDashoffset={circumference * (1 - filled)} />
+        </svg>
+        <div className="whoop-ring-center"><strong>{score.display}</strong><span>{suffix}</span></div>
+      </div>
+      <span className="whoop-score-label">{label}</span>
+      <span className="whoop-band-label">{score.bandLabel}</span>
+      <div className={`whoop-band ${bandKind === "strain" ? "whoop-band-strain" : ""}`} aria-hidden="true">{score.pct === null ? null : <i style={{ left: `${score.pct}%` }} />}</div>
+      <p>{score.detail}</p>
+    </div>
+  );
+}
+
+function WhoopHero({ snapshot, readiness }: { snapshot: Snapshot; readiness: Readiness | null }) {
+  const recovery = recoveryScore(readiness);
+  const sleep = sleepScore(snapshot, readiness);
+  const strain = strainScore(snapshot);
+  const load = weekLoad(snapshot, readiness);
+  const sleepHours = actualSleepHours(snapshot.sleep);
+  return (
+    <section className="whoop-hero" aria-labelledby="whoop-title">
+      <div className="whoop-head">
+        <div>
+          <p className="whoop-kicker">{dateLabel(readiness?.date ?? snapshot.dataDate)} · 今日状态</p>
+          <h1 id="whoop-title">{readiness ? readiness.status : "数据不足"}</h1>
+        </div>
+        {readiness ? <span className="whoop-confidence">置信度{readiness.confidence} · {readiness.signalCount} 项信号</span> : null}
+      </div>
+      <p className="whoop-summary">{readiness?.summary ?? "至少需要两项具备历史基线的信号才能评分。"}</p>
+      <div className="whoop-scores">
+        <ScoreRing label="恢复" score={recovery} suffix="%" bandKind="recovery" />
+        <ScoreRing label="睡眠" score={sleep} suffix="%" bandKind="recovery" />
+        <ScoreRing label="负荷" score={strain} suffix="/ 21" bandKind="strain" />
+      </div>
+      <div className="whoop-drivers">
+        <div><span>HRV</span><strong>{snapshot.hrv.value === null ? "—" : `${numberLabel(snapshot.hrv.value, 1)} ms`}</strong></div>
+        <div><span>静息心率</span><strong>{snapshot.restingHr.value === null ? "—" : `${numberLabel(snapshot.restingHr.value, 1)} bpm`}</strong></div>
+        <div><span>昨晚睡眠</span><strong>{sleepHours.toFixed(1)} h</strong></div>
+        <div><span>睡眠债</span><strong>{readiness?.sleepDebtHours === null || readiness?.sleepDebtHours === undefined ? "—" : `${readiness.sleepDebtHours.toFixed(1)} h`}</strong></div>
+      </div>
+      <div className={`whoop-load whoop-${load.band}`}>
+        <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong>{load.verdict}</strong></div>
+        <p>{load.detail}</p>
+        <p className="whoop-load-note">负荷分由最近完整日的运动时长、活动能量与步数换算（0–21）；恢复与睡眠分沿用原有基线评分，只换了呈现方式。</p>
+      </div>
+    </section>
+  );
+}
+
+function ReadinessPanel({ readiness, compact = false }: { readiness: Readiness; compact?: boolean }) {
   const queryClient = useQueryClient();
   const [feeling, setFeeling] = useState(readiness.morningFeeling ?? 5);
   useEffect(() => setFeeling(readiness.morningFeeling ?? 5), [readiness.morningFeeling]);
@@ -287,7 +496,14 @@ function ReadinessPanel({ readiness }: { readiness: Readiness }) {
   });
   const scoreStyle = { "--readiness-score": (readiness.score ?? 0) * 10 } as CSSProperties;
   return (
-    <section className="readiness-panel" aria-labelledby="readiness-title">
+    <section className="readiness-panel">
+      {compact ? (
+        <div className="readiness-compact-head">
+          <p className="section-kicker">恢复详情</p>
+          <span>{readiness.status} · {readiness.score ?? "—"}/10 · 置信度{readiness.confidence}</span>
+        </div>
+      ) : null}
+      {compact ? null : (
       <div className="readiness-score-wrap">
         <div className={`readiness-ring readiness-${readiness.status}`} style={scoreStyle} role="img" aria-label={readiness.score === null ? "身体准备度数据不足" : `身体准备度 ${readiness.score} 分，满分 10 分`}>
           <div><strong>{readiness.score ?? "—"}</strong><span>/ 10</span></div>
@@ -299,6 +515,7 @@ function ReadinessPanel({ readiness }: { readiness: Readiness }) {
           {readiness.sleepDebtHours !== null ? <p className="sleep-debt">7 天睡眠债 <strong>{readiness.sleepDebtHours.toFixed(1)}h</strong></p> : null}
         </div>
       </div>
+      )}
 
       <div className="readiness-radar" aria-label="睡眠、恢复、运动、心肺、生命体征五维雷达图">
         <ResponsiveContainer width="100%" height="100%">
@@ -435,7 +652,8 @@ function TodayView({ snapshot, readiness, onSyncStrength, strengthSyncing, dataS
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
-      {readiness ? <ReadinessPanel readiness={readiness} /> : null}
+      <WhoopHero snapshot={snapshot} readiness={readiness} />
+      {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
       <section className="verdict" aria-labelledby="verdict-title">
         <p>昨日概览</p>
         <h1 id="verdict-title"><span>{numberLabel(snapshot.steps.value)}</span> 步，{stepSummary}；睡眠 <em>{sleepHours.toFixed(1)} 小时</em>。</h1>

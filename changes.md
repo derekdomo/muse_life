@@ -206,3 +206,11 @@
 - 交付内容（artifact 侧构建审计 pass、无控制台错误、手机宽度无溢出）：全站深色主题；今日页首屏为 WhoopHero——恢复（百分制）、睡眠（百分制）、负荷（0–21 制）三分数环，各带红黄绿状态带、档位标签与驱动指标（HRV、静息心率、昨晚睡眠、睡眠债）；首屏内含负荷判定块（本周运动时长 vs 上周同期环比、力量次数/容量、睡眠债，三档结论）；原恢复详情、昨日概览、指标、力量、数据状态、睡眠分期下沉至首屏之后。恢复/睡眠评分公式与数据口径未改；负荷分由最近完整日运动时长、活动能量与步数换算，口径标注于判定块下方。
 - 评审缺陷已修并复审确认 resolved：负荷环比改为与上周相同星期区间比较（不再拿未完整周比上周整周）；数据不足的分数在状态带上不再渲染误导性标记点。
 - 未实测（如实记录）：审计为非所有者身份，owner 视角首屏像素渲染未在审计环境截图验证（按源码与内容评审确认），待用户打开确认与 PM 验收。artifact 源码回灌本仓（预期仅 client 文件变化）待下一同步轮次完成，本条先行登记交付事实。
+
+## 2026-10-15（muse-life-plans-sync：H-UI-001 + H-LOAD-001 artifact 源码回灌本仓）
+
+- 处理说明：基线 `a7595f3` 之后新增三条提交——`5998bd6` 登记新编号条目 `H-LOAD-001`、`10530cf` 用户指示两条插队由 finance side chat 直办、`02f19a7` 交付登记（两条已在 artifact 上线、待 PM 验收、artifact 源码回灌待同步轮次完成）。本轮只做该回灌，不重复实现、不改服务端；两条整项不自行勾选，保持 `[ ]` 待 PM 验收。
+- 回灌内容（`health-dashboard`，仅 client 两文件，与交付登记预期一致）：`client/src/App.tsx` 新增 WhoopHero 首屏——恢复/睡眠/负荷三分数环（`recoveryScore`/`sleepScore`/`strainScore` 纯呈现函数，负荷分 0–21 由最近完整日运动时长、活动能量与步数换算）、红黄绿状态带（数据不足时不渲染标记点）、驱动指标行；`weekLoad` 判定块（H-LOAD-001）：本周运动时长 vs 上周相同星期区间环比、力量次数/容量、睡眠债并列，三档结论（该歇了 / 负荷偏高 / 状态稳定），恢复数据不足时不下结论；原 ReadinessPanel 改为下沉的恢复详情。`client/src/theme.css` 全站深色主题变量与 whoop-* 样式。服务端评分公式、数据口径、schema/migration、权限门禁均未动；回灌以 artifact（space-4）线上源码与仓库逐文件 diff 核对，除上述两文件外无其他差异，仓库专用验证脚本保留。
+- 验证证据：既有验证脚本全量回归通过——`validate-units.mjs` 25/25、`validate-source.mjs` 36/36、`validate-week-comparison.mjs` 25/25、`validate-week-coverage.mjs` 23/23、`validate-persist-race.mjs` 42/42、`validate-steps-display.mjs` 全部 PASS。回灌后以非 owner 上下文 `invoke_action getDashboard`（space-4）返回 `forbidden: true` 且 snapshot/readiness/dataStatus/strength 全为 null、时间线为空，门禁未破坏。生产库未做任何写入。
+- 已知限制：owner 视角首屏像素渲染与三视口证据仍待用户打开确认与 PM 验收（与交付登记一致）；H-LOAD-001 三档结论与数据不足态的构造例验证、数值与 week_summaries/HealthKit sessions 的独立对账待 PM 复核。回滚：revert 本次提交即可（App.tsx、theme.css 与本条记录），无数据迁移需回退。
+- 修改文件：`health-dashboard/client/src/App.tsx`、`health-dashboard/client/src/theme.css`、`changes.md`。不在本次范围：`H-WORKOUTS-001` 实现（下一轮按序）、`H-UNITS-001`/`H-SOURCE-001`/`L1-RACE-001` 运行证据、`L0.1/AUDIT-02` 用户拍板项。
