@@ -198,14 +198,32 @@ function useTaskPolling() {
 
 type StrengthWeek = Snapshot["strengthTraining"]["weeklyTrend"][number];
 
-// A week is comparable only when its coverage is known to be complete: the
-// sync recorded the unmeasured-set count and it is zero. A week whose count
-// was never recorded (older snapshot) or that contains any completed set
-// missing weight or reps — bodyweight sets included, their load is not
-// comparable — has a partial volume, and comparing it against a real total
-// would fabricate a percentage (e.g. a fake −100%).
+// A week is comparable only when its whole-week coverage is confirmed
+// (coverageComplete from the source's server-computed week summary), its
+// measured-set count is recorded, and it contains no completed set missing
+// weight or reps — bodyweight sets included, their load is not comparable.
+// A week carrying counts without coverageComplete (older snapshot) is
+// conservatively not comparable: its counts may come from a truncated
+// sample, and comparing a partial volume against a real total would
+// fabricate a percentage (e.g. a fake −100%).
 function weekIsComparable(week: StrengthWeek | undefined): week is StrengthWeek {
-  return week !== undefined && week.unmeasuredCompletedSets !== undefined && week.unmeasuredCompletedSets === 0;
+  return week !== undefined
+    && week.coverageComplete === true
+    && week.measuredCompletedSets !== undefined
+    && week.unmeasuredCompletedSets === 0;
+}
+
+// Why a pair of weeks cannot be compared, or null when they can. A week
+// known to contain unmeasured completed sets means the load itself is
+// incomplete; anything else (counts missing, whole-week coverage not yet
+// confirmed) is reported as unconfirmed coverage.
+function weekComparisonReason(current: StrengthWeek | undefined, previous: StrengthWeek | undefined): string | null {
+  if (current === undefined || previous === undefined) return null;
+  if (weekIsComparable(current) && weekIsComparable(previous)) return null;
+  if ((current.unmeasuredCompletedSets ?? 0) > 0 || (previous.unmeasuredCompletedSets ?? 0) > 0) {
+    return "部分已完成组缺重量或次数（含自重组），负荷不完整，周对比不计算百分比。";
+  }
+  return "整周覆盖尚未确认，周对比不计算百分比。";
 }
 
 function weekComparisonLabel(current: StrengthWeek | undefined, previous: StrengthWeek | undefined): string {
@@ -224,7 +242,13 @@ function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["stre
   const currentWeek = strength.weeklyTrend[strength.weeklyTrend.length - 1];
   const previousWeek = strength.weeklyTrend[strength.weeklyTrend.length - 2];
   const comparison = weekComparisonLabel(currentWeek, previousWeek);
-  const currentWeekIncomplete = currentWeek !== undefined && !weekIsComparable(currentWeek);
+  const comparisonReason = weekComparisonReason(currentWeek, previousWeek);
+  // Tag beside 本周负荷: a week known to miss sets is 不完整; a week whose
+  // whole-week coverage is merely unconfirmed is 未确认.
+  const currentUnmeasured = currentWeek?.unmeasuredCompletedSets ?? 0;
+  const currentWeekTag = currentWeek === undefined || weekIsComparable(currentWeek)
+    ? null
+    : currentUnmeasured > 0 ? "不完整" : "未确认";
 
   return (
     <section className="strength-panel" aria-labelledby="strength-title">
@@ -243,10 +267,10 @@ function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["stre
             <div className="strength-primary"><span>{latest.status === "active" ? "当前已完成训练量" : "总训练量"}</span><strong>{volumeLabel(latest.totalVolume)} <small>{latest.unit}</small></strong><p>{latest.completedSets}/{latest.totalSets} 组 · {durationLabel(latest.durationMinutes)}</p></div>
           </div>
           <div className="strength-week">
-            <div><span>本周负荷</span><strong>{volumeLabel(currentWeek?.volume ?? 0)} {strength.displayUnit}{currentWeekIncomplete ? <small className="incomplete-tag">不完整</small> : null}</strong></div>
+            <div><span>本周负荷</span><strong>{volumeLabel(currentWeek?.volume ?? 0)} {strength.displayUnit}{currentWeekTag ? <small className="incomplete-tag">{currentWeekTag}</small> : null}</strong></div>
             <div><span>对比上周</span><strong>{comparison}</strong></div>
           </div>
-          <p className="strength-note">{currentWeekIncomplete ? "部分已完成组缺重量或次数（含自重组），本周负荷不完整，周对比不计算百分比。" : "仅计算已完成且同时填写重量与次数的组。"}</p>
+          <p className="strength-note">{comparisonReason ?? "仅计算已完成且同时填写重量与次数的组。"}</p>
         </>
       ) : <p className="empty-inline">{strength.note}</p>}
     </section>

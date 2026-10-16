@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, asc, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull } from "drizzle-orm";
 import * as schema from "./schema";
 
 const routineSchema = z.enum(["push", "pull", "legs"]);
@@ -83,10 +83,20 @@ async function loadWorkout(ctx: Ctx, workoutId: number) {
 const startResponse = z.object({ forbidden: z.boolean(), workout: workoutResponse.nullable() });
 const doneResponse = z.object({ ok: z.boolean(), forbidden: z.boolean() });
 const addSetResponse = z.object({ forbidden: z.boolean(), set: setResponse.nullable() });
+const weekSummaryResponse = z.object({
+  week_start: z.string(),
+  sessions: z.number(),
+  measured_completed_sets: z.number(),
+  unmeasured_completed_sets: z.number(),
+  volume_lb: z.number(),
+  volume_kg: z.number(),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
   recent_workouts: z.array(workoutResponse),
+  week_summaries: z.array(weekSummaryResponse),
 });
 
 // Owner-only gate (AUDIT-02 / L0.1): every write, initialization, and
@@ -114,6 +124,104 @@ function isOwner(ctx: Ctx): boolean {
 // owner gate; this channel is read-only.
 function isOwnerOrSyncChannel(ctx: Ctx): boolean {
   return ctx.viewer === undefined || ctx.viewer === null || ctx.viewer.isOwner === true;
+}
+
+// Whole-week coverage summaries (H-UNITS-001). Pure and self-contained so
+// it can be extracted and run standalone: workouts carry id, completed_at
+// (ISO string) and unit; sets carry workout_id, weight, reps, completed;
+// now is the current instant. Weeks are bucketed by America/Los_Angeles
+// local date with Monday as the week start, and only the current and
+// previous week are returned (oldest first, both always present). Volume
+// is summed per workout in that workout's own unit — measured sets
+// (completed, with both weight and reps) contribute weight × reps to
+// volume_lb or volume_kg with NO unit conversion; completed sets missing
+// weight or reps count as unmeasured and contribute no volume.
+export function summarizeWeekSummaries(
+  workouts: { id: number; completed_at: string; unit: "lb" | "kg" }[],
+  sets: { workout_id: number; weight: number | null; reps: number | null; completed: boolean }[],
+  now: Date,
+): z.infer<typeof weekSummaryResponse>[] {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const laFormat = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const localParts = (date: Date) => {
+    let year = 0;
+    let month = 0;
+    let day = 0;
+    for (const part of laFormat.formatToParts(date)) {
+      if (part.type === "year") year = Number(part.value);
+      else if (part.type === "month") month = Number(part.value);
+      else if (part.type === "day") day = Number(part.value);
+    }
+    return { year, month, day };
+  };
+  const formatDate = (ms: number) => {
+    const d = new Date(ms);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  };
+  // UTC-midnight timestamp of the Monday (local LA date) of the week
+  // containing `date`.
+  const weekStartMs = (date: Date) => {
+    const { year, month, day } = localParts(date);
+    const dayMs = Date.UTC(year, month - 1, day);
+    const dow = new Date(dayMs).getUTCDay(); // 0 = Sunday
+    return dayMs - ((dow + 6) % 7) * DAY_MS;
+  };
+
+  const currentStart = weekStartMs(now);
+  const previousStart = currentStart - 7 * DAY_MS;
+  const buckets = new Map<number, z.infer<typeof weekSummaryResponse>>();
+  for (const start of [previousStart, currentStart]) {
+    buckets.set(start, {
+      week_start: formatDate(start),
+      sessions: 0,
+      measured_completed_sets: 0,
+      unmeasured_completed_sets: 0,
+      volume_lb: 0,
+      volume_kg: 0,
+    });
+  }
+
+  const workoutWeek = new Map<number, { start: number; unit: "lb" | "kg" }>();
+  for (const workout of workouts) {
+    const completedAt = new Date(workout.completed_at);
+    if (Number.isNaN(completedAt.getTime())) continue;
+    const start = weekStartMs(completedAt);
+    const bucket = buckets.get(start);
+    if (!bucket) continue;
+    bucket.sessions += 1;
+    workoutWeek.set(workout.id, { start, unit: workout.unit });
+  }
+
+  for (const set of sets) {
+    if (!set.completed) continue;
+    const info = workoutWeek.get(set.workout_id);
+    if (!info) continue;
+    const bucket = buckets.get(info.start);
+    if (!bucket) continue;
+    if (set.weight != null && set.reps != null) {
+      bucket.measured_completed_sets += 1;
+      const volume = set.weight * set.reps;
+      if (info.unit === "lb") bucket.volume_lb += volume;
+      else bucket.volume_kg += volume;
+    } else {
+      bucket.unmeasured_completed_sets += 1;
+    }
+  }
+
+  const result: z.infer<typeof weekSummaryResponse>[] = [];
+  for (const start of [previousStart, currentStart]) {
+    const bucket = buckets.get(start);
+    if (bucket) result.push(bucket);
+  }
+  return result;
 }
 
 function targetRepRange(target: string) {
@@ -148,7 +256,7 @@ export const Actions = {
       // isOwnerOrSyncChannel). A present non-owner viewer still gets
       // forbidden with zero data.
       if (!isOwnerOrSyncChannel(ctx)) {
-        return { forbidden: true, active_workout: null, recent_workouts: [] };
+        return { forbidden: true, active_workout: null, recent_workouts: [], week_summaries: [] };
       }
       const db = ctx.db<typeof schema>();
       const activeRows = await db
@@ -171,7 +279,56 @@ export const Actions = {
         const loaded = await loadWorkout(ctx, row.id);
         if (loaded) recentWorkouts.push(loaded);
       }
-      return { forbidden: false, active_workout: activeWorkout, recent_workouts: recentWorkouts };
+
+      // Whole-week coverage (H-UNITS-001): read ALL completed workouts from
+      // the last 21 days with NO limit truncation — recent_workouts above is
+      // capped by recent_limit, which silently dropped older same-week
+      // sessions from week-over-week volume. 21 days always covers the
+      // current and previous Monday-start weeks.
+      const now = new Date();
+      const cutoff = new Date(now.getTime() - 21 * 24 * 60 * 60 * 1000);
+      const weekWorkoutRows = await db
+        .select({
+          id: schema.workouts.id,
+          completedAt: schema.workouts.completedAt,
+          unit: schema.workouts.unit,
+        })
+        .from(schema.workouts)
+        .where(and(isNotNull(schema.workouts.completedAt), gte(schema.workouts.completedAt, cutoff)));
+      const weekWorkoutIds = weekWorkoutRows.map((row) => row.id);
+      const weekSetRows = weekWorkoutIds.length
+        ? await db
+            .select({
+              workoutId: schema.workoutSets.workoutId,
+              weight: schema.workoutSets.weight,
+              reps: schema.workoutSets.reps,
+              completed: schema.workoutSets.completed,
+            })
+            .from(schema.workoutSets)
+            .where(inArray(schema.workoutSets.workoutId, weekWorkoutIds))
+        : [];
+      const weekWorkoutInputs: { id: number; completed_at: string; unit: "lb" | "kg" }[] = [];
+      for (const row of weekWorkoutRows) {
+        if (row.completedAt) {
+          weekWorkoutInputs.push({ id: row.id, completed_at: row.completedAt.toISOString(), unit: row.unit });
+        }
+      }
+      const weekSummaries = summarizeWeekSummaries(
+        weekWorkoutInputs,
+        weekSetRows.map((row) => ({
+          workout_id: row.workoutId,
+          weight: row.weight,
+          reps: row.reps,
+          completed: row.completed,
+        })),
+        now,
+      );
+      return {
+        forbidden: false,
+        active_workout: activeWorkout,
+        recent_workouts: recentWorkouts,
+        week_summaries: weekSummaries,
+      };
     },
   }),
 

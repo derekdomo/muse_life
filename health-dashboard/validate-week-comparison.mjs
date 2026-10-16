@@ -29,18 +29,18 @@ check('server schema: measuredCompletedSets optional',
   serverSrc.includes('measuredCompletedSets: z.number().int().nonnegative().optional(),'));
 check('server schema: unmeasuredCompletedSets optional',
   serverSrc.includes('unmeasuredCompletedSets: z.number().int().nonnegative().optional(),'));
-check('sync prompt computes both counts per week',
-  serverSrc.includes('also report measuredCompletedSets and unmeasuredCompletedSets'));
-check('sync prompt counts bodyweight sets as unmeasured',
-  serverSrc.includes('bodyweight sets count as unmeasured'));
+check('sync prompt takes both counts per week from week_summaries',
+  serverSrc.includes('take sessions, measuredCompletedSets, and unmeasuredCompletedSets directly from that entry'));
+check('server schema: coverageComplete optional',
+  serverSrc.includes('coverageComplete: z.boolean().optional(),'));
 check('sync prompt forbids inferring coverage from the truncated workouts array',
-  serverSrc.includes('never infer whole-week coverage from the truncated workouts array'));
+  serverSrc.includes('never infer whole-week sessions or set counts from the truncated workouts list'));
 check('panel uses the shared comparison label',
   clientSrc.includes('const comparison = weekComparisonLabel(currentWeek, previousWeek);'));
 check('panel no longer computes the old raw delta expression',
   !clientSrc.includes('((currentWeek.volume - previousWeek.volume) / previousWeek.volume) * 100'));
-check('incomplete week is tagged in the panel',
-  clientSrc.includes('currentWeekIncomplete') && clientSrc.includes('不完整'));
+check('incomplete/unconfirmed weeks are tagged distinctly in the panel',
+  clientSrc.includes('currentWeekTag') && clientSrc.includes('不完整') && clientSrc.includes('未确认'));
 
 // ------------------------------------------------------- real-function run
 function matchDelim(s, start, open, close) {
@@ -66,7 +66,9 @@ const label = impl.weekComparisonLabel;
 
 // Week fixtures: volume is already in displayUnit (server/prompt contract).
 const wk = (volume, extra = {}) => ({ weekStart: '2026-10-05', sessions: 1, volume, ...extra });
-const measured = (volume, sets = 10) => wk(volume, { measuredCompletedSets: sets, unmeasuredCompletedSets: 0 });
+// A "measured" week under the current contract: counts recorded AND
+// whole-week coverage confirmed (coverageComplete from week_summaries).
+const measured = (volume, sets = 10) => wk(volume, { measuredCompletedSets: sets, unmeasuredCompletedSets: 0, coverageComplete: true });
 
 // PM counterexample, pre-fix formula reproduced for the record:
 {
@@ -102,11 +104,11 @@ check('one legacy week is enough to block the comparison',
 // sessions) is a genuine zero baseline -> no percentage, but also not
 // "无法比较":
 check('comparable zero previous week => — (no percentage, not 无法比较)',
-  label(measured(100), wk(0, { sessions: 0, measuredCompletedSets: 0, unmeasuredCompletedSets: 0 })) === '—');
+  label(measured(100), wk(0, { sessions: 0, measuredCompletedSets: 0, unmeasuredCompletedSets: 0, coverageComplete: true })) === '—');
 // Comparable current zero (no training this week, coverage recorded)
 // against a valid previous week is a real -100%:
 check('comparable zero current week vs valid 100 => -100% (genuine)',
-  label(wk(0, { sessions: 0, measuredCompletedSets: 0, unmeasuredCompletedSets: 0 }), measured(100)) === '-100%');
+  label(wk(0, { sessions: 0, measuredCompletedSets: 0, unmeasuredCompletedSets: 0, coverageComplete: true }), measured(100)) === '-100%');
 // All-valid mixed-unit weeks: weeklyTrend volumes are already converted
 // to displayUnit, so the ratio is the same in either display unit and
 // switching units cannot manufacture progress:
