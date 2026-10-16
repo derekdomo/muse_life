@@ -374,59 +374,183 @@ function shiftDateStr(date: string, days: number): string {
   return parsed.toISOString().slice(0, 10);
 }
 
+interface WeekLoadWindow {
+  sessions: number;
+  strengthSessions: number;
+  healthKitSessions: number;
+  durationMinutes: number | null;
+  strengthDurationMinutes: number | null;
+  healthKitDurationMinutes: number | null;
+  strengthVolume: number;
+}
+
 interface WeekLoad {
   band: WhoopBand;
   verdict: string;
   detail: string;
+  sufficient: boolean;
+  reasons: string[];
+  current: WeekLoadWindow;
+  previous: WeekLoadWindow;
+  sessionsChangePct: number | null;
+  durationChangePct: number | null;
+  volumeChangePct: number | null;
 }
 
-// H-LOAD-001: this week's load next to the recovery signals, with a
-// three-tier verdict. Thresholds follow the registered draft: rest when
-// HRV is suppressed with resting HR up, sleep debt ≥ 5h, or load up ≥ 40%
-// while recovery markers worsen; watch at +20–40%, HRV z ≤ −0.5, or debt
-// 3–5h. Insufficient coverage means no verdict, never a guessed one.
+const LB_TO_KG = 0.45359237;
+
+function volumeInDisplayUnit(volume: number, unit: "lb" | "kg", displayUnit: "lb" | "kg"): number {
+  if (unit === displayUnit) return volume;
+  return unit === "lb" ? volume * LB_TO_KG : volume / LB_TO_KG;
+}
+
+// H-LOAD-001 (rework): this week's load next to the recovery signals, with
+// a three-tier verdict. Both windows are explicit same-span date ranges —
+// this week mondayOf(dataDate)..dataDate and the same span shifted 7 days
+// back — and every fact comes from session-level records: HealthKit
+// workout sessions plus completed strength workouts from 训练记录, with
+// HK strength sessions on a date that already has a completed strength
+// workout counted once (the strength record wins). Any coverage gap in
+// either window — a missing or duplicated daily row, an unsynced or
+// partially measured strength week, a session without a duration — means
+// no percentage and no verdict, never a guessed one. Percentages are only
+// computed per metric when both windows are complete and last week's
+// value is above zero.
 function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const weekStart = mondayOf(snapshot.dataDate);
   const prevStart = shiftDateStr(weekStart, -7);
-  const sumExercise = (from: string, to: string) => {
-    const rows = snapshot.historyDaily.filter((row) => row.date >= from && row.date <= to && row.exerciseMinutes !== null);
-    return { total: rows.reduce((sum, row) => sum + (row.exerciseMinutes ?? 0), 0), days: rows.length };
-  };
-  const current = sumExercise(weekStart, snapshot.dataDate);
-  // Compare against the same weekday span of last week (上周同期), not the
-  // full previous week: the current week is still partial, so a full-week
-  // baseline would systematically fake a large drop early in the week.
   const elapsedDays = Math.round((Date.parse(`${snapshot.dataDate}T12:00:00Z`) - Date.parse(`${weekStart}T12:00:00Z`)) / 86_400_000) + 1;
-  const previous = sumExercise(prevStart, shiftDateStr(prevStart, elapsedDays - 1));
-  const change = previous.total > 0 && previous.days >= elapsedDays - 1
-    ? Math.round(((current.total - previous.total) / previous.total) * 100)
+  const currentDates = Array.from({ length: elapsedDays }, (_, index) => shiftDateStr(weekStart, index));
+  const previousDates = Array.from({ length: elapsedDays }, (_, index) => shiftDateStr(prevStart, index));
+  const strength = snapshot.strengthTraining;
+  const reasons: string[] = [];
+  const addReason = (reason: string) => { if (!reasons.includes(reason)) reasons.push(reason); };
+
+  if (snapshot.coverageIncomplete) addReason("健康数据还没同步完");
+
+  // Daily coverage: every enumerated date in both windows must appear in
+  // historyDaily exactly once.
+  const dailyCounts = new Map<string, number>();
+  for (const row of snapshot.historyDaily) dailyCounts.set(row.date, (dailyCounts.get(row.date) ?? 0) + 1);
+  const checkDaily = (dates: string[], label: string) => {
+    const missing = dates.filter((date) => !dailyCounts.has(date));
+    if (missing.length) addReason(`${label}每日记录缺 ${missing.join("、")}`);
+    const duplicated = dates.filter((date) => (dailyCounts.get(date) ?? 0) > 1);
+    if (duplicated.length) addReason(`${label}每日记录 ${duplicated.join("、")} 重复`);
+  };
+  checkDaily(currentDates, "本周");
+  checkDaily(previousDates, "上周同期");
+
+  // Strength completeness per window week: the weeklyTrend entry for the
+  // week the window starts in must exist, carry confirmed whole-week
+  // coverage and both set counts, contain no unmeasured completed set, and
+  // agree with the workouts list on the whole week's completed sessions —
+  // otherwise the (capped) list cannot prove the window is complete.
+  if (strength.updatedAt === null) {
+    addReason("力量训练尚未同步");
+  } else {
+    const checkStrengthWeek = (start: string, label: string) => {
+      const week = strength.weeklyTrend.find((entry) => entry.weekStart === start);
+      if (!week) { addReason(`${label}力量周汇总缺失`); return; }
+      if (week.coverageComplete !== true) addReason(`${label}力量整周覆盖未确认`);
+      if (week.measuredCompletedSets === undefined || week.unmeasuredCompletedSets === undefined) {
+        addReason(`${label}力量已完成组计数缺失`);
+      } else if (week.unmeasuredCompletedSets > 0) {
+        addReason("部分已完成组缺重量或次数，负荷不完整");
+      }
+      const weekEnd = shiftDateStr(start, 6);
+      const listed = strength.workouts.filter((workout) => workout.status === "completed" && workout.date >= start && workout.date <= weekEnd).length;
+      if (listed !== week.sessions) addReason("力量训练列表与整周汇总不一致，无法证明同窗完整");
+    };
+    checkStrengthWeek(weekStart, "本周");
+    checkStrengthWeek(prevStart, "上周");
+  }
+
+  const windowFacts = (dates: string[], label: string): WeekLoadWindow => {
+    const inWindow = new Set(dates);
+    const strengthDone = strength.workouts.filter((workout) => workout.status === "completed" && inWindow.has(workout.date));
+    const strengthDates = new Set(strengthDone.map((workout) => workout.date));
+    const hkKept = snapshot.historyWorkouts.filter((session) => inWindow.has(session.date)
+      && !(session.type.toLowerCase().includes("strength") && strengthDates.has(session.date)));
+    const strengthDuration = strengthDone.some((workout) => workout.durationMinutes === null)
+      ? null
+      : strengthDone.reduce((sum, workout) => sum + (workout.durationMinutes ?? 0), 0);
+    if (strengthDuration === null) addReason(`${label}有力量场次时长缺失，时长不完整`);
+    const hkDuration = hkKept.some((session) => session.durationMinutes === null)
+      ? null
+      : hkKept.reduce((sum, session) => sum + (session.durationMinutes ?? 0), 0);
+    if (hkDuration === null) addReason(`${label}有训练时长缺失，时长不完整`);
+    return {
+      sessions: strengthDone.length + hkKept.length,
+      strengthSessions: strengthDone.length,
+      healthKitSessions: hkKept.length,
+      durationMinutes: strengthDuration === null || hkDuration === null ? null : strengthDuration + hkDuration,
+      strengthDurationMinutes: strengthDuration,
+      healthKitDurationMinutes: hkDuration,
+      strengthVolume: strengthDone.reduce((sum, workout) => sum + volumeInDisplayUnit(workout.totalVolume, workout.unit, strength.displayUnit), 0),
+    };
+  };
+  const current = windowFacts(currentDates, "本周");
+  const previous = windowFacts(previousDates, "上周同期");
+
+  const sufficient = reasons.length === 0;
+  const pctChange = (now: number, before: number): number | null => (sufficient && before > 0 ? ((now - before) / before) * 100 : null);
+  const sessionsChangePct = pctChange(current.sessions, previous.sessions);
+  const durationChangePct = current.durationMinutes !== null && previous.durationMinutes !== null
+    ? pctChange(current.durationMinutes, previous.durationMinutes)
     : null;
-  const strengthCurrent = snapshot.strengthTraining.weeklyTrend.find((week) => week.weekStart === weekStart);
+  const volumeChangePct = pctChange(current.strengthVolume, previous.strengthVolume);
+  const facts = { sufficient, reasons, current, previous, sessionsChangePct, durationChangePct, volumeChangePct };
+
   const recovery = recoveryScore(readiness);
   const hrvZ = readiness?.components.find((component) => component.key === "hrv")?.zScore ?? null;
   const restingZ = readiness?.components.find((component) => component.key === "restingHr")?.zScore ?? null;
   const debt = readiness?.sleepDebtHours ?? null;
+  const pctText = (value: number) => `${value > 0 ? "+" : ""}${Math.round(value)}%`;
+  const factsDetail = (withPct: boolean): string => {
+    const durationNote = !withPct ? ""
+      : durationChangePct !== null ? `（时长较上周同期 ${pctText(durationChangePct)}）`
+      : previous.durationMinutes === 0 ? "（上周同期时长为 0，不算百分比）" : "";
+    const volumeNote = !withPct ? ""
+      : volumeChangePct !== null ? `（容量较上周同期 ${pctText(volumeChangePct)}）`
+      : previous.strengthVolume === 0 ? "（上周同期容量为 0，不算百分比）" : "";
+    return [
+      `本周训练 ${current.sessions} 次 · ${current.durationMinutes === null ? "时长不完整" : `${Math.round(current.durationMinutes)} 分钟`}${durationNote}`,
+      `上周同期 ${previous.sessions} 次 · ${previous.durationMinutes === null ? "时长不完整" : `${Math.round(previous.durationMinutes)} 分钟`}`,
+      `力量 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}${volumeNote}`,
+      `恢复 ${recovery.display === "—" ? "—" : `${recovery.display}%`}${debt === null ? "" : ` · 睡眠债 ${debt.toFixed(1)}h`}`,
+    ].join(" · ");
+  };
 
-  const detailParts = [
-    `本周运动 ${Math.round(current.total)} 分钟${change === null ? "" : `（较上周 ${change > 0 ? "+" : ""}${change}%）`}`,
-    strengthCurrent ? `力量 ${strengthCurrent.sessions} 次 · ${volumeLabel(strengthCurrent.volume)} ${snapshot.strengthTraining.displayUnit}` : "力量 本周暂无记录",
-    `恢复 ${recovery.display === "—" ? "—" : `${recovery.display}%`}${debt === null ? "" : ` · 睡眠债 ${debt.toFixed(1)}h`}`,
-  ];
-  const detail = detailParts.join(" · ");
-
+  if (!sufficient) {
+    const knownParts = [
+      `本周已知训练 ${current.sessions} 次`,
+      current.durationMinutes === null ? "本周时长不完整" : `本周时长 ${Math.round(current.durationMinutes)} 分钟`,
+    ];
+    if (strength.updatedAt !== null) knownParts.push(`力量 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}`);
+    knownParts.push(`数据不足：${reasons.join("；")}`);
+    return { band: "slate", verdict: `数据不足：${reasons[0] ?? "覆盖不完整"}`, detail: knownParts.join(" · "), ...facts };
+  }
   if (!readiness || readiness.score === null) {
-    return { band: "slate", verdict: "恢复数据不足，先不下结论", detail };
+    return { band: "slate", verdict: "恢复数据不足，先不下结论", detail: factsDetail(false), ...facts };
   }
-  const recoveryWorsening = (hrvZ !== null && hrvZ < 0) || (restingZ !== null && restingZ < 0) || (debt !== null && debt >= 3);
-  if ((hrvZ !== null && restingZ !== null && hrvZ <= -1 && restingZ <= -0.5)
+  const detail = factsDetail(true);
+  const recoveryWorsening = (hrvZ !== null && hrvZ < 0) || (restingZ !== null && restingZ < 0);
+  if (readiness.score < 2
+    || (hrvZ !== null && restingZ !== null && hrvZ <= -1 && restingZ <= -0.5)
     || (debt !== null && debt >= 5)
-    || (change !== null && change >= 40 && recoveryWorsening)) {
-    return { band: "red", verdict: "该歇了：负荷或睡眠债已经压过恢复", detail };
+    || (durationChangePct !== null && durationChangePct >= 40 && recoveryWorsening)) {
+    return { band: "red", verdict: "该歇了：恢复跟不上，今天休息或只做轻活动", detail, ...facts };
   }
-  if ((change !== null && change >= 20) || (hrvZ !== null && hrvZ <= -0.5) || (debt !== null && debt >= 3)) {
-    return { band: "yellow", verdict: "负荷偏高：今天降强度、早点睡", detail };
+  if ((durationChangePct !== null && durationChangePct >= 20)
+    || (hrvZ !== null && hrvZ <= -0.5)
+    || (debt !== null && debt >= 3)) {
+    return { band: "yellow", verdict: "负荷偏高：今天降强度、早点睡", detail, ...facts };
   }
-  return { band: "green", verdict: "状态稳定，可以按计划训练", detail };
+  if (readiness.confidence === "低") {
+    return { band: "slate", verdict: "恢复置信度低，先不下结论", detail, ...facts };
+  }
+  return { band: "green", verdict: "状态稳定，可以按计划训练", detail, ...facts };
 }
 
 function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: WhoopScore; suffix: string; bandKind: "recovery" | "strain" }) {
