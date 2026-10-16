@@ -166,3 +166,14 @@
 - 用户 2026-10-15 在 finance dash side chat 发现并拍板：健康看板只显示游泳，其他运动看不到，要求登记修复、所有运动都显示出来。
 - 实现方核查结论（源码 + 用户真实数据）：`health-dashboard` 的 HealthKit refresh 已按近 30 天窗口查询全部 workout sessions 并存入 `historyWorkouts`（不分类型），缺口在展示层——`client/src/App.tsx` 仅按 `swim` 过滤渲染游泳专区，其余类型（用户近 30 天实测另有骑行 4 次、椭圆机 1 次）存而不可见；统一时间线未合入 HealthKit 运动。
 - 已在 `plans.md` 新增编号条目 `H-WORKOUTS-001`（全部运动记录区 + 统一时间线合入 + 口径不变 + 以 health-cli sessions 计数对账验收）。本条只登记需求，未改实现代码，由后续同步轮次执行交付。
+
+## 2026-10-15（muse-life-plans-sync：H-UNITS-001 缺失训练量可比性返工）
+
+- 处理说明：本轮基线 `561d1d5` 之后新增两条提交——`38b1c6a`（PM 17:35 复核：H-UNITS-001 换算通过、缺失组可比性返工）与 `f4af710`（新登记 `H-WORKOUTS-001`）。按 plans.md「推荐执行顺序」与 PM「下一实现仅 H-UNITS-001 缺失量可比性收尾」，本轮只交付该返工（本轮仅此一项）；`H-WORKOUTS-001` 为新编号条目，本轮未动，留下轮按序推进。整项不自行勾选，保持 `[ ]` 待 PM 验收。
+- `H-UNITS-001` 返工（health-dashboard）：先在 artifact（space-4）修改并审计通过、再回灌本仓。未重做已通过的 lb/kg 换算，未改 readiness 评分/PR 算法，无 schema migration，权限门禁语义未动。
+  - **附加式 coverage 契约**：`strengthWeekSchema` 每周新增两个可选计数——`measuredCompletedSets`（已完成且重量与次数都有值的组数）与 `unmeasuredCompletedSets`（已完成但缺重量或缺次数的组数，自重组计入此类，其负荷不可比）。`STRENGTH_SYNC_PROMPT` 要求同步任务按周与 volume 同一遍、同一完整数据源计算这两计数，并明文禁止从 payload 中截断（上限 20 条）的 workouts 列表推断整周 coverage。
+  - **旧快照降级（兼容策略）**：新字段可选，旧快照照常解析；计数未记录的周一律视为 coverage 未知、不可比——下一次力量同步写入新计数后自动恢复可比，不需要迁移或回填。回滚 revert 本次提交即可，旧代码忽略新字段、旧快照读回不变。
+  - **客户端对比逻辑**：`client/src/App.tsx` 新增纯函数 `weekIsComparable` / `weekComparisonLabel`，StrengthPanel 改用之：任一周缺失→「—」；任一周计数未记录（旧快照）或 `unmeasuredCompletedSets > 0`→「无法比较」，不输出百分比；两周都可比但上周 volume 为 0（有效零基）→「—」；仅两周都可比且上周 volume > 0 才输出带符号百分比。本周不可比时负荷数值后标「不完整」，面板说明改为「部分已完成组缺重量或次数（含自重组），本周负荷不完整，周对比不计算百分比。」；`theme.css` 新增 `.incomplete-tag` 样式。历史页周趋势图未改（其单周柱仍为已测 volume，属本条范围外，留 PM 判断）。
+- 验证证据（均为 synthetic 数据，无真实健康数值入仓）：(1) 新增 `health-dashboard/validate-week-comparison.mjs`（纯 Node、无依赖）——源码断言 8 项 + 以 `node:module.stripTypeScriptTypes` 抽取**真实** `weekIsComparable`/`weekComparisonLabel` 运行 17 组：修前反例复刻（旧公式对 PM 反例输入输出 −100%）；缺重量、缺次数、全未知、部分缺失（本周/上周两侧）、自重不可比、旧快照无计数→均「无法比较」；有效零基→「—」；可比零本周 vs 有效上周→真实 −100%；全有效混单位 kg 145.4 vs 100 与切 lb 320.5 vs 220.5 同为 +45%（切单位不制造进步）；缺周→「—」。**25 passed, 0 failed**，退出 0。(2) 既有回归全过：`validate-units.mjs` 25/25、`validate-source.mjs` 36/36、`validate-steps-display.mjs` PASS、`validate-persist-race.mjs` 42/42。(3) artifact 构建审计 verdict pass、fix_before_attesting 为空；内容评审逐项核对客户端四分支与服务端 schema/prompt；上线后以非 owner 上下文 `invoke_action getDashboard` 返回 `forbidden: true` 且 snapshot/readiness/dataStatus 均为 null、strength 为 null、时间线为空，门禁未破坏。生产库未做任何写入。
+- 已知限制：审计与 invoke 上下文均为非 owner，owner 视角今日/历史页三视口（390×844 / 430×932 / 桌面）目视证据仍待 PM 以 owner 会话验收；新计数需下一次真实力量同步后才出现在快照里，在此之前现有快照的周对比会按旧快照降级显示「无法比较」，属预期行为。
+- 修改文件：`health-dashboard/server/src/actions.ts`、`health-dashboard/client/src/App.tsx`、`health-dashboard/client/src/theme.css`、`health-dashboard/validate-week-comparison.mjs`（新增）、`changes.md`。不在本次范围：`H-WORKOUTS-001`（新登记，留下轮）、`H-SOURCE-001` 完整 handler/五状态页面验收、`L1-RACE-001` artifact 运行证据、`L0.1/AUDIT-02` 用户拍板项。

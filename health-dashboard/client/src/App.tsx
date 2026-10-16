@@ -196,14 +196,35 @@ function useTaskPolling() {
   return { syncing, failureNote, startPolling };
 }
 
+type StrengthWeek = Snapshot["strengthTraining"]["weeklyTrend"][number];
+
+// A week is comparable only when its coverage is known to be complete: the
+// sync recorded the unmeasured-set count and it is zero. A week whose count
+// was never recorded (older snapshot) or that contains any completed set
+// missing weight or reps — bodyweight sets included, their load is not
+// comparable — has a partial volume, and comparing it against a real total
+// would fabricate a percentage (e.g. a fake −100%).
+function weekIsComparable(week: StrengthWeek | undefined): week is StrengthWeek {
+  return week !== undefined && week.unmeasuredCompletedSets !== undefined && week.unmeasuredCompletedSets === 0;
+}
+
+function weekComparisonLabel(current: StrengthWeek | undefined, previous: StrengthWeek | undefined): string {
+  if (current === undefined || previous === undefined) return "—";
+  if (!weekIsComparable(current) || !weekIsComparable(previous)) return "无法比较";
+  // Both weeks fully measured but last week is a genuine zero baseline:
+  // there is no meaningful percentage, and it is not "无法比较" either.
+  if (previous.volume === 0) return "—";
+  const delta = Math.round(((current.volume - previous.volume) / previous.volume) * 100);
+  return `${delta > 0 ? "+" : ""}${delta}%`;
+}
+
 function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["strengthTraining"]; onSync: () => void; syncing: boolean }) {
   const workouts = [...strength.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const latest = workouts[0];
   const currentWeek = strength.weeklyTrend[strength.weeklyTrend.length - 1];
   const previousWeek = strength.weeklyTrend[strength.weeklyTrend.length - 2];
-  const delta = currentWeek && previousWeek && previousWeek.volume > 0
-    ? Math.round(((currentWeek.volume - previousWeek.volume) / previousWeek.volume) * 100)
-    : null;
+  const comparison = weekComparisonLabel(currentWeek, previousWeek);
+  const currentWeekIncomplete = currentWeek !== undefined && !weekIsComparable(currentWeek);
 
   return (
     <section className="strength-panel" aria-labelledby="strength-title">
@@ -222,10 +243,10 @@ function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["stre
             <div className="strength-primary"><span>{latest.status === "active" ? "当前已完成训练量" : "总训练量"}</span><strong>{volumeLabel(latest.totalVolume)} <small>{latest.unit}</small></strong><p>{latest.completedSets}/{latest.totalSets} 组 · {durationLabel(latest.durationMinutes)}</p></div>
           </div>
           <div className="strength-week">
-            <div><span>本周负荷</span><strong>{volumeLabel(currentWeek?.volume ?? 0)} {strength.displayUnit}</strong></div>
-            <div><span>对比上周</span><strong>{delta === null ? "—" : `${delta > 0 ? "+" : ""}${delta}%`}</strong></div>
+            <div><span>本周负荷</span><strong>{volumeLabel(currentWeek?.volume ?? 0)} {strength.displayUnit}{currentWeekIncomplete ? <small className="incomplete-tag">不完整</small> : null}</strong></div>
+            <div><span>对比上周</span><strong>{comparison}</strong></div>
           </div>
-          <p className="strength-note">仅计算已完成且同时填写重量与次数的组。</p>
+          <p className="strength-note">{currentWeekIncomplete ? "部分已完成组缺重量或次数（含自重组），本周负荷不完整，周对比不计算百分比。" : "仅计算已完成且同时填写重量与次数的组。"}</p>
         </>
       ) : <p className="empty-inline">{strength.note}</p>}
     </section>
