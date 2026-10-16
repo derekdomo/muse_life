@@ -164,7 +164,7 @@
 ## 2026-10-15（用户指示：登记 H-WORKOUTS-001 全部运动记录展示）
 
 - 用户 2026-10-15 在 finance dash side chat 发现并拍板：健康看板只显示游泳，其他运动看不到，要求登记修复、所有运动都显示出来。
-- 实现方核查结论（源码 + 用户真实数据）：`health-dashboard` 的 HealthKit refresh 已按近 30 天窗口查询全部 workout sessions 并存入 `historyWorkouts`（不分类型），缺口在展示层——`client/src/App.tsx` 仅按 `swim` 过滤渲染游泳专区，其余类型（用户近 30 天实测另有骑行 4 次、椭圆机 1 次）存而不可见；统一时间线未合入 HealthKit 运动。
+- 实现方核查结论（源码）：`health-dashboard` 的 HealthKit refresh 已按近 30 天窗口查询全部 workout sessions 并存入 `historyWorkouts`（不分类型），缺口在展示层——`client/src/App.tsx` 仅按 `swim` 过滤渲染游泳专区，其余类型存而不可见（用户已确认非游泳运动也应可见；个人运动统计不入仓）；统一时间线未合入 HealthKit 运动。
 - 已在 `plans.md` 新增编号条目 `H-WORKOUTS-001`（全部运动记录区 + 统一时间线合入 + 口径不变 + 以 health-cli sessions 计数对账验收）。本条只登记需求，未改实现代码，由后续同步轮次执行交付。
 
 ## 2026-10-15（muse-life-plans-sync：H-UNITS-001 缺失训练量可比性返工）
@@ -177,3 +177,10 @@
 - 验证证据（均为 synthetic 数据，无真实健康数值入仓）：(1) 新增 `health-dashboard/validate-week-comparison.mjs`（纯 Node、无依赖）——源码断言 8 项 + 以 `node:module.stripTypeScriptTypes` 抽取**真实** `weekIsComparable`/`weekComparisonLabel` 运行 17 组：修前反例复刻（旧公式对 PM 反例输入输出 −100%）；缺重量、缺次数、全未知、部分缺失（本周/上周两侧）、自重不可比、旧快照无计数→均「无法比较」；有效零基→「—」；可比零本周 vs 有效上周→真实 −100%；全有效混单位 kg 145.4 vs 100 与切 lb 320.5 vs 220.5 同为 +45%（切单位不制造进步）；缺周→「—」。**25 passed, 0 failed**，退出 0。(2) 既有回归全过：`validate-units.mjs` 25/25、`validate-source.mjs` 36/36、`validate-steps-display.mjs` PASS、`validate-persist-race.mjs` 42/42。(3) artifact 构建审计 verdict pass、fix_before_attesting 为空；内容评审逐项核对客户端四分支与服务端 schema/prompt；上线后以非 owner 上下文 `invoke_action getDashboard` 返回 `forbidden: true` 且 snapshot/readiness/dataStatus 均为 null、strength 为 null、时间线为空，门禁未破坏。生产库未做任何写入。
 - 已知限制：审计与 invoke 上下文均为非 owner，owner 视角今日/历史页三视口（390×844 / 430×932 / 桌面）目视证据仍待 PM 以 owner 会话验收；新计数需下一次真实力量同步后才出现在快照里，在此之前现有快照的周对比会按旧快照降级显示「无法比较」，属预期行为。
 - 修改文件：`health-dashboard/server/src/actions.ts`、`health-dashboard/client/src/App.tsx`、`health-dashboard/client/src/theme.css`、`health-dashboard/validate-week-comparison.mjs`（新增）、`changes.md`。不在本次范围：`H-WORKOUTS-001`（新登记，留下轮）、`H-SOURCE-001` 完整 handler/五状态页面验收、`L1-RACE-001` artifact 运行证据、`L0.1/AUDIT-02` 用户拍板项。
+
+## 2026-10-15（muse-life-plans-sync：L0.4/AUDIT-03 新增文档脱敏，PM 20:33 P0 返工）
+
+- 处理说明：基线 `5a8aa17` 之后新增 PM 复核提交 `6d2fbef`（复核至 `5a8aa17`）——`H-UNITS-001` 显式缺组分支通过、整周 coverage 继续返工；`L0.4/AUDIT-03` 新增 P0 文档脱敏：`f4af710` 登记 `H-WORKOUTS-001` 时把个人运动统计写入 `changes.md`，PM 指令先完成本脱敏、再恢复 `H-UNITS-001`。本条只做文档脱敏，不改实现、不扩功能；整项不自行勾选，保持 `[ ]` 待 PM 验收。
+- 清理内容：`changes.md` 中 `H-WORKOUTS-001` 登记条目（原第 164–168 行段）内带个人数值的核查结论句，已替换为无个人数值的来源/范围摘要——保留需求来源（用户拍板全部运动都应展示）、缺口定位（refresh 已存全部类型 sessions、展示层仅按 swim 过滤、统一时间线未合入）与「个人运动统计不入仓」口径。未把真实记录改标为 synthetic，未改写其他历史条目；plans 侧个人数值已由 PM 在 `6d2fbef` 先行清除，本条未动 plans.md。
+- 脱敏复查证据（按 PM 要求只报命中位置与计数，不复制原值）：(1) 对当前 `changes.md`、`plans.md` 两 blob 执行「运动类型词前后 12 字内带数字计数」模式扫描：命中 0 处。(2) 对仓库全部 tracked 文件检索本次涉及的非游泳运动类型词：命中 0 处。(3) `git diff` 复核：本条差异仅为该段一句替换与本节新增记录，`H-WORKOUTS-001` 的编号、来源与验收口径（以同一窗口 health-cli sessions 计数对账）未丢失。
+- 修改文件：`changes.md`。回滚：revert 本次提交即可恢复原句（不建议——将重新引入个人统计入仓）。
