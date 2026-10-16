@@ -305,10 +305,28 @@ function recoveryScore(readiness: Readiness | null): WhoopScore {
   };
 }
 
+// H-UI-001 (rework): a sleep session counts as recorded only when the
+// snapshot does not flag it missing and it has a positive actual duration.
+// The server radar defaults the sleep dimension to 5 when both sleep
+// components are missing, so the radar value is only honest when at least
+// one of lastSleep / sleepBank carries a real component score.
+function hasSleepSession(snapshot: Snapshot): boolean {
+  return snapshot.sleep.status !== "数据缺失" && actualSleepHours(snapshot.sleep) > 0;
+}
+
 function sleepScore(snapshot: Snapshot, readiness: Readiness | null): WhoopScore {
   const hours = actualSleepHours(snapshot.sleep);
   const detail = `${hours.toFixed(1)} 小时 · ${snapshot.sleep.bedtime}–${snapshot.sleep.wakeTime}`;
+  if (!hasSleepSession(snapshot)) {
+    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: "昨晚睡眠未记录" };
+  }
   const radarSleep = readiness?.radar.find((dimension) => dimension.key === "sleep");
+  const sleepSignalAvailable = (readiness?.components ?? []).some(
+    (component) => (component.key === "lastSleep" || component.key === "sleepBank") && component.score !== null,
+  );
+  if (radarSleep && !sleepSignalAvailable) {
+    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: `${detail} · 睡眠信号不足` };
+  }
   if (radarSleep) {
     const pct = Math.round(radarSleep.score * 10);
     return {
@@ -338,26 +356,39 @@ function sleepScore(snapshot: Snapshot, readiness: Readiness | null): WhoopScore
 }
 
 function strainScore(snapshot: Snapshot): WhoopScore {
-  const row = snapshot.historyDaily.find((daily) => daily.date === snapshot.dataDate)
-    ?? snapshot.historyDaily[snapshot.historyDaily.length - 1];
-  const exercise = row?.exerciseMinutes ?? null;
-  const kcal = row?.activeKcal ?? null;
+  // H-UI-001 (rework): only the row dated exactly dataDate may be used —
+  // never splice another date's exercise/energy with dataDate's steps —
+  // and every input must be present: a missing item degrades the score to
+  // 数据不足 (named in the detail) instead of silently counting as 0.
+  // Real zeros are data, not missing: all three present at 0 scores 0.0.
+  const row = snapshot.historyDaily.find((daily) => daily.date === snapshot.dataDate);
+  if (!row) {
+    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: `${snapshot.dataDate} 的活动记录缺失` };
+  }
+  const exercise = row.exerciseMinutes ?? null;
+  const kcal = row.activeKcal ?? null;
   const steps = snapshot.steps.value;
-  if (exercise === null && kcal === null && steps === null) {
-    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: "最近完整日没有活动记录" };
+  const present = `运动 ${exercise === null ? "—" : `${Math.round(exercise)} 分钟`} · 活动 ${kcal === null ? "—" : `${Math.round(kcal)} kcal`} · ${steps === null ? "—" : `${numberLabel(steps)} 步`}`;
+  const missing = [
+    exercise === null ? "运动时长缺失" : null,
+    kcal === null ? "活动能量缺失" : null,
+    steps === null ? "步数缺失" : null,
+  ].filter(Boolean).join("、");
+  if (missing) {
+    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: `${present} · ${missing}` };
   }
   // Whoop-style 0–21 day strain, built only from recorded quantities:
   // exercise minutes up to 8 points, active energy up to 7, steps up to 6.
-  const value = Math.min(exercise ?? 0, 120) / 120 * 8
-    + Math.min(kcal ?? 0, 600) / 600 * 7
-    + Math.min(steps ?? 0, 12000) / 12000 * 6;
+  const value = Math.min(exercise, 120) / 120 * 8
+    + Math.min(kcal, 600) / 600 * 7
+    + Math.min(steps, 12000) / 12000 * 6;
   const band: WhoopBand = value < 7 ? "blue" : value < 14 ? "green" : value < 18 ? "yellow" : "red";
   return {
     pct: Math.round((value / 21) * 100),
     display: value.toFixed(1),
     band,
     bandLabel: value < 7 ? "负荷较轻" : value < 14 ? "负荷适中" : value < 18 ? "负荷偏高" : "负荷过高",
-    detail: `运动 ${exercise === null ? "—" : `${Math.round(exercise)} 分钟`} · 活动 ${kcal === null ? "—" : `${Math.round(kcal)} kcal`} · ${steps === null ? "—" : `${numberLabel(steps)} 步`}`,
+    detail: present,
   };
 }
 
@@ -598,13 +629,13 @@ function WhoopHero({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
       <div className="whoop-drivers">
         <div><span>HRV</span><strong>{snapshot.hrv.value === null ? "—" : `${numberLabel(snapshot.hrv.value, 1)} ms`}</strong></div>
         <div><span>静息心率</span><strong>{snapshot.restingHr.value === null ? "—" : `${numberLabel(snapshot.restingHr.value, 1)} bpm`}</strong></div>
-        <div><span>昨晚睡眠</span><strong>{sleepHours.toFixed(1)} h</strong></div>
+        <div><span>昨晚睡眠</span><strong>{hasSleepSession(snapshot) ? `${sleepHours.toFixed(1)} h` : "—"}</strong></div>
         <div><span>睡眠债</span><strong>{readiness?.sleepDebtHours === null || readiness?.sleepDebtHours === undefined ? "—" : `${readiness.sleepDebtHours.toFixed(1)} h`}</strong></div>
       </div>
       <div className={`whoop-load whoop-${load.band}`}>
         <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong>{load.verdict}</strong></div>
         <p>{load.detail}</p>
-        <p className="whoop-load-note">负荷分由最近完整日的运动时长、活动能量与步数换算（0–21）；恢复与睡眠分沿用原有基线评分，只换了呈现方式。</p>
+        <p className="whoop-load-note">负荷分只取数据日期当天的运动时长、活动能量与步数，三项齐全时才换算（0–21），缺任一项显示数据不足；睡眠缺失时不评分。恢复与睡眠分沿用原有基线评分，只换了呈现方式。</p>
       </div>
     </section>
   );
