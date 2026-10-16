@@ -985,8 +985,17 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
+// H-WORKOUTS-001 (1): every HealthKit workout session in the snapshot,
+// newest first; same-day ties break by id so the order is stable across
+// renders. Returns a copy — the snapshot array is never mutated. Missing
+// fields stay null here and render as "—" in the list; nothing is filled in.
+function allWorkoutsList(historyWorkouts: Snapshot["historyWorkouts"]): Snapshot["historyWorkouts"] {
+  return historyWorkouts.slice().sort((a, b) => (a.date === b.date ? (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : a.date < b.date ? 1 : -1));
+}
+
 function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifiedTimeline?: UnifiedDay[] }) {
   const strengths = [...snapshot.strengthTraining.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  const allWorkouts = allWorkoutsList(snapshot.historyWorkouts);
   const swims = snapshot.historyWorkouts.filter((workout) => workout.type.toLowerCase().includes("swim")).slice().reverse();
   const weights = snapshot.historyDaily.filter((row): row is Daily & { weightKg: number } => row.weightKg !== null).slice().reverse();
   const sleeps = snapshot.historySleeps.slice().reverse();
@@ -1021,6 +1030,11 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
             </div>
           </details>
         ))}</div> : <p className="empty-inline">{snapshot.strengthTraining.note}</p>}
+      </section>
+
+      <section className="history-section" aria-labelledby="all-workouts-title">
+        <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="all-workouts-title">全部运动记录</h2></div><span className="record-count">{allWorkouts.length} 次</span></div>
+        {allWorkouts.length ? <div className="record-list">{allWorkouts.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)}</strong><span>{workout.type}</span></div><dl><div><dt>距离</dt><dd>{workout.distanceMeters === null ? "—" : `${numberLabel(workout.distanceMeters)} 米`}</dd></div><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有 HealthKit 运动记录。</p>}
       </section>
 
       <section className="history-section" aria-labelledby="swim-history-title">
