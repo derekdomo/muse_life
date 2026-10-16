@@ -146,6 +146,9 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .whoop-load-head strong { color: var(--whoop-color); font-size: 13px; }
 .whoop-load p { margin: 6px 0 0; color: #c3ccc4; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .whoop-load .whoop-load-note { color: var(--whoop-dim); font-size: 10px; }
+.whoop-readiness-trend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 8px; color: #c3ccc4; font-size: 11px; font-variant-numeric: tabular-nums; }
+.whoop-readiness-trend .whoop-trend-label { color: var(--whoop-dim); font-weight: 800; }
+.whoop-readiness-trend .whoop-trend-point { white-space: nowrap; }
 
 .verdict { padding: 28px 0 22px; }
 .verdict > p { margin: 0 0 8px; color: var(--dim); font-size: 13px; font-weight: 700; }

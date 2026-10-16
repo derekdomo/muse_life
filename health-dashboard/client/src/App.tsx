@@ -415,6 +415,11 @@ interface WeekLoadWindow {
   strengthVolume: number;
 }
 
+interface ReadinessTrendPoint {
+  date: string;
+  score: number | null;
+}
+
 interface WeekLoad {
   band: WhoopBand;
   verdict: string;
@@ -423,9 +428,12 @@ interface WeekLoad {
   reasons: string[];
   current: WeekLoadWindow;
   previous: WeekLoadWindow;
+  currentWindow: { start: string; end: string };
+  previousWindow: { start: string; end: string };
   sessionsChangePct: number | null;
   durationChangePct: number | null;
   volumeChangePct: number | null;
+  readinessTrend: ReadinessTrendPoint[];
 }
 
 const LB_TO_KG = 0.45359237;
@@ -439,14 +447,19 @@ function volumeInDisplayUnit(volume: number, unit: "lb" | "kg", displayUnit: "lb
 // a three-tier verdict. Both windows are explicit same-span date ranges —
 // this week mondayOf(dataDate)..dataDate and the same span shifted 7 days
 // back — and every fact comes from session-level records: HealthKit
-// workout sessions plus completed strength workouts from 训练记录, with
-// HK strength sessions on a date that already has a completed strength
-// workout counted once (the strength record wins). Any coverage gap in
-// either window — a missing or duplicated daily row, an unsynced or
-// partially measured strength week, a session without a duration — means
-// no percentage and no verdict, never a guessed one. Percentages are only
-// computed per metric when both windows are complete and last week's
-// value is above zero.
+// workout sessions plus completed strength workouts from 训练记录.
+// Cross-source duplicate handling (PM 2026-10-16 05:45): a HealthKit
+// workout record carries only id/date/type/duration — no start/end time
+// and no cross-source link — so an HK strength session on a date that
+// also has a completed strength workout can never be proven to be the
+// same session. Such a date is never silently merged by date: both
+// sources' facts are kept, the window is marked 重复归属未确认 and no
+// percentage or verdict is produced. Any other coverage gap in either
+// window — a missing or duplicated daily row, an unsynced or partially
+// measured strength week, a session without a duration — likewise means
+// no percentage and no verdict, never a guessed one. Percentages are
+// only computed per metric when both windows are complete and last
+// week's value is above zero.
 function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const weekStart = mondayOf(snapshot.dataDate);
   const prevStart = shiftDateStr(weekStart, -7);
@@ -500,21 +513,30 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const windowFacts = (dates: string[], label: string): WeekLoadWindow => {
     const inWindow = new Set(dates);
     const strengthDone = strength.workouts.filter((workout) => workout.status === "completed" && inWindow.has(workout.date));
+    // No date-based dedup (PM 2026-10-16 05:45): every HK session in the
+    // window is kept and counted. A date carrying both a completed
+    // strength workout and an HK strength-type session is ambiguous —
+    // the stored HK fields cannot prove sameness — so it degrades the
+    // whole comparison instead of deleting either source's facts.
+    const hkAll = snapshot.historyWorkouts.filter((session) => inWindow.has(session.date));
     const strengthDates = new Set(strengthDone.map((workout) => workout.date));
-    const hkKept = snapshot.historyWorkouts.filter((session) => inWindow.has(session.date)
-      && !(session.type.toLowerCase().includes("strength") && strengthDates.has(session.date)));
+    for (const date of dates) {
+      if (strengthDates.has(date) && hkAll.some((session) => session.date === date && session.type.toLowerCase().includes("strength"))) {
+        addReason(`重复归属未确认：${date} 同日有训练记录力量场次与 HealthKit 力量记录，现有字段无法证明是否为同一次，不合并、不比较`);
+      }
+    }
     const strengthDuration = strengthDone.some((workout) => workout.durationMinutes === null)
       ? null
       : strengthDone.reduce((sum, workout) => sum + (workout.durationMinutes ?? 0), 0);
     if (strengthDuration === null) addReason(`${label}有力量场次时长缺失，时长不完整`);
-    const hkDuration = hkKept.some((session) => session.durationMinutes === null)
+    const hkDuration = hkAll.some((session) => session.durationMinutes === null)
       ? null
-      : hkKept.reduce((sum, session) => sum + (session.durationMinutes ?? 0), 0);
+      : hkAll.reduce((sum, session) => sum + (session.durationMinutes ?? 0), 0);
     if (hkDuration === null) addReason(`${label}有训练时长缺失，时长不完整`);
     return {
-      sessions: strengthDone.length + hkKept.length,
+      sessions: strengthDone.length + hkAll.length,
       strengthSessions: strengthDone.length,
-      healthKitSessions: hkKept.length,
+      healthKitSessions: hkAll.length,
       durationMinutes: strengthDuration === null || hkDuration === null ? null : strengthDuration + hkDuration,
       strengthDurationMinutes: strengthDuration,
       healthKitDurationMinutes: hkDuration,
@@ -531,7 +553,22 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
     ? pctChange(current.durationMinutes, previous.durationMinutes)
     : null;
   const volumeChangePct = pctChange(current.strengthVolume, previous.strengthVolume);
-  const facts = { sufficient, reasons, current, previous, sessionsChangePct, durationChangePct, volumeChangePct };
+  // Readiness 7-day trend (honest form): the server provides only the
+  // latest day's readiness — there is no stored per-day series — so the
+  // trend carries the real score only on readiness.date and null (a
+  // dated gap) on the other six days. Today's value is never copied
+  // onto other dates and no substitute algorithm is invented here.
+  const trendEnd = readiness?.date ?? shiftDateStr(snapshot.dataDate, 1);
+  const readinessTrend: ReadinessTrendPoint[] = Array.from({ length: 7 }, (_, index) => {
+    const date = shiftDateStr(trendEnd, index - 6);
+    return { date, score: readiness && date === readiness.date ? readiness.score : null };
+  });
+  const facts = {
+    sufficient, reasons, current, previous,
+    currentWindow: { start: weekStart, end: snapshot.dataDate },
+    previousWindow: { start: prevStart, end: shiftDateStr(snapshot.dataDate, -7) },
+    sessionsChangePct, durationChangePct, volumeChangePct, readinessTrend,
+  };
 
   const recovery = recoveryScore(readiness);
   const hrvZ = readiness?.components.find((component) => component.key === "hrv")?.zScore ?? null;
@@ -539,6 +576,9 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const debt = readiness?.sleepDebtHours ?? null;
   const pctText = (value: number) => `${value > 0 ? "+" : ""}${Math.round(value)}%`;
   const factsDetail = (withPct: boolean): string => {
+    const sessionsNote = !withPct ? ""
+      : sessionsChangePct !== null ? `（次数较上周同期 ${pctText(sessionsChangePct)}）`
+      : previous.sessions === 0 ? "（上周同期次数为 0，不算百分比）" : "";
     const durationNote = !withPct ? ""
       : durationChangePct !== null ? `（时长较上周同期 ${pctText(durationChangePct)}）`
       : previous.durationMinutes === 0 ? "（上周同期时长为 0，不算百分比）" : "";
@@ -546,24 +586,24 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
       : volumeChangePct !== null ? `（容量较上周同期 ${pctText(volumeChangePct)}）`
       : previous.strengthVolume === 0 ? "（上周同期容量为 0，不算百分比）" : "";
     return [
-      `本周训练 ${current.sessions} 次 · ${current.durationMinutes === null ? "时长不完整" : `${Math.round(current.durationMinutes)} 分钟`}${durationNote}`,
-      `上周同期 ${previous.sessions} 次 · ${previous.durationMinutes === null ? "时长不完整" : `${Math.round(previous.durationMinutes)} 分钟`}`,
-      `力量 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}${volumeNote}`,
+      `本周（${dateLabel(weekStart)}–${dateLabel(snapshot.dataDate)}）训练 ${current.sessions} 次${sessionsNote} · ${current.durationMinutes === null ? "时长不完整" : `${Math.round(current.durationMinutes)} 分钟`}${durationNote}`,
+      `上周同期（${dateLabel(prevStart)}–${dateLabel(shiftDateStr(snapshot.dataDate, -7))}） ${previous.sessions} 次 · ${previous.durationMinutes === null ? "时长不完整" : `${Math.round(previous.durationMinutes)} 分钟`}`,
+      `力量 本周 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}${volumeNote} · 上周同期 ${previous.strengthSessions} 次 · 容量 ${volumeLabel(previous.strengthVolume)} ${strength.displayUnit}`,
       `恢复 ${recovery.display === "—" ? "—" : `${recovery.display}%`}${debt === null ? "" : ` · 睡眠债 ${debt.toFixed(1)}h`}`,
     ].join(" · ");
   };
 
   if (!sufficient) {
     const knownParts = [
-      `本周已知训练 ${current.sessions} 次`,
+      `本周已知训练 ${current.sessions} 次（力量 ${current.strengthSessions} 次 + HealthKit ${current.healthKitSessions} 次，两边事实都保留）`,
       current.durationMinutes === null ? "本周时长不完整" : `本周时长 ${Math.round(current.durationMinutes)} 分钟`,
     ];
-    if (strength.updatedAt !== null) knownParts.push(`力量 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}`);
+    if (strength.updatedAt !== null) knownParts.push(`力量容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}`);
     knownParts.push(`数据不足：${reasons.join("；")}`);
     return { band: "slate", verdict: `数据不足：${reasons[0] ?? "覆盖不完整"}`, detail: knownParts.join(" · "), ...facts };
   }
   if (!readiness || readiness.score === null) {
-    return { band: "slate", verdict: "恢复数据不足，先不下结论", detail: factsDetail(false), ...facts };
+    return { band: "slate", verdict: "恢复数据不足，先不下结论", detail: factsDetail(true), ...facts };
   }
   const detail = factsDetail(true);
   const recoveryWorsening = (hrvZ !== null && hrvZ < 0) || (restingZ !== null && restingZ < 0);
@@ -635,6 +675,13 @@ function WhoopHero({ snapshot, readiness }: { snapshot: Snapshot; readiness: Rea
       <div className={`whoop-load whoop-${load.band}`}>
         <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong>{load.verdict}</strong></div>
         <p>{load.detail}</p>
+        <div className="whoop-readiness-trend" aria-label="readiness 近 7 天趋势">
+          <span className="whoop-trend-label">readiness 近 7 天</span>
+          {load.readinessTrend.map((point) => (
+            <span className="whoop-trend-point" key={point.date}>{dateLabel(point.date)} {point.score === null ? "—" : point.score.toFixed(1)}</span>
+          ))}
+        </div>
+        <p className="whoop-load-note">readiness 近 7 天：服务端只保存最新一天分数，其余日期为缺口，不复制今日值。</p>
         <p className="whoop-load-note">负荷分只取数据日期当天的运动时长、活动能量与步数，三项齐全时才换算（0–21），缺任一项显示数据不足；睡眠缺失时不评分。恢复与睡眠分沿用原有基线评分，只换了呈现方式。</p>
       </div>
     </section>

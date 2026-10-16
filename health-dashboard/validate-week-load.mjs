@@ -49,10 +49,17 @@ check('source: consumer WhoopHero renders weekLoad verdict + detail',
   clientSrc.includes('const load = weekLoad(snapshot, readiness);')
   && clientSrc.includes('<div className={`whoop-load whoop-${load.band}`}>')
   && clientSrc.includes('{load.verdict}') && clientSrc.includes('{load.detail}'));
+check('source: WeekLoad carries window ranges + readinessTrend, WhoopHero renders the trend',
+  clientSrc.includes('readinessTrend: ReadinessTrendPoint[];')
+  && clientSrc.includes('currentWindow: { start: string; end: string }')
+  && clientSrc.includes('load.readinessTrend.map')
+  && clientSrc.includes('服务端只保存最新一天分数，其余日期为缺口，不复制今日值'));
+check('source: no date-based HK strength dedup remains in weekLoad',
+  !extractFunction(clientSrc, 'weekLoad').includes('strengthDates.has(session.date)'));
 check('source: no exerciseMinutes aggregation remains in weekLoad',
   !extractFunction(clientSrc, 'weekLoad').includes('exerciseMinutes'));
 
-const FN_NAMES = ['mondayOf', 'shiftDateStr', 'percentBand', 'recoveryScore', 'volumeLabel', 'volumeInDisplayUnit', 'weekLoad'];
+const FN_NAMES = ['mondayOf', 'shiftDateStr', 'percentBand', 'recoveryScore', 'volumeLabel', 'volumeInDisplayUnit', 'dateLabel', 'weekLoad'];
 function buildWeekLoad(src) {
   const lbLine = src.match(/const LB_TO_KG = [^;]+;/)[0];
   const code = FN_NAMES.map((n) => extractFunction(src, n)).join('\n');
@@ -91,7 +98,7 @@ function snapshot(over = {}) {
   return { ...base, ...over, strengthTraining: { ...base.strengthTraining, ...(over.strengthTraining ?? {}) } };
 }
 const readiness = (over = {}) => ({
-  score: 8, confidence: '高', status: '恢复良好', sleepDebtHours: 1,
+  date: '2026-10-15', score: 8, confidence: '高', status: '恢复良好', sleepDebtHours: 1,
   components: [{ key: 'hrv', zScore: 0 }, { key: 'restingHr', zScore: 0 }], ...over,
 });
 
@@ -107,11 +114,25 @@ const readiness = (over = {}) => ({
   check('normal tier: sufficient + green verdict',
     r.sufficient === true && r.band === 'green' && r.verdict.includes('状态稳定'));
   check('detail reconciles both windows + strength volume',
-    r.detail.includes('本周训练 2 次') && r.detail.includes('上周同期 2 次') && r.detail.includes('容量 1,000 lb'));
+    r.detail.includes('训练 2 次') && r.detail.includes('上周同期') && r.detail.includes('容量 1,000 lb'));
+  check('visible: both window date ranges shown (current 10/12–10/14, previous 10/5–10/7)',
+    r.detail.includes('本周（10/12–10/14）') && r.detail.includes('上周同期（10/5–10/7）')
+    && r.currentWindow.start === '2026-10-12' && r.currentWindow.end === '2026-10-14'
+    && r.previousWindow.start === '2026-10-05' && r.previousWindow.end === '2026-10-07');
+  check('visible: all three change pcts in detail (sessions/duration/volume) + previous volume with unit',
+    r.detail.includes('次数较上周同期 0%') && r.detail.includes('时长较上周同期 0%')
+    && r.detail.includes('容量较上周同期 0%') && r.detail.includes('上周同期 1 次 · 容量 1,000 lb'));
+  check('readinessTrend: 7 consecutive dates ending at readiness.date, only that date carries the score',
+    r.readinessTrend.length === 7 && r.readinessTrend[0].date === '2026-10-09'
+    && r.readinessTrend[6].date === '2026-10-15' && r.readinessTrend[6].score === 8
+    && r.readinessTrend.slice(0, 6).every((point) => point.score === null));
 }
 
-// Same-day dedup must drop only the duplicated HK strength session, never
-// the day's independent strength sessions (PM 2026-10-16 explicit case).
+// Cross-source ambiguity (PM 2026-10-16 05:45): an HK strength session on
+// a date that also has a completed strength workout can never be proven
+// to be the same session (HK rows carry no start/end or cross-source id),
+// so nothing is deleted by date — both sources' facts are kept and the
+// whole comparison degrades to insufficient with no percentages/verdict.
 {
   const snap = snapshot({
     historyWorkouts: [hk('2026-10-12', 45, 'Traditional Strength Training'), hk('2026-10-12', 20), hk('2026-10-06', 30)],
@@ -121,10 +142,55 @@ const readiness = (over = {}) => ({
     },
   });
   const r = weekLoad(snap, readiness());
-  check('same-day: two independent strength sessions both kept (strengthSessions 2)',
-    r.current.strengthSessions === 2 && r.current.strengthVolume === 1500);
-  check('same-day: HK strength session on a strength date deduped, HK swim kept (HK 1, total 3, duration 130)',
-    r.current.healthKitSessions === 1 && r.current.sessions === 3 && r.current.durationMinutes === 130);
+  check('ambiguity: same-day HK strength + strength record -> insufficient, reason names the date',
+    r.sufficient === false && r.band === 'slate'
+    && r.reasons.some((x) => x.includes('重复归属未确认') && x.includes('2026-10-12'))
+    && r.sessionsChangePct === null && r.durationChangePct === null && r.volumeChangePct === null);
+  check('ambiguity: both sources kept (strength 2 + HK 2 = 4 sessions, duration 175, volume 1500)',
+    r.current.strengthSessions === 2 && r.current.healthKitSessions === 2
+    && r.current.sessions === 4 && r.current.durationMinutes === 175 && r.current.strengthVolume === 1500);
+  check('ambiguity: detail keeps both-source facts and the reason',
+    r.detail.includes('HealthKit 2 次') && r.detail.includes('重复归属未确认'));
+}
+// PM's exact synthetic case: strength record 60m on a day, HK has one
+// plausibly-duplicate 60m strength session AND one independent 90m
+// strength session that same day. The old date-based deletion returned
+// 1 session / 60m / green; the correct outcome is ambiguity, not a guess.
+{
+  const snap = snapshot({
+    historyWorkouts: [hk('2026-10-13', 60, 'Traditional Strength Training'), hk('2026-10-13', 90, 'Traditional Strength Training'), hk('2026-10-06', 30)],
+    strengthTraining: {
+      workouts: [sw('2026-10-13', 60), sw('2026-10-05', 60)],
+      weeklyTrend: [strengthWk('2026-10-12', 1), strengthWk('2026-10-05', 1)],
+    },
+  });
+  const r = weekLoad(snap, readiness());
+  check('ambiguity (PM case): independent HK strength session is not silently deleted',
+    r.sufficient === false && r.current.sessions === 3 && r.current.durationMinutes === 210
+    && r.reasons.some((x) => x.includes('重复归属未确认')));
+  const moved = snapshot({
+    historyWorkouts: [hk('2026-10-13', 60, 'Traditional Strength Training'), hk('2026-10-14', 90, 'Traditional Strength Training'), hk('2026-10-06', 30)],
+    strengthTraining: {
+      workouts: [sw('2026-10-13', 60), sw('2026-10-05', 60)],
+      weeklyTrend: [strengthWk('2026-10-12', 1), strengthWk('2026-10-05', 1)],
+    },
+  });
+  const r2 = weekLoad(moved, readiness());
+  check('ambiguity (PM case): HK strength on a date with NO strength record counts normally',
+    r2.sufficient === false && r2.current.healthKitSessions === 2);
+  const clean = snapshot({
+    historyWorkouts: [hk('2026-10-14', 90, 'Traditional Strength Training'), hk('2026-10-06', 30)],
+  });
+  const r3 = weekLoad(clean, readiness());
+  check('no overlap at all: sufficient, HK strength session counted (sessions 2, duration 150)',
+    r3.sufficient === true && r3.current.sessions === 2 && r3.current.durationMinutes === 150);
+}
+// readinessTrend without readiness: dated gaps only, ending dataDate + 1.
+{
+  const r = weekLoad(snapshot(), null);
+  check('readinessTrend: null readiness -> 7 dated gaps ending 2026-10-15, no copied score',
+    r.readinessTrend.length === 7 && r.readinessTrend[6].date === '2026-10-15'
+    && r.readinessTrend.every((point) => point.score === null));
 }
 
 // Unit conversion per session into displayUnit.
@@ -242,6 +308,13 @@ expectInsufficient('strength session without duration',
   check('mutation: removing low-readiness gate flips score 1.5 case from red to green',
     weekLoad(snapshot(), readiness({ score: 1.5 })).band === 'red'
     && noLowScore(snapshot(), readiness({ score: 1.5 })).band === 'green');
+  const noAmbiguity = buildWeekLoad(clientSrc.replace('addReason(`重复归属未确认', 'void(`重复归属未确认'));
+  const ambSnap = snapshot({
+    historyWorkouts: [hk('2026-10-12', 45, 'Traditional Strength Training'), hk('2026-10-06', 30)],
+  });
+  check('mutation: removing the ambiguity gate flips the same-day overlap case to sufficient',
+    weekLoad(ambSnap, readiness()).sufficient === false
+    && noAmbiguity(ambSnap, readiness()).sufficient === true);
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);
