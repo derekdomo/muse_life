@@ -185,6 +185,46 @@ export function canReclaimInitializingWorkout(input: {
   return input.initializing && input.completedAt == null;
 }
 
+// W-START-001 (yield decision): when a start's conflict re-check finds
+// an earlier active workout, what happens next depends on that
+// workout's state — never return it while it is still initializing.
+// This pure function is the whole decision; startWorkout drives it in
+// a bounded poll loop, re-reading the other row between waits.
+//  - other gone (its initialization failed and it cleaned itself up,
+//    or it was taken over): proceed — flip own workout ready.
+//  - other ready: yield to it (reclaim own initializing row, return
+//    the other workout, which is usable: ready with its sets in).
+//  - other still initializing and poll attempts remain: wait.
+//  - other still initializing, attempts exhausted, and its started_at
+//    is at least 30s old: it is a failed leftover — take over
+//    (conditionally delete it, then flip own workout ready).
+//  - other still initializing, attempts exhausted, but fresh: a live
+//    initialization is in flight — reclaim own row and fail with a
+//    retryable error instead of returning an unusable workout.
+// Self-contained (no module state) so validation scripts can run it
+// verbatim over the full matrix.
+export function resolveYieldDecision(
+  other: { present: boolean; initializing: boolean; startedAtMs: number | null },
+  attemptsLeft: number,
+  nowMs: number,
+): "proceed-self" | "yield-ready" | "wait" | "takeover" | "retry" {
+  if (!other.present) return "proceed-self";
+  if (!other.initializing) return "yield-ready";
+  if (attemptsLeft > 0) return "wait";
+  const ageMs = other.startedAtMs == null ? Number.POSITIVE_INFINITY : nowMs - other.startedAtMs;
+  return ageMs >= 30_000 ? "takeover" : "retry";
+}
+
+// Bounded poll budget for the yield wait above: 10 × 200ms ≈ 2s —
+// long enough for a concurrent start's handful of inserts to finish,
+// far short of the 30s staleness threshold.
+export const YIELD_WAIT_ATTEMPTS = 10;
+export const YIELD_WAIT_INTERVAL_MS = 200;
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Whole-week coverage summaries (H-UNITS-001). Pure and self-contained so
 // it can be extracted and run standalone: workouts carry id, completed_at
 // (ISO string) and unit; sets carry workout_id, weight, reps, completed;
@@ -572,6 +612,34 @@ export const Actions = {
       const workoutId = inserted[0]?.id;
       if (!workoutId) throw new Error("未能开始训练");
 
+      // W-START-001 unified failure cleanup: EVERY step of the
+      // initialization below (history read, set insert, conflict
+      // re-check, ready flip) runs inside one try; any failure
+      // removes this run's own initializing workout and its sets and
+      // rethrows, so a retry starts from a clean slate instead of
+      // meeting a stuck invisible row that every later start yields
+      // to. The workout DELETE is conditioned on initializing = 1
+      // AND completed_at IS NULL — if this row somehow already
+      // became visible or completed it is NOT removed, and neither
+      // are its sets (sets are deleted only when the row delete
+      // actually removed the still-initializing row).
+      const cleanupOwnInitializing = async () => {
+        const removed = await db
+          .delete(schema.workouts)
+          .where(
+            and(
+              eq(schema.workouts.id, workoutId),
+              eq(schema.workouts.initializing, 1),
+              isNull(schema.workouts.completedAt),
+            ),
+          )
+          .returning({ id: schema.workouts.id });
+        if (removed.length > 0) {
+          await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
+        }
+      };
+
+      try {
       const previous = await loadPreviousCompletedSets(ctx, args.routine, args.unit);
       const values = ROUTINES[args.routine].flatMap((exercise) => {
         const history = previous.byExercise[exercise.key] ?? [];
@@ -613,72 +681,126 @@ export const Actions = {
           };
         });
       });
-      try {
-        await db.insert(schema.workoutSets).values(values);
-      } catch (error) {
-        // Initialization failed: remove this run's own initializing
-        // workout (and any sets that landed) so a later start retries
-        // from a clean slate instead of meeting a stuck invisible
-        // row. The delete is conditioned on initializing = 1 — this
-        // row was never visible, so nothing user-owned can be lost.
-        await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
-        await db
-          .delete(schema.workouts)
-          .where(and(eq(schema.workouts.id, workoutId), eq(schema.workouts.initializing, 1)));
-        throw error;
-      }
+      await db.insert(schema.workoutSets).values(values);
 
       // W-START-001 conflict re-check, run after the prefill sets are
       // in and BEFORE this workout becomes ready: re-read ALL other
       // actives — ready and initializing both count as conflict
       // targets. If an earlier active exists, this insert yields to
-      // it: this row is still initializing, which by contract means
-      // no user write can have landed on it, so a single conditional
-      // DELETE (still initializing, still active — the mirror of
-      // canReclaimInitializingWorkout) removes it and its sets, and
-      // the earlier workout is returned. Two concurrent starts
-      // therefore return the SAME workout, and at most one usable
-      // (ready) active exists at any read moment.
+      // it — but only once the earlier workout is actually usable.
+      // resolveYieldDecision drives a bounded poll over the other
+      // row's live state:
+      //  - it flips ready → reclaim this initializing row (single
+      //    conditional DELETE: still initializing, still active —
+      //    the mirror of canReclaimInitializingWorkout; no user
+      //    write can have landed on it) and return the earlier
+      //    workout. Two concurrent starts therefore return the SAME
+      //    usable workout.
+      //  - it disappears (its own initialization failed and it
+      //    cleaned itself up) → fall through and flip THIS workout
+      //    ready instead.
+      //  - it is still initializing past the poll budget and its
+      //    started_at is ≥30s old → a failed leftover: conditionally
+      //    delete it and its sets (same initializing = 1 guard), then
+      //    flip this workout ready.
+      //  - it is still initializing and fresh → a live initialization
+      //    is in flight: throw a retryable error (the catch below
+      //    reclaims this run's initializing row first). A start NEVER
+      //    returns a workout that is not ready with its sets in.
       const otherActiveRows = await db
-        .select({ id: schema.workouts.id })
+        .select({
+          id: schema.workouts.id,
+          initializing: schema.workouts.initializing,
+          startedAt: schema.workouts.startedAt,
+        })
         .from(schema.workouts)
         .where(and(isNull(schema.workouts.completedAt), ne(schema.workouts.id, workoutId)))
         .orderBy(asc(schema.workouts.id));
-      const earliestOtherActiveId = otherActiveRows[0]?.id ?? null;
+      const earliestOther = otherActiveRows[0] ?? null;
+      const earliestOtherActiveId = earliestOther?.id ?? null;
       const conflict = resolveStartConflict(earliestOtherActiveId, workoutId);
       if (conflict.action === "yield") {
-        const reclaimed = await db
-          .delete(schema.workouts)
-          .where(
-            and(
-              eq(schema.workouts.id, workoutId),
-              eq(schema.workouts.initializing, 1),
-              isNull(schema.workouts.completedAt),
-            ),
-          )
-          .returning({ id: schema.workouts.id });
-        if (reclaimed.length > 0) {
-          await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
-          const kept = await loadWorkout(ctx, conflict.keepId);
-          if (!kept) throw new Error("未能读取进行中的训练");
-          ctx.invalidateQueries();
-          return { forbidden: false, workout: kept };
+        const keepId = conflict.keepId;
+        let other: { initializing: number; startedAt: Date } | null = earliestOther
+          ? { initializing: earliestOther.initializing, startedAt: earliestOther.startedAt }
+          : null;
+        let attemptsLeft = YIELD_WAIT_ATTEMPTS;
+        for (;;) {
+          const decision = resolveYieldDecision(
+            {
+              present: other != null,
+              initializing: other != null && other.initializing === 1,
+              startedAtMs: other ? other.startedAt.getTime() : null,
+            },
+            attemptsLeft,
+            Date.now(),
+          );
+          if (decision === "wait") {
+            attemptsLeft -= 1;
+            await waitMs(YIELD_WAIT_INTERVAL_MS);
+            const reread = await db
+              .select({ initializing: schema.workouts.initializing, startedAt: schema.workouts.startedAt })
+              .from(schema.workouts)
+              .where(eq(schema.workouts.id, keepId))
+              .limit(1);
+            other = reread[0] ?? null;
+            continue;
+          }
+          if (decision === "yield-ready") {
+            const reclaimed = await db
+              .delete(schema.workouts)
+              .where(
+                and(
+                  eq(schema.workouts.id, workoutId),
+                  eq(schema.workouts.initializing, 1),
+                  isNull(schema.workouts.completedAt),
+                ),
+              )
+              .returning({ id: schema.workouts.id });
+            if (reclaimed.length > 0) {
+              await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
+              const kept = await loadWorkout(ctx, keepId);
+              if (!kept) throw new Error("未能读取进行中的训练");
+              ctx.invalidateQueries();
+              return { forbidden: false, workout: kept };
+            }
+            // The conditional DELETE matched nothing: this row is no
+            // longer in its initializing state (defensive — under the
+            // contract no other action can flip or complete an
+            // initializing row). Delete nothing further and return this
+            // workout itself, so a visible or completed record is never
+            // lost to the single-active yield.
+            const own = await loadWorkout(ctx, workoutId);
+            if (!own) throw new Error("未能读取进行中的训练");
+            ctx.invalidateQueries();
+            return { forbidden: false, workout: own };
+          }
+          if (decision === "takeover") {
+            const removedStale = await db
+              .delete(schema.workouts)
+              .where(
+                and(
+                  eq(schema.workouts.id, keepId),
+                  eq(schema.workouts.initializing, 1),
+                  isNull(schema.workouts.completedAt),
+                ),
+              )
+              .returning({ id: schema.workouts.id });
+            if (removedStale.length > 0) {
+              await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, keepId));
+            }
+            break;
+          }
+          if (decision === "retry") {
+            throw new Error("另一场训练正在初始化，请稍后重试");
+          }
+          break; // "proceed-self": the other row vanished mid-wait
         }
-        // The conditional DELETE matched nothing: this row is no
-        // longer in its initializing state (defensive — under the
-        // contract no other action can flip or complete an
-        // initializing row). Delete nothing further and return this
-        // workout itself, so a visible or completed record is never
-        // lost to the single-active yield.
-        const own = await loadWorkout(ctx, workoutId);
-        if (!own) throw new Error("未能读取进行中的训练");
-        ctx.invalidateQueries();
-        return { forbidden: false, workout: own };
       }
 
-      // This insert is the earliest active: flip it ready with a
-      // single conditional UPDATE — only a row still initializing
-      // becomes visible, atomically.
+      // This insert is the earliest surviving active: flip it ready
+      // with a single conditional UPDATE — only a row still
+      // initializing becomes visible, atomically.
       await db
         .update(schema.workouts)
         .set({ initializing: 0 })
@@ -691,6 +813,18 @@ export const Actions = {
         forbidden: false,
         workout: previous.converted ? { ...workout, prefill_unit_converted: true } : workout,
       };
+      } catch (error) {
+        // Unified initialization failure cleanup (see
+        // cleanupOwnInitializing): best-effort — a cleanup failure
+        // never masks the original error, which is rethrown as-is so
+        // the caller can retry from a clean slate.
+        try {
+          await cleanupOwnInitializing();
+        } catch {
+          // The original error below is the one that matters.
+        }
+        throw error;
+      }
     },
   }),
 

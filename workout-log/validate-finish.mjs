@@ -7,6 +7,16 @@
 // boundary (settlePendingAdds joins in-flight "+ 加一组" promises
 // before either finish path flushes or seals; a failed add aborts
 // the finish; a landed add's new set joins the final gate).
+// 2026-10-17 second rework adds: W-START-001 yield-by-state — the
+// WHOLE initialization (history read included) runs under one
+// failure cleanup, and a yielding start decides via the pure
+// resolveYieldDecision (other ready -> yield; still initializing ->
+// bounded poll; vanished -> proceed; stale leftover -> takeover;
+// fresh -> retryable error, never an unusable success) — and the
+// W-FINISH-001 registration barrier: both finish paths re-fetch the
+// dashboard after settling adds and wait via the pure
+// waitForExpectedSetRegistration until the handle registry covers
+// every set id of that final data version before flushing/sealing.
 // Runs the REAL production functions extracted verbatim from
 // client/src/App.tsx and server/src/actions.ts over synthetic data
 // only, with a deferred transport so write/complete ordering is
@@ -72,7 +82,7 @@ const CLIENT_FN = [
   'editSetDraft', 'beginSetSave', 'applySetSaveSuccess', 'applySetSaveFailure',
   'adoptServerDraft', 'createSaveQueue', 'finishGateDecision',
 ];
-const CLIENT_ASYNC_FN = ['drainSetSaves', 'flushAllHandles', 'sealAllAndSettleStable', 'settlePendingAdds'];
+const CLIENT_ASYNC_FN = ['drainSetSaves', 'flushAllHandles', 'sealAllAndSettleStable', 'settlePendingAdds', 'waitForExpectedSetRegistration'];
 function extractAsyncFunction(source, name) {
   const idx = source.search(new RegExp(`async function ${name}\\(`));
   if (idx < 0) throw new Error(`async function ${name} not found`);
@@ -88,7 +98,7 @@ function buildClient(src) {
   const names = [...CLIENT_FN, ...CLIENT_ASYNC_FN];
   return new Function(`${stripTypeScriptTypes(parts.join('\n'))}\nreturn { ${names.join(', ')} };`)();
 }
-const SERVER_FN = ['mutationTargetDecision', 'resolveStartConflict', 'canReclaimInitializingWorkout'];
+const SERVER_FN = ['mutationTargetDecision', 'resolveStartConflict', 'canReclaimInitializingWorkout', 'resolveYieldDecision'];
 function buildServer(src) {
   const code = SERVER_FN.map((n) => extractFunction(src, n)).join('\n');
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { ${SERVER_FN.join(', ')} };`)();
@@ -140,8 +150,40 @@ check('server: startWorkout flips ready with a single conditional UPDATE (initia
 check('server: startWorkout yield deletes only its own still-initializing row',
   serverSrc.indexOf('eq(schema.workouts.initializing, 1),', serverSrc.indexOf('startWorkout: defineAction')) > -1
   && serverSrc.indexOf('isNull(schema.workouts.completedAt),', serverSrc.indexOf('startWorkout: defineAction')) > -1);
-check('server: startWorkout cleans up its initializing row when set insertion fails (retryable)',
-  /catch \(error\) \{[\s\S]*?eq\(schema\.workouts\.initializing, 1\)[\s\S]*?throw error/.test(serverSrc.slice(serverSrc.indexOf('startWorkout: defineAction'))));
+{
+  const startSlice = serverSrc.slice(serverSrc.indexOf('startWorkout: defineAction'));
+  check('server: startWorkout history read runs INSIDE the unified cleanup try (W-START-001)',
+    startSlice.indexOf('try {') > -1
+    && startSlice.indexOf('try {') < startSlice.indexOf('loadPreviousCompletedSets(ctx')
+    && startSlice.indexOf('loadPreviousCompletedSets(ctx') < startSlice.indexOf('catch (error)'));
+  check('server: startWorkout unified catch cleans up its own initializing row and rethrows as-is',
+    /catch \(error\) \{[\s\S]*?cleanupOwnInitializing\(\)[\s\S]*?throw error/.test(startSlice));
+  check('server: cleanup deletes only a still-initializing, never-completed own row (visible/completed never deleted)',
+    /const cleanupOwnInitializing[\s\S]*?eq\(schema\.workouts\.initializing, 1\),\s*isNull\(schema\.workouts\.completedAt\)/.test(startSlice));
+  check('server: startWorkout yield is driven by resolveYieldDecision over a bounded poll (W-START-001)',
+    startSlice.includes('resolveYieldDecision(') && startSlice.includes('waitMs(YIELD_WAIT_INTERVAL_MS)'));
+  check('server: a fresh still-initializing conflict fails retryably, never as an unusable success',
+    startSlice.includes('另一场训练正在初始化，请稍后重试'));
+  check('server: takeover deletes the stale row only under the same initializing guard',
+    /decision === "takeover"[\s\S]*?eq\(schema\.workouts\.id, keepId\),\s*eq\(schema\.workouts\.initializing, 1\),\s*isNull\(schema\.workouts\.completedAt\)/.test(startSlice));
+}
+check('source: registration barrier helper is exported (W-FINISH-001)',
+  clientSrc.includes('export async function waitForExpectedSetRegistration('));
+check('source: the barrier re-fetches the latest dashboard via fetchQuery',
+  clientSrc.includes('queryClient.fetchQuery'));
+{
+  const hf = clientSrc.indexOf('async function handleFinish()');
+  const cf = clientSrc.indexOf('async function confirmFinishAnyway()');
+  const hfBarrier = clientSrc.indexOf('await awaitFinalSetRegistration()', hf);
+  const cfBarrier = clientSrc.indexOf('await awaitFinalSetRegistration()', cf);
+  check('source: both finish paths run the registration barrier after settling adds, before flush/seal',
+    hfBarrier > clientSrc.indexOf('await settlePendingAdds(', hf)
+    && hfBarrier < clientSrc.indexOf('await flushAllHandles(', hf)
+    && cfBarrier > clientSrc.indexOf('await settlePendingAdds(', cf)
+    && cfBarrier < clientSrc.indexOf('await sealAllAndSettleStable(', cf));
+  check('source: barrier failure aborts both finish paths with the failure shown, no complete',
+    (clientSrc.match(/if \(!registered\) \{\s*setFinishFailed\(true\);\s*return;/g) ?? []).length === 2);
+}
 check('server: getDashboard active selection excludes initializing workouts',
   serverSrc.indexOf('eq(schema.workouts.initializing, 0)', serverSrc.indexOf('getDashboard: defineAction')) > -1);
 check('server: updateSet guard excludes initializing workouts (zero writes while initializing)',
@@ -388,6 +430,103 @@ const SET = { id: 7, weight: 100, reps: 8, completed: true };
     res.ok === false && res.stable === false);
 }
 
+// W-START-001 yield-by-state matrix: resolveYieldDecision driven in
+// the same bounded-poll loop startWorkout runs — each poll re-reads
+// the other row's state and feeds it to the REAL pure function.
+function driveYield(observations, attempts = 3) {
+  let index = 0;
+  let attemptsLeft = attempts;
+  const seen = [];
+  for (;;) {
+    const obs = observations[Math.min(index, observations.length - 1)];
+    const decision = S.resolveYieldDecision(obs.other, attemptsLeft, obs.nowMs);
+    seen.push(decision);
+    if (decision !== 'wait') return { decision, seen };
+    attemptsLeft -= 1;
+    index += 1;
+  }
+}
+const INIT_AT_1000 = { present: true, initializing: true, startedAtMs: 1000 };
+{
+  const { decision, seen } = driveYield([{ other: { present: true, initializing: false, startedAtMs: 1000 }, nowMs: 2000 }]);
+  check('W-START(yield): other already ready -> yield to it immediately',
+    decision === 'yield-ready' && seen.join(',') === 'yield-ready');
+}
+{
+  const { decision, seen } = driveYield([
+    { other: INIT_AT_1000, nowMs: 1100 },
+    { other: INIT_AT_1000, nowMs: 1300 },
+    { other: { present: true, initializing: false, startedAtMs: 1000 }, nowMs: 1500 },
+  ], 5);
+  check('W-START(yield): other flips ready mid-wait -> wait, wait, then yield',
+    decision === 'yield-ready' && seen.join(',') === 'wait,wait,yield-ready', seen.join(','));
+}
+{
+  const { decision, seen } = driveYield([
+    { other: INIT_AT_1000, nowMs: 1100 },
+    { other: { present: false, initializing: false, startedAtMs: null }, nowMs: 1300 },
+  ], 5);
+  check('W-START(yield): other row vanishes mid-wait (its init failed and self-cleaned) -> proceed with own ready flip',
+    decision === 'proceed-self' && seen.join(',') === 'wait,proceed-self', seen.join(','));
+}
+{
+  const stale = { present: true, initializing: true, startedAtMs: 1000 };
+  const { decision, seen } = driveYield([
+    { other: stale, nowMs: 32000 },
+    { other: stale, nowMs: 32200 },
+    { other: stale, nowMs: 32400 },
+  ], 2);
+  check('W-START(yield): still initializing past the budget and >=30s old -> takeover',
+    decision === 'takeover' && seen.join(',') === 'wait,wait,takeover', seen.join(','));
+}
+{
+  const fresh = { present: true, initializing: true, startedAtMs: 1000 };
+  const { decision, seen } = driveYield([
+    { other: fresh, nowMs: 4000 },
+    { other: fresh, nowMs: 4200 },
+    { other: fresh, nowMs: 4400 },
+  ], 2);
+  check('W-START(yield): still initializing past the budget but fresh -> retryable error, never an unusable return',
+    decision === 'retry' && seen.join(',') === 'wait,wait,retry', seen.join(','));
+}
+check('W-START(yield): no other row at all -> proceed-self',
+  S.resolveYieldDecision({ present: false, initializing: false, startedAtMs: null }, 0, 5000) === 'proceed-self');
+check('W-START(yield): exactly 30s old counts as stale (boundary)',
+  S.resolveYieldDecision({ present: true, initializing: true, startedAtMs: 1000 }, 0, 31000) === 'takeover'
+  && S.resolveYieldDecision({ present: true, initializing: true, startedAtMs: 1000 }, 0, 30999) === 'retry');
+
+// W-FINISH-001 registration barrier: waitForExpectedSetRegistration
+// polls the registry until the FINAL data version's set ids are all
+// registered; the finish paths proceed only on { ok: true }.
+{
+  const res = await C.waitForExpectedSetRegistration(() => [1, 2, 3], [1, 2, 3], 5, 1);
+  check('W-FINISH(barrier): every expected set already registered -> passes at once',
+    res.ok === true && res.missing.length === 0);
+}
+{
+  // The PM window: the dashboard data already includes the new set,
+  // but its SetRow registers only a few polls later.
+  let reads = 0;
+  const res = await C.waitForExpectedSetRegistration(() => {
+    reads += 1;
+    return reads >= 4 ? [1, 2] : [1];
+  }, [1, 2], 10, 1);
+  check('W-FINISH(barrier): registration lagging several polls behind the data still passes',
+    res.ok === true && reads >= 4, `reads=${reads}`);
+}
+{
+  let completeCalled = false;
+  const res = await C.waitForExpectedSetRegistration(() => [1], [1, 2, 3], 3, 1);
+  if (res.ok) completeCalled = true; // both finish paths gate complete on the barrier
+  check('W-FINISH(barrier): a set that never registers reports its id missing and the finish aborts (no complete)',
+    res.ok === false && JSON.stringify(res.missing) === JSON.stringify([2, 3]) && completeCalled === false);
+}
+{
+  const res = await C.waitForExpectedSetRegistration(() => [1, 2], [], 3, 1);
+  check('W-FINISH(barrier): an empty expectation passes trivially',
+    res.ok === true && res.missing.length === 0);
+}
+
 // W-START-001: reclaim decision matrix (pure mirror of the
 // conditional DELETE). Under the invisible-initialization contract
 // reclaim needs no edit heuristics: still-initializing + active is
@@ -555,6 +694,21 @@ check('W0.4: a later active does not displace the insert',
   let n = 0;
   const { stable } = await CM.flushAllHandles(() => [mkHandle(++n)], 3);
   check('mutation: skipping the stability re-check reports an unstable batch stable (detected)', stable === true);
+}
+
+{
+  const mutated = clientSrc.replace('round < maxRounds && missing.length > 0', 'round < 0 && missing.length > 0');
+  const CM = buildClient(mutated);
+  let reads = 0;
+  const res = await CM.waitForExpectedSetRegistration(() => { reads += 1; return reads >= 4 ? [1, 2] : [1]; }, [1, 2], 10, 1);
+  check('mutation: a registration barrier that never polls misses late registration (detected)', res.ok === false);
+}
+{
+  const mutated = serverSrc.replace('if (attemptsLeft > 0) return "wait";', 'if (attemptsLeft < 0) return "wait";');
+  const SM = buildServer(mutated);
+  const decision = SM.resolveYieldDecision({ present: true, initializing: true, startedAtMs: 1000 }, 3, 2000);
+  check('mutation: dropping the bounded yield wait decides over a still-initializing workout immediately (detected)',
+    decision !== 'wait');
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

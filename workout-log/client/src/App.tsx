@@ -884,6 +884,39 @@ export async function settlePendingAdds(
     : { ok: false, stable: false };
 }
 
+// --- W-FINISH-001 (registration barrier): the finish paths must not
+// judge completion from the handle registry until every set of the
+// FINAL dashboard data version has a registered SetRow handle. A
+// landed addSet refreshes the dashboard data first, but React still
+// has to commit and the new SetRow's effect has to register its
+// handle; settlePendingAdds resolving (or an invalidateQueries
+// resolving) proves neither. This barrier polls the registry until
+// every expected set id is present: { ok: true } only then. If the
+// rounds run out first it reports exactly which ids never registered
+// ({ ok: false, missing }) and the caller aborts the finish — drafts
+// stay editable — instead of completing over a set nobody checked.
+// A single setTimeout(0) or one registry read is NOT a substitute:
+// registration may lag several commits behind the data.
+export type WaitForSetRegistrationResult = { ok: boolean; missing: number[] };
+
+export async function waitForExpectedSetRegistration(
+  getRegisteredIds: () => Iterable<number>,
+  expectedIds: number[],
+  maxRounds = 40,
+  delayMs = 50,
+): Promise<WaitForSetRegistrationResult> {
+  const missingNow = (): number[] => {
+    const registered = new Set(getRegisteredIds());
+    return expectedIds.filter((id) => !registered.has(id));
+  };
+  let missing = missingNow();
+  for (let round = 0; round < maxRounds && missing.length > 0; round += 1) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    missing = missingNow();
+  }
+  return missing.length === 0 ? { ok: true, missing: [] } : { ok: false, missing };
+}
+
 // --- W-UI-001 rework: finish gate ---
 // Finish proceeds only when every set flushed clean, is saved, is not
 // blocked (completed without reps), and is completed. Otherwise the
@@ -1642,6 +1675,37 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     return false;
   }
 
+  // W-FINISH-001 registration barrier, shared by both finish paths:
+  // after the pending adds settle, re-fetch the LATEST dashboard,
+  // take the current workout's full set-id list from THAT data as
+  // the expected collection, and wait until the handle registry
+  // covers every one of those ids. A dashboard refetch returning is
+  // not registration: React may not have committed the new SetRow
+  // (and its effect may not have registered the handle) yet, and
+  // judging from the stale registry would silently skip a landed
+  // add's unfinished set. Returns false when the fetch fails or any
+  // expected set never registers — the caller then aborts the
+  // finish (failure shown, entry unlocked, drafts kept) and never
+  // calls complete.
+  async function awaitFinalSetRegistration(): Promise<boolean> {
+    let latest: Dashboard;
+    try {
+      latest = await queryClient.fetchQuery({
+        queryKey: ["dashboard"],
+        queryFn: () => api.getDashboard({ recent_limit: 20 }),
+      });
+    } catch {
+      return false;
+    }
+    const current = latest.active_workout;
+    const expectedIds = (current && current.id === workout.id ? current.sets : workout.sets).map((set) => set.id);
+    const registration = await waitForExpectedSetRegistration(
+      () => setHandlesRef.current.keys(),
+      expectedIds,
+    );
+    return registration.ok;
+  }
+
   // W-UI-001 finish gate + W-FINISH-001: flush every set over a
   // consistent handle set (flushAllHandles re-reads the registry and
   // re-flushes if the set changed mid-flush; an unstable batch counts
@@ -1669,6 +1733,14 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
       // collection.
       const adds = await settlePendingAdds(() => [...pendingAddsRef.current]);
       if (!adds.ok) {
+        setFinishFailed(true);
+        return;
+      }
+      // Registration barrier: only once the registry provably covers
+      // every set of the latest dashboard version may the flush/gate
+      // below judge the final collection.
+      const registered = await awaitFinalSetRegistration();
+      if (!registered) {
         setFinishFailed(true);
         return;
       }
@@ -1730,6 +1802,15 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
       // settled by the rounds below like every other set.
       const adds = await settlePendingAdds(() => [...pendingAddsRef.current]);
       if (!adds.ok) {
+        setFinishFailed(true);
+        return;
+      }
+      // Same registration barrier as handleFinish, before any seal:
+      // the seal rounds below must cover the landed add's set too,
+      // and a set whose handle never registered aborts the finish
+      // here (nothing sealed yet, drafts untouched).
+      const registered = await awaitFinalSetRegistration();
+      if (!registered) {
         setFinishFailed(true);
         return;
       }
