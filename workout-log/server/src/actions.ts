@@ -97,11 +97,32 @@ const weekSummaryResponse = z.object({
   volume_kg: z.number(),
 });
 
+const comparableHistorySetResponse = z.object({
+  set_number: z.number(),
+  weight: z.number().nullable(),
+  reps: z.number().nullable(),
+  completed: z.boolean(),
+});
+
+// W1-CONSISTENCY-001 (additive, optional): one exercise's most recent
+// comparable history, selected per routine by the same raw selection
+// the startWorkout prefill uses (see selectComparableHistory). Sets
+// are in the source workout's own unit/values — unconverted. Existing
+// consumers （健康看板 sync channel) ignore the field.
+const comparableHistoryEntryResponse = z.object({
+  routine: routineSchema,
+  exercise_key: z.string(),
+  unit: unitSchema,
+  target: z.string(),
+  sets: z.array(comparableHistorySetResponse),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
   recent_workouts: z.array(workoutResponse),
   week_summaries: z.array(weekSummaryResponse),
+  comparable_history: z.array(comparableHistoryEntryResponse).optional(),
 });
 
 // Owner-only gate (AUDIT-02 / L0.1): every write, initialization, and
@@ -399,40 +420,80 @@ export type PreviousSetLike = {
   completed: boolean;
 };
 
-// W1-CONSISTENCY-001: per-exercise most-recent comparable history.
-// Pure and self-contained so validation scripts can run it verbatim.
-// `recentCompleted` is the routine's completed workouts, most recent
-// first; only the first 20 are considered — the same window the
-// client sees via getDashboard recent_limit=20 — so a record ranked
-// 21st or older is never adopted by either side. For EACH exercise
-// key independently, the most recent workout in that window that
-// contains the exercise contributes ALL of its sets for the exercise
-// (completed and uncompleted alike — the identical collection the
-// client's reviewRecommendation judges). When a contributing
-// workout's unit differs from the target unit, its weights are
-// converted per source workout (LB_TO_KG, 0.5 rounding); `converted`
-// is true when any source actually used for a returned exercise was
-// converted.
-export function selectPreviousSetsByExercise(
-  recentCompleted: { unit: "lb" | "kg"; sets: PreviousSetLike[] }[],
+// W1-CONSISTENCY-001 (cross-window fix): the ONE raw comparable-history
+// selection every "next time" verdict derives from. Pure and
+// self-contained so validation scripts can run it verbatim.
+// `recentCompleted` is ONE routine's completed workouts, most recent
+// first; only the first 20 are considered. For EACH exercise key
+// independently, the most recent workout in that window that contains
+// the exercise contributes ALL of its sets for the exercise (completed
+// and uncompleted alike — the identical collection
+// progressionDecision judges). NO unit conversion happens here: sets
+// keep their source-workout values and the entry records the source
+// unit and the exercise's target string from that workout, so the
+// startWorkout prefill (via selectPreviousSetsByExercise) and the
+// getDashboard comparable_history field are two views of this single
+// selection and can never pick different candidates.
+export type ComparableSetLike = PreviousSetLike & { targetReps: string };
+
+export type ComparableHistoryRaw = {
+  exerciseKey: string;
+  unit: "lb" | "kg";
+  target: string;
+  sets: { setNumber: number; weight: number | null; reps: number | null; completed: boolean }[];
+};
+
+export function selectComparableHistory(
+  recentCompleted: { unit: "lb" | "kg"; sets: ComparableSetLike[] }[],
   exerciseKeys: string[],
-  targetUnit: "lb" | "kg",
-): { byExercise: Record<string, PreviousSetLike[]>; converted: boolean } {
+): ComparableHistoryRaw[] {
   const windowed = recentCompleted.slice(0, 20);
-  const byExercise: Record<string, PreviousSetLike[]> = {};
-  let converted = false;
+  const entries: ComparableHistoryRaw[] = [];
   for (const key of exerciseKeys) {
     for (const workout of windowed) {
       const sets = workout.sets.filter((set) => set.exerciseKey === key);
       if (sets.length === 0) continue;
-      const unitConverted = workout.unit !== targetUnit;
-      if (unitConverted) converted = true;
-      byExercise[key] = sets.map((set) => ({
-        ...set,
-        weight: unitConverted ? convertWeight(set.weight, workout.unit, targetUnit) : set.weight,
-      }));
+      const first = sets[0];
+      if (!first) continue;
+      entries.push({
+        exerciseKey: key,
+        unit: workout.unit,
+        target: first.targetReps,
+        sets: sets.map((set) => ({
+          setNumber: set.setNumber,
+          weight: set.weight,
+          reps: set.reps,
+          completed: set.completed,
+        })),
+      });
       break;
     }
+  }
+  return entries;
+}
+
+// W1-CONSISTENCY-001: the prefill view of the same raw selection —
+// when a contributing workout's unit differs from the target unit, its
+// weights are converted per source workout (LB_TO_KG, 0.5 rounding);
+// `converted` is true when any source actually used for a returned
+// exercise was converted.
+export function selectPreviousSetsByExercise(
+  recentCompleted: { unit: "lb" | "kg"; sets: ComparableSetLike[] }[],
+  exerciseKeys: string[],
+  targetUnit: "lb" | "kg",
+): { byExercise: Record<string, PreviousSetLike[]>; converted: boolean } {
+  const byExercise: Record<string, PreviousSetLike[]> = {};
+  let converted = false;
+  for (const entry of selectComparableHistory(recentCompleted, exerciseKeys)) {
+    const unitConverted = entry.unit !== targetUnit;
+    if (unitConverted) converted = true;
+    byExercise[entry.exerciseKey] = entry.sets.map((set) => ({
+      exerciseKey: entry.exerciseKey,
+      setNumber: set.setNumber,
+      weight: unitConverted ? convertWeight(set.weight, entry.unit, targetUnit) : set.weight,
+      reps: set.reps,
+      completed: set.completed,
+    }));
   }
   return { byExercise, converted };
 }
@@ -442,15 +503,15 @@ type PreviousComparable = {
   converted: boolean;
 };
 
-// W1.3 + W1-CONSISTENCY-001: load the routine's 20 most recent
-// completed workouts (any unit) with all their sets, then select the
-// per-exercise comparable history through the same pure rule the
-// client's weekly review mirrors.
-async function loadPreviousCompletedSets(
+// W1.3 + W1-CONSISTENCY-001: load ONE routine's 20 most recent
+// completed workouts (any unit) with all their sets, in the raw shape
+// selectComparableHistory consumes. This is the single history read
+// behind both the startWorkout prefill and the dashboard's
+// comparable_history field.
+async function loadRoutineRecentCompleted(
   ctx: Ctx,
   routine: z.infer<typeof routineSchema>,
-  unit: z.infer<typeof unitSchema>,
-): Promise<PreviousComparable> {
+): Promise<{ unit: "lb" | "kg"; sets: ComparableSetLike[] }[]> {
   const db = ctx.db<typeof schema>();
   const rows = await db
     .select({ id: schema.workouts.id, unit: schema.workouts.unit })
@@ -458,33 +519,74 @@ async function loadPreviousCompletedSets(
     .where(and(eq(schema.workouts.routine, routine), isNotNull(schema.workouts.completedAt)))
     .orderBy(desc(schema.workouts.completedAt))
     .limit(20);
-  if (rows.length === 0) return { byExercise: {}, converted: false };
+  if (rows.length === 0) return [];
   const setRows = await db
     .select()
     .from(schema.workoutSets)
     .where(inArray(schema.workoutSets.workoutId, rows.map((row) => row.id)))
     .orderBy(asc(schema.workoutSets.id));
-  const setsByWorkout = new Map<number, PreviousSetLike[]>();
+  const setsByWorkout = new Map<number, ComparableSetLike[]>();
   for (const row of setRows) {
     const list = setsByWorkout.get(row.workoutId) ?? [];
     list.push({
       exerciseKey: row.exerciseKey,
       setNumber: row.setNumber,
+      targetReps: row.targetReps,
       weight: row.weight,
       reps: row.reps,
       completed: row.completed,
     });
     setsByWorkout.set(row.workoutId, list);
   }
-  const recentCompleted = rows.map((row) => ({
+  return rows.map((row) => ({
     unit: row.unit,
     sets: setsByWorkout.get(row.id) ?? [],
   }));
+}
+
+async function loadPreviousCompletedSets(
+  ctx: Ctx,
+  routine: z.infer<typeof routineSchema>,
+  unit: z.infer<typeof unitSchema>,
+): Promise<PreviousComparable> {
+  const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
   return selectPreviousSetsByExercise(
     recentCompleted,
     ROUTINES[routine].map((exercise) => exercise.key),
     unit,
   );
+}
+
+// W1-CONSISTENCY-001: the dashboard view of the same raw selection,
+// for all three routines — per exercise, the source workout's unit,
+// the exercise's target string, and ALL of its sets in SOURCE values
+// (no conversion; the client converts into the review unit exactly as
+// the prefill path converts into the new workout's unit). This is
+// what lets the weekly review judge the same candidate the prefill
+// used even when that candidate sits beyond the global
+// recent_workouts window (which mixes routines).
+async function loadComparableHistory(
+  ctx: Ctx,
+): Promise<z.infer<typeof comparableHistoryEntryResponse>[]> {
+  const entries: z.infer<typeof comparableHistoryEntryResponse>[] = [];
+  for (const routine of ["push", "pull", "legs"] as const) {
+    const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
+    for (const raw of selectComparableHistory(recentCompleted, ROUTINES[routine].map((exercise) => exercise.key))) {
+      entries.push({
+        routine,
+        exercise_key: raw.exerciseKey,
+        unit: raw.unit,
+        target: raw.target,
+        sets: raw.sets.map((set) => ({
+          set_number: set.setNumber,
+          weight: set.weight,
+          reps: set.reps,
+          completed: set.completed,
+        })),
+      });
+    }
+  }
+  return entries;
 }
 
 export const Actions = {
@@ -570,6 +672,7 @@ export const Actions = {
         active_workout: activeWorkout,
         recent_workouts: recentWorkouts,
         week_summaries: weekSummaries,
+        comparable_history: await loadComparableHistory(ctx),
       };
     },
   }),

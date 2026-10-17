@@ -29,6 +29,23 @@
 // an older push but absent from the newest push — must yield the
 // SAME non-null verdict on both ends, as must the extra-uncompleted-
 // set, cross-unit, and beyond-20-window cases.
+// W1-CONSISTENCY-001 cross-window fix (2026-10-17, second rework):
+// the two windows were never the same set — the server selects per
+// ROUTINE (20 most recent completed workouts of that routine) while
+// getDashboard's recent_workouts is a GLOBAL 20 across routines. A
+// comparable record ranked 21st globally but inside its routine's 20
+// was adopted by the prefill yet invisible to the review, which
+// reported "no comparable record". The fix is a single raw selection
+// (server selectComparableHistory): startWorkout's prefill derives
+// from it via selectPreviousSetsByExercise, and getDashboard ships it
+// as comparable_history, which the client's reviewRecommendation
+// prefers over its recent_workouts scan (the scan remains only as a
+// fallback for older servers). The case below builds ONE dataset
+// where bench is globally 21st and asserts both ends — server
+// selection and client recommendation over the shipped
+// comparable_history — reach the SAME increase-to-105 verdict, while
+// the legacy fallback scan over the same global list still finds
+// nothing (the original conflict, kept as documentation).
 // Mutations are executed (cap check weakened to the minimum, the
 // reps-missing guard removed, the increment changed) and must flip
 // outcomes in BOTH copies.
@@ -88,10 +105,10 @@ function buildFrom(src, fnNames, constNames) {
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { ${[...fnNames, ...constNames].join(', ')} };`)();
 }
 
-const server = buildFrom(serverSrc, ['progressionDecision', 'convertWeight', 'selectPreviousSetsByExercise'], ['LB_TO_KG']);
+const server = buildFrom(serverSrc, ['progressionDecision', 'convertWeight', 'selectPreviousSetsByExercise', 'selectComparableHistory'], ['LB_TO_KG']);
 const client = buildFrom(clientSrc, ['progressionDecision', 'convertWeightValue'], ['LB_TO_KG']);
 const clientReview = buildFrom(clientSrc,
-  ['progressionDecision', 'convertWeightValue', 'groupSets', 'targetRange', 'reviewRecommendation'], ['LB_TO_KG']);
+  ['progressionDecision', 'convertWeightValue', 'groupSets', 'targetRange', 'recommendationFromCandidate', 'reviewRecommendation'], ['LB_TO_KG']);
 
 // --- source wiring ---
 check('source: server prefill calls progressionDecision', serverSrc.includes('const decision = progressionDecision({'));
@@ -111,9 +128,20 @@ check('source: client trainingVolume counts only completed sets with weight and 
 check('source: server selects comparable history per exercise (W1-CONSISTENCY-001)',
   serverSrc.includes('selectPreviousSetsByExercise(') && serverSrc.includes('previous.byExercise[exercise.key]'));
 check('source: server history window is the routine\'s 20 most recent completed workouts',
-  /loadPreviousCompletedSets[\s\S]*?\.limit\(20\)/.test(serverSrc) && serverSrc.includes('recentCompleted.slice(0, 20)'));
+  /loadRoutineRecentCompleted[\s\S]*?\.limit\(20\)/.test(serverSrc) && serverSrc.includes('recentCompleted.slice(0, 20)'));
 check('source: client history window matches (getDashboard recent_limit = 20)',
   clientSrc.includes('api.getDashboard({ recent_limit: 20 })'));
+check('source: single raw selection feeds both ends (W1-CONSISTENCY-001 cross-window)',
+  serverSrc.includes('selectComparableHistory(recentCompleted, ROUTINES[routine].map((exercise) => exercise.key))')
+  && serverSrc.includes('selectComparableHistory(recentCompleted, exerciseKeys)'));
+check('source: getDashboard ships comparable_history from that selection',
+  serverSrc.includes('comparable_history: await loadComparableHistory(ctx)')
+  && serverSrc.includes('comparable_history: z.array(comparableHistoryEntryResponse).optional()'));
+check('source: forbidden dashboard still returns zero data (no comparable_history leak)',
+  serverSrc.includes('return { forbidden: true, active_workout: null, recent_workouts: [], week_summaries: [] };'));
+check('source: client review prefers comparable_history, keeps the legacy scan as fallback',
+  clientSrc.includes('comparableHistory?.find((entry) => entry.exercise_key === review.key)')
+  && clientSrc.includes('groupSets(workout.sets).find((group) => group.key === review.key)'));
 
 // --- behaviour: server and client copies must agree on every case ---
 const S = (weight, reps, completed = true) => ({ weight, reps, completed });
@@ -156,7 +184,7 @@ check('convert: round trip lb->kg->lb lands within one step',
 // Server end: selectPreviousSetsByExercise + progressionDecision is
 // exactly what startWorkout's prefill consumes. Client end: the real
 // reviewRecommendation over Workout-shaped recent_workouts.
-const PS = (weight, reps, completed = true) => ({ exerciseKey: 'barbell-bench', setNumber: 0, weight, reps, completed });
+const PS = (weight, reps, completed = true) => ({ exerciseKey: 'barbell-bench', setNumber: 0, targetReps: '6–8', weight, reps, completed });
 const benchHistory = (list) => list.map(([w, r, c], i) => ({ ...PS(w, r, c), setNumber: i + 1 }));
 function serverDecision(recentCompleted, targetUnit = 'lb') {
   const { byExercise, converted } = server.selectPreviousSetsByExercise(recentCompleted, ['barbell-bench'], targetUnit);
@@ -243,6 +271,91 @@ const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
     Array.from({ length: 20 }, () => clientWorkout('lb', [])));
   check('W1-CONSISTENCY: client agrees beyond the window (no comparable record)',
     clientText.includes('暂不做重量建议'), clientText);
+}
+
+// --- W1-CONSISTENCY-001 cross-window: ONE dataset, both ends agree ---
+// The PM counterexample for the second rework: bench's most recent
+// comparable record (push, 4x100lbx8, all completed, all at the cap)
+// ranks 21st in the GLOBAL completed list — the global 20 are other
+// routines' workouts plus one newer bench-less push — but it is the
+// 2nd most recent PUSH workout, well inside the routine's own 20.
+// Server end: selectPreviousSetsByExercise over the push window (what
+// startWorkout consumes). Client end: reviewRecommendation over the
+// global recent_workouts PLUS the comparable_history entry the server
+// builds from the SAME raw selection (selectComparableHistory). Both
+// must say increase to 105lb; the legacy fallback scan over the
+// global list alone still finds nothing (the original conflict).
+{
+  const olderBench = benchHistory([[100, 8], [100, 8], [100, 8], [100, 8]]);
+  const benchlessPush = [{ exerciseKey: 'overhead-press', setNumber: 1, targetReps: '8–10', weight: 60, reps: 10, completed: true }];
+  const otherRoutineSet = [{ exerciseKey: 'wide-lat-pulldown', setNumber: 1, targetReps: '8–12', weight: 120, reps: 10, completed: true }];
+  // Push window, most recent first: bench-less push, then the bench push.
+  const pushWindow = [
+    { unit: 'lb', sets: benchlessPush },
+    { unit: 'lb', sets: olderBench },
+  ];
+  const { history, decision } = serverDecision(pushWindow);
+  check('W1-CONSISTENCY cross-window: server selection adopts the bench record inside the routine window',
+    history.length === 4 && history.every((s) => s.weight === 100));
+  check('W1-CONSISTENCY cross-window: server prefill verdict is increase to 105',
+    decision.action === 'increase' && decision.suggestedWeight === 105 && decision.suggestedReps === 6,
+    JSON.stringify(decision));
+
+  // The comparable_history entry exactly as getDashboard builds it:
+  // same raw selection, source values unconverted.
+  const rawEntries = server.selectComparableHistory(pushWindow, ['barbell-bench', 'overhead-press']);
+  const comparableHistory = rawEntries.map((entry) => ({
+    routine: 'push',
+    exercise_key: entry.exerciseKey,
+    unit: entry.unit,
+    target: entry.target,
+    sets: entry.sets.map((s) => ({ set_number: s.setNumber, weight: s.weight, reps: s.reps, completed: s.completed })),
+  }));
+  const benchEntry = comparableHistory.find((entry) => entry.exercise_key === 'barbell-bench');
+  check('W1-CONSISTENCY cross-window: comparable_history carries the bench candidate in source values',
+    benchEntry != null && benchEntry.unit === 'lb' && benchEntry.target === '6–8'
+    && benchEntry.sets.length === 4 && benchEntry.sets.every((s) => s.weight === 100 && s.reps === 8 && s.completed));
+
+  // Global recent_workouts, most recent first: 19 other-routine
+  // workouts + the bench-less push = the global 20; the bench push
+  // would be 21st and is NOT in the list the client receives.
+  const globalRecent = [
+    {
+      unit: 'lb',
+      sets: benchlessPush.map((s) => ({
+        exercise_key: s.exerciseKey, exercise_name: '站姿推举', set_number: s.setNumber,
+        target_reps: s.targetReps, weight: s.weight, reps: s.reps, completed: s.completed,
+      })),
+    },
+    ...Array.from({ length: 19 }, () => ({
+      unit: 'lb',
+      sets: otherRoutineSet.map((s) => ({
+        exercise_key: s.exerciseKey, exercise_name: '高位下拉 · 宽握', set_number: s.setNumber,
+        target_reps: s.targetReps, weight: s.weight, reps: s.reps, completed: s.completed,
+      })),
+    })),
+  ];
+  const legacyText = clientReview.reviewRecommendation(benchReview, globalRecent);
+  check('W1-CONSISTENCY cross-window: legacy global scan alone still finds no candidate (the original conflict)',
+    legacyText.includes('暂不做重量建议'), legacyText);
+  const fixedText = clientReview.reviewRecommendation(benchReview, globalRecent, comparableHistory);
+  check('W1-CONSISTENCY cross-window: client prefers comparable_history and agrees with the server (increase to 105lb)',
+    fixedText.includes('下次增至 105lb'), fixedText);
+
+  // An exercise with NO comparable_history entry still falls back to
+  // the recent_workouts scan (older-server compatibility path intact).
+  const ohpReview = { key: 'overhead-press', name: '站姿推举', unit: 'lb' };
+  const ohpWorkout = {
+    unit: 'lb',
+    sets: [60, 60, 60].map((w, i) => ({
+      exercise_key: 'overhead-press', exercise_name: '站姿推举', set_number: i + 1,
+      target_reps: '8–10', weight: w, reps: 10, completed: true,
+    })),
+  };
+  const benchOnlyHistory = comparableHistory.filter((entry) => entry.exercise_key === 'barbell-bench');
+  const fallbackText = clientReview.reviewRecommendation(ohpReview, [ohpWorkout], benchOnlyHistory);
+  check('W1-CONSISTENCY cross-window: entry-less exercise falls back to the recent_workouts scan (increase to 65lb)',
+    fallbackText.includes('下次增至 65lb'), fallbackText);
 }
 
 // --- mutation sensitivity (executed, in BOTH copies) ---

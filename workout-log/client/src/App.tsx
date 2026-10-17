@@ -383,34 +383,35 @@ function weightTrend(review: ExerciseReview) {
   return `${weightText} · 平均次数${repDelta === 0 ? "持平" : `较前一周${repDelta > 0 ? "+" : ""}${repDelta}`}`;
 }
 
-function reviewRecommendation(review: ExerciseReview, workouts: Workout[]) {
-  // W1: the "next time" suggestion is decided by this exercise's most
-  // recent comparable workout in recent_workouts (same key; either unit —
-  // weights are converted into the review unit first), fed through the
-  // same progressionDecision the server prefill uses. The week-over-week
-  // evidence above stays display-only and no longer derives a second,
-  // conflicting verdict.
-  let comparable: { workout: Workout; exercise: ReturnType<typeof groupSets>[number] } | null = null;
-  for (const workout of workouts) {
-    const exercise = groupSets(workout.sets).find((group) => group.key === review.key);
-    if (exercise) {
-      comparable = { workout, exercise };
-      break;
-    }
-  }
-  if (!comparable) return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
-  const { min, max } = targetRange(comparable.exercise.target);
-  const unitConverted = comparable.workout.unit !== review.unit;
-  const sets = comparable.exercise.sets.map((set) => ({
+type ComparableHistoryEntry = NonNullable<Dashboard["comparable_history"]>[number];
+
+// Shared tail of reviewRecommendation: given ONE comparable candidate
+// (target string, source unit, and ALL of the exercise's sets from the
+// source workout — completed and uncompleted alike), convert its
+// weights into the review unit and run the same progressionDecision
+// the server prefill uses, then phrase the verdict. Both candidate
+// sources (comparable_history and the recent_workouts fallback) feed
+// through here so the wording and the rule can never drift apart.
+function recommendationFromCandidate(
+  review: ExerciseReview,
+  candidate: {
+    target: string;
+    unit: Unit;
+    sets: { weight: number | null; reps: number | null; completed: boolean }[];
+  },
+) {
+  const { min, max } = targetRange(candidate.target);
+  const unitConverted = candidate.unit !== review.unit;
+  const sets = candidate.sets.map((set) => ({
     weight: set.weight == null
       ? null
       : unitConverted
-        ? convertWeightValue(set.weight, comparable.workout.unit, review.unit)
+        ? convertWeightValue(set.weight, candidate.unit, review.unit)
         : set.weight,
     reps: set.reps,
     completed: set.completed,
   }));
-  const planned = comparable.exercise.sets.length;
+  const planned = candidate.sets.length;
   const decision = progressionDecision({
     plannedSets: planned,
     sets,
@@ -434,7 +435,49 @@ function reviewRecommendation(review: ExerciseReview, workouts: Workout[]) {
   return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
 }
 
-function WeeklyReview({ workouts }: { workouts: Workout[] }) {
+function reviewRecommendation(
+  review: ExerciseReview,
+  workouts: Workout[],
+  comparableHistory?: ComparableHistoryEntry[],
+) {
+  // W1: the "next time" suggestion is decided by this exercise's most
+  // recent comparable workout, fed through the same progressionDecision
+  // the server prefill uses. The week-over-week evidence above stays
+  // display-only and no longer derives a second, conflicting verdict.
+  // W1-CONSISTENCY-001 (cross-window fix): the candidate comes FIRST
+  // from comparable_history — the server's per-routine selection, the
+  // exact candidate startWorkout's prefill judges — because
+  // recent_workouts is a GLOBAL window (all routines mixed): a
+  // comparable record can rank beyond the global 20 while still
+  // inside its own routine's 20, and the old scan then reported "no
+  // comparable record" while the prefill suggested a weight. Only
+  // when comparable_history is absent (older server) does the scan
+  // below run, unchanged.
+  const historyEntry = comparableHistory?.find((entry) => entry.exercise_key === review.key);
+  if (historyEntry) {
+    return recommendationFromCandidate(review, {
+      target: historyEntry.target,
+      unit: historyEntry.unit,
+      sets: historyEntry.sets,
+    });
+  }
+  let comparable: { workout: Workout; exercise: ReturnType<typeof groupSets>[number] } | null = null;
+  for (const workout of workouts) {
+    const exercise = groupSets(workout.sets).find((group) => group.key === review.key);
+    if (exercise) {
+      comparable = { workout, exercise };
+      break;
+    }
+  }
+  if (!comparable) return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
+  return recommendationFromCandidate(review, {
+    target: comparable.exercise.target,
+    unit: comparable.workout.unit,
+    sets: comparable.exercise.sets,
+  });
+}
+
+function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
   const { start, end } = previousCompleteWeek();
   const priorStart = new Date(start);
   priorStart.setDate(priorStart.getDate() - 7);
@@ -447,7 +490,7 @@ function WeeklyReview({ workouts }: { workouts: Workout[] }) {
   );
   const missing = (Object.keys(ROUTINE_META) as Routine[]).filter((routine) => !routines.has(routine));
   const reviews = exerciseReviews(week, priorWeek);
-  const recommendations = reviews.map((review) => reviewRecommendation(review, workouts));
+  const recommendations = reviews.map((review) => reviewRecommendation(review, workouts, comparableHistory));
   const endInclusive = new Date(end);
   endInclusive.setDate(endInclusive.getDate() - 1);
 
@@ -2057,7 +2100,7 @@ function History({ workouts }: { workouts: Workout[] }) {
   );
 }
 
-function StartScreen({ recent }: { recent: Workout[] }) {
+function StartScreen({ recent, comparableHistory }: { recent: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
   const queryClient = useQueryClient();
   const [unit, setUnit] = useState<Unit>("lb");
   const start = useMutation({
@@ -2079,7 +2122,7 @@ function StartScreen({ recent }: { recent: Workout[] }) {
         </div>
       </section>
 
-      <WeeklyReview workouts={recent} />
+      <WeeklyReview workouts={recent} comparableHistory={comparableHistory} />
 
       <section className="routine-selector" aria-label="选择训练日">
         {(Object.keys(ROUTINE_META) as Routine[]).map((routine, index) => {
@@ -2135,7 +2178,7 @@ export function App() {
       {dashboard.data.active_workout ? (
         <ActiveWorkout workout={dashboard.data.active_workout} recent={dashboard.data.recent_workouts} />
       ) : (
-        <StartScreen recent={dashboard.data.recent_workouts} />
+        <StartScreen recent={dashboard.data.recent_workouts} comparableHistory={dashboard.data.comparable_history} />
       )}
     </div>
   );
