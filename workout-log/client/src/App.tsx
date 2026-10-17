@@ -929,7 +929,7 @@ export type SaveAggregate = {
   label: string;
   errorCount: number;
   blockedCount: number;
-  firstAbnormal: SetSaveSnapshot | null;
+  firstAbnormal: { exerciseKey: string; setId: number; blocked: boolean } | null;
 };
 
 export function aggregateSaveStates(
@@ -939,15 +939,20 @@ export function aggregateSaveStates(
   const errors = snapshots.filter((snapshot) => snapshot.status === "error");
   const blockedList = snapshots.filter((snapshot) => snapshot.blocked);
   const counts = { errorCount: errors.length, blockedCount: blockedList.length };
+  const abnormalOf = (snapshot: SetSaveSnapshot) => ({
+    exerciseKey: snapshot.exerciseKey,
+    setId: snapshot.id,
+    blocked: snapshot.blocked,
+  });
   if (errors.length > 0) {
-    return { kind: "error", label: `有 ${errors.length} 组保存失败`, ...counts, firstAbnormal: errors[0] };
+    return { kind: "error", label: `有 ${errors.length} 组保存失败`, ...counts, firstAbnormal: abnormalOf(errors[0]) };
   }
   if (blockedList.length > 0) {
-    return { kind: "blocked", label: `有 ${blockedList.length} 组需补次数`, ...counts, firstAbnormal: blockedList[0] };
+    return { kind: "blocked", label: `有 ${blockedList.length} 组需补次数`, ...counts, firstAbnormal: abnormalOf(blockedList[0]) };
   }
   const dirty = snapshots.filter((snapshot) => snapshot.status === "dirty");
   if (dirty.length > 0) {
-    return { kind: "dirty", label: "有未保存的修改", ...counts, firstAbnormal: dirty[0] };
+    return { kind: "dirty", label: "有未保存的修改", ...counts, firstAbnormal: abnormalOf(dirty[0]) };
   }
   if (snapshots.some((snapshot) => snapshot.status === "saving")) {
     return { kind: "saving", label: "正在保存", ...counts, firstAbnormal: null };
@@ -993,7 +998,7 @@ export function exerciseHeadInfo(doneCount: number, snapshots: SetSaveSnapshot[]
   if (blockedList.length > 0) {
     return {
       doneCount,
-      statusText: blockedList.length > 1 ? `有 ${blockedList.length} 组需补次数` : "需补次数",
+      statusText: blockedList.length > 1 ? `${blockedList.length} 组需补次数` : "需补次数",
       statusKind: "blocked",
     };
   }
@@ -1518,6 +1523,10 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   });
   const [pendingAddCount, setPendingAddCount] = useState(0);
   const finishButtonRef = useRef<HTMLButtonElement | null>(null);
+  // W-UI-001-D1: the element focused when a finish attempt started, so
+  // cancelling the finish confirmation restores the original focus
+  // and current exercise.
+  const preFinishFocusRef = useRef<Element | null>(null);
   const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
   // Rest timer lives only in this component's memory: no server writes, no
   // localStorage, so a page refresh resets it (workout data itself is still
@@ -1644,6 +1653,10 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   // workout completes; anything else shows the confirmation for its
   // reason, because finishing would lose edits or skip sets.
   async function handleFinish() {
+    // W-UI-001-D1: remember where focus was, so cancelling the finish
+    // confirmation can restore it (and the current exercise, which the
+    // finish flow never changes).
+    preFinishFocusRef.current = document.activeElement;
     setFinishFailed(false);
     setFinishing(true);
     try {
@@ -1681,6 +1694,16 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
       setFinishBlock(decision.reason);
     } finally {
       setFinishing(false);
+    }
+  }
+
+  // W-UI-001-D1: cancelling the finish confirmation restores the
+  // focus the user had when the finish attempt started.
+  function cancelFinish() {
+    setFinishBlock(null);
+    const target = preFinishFocusRef.current;
+    if (target instanceof HTMLElement && target.isConnected) {
+      requestAnimationFrame(() => target.focus());
     }
   }
 
@@ -1801,7 +1824,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     const abnormal = aggregate.firstAbnormal;
     if (!abnormal) return;
     setSelectedExerciseKey(abnormal.exerciseKey);
-    focusSetInput(abnormal.id, abnormal.blocked ? "reps" : "weight");
+    focusSetInput(abnormal.setId, abnormal.blocked ? "reps" : "weight");
   };
   const restTimerUi = (
     <>
@@ -1890,7 +1913,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
                 ? "有已完成但缺次数的组，请先补次数，或确认直接结束"
                 : "还有未完成的组，确认结束训练吗？"}
           </span>
-          <button type="button" onClick={() => setFinishBlock(null)}>返回继续编辑</button>
+          <button type="button" onClick={cancelFinish}>返回继续编辑</button>
           <button type="button" className="danger" onClick={() => void confirmFinishAnyway()} disabled={complete.isPending || finishing}>仍要结束</button>
         </div>
       ) : null}

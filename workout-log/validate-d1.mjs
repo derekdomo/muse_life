@@ -53,11 +53,11 @@ const clean = { pendingAdds: 0, finishing: false };
 let r = aggregateSaveStates([], clean);
 check("aggregate: empty -> saved 全部已保存", r.kind === "saved" && r.label === "全部已保存" && r.firstAbnormal === null);
 r = aggregateSaveStates([snap("error")], clean);
-check("aggregate: one error", r.kind === "error" && r.label === "有 1 组保存失败" && r.errorCount === 1 && r.firstAbnormal?.id === 1);
+check("aggregate: one error", r.kind === "error" && r.label === "有 1 组保存失败" && r.errorCount === 1 && r.firstAbnormal?.setId === 1 && r.firstAbnormal?.exerciseKey === "bench");
 r = aggregateSaveStates([snap("error", false, "bench", 1), snap("error", false, "row", 2), snap("saved", true, "row", 3)], clean);
-check("aggregate: error outranks blocked, counts kept", r.kind === "error" && r.errorCount === 2 && r.blockedCount === 1 && r.firstAbnormal?.id === 1);
+check("aggregate: error outranks blocked, counts kept", r.kind === "error" && r.errorCount === 2 && r.blockedCount === 1 && r.firstAbnormal?.setId === 1);
 r = aggregateSaveStates([snap("saved", true, "bench", 7)], clean);
-check("aggregate: blocked -> 需补次数 + firstAbnormal", r.kind === "blocked" && r.label === "有 1 组需补次数" && r.firstAbnormal?.id === 7);
+check("aggregate: blocked -> 需补次数 + firstAbnormal", r.kind === "blocked" && r.label === "有 1 组需补次数" && r.firstAbnormal?.setId === 7);
 r = aggregateSaveStates([snap("dirty")], clean);
 check("aggregate: dirty -> 有未保存的修改", r.kind === "dirty" && r.label === "有未保存的修改" && r.firstAbnormal !== null);
 r = aggregateSaveStates([snap("saving")], clean);
@@ -109,7 +109,7 @@ check("head: error text + doneCount passthrough", h.doneCount === 3 && h.statusT
 h = exerciseHeadInfo(1, [snap("saved", true)]);
 check("head: single blocked -> 需补次数", h.statusText === "需补次数" && h.statusKind === "blocked");
 h = exerciseHeadInfo(0, [snap("saved", true, "bench", 1), snap("saved", true, "bench", 2)]);
-check("head: two blocked -> 有 2 组需补次数", h.statusText === "有 2 组需补次数");
+check("head: two blocked -> 2 组需补次数", h.statusText === "2 组需补次数");
 h = exerciseHeadInfo(2, [snap("dirty")]);
 check("head: dirty -> 有未保存修改", h.statusText === "有未保存修改" && h.statusKind === "dirty");
 h = exerciseHeadInfo(2, [snap("saving")]);
@@ -122,6 +122,7 @@ check("wiring: status bar with separate completion count", clientSrc.includes('c
 check("wiring: 查看 button only rendered for error/blocked kinds", clientSrc.includes('aggregate.kind === "error" || aggregate.kind === "blocked"'));
 check("wiring: card body hidden, rows stay mounted", clientSrc.includes('className="exercise-body" hidden={!expanded}'));
 check("wiring: focus attributes + finish ref", clientSrc.includes("data-focus-set={set.id}") && clientSrc.includes("finishButtonRef"));
+check("wiring: cancel finish restores pre-finish focus", clientSrc.includes("preFinishFocusRef") && clientSrc.includes("function cancelFinish()") && clientSrc.includes("onClick={cancelFinish}"));
 check("wiring: timer anchors to resolved current exercise", clientSrc.includes("resolveCurrentExerciseKey(") && clientSrc.includes("exercise.key === currentExercise.key"));
 check("css: D1 selectors present", themeCss.includes(".workout-status-bar") && themeCss.includes(".save-aggregate") && themeCss.includes(".exercise-body[hidden]") && themeCss.includes(".exercise-head-status"));
 

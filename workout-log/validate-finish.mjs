@@ -109,7 +109,9 @@ check('source: runComplete unseals every set on failure',
 check('source: finish failure is surfaced in words',
   clientSrc.includes('结束失败，修改已保留，可以继续编辑保存后重试结束'));
 check('source: cancel confirmation does not seal',
-  clientSrc.includes('onClick={() => setFinishBlock(null)}>返回继续编辑'));
+  clientSrc.includes('onClick={cancelFinish}>返回继续编辑')
+  && /function cancelFinish\(\) \{[^}]*setFinishBlock\(null\)[^}]*\}/.test(clientSrc)
+  && !/function cancelFinish\(\) \{[^}]*\.seal\(/.test(clientSrc));
 check('source: handleFinish consumes flushAllHandles stability',
   clientSrc.includes('flushOk: stable && (results[index] ?? false)'));
 check('server: updateSet is a single UPDATE with the active guard inside (W-ACTIVE-001)',
