@@ -1,0 +1,1 @@
+ALTER TABLE workouts ADD COLUMN initializing INTEGER NOT NULL DEFAULT 0;

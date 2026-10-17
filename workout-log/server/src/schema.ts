@@ -8,6 +8,13 @@ export const workouts = sqliteTable("workouts", {
     .notNull()
     .$defaultFn(() => new Date()),
   completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+  // W-START-001: a workout is inserted with initializing = 1 while
+  // startWorkout inserts its prefill sets; it becomes a usable active
+  // workout only when a single conditional UPDATE flips this to 0.
+  // Every read/write target selection excludes initializing = 1 rows,
+  // so an initializing workout is invisible and unwritable. Existing
+  // rows default to 0 (ready).
+  initializing: integer("initializing").notNull().default(0),
 });
 
 export const workoutSets = sqliteTable("workout_sets", {

@@ -19,6 +19,16 @@
 // W1.4: client trainingVolume and server week summaries only count
 // completed sets with both weight and reps (asserted at source level
 // here; week summaries are covered by their own history in changes).
+// W1-CONSISTENCY-001 (2026-10-17): the comparable history itself is
+// selected PER EXERCISE — the server's selectPreviousSetsByExercise
+// (extracted verbatim) walks the routine's 20 most recent completed
+// workouts and, for each exercise, takes the most recent workout
+// containing it; the client's reviewRecommendation (also extracted
+// verbatim) does the same walk over recent_workouts (the same
+// 20-workout window). The PM counterexample — bench press present in
+// an older push but absent from the newest push — must yield the
+// SAME non-null verdict on both ends, as must the extra-uncompleted-
+// set, cross-unit, and beyond-20-window cases.
 // Mutations are executed (cap check weakened to the minimum, the
 // reps-missing guard removed, the increment changed) and must flip
 // outcomes in BOTH copies.
@@ -52,10 +62,15 @@ function extractFunction(source, name) {
   const closeParen = matchDelim(source, openParen, '(', ')');
   // Skip an object-literal return-type annotation (`): { ... } {`):
   // the first balanced { ... } after the parameter list is the type,
-  // the body brace follows it.
+  // the body brace follows it. Only a brace that follows a colon is a
+  // type — a plain function's body brace directly after `)` is not.
   let pos = closeParen + 1;
-  while (pos < source.length && /[\s:]/.test(source[pos])) pos++;
-  if (source[pos] === '{') pos = matchDelim(source, pos, '{', '}') + 1;
+  let sawColon = false;
+  while (pos < source.length && /[\s:]/.test(source[pos])) {
+    if (source[pos] === ':') sawColon = true;
+    pos++;
+  }
+  if (sawColon && source[pos] === '{') pos = matchDelim(source, pos, '{', '}') + 1;
   const bodyStart = source.indexOf('{', pos);
   const bodyEnd = matchDelim(source, bodyStart, '{', '}');
   return source.slice(idx, bodyEnd + 1);
@@ -73,8 +88,10 @@ function buildFrom(src, fnNames, constNames) {
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { ${[...fnNames, ...constNames].join(', ')} };`)();
 }
 
-const server = buildFrom(serverSrc, ['progressionDecision', 'convertWeight'], ['LB_TO_KG']);
+const server = buildFrom(serverSrc, ['progressionDecision', 'convertWeight', 'selectPreviousSetsByExercise'], ['LB_TO_KG']);
 const client = buildFrom(clientSrc, ['progressionDecision', 'convertWeightValue'], ['LB_TO_KG']);
+const clientReview = buildFrom(clientSrc,
+  ['progressionDecision', 'convertWeightValue', 'groupSets', 'targetRange', 'reviewRecommendation'], ['LB_TO_KG']);
 
 // --- source wiring ---
 check('source: server prefill calls progressionDecision', serverSrc.includes('const decision = progressionDecision({'));
@@ -91,6 +108,12 @@ check('source: both copies share the LB_TO_KG constant',
   server.LB_TO_KG === 0.45359237 && client.LB_TO_KG === 0.45359237);
 check('source: client trainingVolume counts only completed sets with weight and reps (W1.4)',
   clientSrc.includes('if (!set.completed || set.weight == null || set.reps == null) return sum;'));
+check('source: server selects comparable history per exercise (W1-CONSISTENCY-001)',
+  serverSrc.includes('selectPreviousSetsByExercise(') && serverSrc.includes('previous.byExercise[exercise.key]'));
+check('source: server history window is the routine\'s 20 most recent completed workouts',
+  /loadPreviousCompletedSets[\s\S]*?\.limit\(20\)/.test(serverSrc) && serverSrc.includes('recentCompleted.slice(0, 20)'));
+check('source: client history window matches (getDashboard recent_limit = 20)',
+  clientSrc.includes('api.getDashboard({ recent_limit: 20 })'));
 
 // --- behaviour: server and client copies must agree on every case ---
 const S = (weight, reps, completed = true) => ({ weight, reps, completed });
@@ -128,6 +151,99 @@ check('convert: client copy agrees on values',
   && client.convertWeightValue(37.5, 'lb', 'lb') === 37.5);
 check('convert: round trip lb->kg->lb lands within one step',
   Math.abs(server.convertWeight(server.convertWeight(185, 'lb', 'kg'), 'kg', 'lb') - 185) <= 5);
+
+// --- W1-CONSISTENCY-001: per-exercise selection, both ends agree ---
+// Server end: selectPreviousSetsByExercise + progressionDecision is
+// exactly what startWorkout's prefill consumes. Client end: the real
+// reviewRecommendation over Workout-shaped recent_workouts.
+const PS = (weight, reps, completed = true) => ({ exerciseKey: 'barbell-bench', setNumber: 0, weight, reps, completed });
+const benchHistory = (list) => list.map(([w, r, c], i) => ({ ...PS(w, r, c), setNumber: i + 1 }));
+function serverDecision(recentCompleted, targetUnit = 'lb') {
+  const { byExercise, converted } = server.selectPreviousSetsByExercise(recentCompleted, ['barbell-bench'], targetUnit);
+  const history = byExercise['barbell-bench'] ?? [];
+  const decision = server.progressionDecision({
+    plannedSets: history.length > 0 ? history.length : 4,
+    sets: history, targetMin: 6, targetMax: 8, unit: targetUnit,
+  });
+  return { history, converted, decision };
+}
+function clientWorkout(unit, benchSets) {
+  return {
+    unit,
+    sets: benchSets.map((s, i) => ({
+      exercise_key: 'barbell-bench', exercise_name: '杠铃卧推', set_number: i + 1,
+      target_reps: '6–8', weight: s.weight, reps: s.reps, completed: s.completed,
+    })),
+  };
+}
+const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
+
+// PM counterexample: the newest push has NO bench press; an older
+// push has bench 4x100lbx8, all completed, all at the cap. Both ends
+// must reach the bench from the older workout and agree: increase.
+{
+  const olderBench = benchHistory([[100, 8], [100, 8], [100, 8], [100, 8]]);
+  const recentServer = [
+    { unit: 'lb', sets: [{ exerciseKey: 'overhead-press', setNumber: 1, weight: 60, reps: 10, completed: true }] },
+    { unit: 'lb', sets: olderBench },
+  ];
+  const { history, decision } = serverDecision(recentServer);
+  check('W1-CONSISTENCY: server walks past a bench-less newest workout to the older bench record',
+    history.length === 4 && history.every((s) => s.weight === 100));
+  check('W1-CONSISTENCY: server prefill verdict for the PM counterexample is increase to 105 (non-null)',
+    decision.action === 'increase' && decision.suggestedWeight === 105 && decision.suggestedReps === 6,
+    JSON.stringify(decision));
+  const clientText = clientReview.reviewRecommendation(benchReview, [
+    clientWorkout('lb', []),
+    clientWorkout('lb', olderBench),
+  ]);
+  check('W1-CONSISTENCY: client recommendation agrees (increase to 105lb)',
+    clientText.includes('下次增至 105lb'), clientText);
+}
+
+// Extra uncompleted set must not regress: bench's most recent record
+// carries 5 sets, 4 completed at the cap + 1 uncompleted. Planned is
+// the recorded 5, so both ends hold at 100 — not increase.
+{
+  const sets = benchHistory([[100, 8], [100, 8], [100, 8], [100, 8], [100, null, false]]);
+  const { history, decision } = serverDecision([{ unit: 'lb', sets }]);
+  check('W1-CONSISTENCY: extra uncompleted set keeps planned at the recorded count (hold, not increase)',
+    history.length === 5 && decision.action === 'hold' && decision.suggestedWeight === 100,
+    JSON.stringify(decision));
+  const clientText = clientReview.reviewRecommendation(benchReview, [clientWorkout('lb', sets)]);
+  check('W1-CONSISTENCY: client agrees on the extra-uncompleted-set case (hold 100lb)',
+    clientText.includes('少完成 1 组，下次保持 100lb'), clientText);
+}
+
+// Cross-unit per source workout: bench's most recent record is a kg
+// workout (4x45kgx8 all at cap); the new workout is lb. 45kg -> 99lb,
+// so both ends increase to 104lb and the server flags the conversion.
+{
+  const kgSets = benchHistory([[45, 8], [45, 8], [45, 8], [45, 8]]);
+  const { history, converted, decision } = serverDecision([{ unit: 'kg', sets: kgSets }], 'lb');
+  check('W1-CONSISTENCY: cross-unit source is converted per workout (45kg -> 99lb) and flagged',
+    converted === true && history.every((s) => s.weight === 99));
+  check('W1-CONSISTENCY: server verdict on the converted record is increase to 104',
+    decision.action === 'increase' && decision.suggestedWeight === 104, JSON.stringify(decision));
+  const clientText = clientReview.reviewRecommendation(benchReview, [clientWorkout('kg', kgSets)]);
+  check('W1-CONSISTENCY: client agrees on the cross-unit case (increase to 104lb)',
+    clientText.includes('下次增至 104lb'), clientText);
+}
+
+// Beyond the 20-workout window: bench exists only in the 21st most
+// recent workout. Neither end may adopt it — both say no suggestion.
+{
+  const filler = { unit: 'lb', sets: [{ exerciseKey: 'overhead-press', setNumber: 1, weight: 60, reps: 10, completed: true }] };
+  const benchOnly = { unit: 'lb', sets: benchHistory([[100, 8], [100, 8], [100, 8], [100, 8]]) };
+  const recentServer = [...Array.from({ length: 20 }, () => filler), benchOnly];
+  const { history, decision } = serverDecision(recentServer);
+  check('W1-CONSISTENCY: the 21st workout is outside the server window (no history adopted)',
+    history.length === 0 && decision.action === 'none');
+  const clientText = clientReview.reviewRecommendation(benchReview,
+    Array.from({ length: 20 }, () => clientWorkout('lb', [])));
+  check('W1-CONSISTENCY: client agrees beyond the window (no comparable record)',
+    clientText.includes('暂不做重量建议'), clientText);
+}
 
 // --- mutation sensitivity (executed, in BOTH copies) ---
 function mutated(src, from, to) {

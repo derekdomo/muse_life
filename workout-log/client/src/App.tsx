@@ -843,6 +843,44 @@ export async function sealAllAndSettleStable(
   return { handles: lastHandles, results: lastResults, stable: false };
 }
 
+// --- W-FINISH-001 (in-flight addSet joins the finish boundary) ---
+// "+ 加一组" clicks register their mutateAsync promise — a chain
+// that only settles after the add landed AND the dashboard
+// invalidation/refetch completed — into a registry shared at the
+// ActiveWorkout level. Before any finish path may flush or seal, it
+// joins the registry until it is empty AND stable: await the current
+// batch, re-read (a settle may have surfaced a further registration),
+// and when a read comes back empty, yield one macrotask and confirm
+// it is STILL empty — an add issued in the same tick as the finish
+// press registers during that yield and is then awaited like any
+// other. A rejected add is a finish failure, never a silent success:
+// { ok: false }. Exhausting the rounds with a registry that never
+// empties reports { ok: false, stable: false } so the caller aborts
+// the finish instead of completing over an unchecked new set.
+export type SettlePendingAddsResult = { ok: boolean; stable: boolean };
+
+export async function settlePendingAdds(
+  getPending: () => Promise<unknown>[],
+  maxRounds = 10,
+): Promise<SettlePendingAddsResult> {
+  for (let round = 0; round < maxRounds; round += 1) {
+    const pending = getPending();
+    if (pending.length > 0) {
+      try {
+        await Promise.all(pending);
+      } catch {
+        return { ok: false, stable: true };
+      }
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (getPending().length === 0) return { ok: true, stable: true };
+  }
+  return getPending().length === 0
+    ? { ok: true, stable: true }
+    : { ok: false, stable: false };
+}
+
 // --- W-UI-001 rework: finish gate ---
 // Finish proceeds only when every set flushed clean, is saved, is not
 // blocked (completed without reps), and is completed. Otherwise the
@@ -1158,7 +1196,7 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
 // workout's unit when the source workout used the other unit.
 export type PreviousMark = { weight: number | null; reps: number | null; converted: boolean };
 
-function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, onChanged, onSetCompleted, onOpenGuide, onRegisterSet }: {
+function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, onChanged, onSetCompleted, onOpenGuide, onRegisterSet, onRegisterPendingAdd }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
   previous?: PreviousMark;
@@ -1173,6 +1211,11 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, on
   onSetCompleted: () => void;
   onOpenGuide: (guide: ExerciseGuide) => void;
   onRegisterSet: (id: number, handle: SetSaveHandle | null) => void;
+  // W-FINISH-001: an in-flight add registers its promise (which only
+  // settles after the dashboard invalidation/refetch completes) into
+  // ActiveWorkout's shared pending-add registry, so a finish flow
+  // joins it before flushing or sealing anything.
+  onRegisterPendingAdd: (promise: Promise<unknown>) => void;
 }) {
   const queryClient = useQueryClient();
   const addSet = useMutation({
@@ -1183,6 +1226,20 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, on
     },
   });
   const guide = EXERCISE_GUIDES[exercise.key];
+
+  // The promise is registered synchronously in the click, before any
+  // later finish press can run, and unregistered by the registry
+  // owner when it settles.
+  function handleAddSet() {
+    let promise: Promise<unknown>;
+    try {
+      promise = addSet.mutateAsync();
+    } catch (error) {
+      promise = Promise.reject(error);
+    }
+    onRegisterPendingAdd(promise);
+    void promise.catch(() => {});
+  }
 
   return (
     <section className="exercise-block" aria-labelledby={`exercise-${exercise.key}`}>
@@ -1218,7 +1275,7 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, on
           <SetRow key={set.id} set={set} unit={workout.unit} locked={entryLocked} onSaved={onChanged} onRegister={onRegisterSet} onCompleted={onSetCompleted} />
         ))}
       </div>
-      <button className="add-set" type="button" onClick={() => addSet.mutate()} disabled={addSet.isPending || entryLocked}>
+      <button className="add-set" type="button" onClick={handleAddSet} disabled={addSet.isPending || entryLocked}>
         {addSet.isPending ? "添加中…" : "+ 加一组"}
       </button>
       {timerSlot}
@@ -1330,6 +1387,22 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
 
   const setHandlesRef = useRef(new Map<number, SetSaveHandle>());
 
+  // W-FINISH-001: shared pending-add registry. Every "+ 加一组"
+  // click registers its mutateAsync promise here (the promise only
+  // settles after the add landed and the dashboard refetch
+  // completed, which is also what mounts the new SetRow and
+  // registers its save handle); the entry is removed on settle.
+  // Both finish paths join this registry via settlePendingAdds
+  // before flushing or sealing anything.
+  const pendingAddsRef = useRef(new Set<Promise<unknown>>());
+  const registerPendingAdd = useCallback((promise: Promise<unknown>) => {
+    pendingAddsRef.current.add(promise);
+    const unregister = () => {
+      pendingAddsRef.current.delete(promise);
+    };
+    void promise.then(unregister, unregister);
+  }, []);
+
   useEffect(() => {
     const timer = window.setInterval(() => setClock((value) => value + 1), 30000);
     return () => window.clearInterval(timer);
@@ -1390,6 +1463,18 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     setFinishFailed(false);
     setFinishing(true);
     try {
+      // W-FINISH-001: join in-flight adds first, while the finishing
+      // entry lock is held. A failed add aborts the finish outright
+      // (failure shown, entry unlocked by the finally below, no
+      // complete attempted); a landed add has already refreshed the
+      // dashboard, so its new SetRow is registered in the handle
+      // registry and the flush/gate below judges the FINAL set
+      // collection.
+      const adds = await settlePendingAdds(() => [...pendingAddsRef.current]);
+      if (!adds.ok) {
+        setFinishFailed(true);
+        return;
+      }
       const { handles, results, stable } = await flushAllHandles(() => [...setHandlesRef.current.values()]);
       const snapshots = handles.map((handle, index) => ({
         flushOk: stable && (results[index] ?? false),
@@ -1432,6 +1517,15 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     setFinishFailed(false);
     setFinishing(true);
     try {
+      // W-FINISH-001: same pending-add join as handleFinish, before
+      // any seal — a failed add aborts with the failure shown and no
+      // complete attempted; a landed add's new SetRow is sealed and
+      // settled by the rounds below like every other set.
+      const adds = await settlePendingAdds(() => [...pendingAddsRef.current]);
+      if (!adds.ok) {
+        setFinishFailed(true);
+        return;
+      }
       const { stable } = await sealAllAndSettleStable(() => [...setHandlesRef.current.values()]);
       if (!stable) {
         for (const handle of setHandlesRef.current.values()) handle.unseal();
@@ -1524,6 +1618,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
             onSetCompleted={handleSetCompleted}
             onOpenGuide={setSelectedGuide}
             onRegisterSet={registerSet}
+            onRegisterPendingAdd={registerPendingAdd}
           />
         ))}
       </div>

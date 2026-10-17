@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const routineSchema = z.enum(["push", "pull", "legs"]);
@@ -136,14 +136,20 @@ function isOwnerOrSyncChannel(ctx: Ctx): boolean {
 // missing workout is "not-found"; an already-completed one is
 // "not-active" — its rows are history and must never be written,
 // completed again, or deleted by a mutation aimed at a stale id.
+// W-START-001: a workout still initializing (startWorkout has not
+// finished inserting its prefill sets and flipping it ready) is never
+// a valid target either — "initializing": invisible to getDashboard
+// and unwritable by updateSet / addSet / completeWorkout /
+// discardWorkout, so no user write can ever land on it.
 // W-ACTIVE-001: the handlers no longer decide with this function —
 // each write carries the same condition inside its single statement,
 // so a completeWorkout landing between a check and a write cannot be
 // overwritten. This pure mirror remains for validation scripts.
 export function mutationTargetDecision(
-  workout: { completed_at: string | null } | null,
-): "ok" | "not-found" | "not-active" {
+  workout: { completed_at: string | null; initializing?: boolean } | null,
+): "ok" | "not-found" | "not-active" | "initializing" {
   if (!workout) return "not-found";
+  if (workout.initializing) return "initializing";
   if (workout.completed_at != null) return "not-active";
   return "ok";
 }
@@ -161,25 +167,22 @@ export function resolveStartConflict(
   return { action: "created", keepId: insertedId };
 }
 
-// W-START-001: whether a just-inserted workout that must yield to an
-// earlier active one may be safely reclaimed (deleted). Safe only
-// while it is still active, no set row was user-edited after creation
-// (updated_at moved past created_at), and the set count still equals
-// the initially inserted count (no addSet landed). startWorkout
-// enforces exactly these conditions inside its single conditional
-// DELETE — the DELETE is the verdict; this pure mirror exists so
-// validation scripts can exercise the decision without the database.
-export function canReclaimYieldedWorkout(input: {
+// W-START-001 (invisible-initialization contract): whether a
+// just-inserted workout that must yield to an earlier active one may
+// be safely reclaimed (deleted). Under the initializing contract this
+// no longer needs edit heuristics: while initializing = 1 the row is
+// invisible and unwritable to every other action, so NO user write
+// can possibly have landed on it — reclaim is safe exactly while the
+// row is still initializing and not completed. startWorkout enforces
+// exactly these conditions inside its single conditional DELETE
+// (WHERE id = ? AND initializing = 1 AND completed_at IS NULL) — the
+// DELETE is the verdict; this pure mirror exists so validation
+// scripts can exercise the decision without the database.
+export function canReclaimInitializingWorkout(input: {
+  initializing: boolean;
   completedAt: string | null;
-  setCount: number;
-  initialSetCount: number;
-  editedSetCount: number;
 }): boolean {
-  return (
-    input.completedAt == null &&
-    input.editedSetCount === 0 &&
-    input.setCount === input.initialSetCount
-  );
+  return input.initializing && input.completedAt == null;
 }
 
 // Whole-week coverage summaries (H-UNITS-001). Pure and self-contained so
@@ -348,18 +351,61 @@ export function convertWeight(weight: number | null, from: "lb" | "kg", to: "lb"
   return Math.round(converted * 2) / 2;
 }
 
+export type PreviousSetLike = {
+  exerciseKey: string;
+  setNumber: number;
+  weight: number | null;
+  reps: number | null;
+  completed: boolean;
+};
+
+// W1-CONSISTENCY-001: per-exercise most-recent comparable history.
+// Pure and self-contained so validation scripts can run it verbatim.
+// `recentCompleted` is the routine's completed workouts, most recent
+// first; only the first 20 are considered — the same window the
+// client sees via getDashboard recent_limit=20 — so a record ranked
+// 21st or older is never adopted by either side. For EACH exercise
+// key independently, the most recent workout in that window that
+// contains the exercise contributes ALL of its sets for the exercise
+// (completed and uncompleted alike — the identical collection the
+// client's reviewRecommendation judges). When a contributing
+// workout's unit differs from the target unit, its weights are
+// converted per source workout (LB_TO_KG, 0.5 rounding); `converted`
+// is true when any source actually used for a returned exercise was
+// converted.
+export function selectPreviousSetsByExercise(
+  recentCompleted: { unit: "lb" | "kg"; sets: PreviousSetLike[] }[],
+  exerciseKeys: string[],
+  targetUnit: "lb" | "kg",
+): { byExercise: Record<string, PreviousSetLike[]>; converted: boolean } {
+  const windowed = recentCompleted.slice(0, 20);
+  const byExercise: Record<string, PreviousSetLike[]> = {};
+  let converted = false;
+  for (const key of exerciseKeys) {
+    for (const workout of windowed) {
+      const sets = workout.sets.filter((set) => set.exerciseKey === key);
+      if (sets.length === 0) continue;
+      const unitConverted = workout.unit !== targetUnit;
+      if (unitConverted) converted = true;
+      byExercise[key] = sets.map((set) => ({
+        ...set,
+        weight: unitConverted ? convertWeight(set.weight, workout.unit, targetUnit) : set.weight,
+      }));
+      break;
+    }
+  }
+  return { byExercise, converted };
+}
+
 type PreviousComparable = {
-  sets: { exerciseKey: string; setNumber: number; weight: number | null; reps: number | null; completed: boolean }[];
+  byExercise: Record<string, PreviousSetLike[]>;
   converted: boolean;
 };
 
-// W1.3: the previous comparable workout is the routine's most recent
-// completed workout in ANY unit; when its unit differs from the new
-// workout's, every weight is converted into the new unit.
-// W1-CONSISTENCY-001: ALL of that workout's sets are returned —
-// completed and uncompleted alike. The prefill (here) and the weekly
-// review (client) must judge the identical set collection, or the
-// same history yields two different "next time" verdicts.
+// W1.3 + W1-CONSISTENCY-001: load the routine's 20 most recent
+// completed workouts (any unit) with all their sets, then select the
+// per-exercise comparable history through the same pure rule the
+// client's weekly review mirrors.
 async function loadPreviousCompletedSets(
   ctx: Ctx,
   routine: z.infer<typeof routineSchema>,
@@ -371,25 +417,34 @@ async function loadPreviousCompletedSets(
     .from(schema.workouts)
     .where(and(eq(schema.workouts.routine, routine), isNotNull(schema.workouts.completedAt)))
     .orderBy(desc(schema.workouts.completedAt))
-    .limit(1);
-  const previous = rows[0];
-  if (!previous) return { sets: [], converted: false };
+    .limit(20);
+  if (rows.length === 0) return { byExercise: {}, converted: false };
   const setRows = await db
     .select()
     .from(schema.workoutSets)
-    .where(eq(schema.workoutSets.workoutId, previous.id))
+    .where(inArray(schema.workoutSets.workoutId, rows.map((row) => row.id)))
     .orderBy(asc(schema.workoutSets.id));
-  const converted = previous.unit !== unit;
-  return {
-    converted,
-    sets: setRows.map((row) => ({
+  const setsByWorkout = new Map<number, PreviousSetLike[]>();
+  for (const row of setRows) {
+    const list = setsByWorkout.get(row.workoutId) ?? [];
+    list.push({
       exerciseKey: row.exerciseKey,
       setNumber: row.setNumber,
-      weight: converted ? convertWeight(row.weight, previous.unit, unit) : row.weight,
+      weight: row.weight,
       reps: row.reps,
       completed: row.completed,
-    })),
-  };
+    });
+    setsByWorkout.set(row.workoutId, list);
+  }
+  const recentCompleted = rows.map((row) => ({
+    unit: row.unit,
+    sets: setsByWorkout.get(row.id) ?? [],
+  }));
+  return selectPreviousSetsByExercise(
+    recentCompleted,
+    ROUTINES[routine].map((exercise) => exercise.key),
+    unit,
+  );
 }
 
 export const Actions = {
@@ -404,10 +459,12 @@ export const Actions = {
         return { forbidden: true, active_workout: null, recent_workouts: [], week_summaries: [] };
       }
       const db = ctx.db<typeof schema>();
+      // W-START-001: initializing workouts are invisible — the active
+      // selection only ever returns a ready (initializing = 0) one.
       const activeRows = await db
         .select({ id: schema.workouts.id })
         .from(schema.workouts)
-        .where(isNull(schema.workouts.completedAt))
+        .where(and(isNull(schema.workouts.completedAt), eq(schema.workouts.initializing, 0)))
         .orderBy(desc(schema.workouts.startedAt))
         .limit(1);
       const activeId = activeRows[0]?.id;
@@ -485,10 +542,16 @@ export const Actions = {
         return { forbidden: true, workout: null };
       }
       const db = ctx.db<typeof schema>();
+      // W-START-001: only a READY active short-circuits a start. An
+      // initializing one belongs to a concurrent start still in
+      // flight; it is not a usable target, so this start proceeds to
+      // insert its own initializing row and the conflict re-check
+      // below decides which of the two becomes the single usable
+      // active.
       const existing = await db
         .select({ id: schema.workouts.id })
         .from(schema.workouts)
-        .where(isNull(schema.workouts.completedAt))
+        .where(and(isNull(schema.workouts.completedAt), eq(schema.workouts.initializing, 0)))
         .orderBy(desc(schema.workouts.startedAt))
         .limit(1);
       const existingId = existing[0]?.id;
@@ -498,16 +561,20 @@ export const Actions = {
         return { forbidden: false, workout: loaded };
       }
 
+      // Invisible initialization: the new workout is inserted with
+      // initializing = 1 and stays invisible/unwritable (getDashboard
+      // and every mutation exclude initializing rows) until the
+      // single conditional UPDATE at the end flips it ready.
       const inserted = await db
         .insert(schema.workouts)
-        .values({ routine: args.routine, unit: args.unit })
+        .values({ routine: args.routine, unit: args.unit, initializing: 1 })
         .returning({ id: schema.workouts.id });
       const workoutId = inserted[0]?.id;
       if (!workoutId) throw new Error("未能开始训练");
 
       const previous = await loadPreviousCompletedSets(ctx, args.routine, args.unit);
       const values = ROUTINES[args.routine].flatMap((exercise) => {
-        const history = previous.sets.filter((set) => set.exerciseKey === exercise.key);
+        const history = previous.byExercise[exercise.key] ?? [];
         const { min: targetMin, max: targetMax } = targetRepRange(exercise.target);
         // W1.2: prefill comes from the same progressionDecision the
         // weekly review uses — one rule, one verdict for "next time".
@@ -546,38 +613,50 @@ export const Actions = {
           };
         });
       });
-      await db.insert(schema.workoutSets).values(values);
+      try {
+        await db.insert(schema.workoutSets).values(values);
+      } catch (error) {
+        // Initialization failed: remove this run's own initializing
+        // workout (and any sets that landed) so a later start retries
+        // from a clean slate instead of meeting a stuck invisible
+        // row. The delete is conditioned on initializing = 1 — this
+        // row was never visible, so nothing user-owned can be lost.
+        await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
+        await db
+          .delete(schema.workouts)
+          .where(and(eq(schema.workouts.id, workoutId), eq(schema.workouts.initializing, 1)));
+        throw error;
+      }
 
-      // W0.4: re-check for a single active workout. A concurrent start
-      // may have inserted its own workout after the pre-check above;
-      // if an earlier active workout (smaller id) now exists, this
-      // insert yields to it — subject to the W-START-001 reclaim
-      // guard below.
-      const activeRows = await db
+      // W-START-001 conflict re-check, run after the prefill sets are
+      // in and BEFORE this workout becomes ready: re-read ALL other
+      // actives — ready and initializing both count as conflict
+      // targets. If an earlier active exists, this insert yields to
+      // it: this row is still initializing, which by contract means
+      // no user write can have landed on it, so a single conditional
+      // DELETE (still initializing, still active — the mirror of
+      // canReclaimInitializingWorkout) removes it and its sets, and
+      // the earlier workout is returned. Two concurrent starts
+      // therefore return the SAME workout, and at most one usable
+      // (ready) active exists at any read moment.
+      const otherActiveRows = await db
         .select({ id: schema.workouts.id })
         .from(schema.workouts)
-        .where(isNull(schema.workouts.completedAt))
+        .where(and(isNull(schema.workouts.completedAt), ne(schema.workouts.id, workoutId)))
         .orderBy(asc(schema.workouts.id));
-      const earliestOtherActiveId = activeRows.map((row) => row.id).find((id) => id !== workoutId) ?? null;
+      const earliestOtherActiveId = otherActiveRows[0]?.id ?? null;
       const conflict = resolveStartConflict(earliestOtherActiveId, workoutId);
       if (conflict.action === "yield") {
-        // W-START-001: reclaim the just-inserted workout ONLY if it is
-        // provably untouched — a single conditional DELETE whose guard
-        // mirrors canReclaimYieldedWorkout: still active, no set was
-        // user-edited after creation (updated_at past created_at),
-        // and the set count still equals the initially inserted count
-        // (no addSet landed). The DELETE itself is the verdict.
-        const reclaimed = await db.all(sql`
-          DELETE FROM workouts
-          WHERE id = ${workoutId}
-            AND completed_at IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM workout_sets
-              WHERE workout_id = ${workoutId} AND updated_at > created_at
-            )
-            AND (SELECT COUNT(*) FROM workout_sets WHERE workout_id = ${workoutId}) = ${values.length}
-          RETURNING id
-        `);
+        const reclaimed = await db
+          .delete(schema.workouts)
+          .where(
+            and(
+              eq(schema.workouts.id, workoutId),
+              eq(schema.workouts.initializing, 1),
+              isNull(schema.workouts.completedAt),
+            ),
+          )
+          .returning({ id: schema.workouts.id });
         if (reclaimed.length > 0) {
           await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
           const kept = await loadWorkout(ctx, conflict.keepId);
@@ -585,15 +664,25 @@ export const Actions = {
           ctx.invalidateQueries();
           return { forbidden: false, workout: kept };
         }
-        // The insert was already completed or written by the user:
-        // delete nothing and return that workout itself, so a saved
-        // or completed record is never lost to the single-active
-        // yield.
+        // The conditional DELETE matched nothing: this row is no
+        // longer in its initializing state (defensive — under the
+        // contract no other action can flip or complete an
+        // initializing row). Delete nothing further and return this
+        // workout itself, so a visible or completed record is never
+        // lost to the single-active yield.
         const own = await loadWorkout(ctx, workoutId);
         if (!own) throw new Error("未能读取进行中的训练");
         ctx.invalidateQueries();
         return { forbidden: false, workout: own };
       }
+
+      // This insert is the earliest active: flip it ready with a
+      // single conditional UPDATE — only a row still initializing
+      // becomes visible, atomically.
+      await db
+        .update(schema.workouts)
+        .set({ initializing: 0 })
+        .where(and(eq(schema.workouts.id, workoutId), eq(schema.workouts.initializing, 1)));
 
       const workout = await loadWorkout(ctx, workoutId);
       if (!workout) throw new Error("未能读取新训练");
@@ -622,16 +711,18 @@ export const Actions = {
       // — the write lands only when the set's owning workout is still
       // active (completed_at IS NULL) at write time, so a
       // completeWorkout that lands between any earlier read and this
-      // statement can no longer be overwritten. RETURNING is the
-      // verdict: zero rows means the set is missing or its workout is
-      // already history, and nothing was written.
+      // statement can no longer be overwritten. W-START-001: the
+      // guard also requires initializing = 0 — an initializing
+      // workout is not a writable target. RETURNING is the verdict:
+      // zero rows means the set is missing or its workout is already
+      // history (or still initializing), and nothing was written.
       const updatedRows = await db.all(sql`
         UPDATE workout_sets
         SET weight = ${args.weight}, reps = ${args.reps}, completed = ${args.completed ? 1 : 0}, updated_at = ${Date.now()}
         WHERE id = ${args.id}
           AND EXISTS (
             SELECT 1 FROM workouts
-            WHERE workouts.id = workout_sets.workout_id AND workouts.completed_at IS NULL
+            WHERE workouts.id = workout_sets.workout_id AND workouts.completed_at IS NULL AND workouts.initializing = 0
           )
         RETURNING id
       `);
@@ -663,12 +754,14 @@ export const Actions = {
       // INSERT … SELECT: the row is created only when the target
       // workout exists and is still active at insert time, so a
       // completeWorkout that landed after the read above gains no new
-      // sets. RETURNING is the verdict: zero rows, zero inserted.
+      // sets. W-START-001: initializing = 0 is required too — an
+      // initializing workout gains no sets. RETURNING is the verdict:
+      // zero rows, zero inserted.
       const insertedRows = await db.all(sql`
         INSERT INTO workout_sets (workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, completed, created_at, updated_at)
         SELECT id, ${previous.exerciseKey}, ${previous.exerciseName}, ${previous.setNumber + 1}, ${previous.targetReps}, ${previous.weight}, NULL, 0, ${nowMs}, ${nowMs}
         FROM workouts
-        WHERE id = ${args.workout_id} AND completed_at IS NULL
+        WHERE id = ${args.workout_id} AND completed_at IS NULL AND initializing = 0
         RETURNING id, workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, completed
       `);
       const row = insertedRows[0] as
@@ -714,10 +807,17 @@ export const Actions = {
       // W0.3: complete only a workout that exists and is still active;
       // the affected-row count is the verdict, so an already-completed
       // or missing workout reports ok: false instead of success.
+      // W-START-001: an initializing workout cannot be completed.
       const updated = await db
         .update(schema.workouts)
         .set({ completedAt: new Date() })
-        .where(and(eq(schema.workouts.id, args.workout_id), isNull(schema.workouts.completedAt)))
+        .where(
+          and(
+            eq(schema.workouts.id, args.workout_id),
+            isNull(schema.workouts.completedAt),
+            eq(schema.workouts.initializing, 0),
+          ),
+        )
         .returning({ id: schema.workouts.id });
       if (updated.length === 0) return { ok: false, forbidden: false };
       ctx.invalidateQueries();
@@ -738,10 +838,11 @@ export const Actions = {
       // Only a workout still active at delete time is removed, and
       // only then are its sets deleted. A completed workout (history)
       // or a missing id matches zero rows: ok: false, and no set is
-      // ever touched.
+      // ever touched. W-START-001: an initializing workout cannot be
+      // discarded either (initializing = 0 required).
       const deletedRows = await db.all(sql`
         DELETE FROM workouts
-        WHERE id = ${args.workout_id} AND completed_at IS NULL
+        WHERE id = ${args.workout_id} AND completed_at IS NULL AND initializing = 0
         RETURNING id
       `);
       if (deletedRows.length === 0) return { ok: false, forbidden: false };

@@ -1,5 +1,12 @@
 // W-FINISH-001 / W0.3 / W0.4 validation — finish-boundary consistency,
 // server mutation target ownership, and the single-active guarantee.
+// 2026-10-17 rework adds: W-START-001 invisible-initialization
+// contract (initializing rows are invisible/unwritable; two
+// concurrent starts converge on one usable active; initialization
+// failure cleans up for retry) and the W-FINISH-001 pending-add
+// boundary (settlePendingAdds joins in-flight "+ 加一组" promises
+// before either finish path flushes or seals; a failed add aborts
+// the finish; a landed add's new set joins the final gate).
 // Runs the REAL production functions extracted verbatim from
 // client/src/App.tsx and server/src/actions.ts over synthetic data
 // only, with a deferred transport so write/complete ordering is
@@ -65,7 +72,7 @@ const CLIENT_FN = [
   'editSetDraft', 'beginSetSave', 'applySetSaveSuccess', 'applySetSaveFailure',
   'adoptServerDraft', 'createSaveQueue', 'finishGateDecision',
 ];
-const CLIENT_ASYNC_FN = ['drainSetSaves', 'flushAllHandles', 'sealAllAndSettleStable'];
+const CLIENT_ASYNC_FN = ['drainSetSaves', 'flushAllHandles', 'sealAllAndSettleStable', 'settlePendingAdds'];
 function extractAsyncFunction(source, name) {
   const idx = source.search(new RegExp(`async function ${name}\\(`));
   if (idx < 0) throw new Error(`async function ${name} not found`);
@@ -81,7 +88,7 @@ function buildClient(src) {
   const names = [...CLIENT_FN, ...CLIENT_ASYNC_FN];
   return new Function(`${stripTypeScriptTypes(parts.join('\n'))}\nreturn { ${names.join(', ')} };`)();
 }
-const SERVER_FN = ['mutationTargetDecision', 'resolveStartConflict', 'canReclaimYieldedWorkout'];
+const SERVER_FN = ['mutationTargetDecision', 'resolveStartConflict', 'canReclaimInitializingWorkout'];
 function buildServer(src) {
   const code = SERVER_FN.map((n) => extractFunction(src, n)).join('\n');
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { ${SERVER_FN.join(', ')} };`)();
@@ -123,9 +130,39 @@ check('server: discardWorkout conditionally deletes the workout row BEFORE its s
   && serverSrc.indexOf('DELETE FROM workouts', serverSrc.indexOf('discardWorkout: defineAction'))
      < serverSrc.indexOf('db.delete(schema.workoutSets)', serverSrc.indexOf('discardWorkout: defineAction'))
   && serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('discardWorkout: defineAction')) === -1);
-check('server: startWorkout reclaim DELETE carries the W-START-001 conditions',
-  serverSrc.indexOf('DELETE FROM workouts', serverSrc.indexOf('startWorkout: defineAction')) > -1
-  && serverSrc.indexOf('NOT EXISTS (', serverSrc.indexOf('startWorkout: defineAction')) > -1);
+check('server: startWorkout inserts invisibly (initializing = 1) under the W-START-001 contract',
+  serverSrc.indexOf('initializing: 1', serverSrc.indexOf('startWorkout: defineAction')) > -1);
+check('server: startWorkout flips ready with a single conditional UPDATE (initializing 1 -> 0)',
+  serverSrc.indexOf('.set({ initializing: 0 })', serverSrc.indexOf('startWorkout: defineAction')) > -1
+  && serverSrc.indexOf('eq(schema.workouts.initializing, 1)', serverSrc.indexOf('startWorkout: defineAction')) > -1);
+check('server: startWorkout yield deletes only its own still-initializing row',
+  serverSrc.indexOf('eq(schema.workouts.initializing, 1),', serverSrc.indexOf('startWorkout: defineAction')) > -1
+  && serverSrc.indexOf('isNull(schema.workouts.completedAt),', serverSrc.indexOf('startWorkout: defineAction')) > -1);
+check('server: startWorkout cleans up its initializing row when set insertion fails (retryable)',
+  /catch \(error\) \{[\s\S]*?eq\(schema\.workouts\.initializing, 1\)[\s\S]*?throw error/.test(serverSrc.slice(serverSrc.indexOf('startWorkout: defineAction'))));
+check('server: getDashboard active selection excludes initializing workouts',
+  serverSrc.indexOf('eq(schema.workouts.initializing, 0)', serverSrc.indexOf('getDashboard: defineAction')) > -1);
+check('server: updateSet guard excludes initializing workouts (zero writes while initializing)',
+  serverSrc.indexOf('workouts.initializing = 0', serverSrc.indexOf('updateSet: defineAction')) > -1);
+check('server: addSet insert guard excludes initializing workouts',
+  serverSrc.indexOf('completed_at IS NULL AND initializing = 0', serverSrc.indexOf('addSet: defineAction')) > -1);
+check('server: completeWorkout excludes initializing workouts',
+  serverSrc.indexOf('eq(schema.workouts.initializing, 0)', serverSrc.indexOf('completeWorkout: defineAction')) > -1);
+check('server: discardWorkout delete excludes initializing workouts',
+  serverSrc.indexOf('completed_at IS NULL AND initializing = 0', serverSrc.indexOf('discardWorkout: defineAction')) > -1);
+check('source: add-set click registers the mutateAsync promise into the shared registry',
+  clientSrc.includes('onRegisterPendingAdd(promise)') && clientSrc.includes('addSet.mutateAsync()')
+  && clientSrc.includes('pendingAddsRef') && clientSrc.includes('onRegisterPendingAdd={registerPendingAdd}'));
+check('source: handleFinish joins pending adds before flushing',
+  clientSrc.indexOf('await settlePendingAdds(', clientSrc.indexOf('async function handleFinish()')) > -1
+  && clientSrc.indexOf('await settlePendingAdds(', clientSrc.indexOf('async function handleFinish()'))
+     < clientSrc.indexOf('await flushAllHandles(', clientSrc.indexOf('async function handleFinish()')));
+check('source: confirmFinishAnyway joins pending adds before sealing',
+  clientSrc.indexOf('await settlePendingAdds(', clientSrc.indexOf('async function confirmFinishAnyway()')) > -1
+  && clientSrc.indexOf('await settlePendingAdds(', clientSrc.indexOf('async function confirmFinishAnyway()'))
+     < clientSrc.indexOf('await sealAllAndSettleStable(', clientSrc.indexOf('async function confirmFinishAnyway()')));
+check('source: a failed pending add aborts both finish paths with the failure shown, no complete',
+  (clientSrc.match(/if \(!adds\.ok\) \{\s*setFinishFailed\(true\);\s*return;/g) ?? []).length === 2);
 check('source: direct finish seals the batch before completing (W-FINISH-001)',
   /handle\.seal\(\)/.test(clientSrc) && clientSrc.includes('sealAllAndSettleStable'));
 check('source: inputs lock while finishing (W-FINISH-001)',
@@ -275,15 +312,186 @@ const SET = { id: 7, weight: 100, reps: 8, completed: true };
   check('W-FINISH: never-stable registry reports stable:false (caller aborts)', unstable.stable === false);
 }
 
-// W-START-001: reclaim decision matrix (pure mirror of the DELETE).
-check('W-START: untouched active insert may be reclaimed',
-  S.canReclaimYieldedWorkout({ completedAt: null, setCount: 16, initialSetCount: 16, editedSetCount: 0 }) === true);
-check('W-START: a completed insert is never reclaimed',
-  S.canReclaimYieldedWorkout({ completedAt: '2026-10-17T00:00:00.000Z', setCount: 16, initialSetCount: 16, editedSetCount: 0 }) === false);
-check('W-START: a user-edited insert is never reclaimed',
-  S.canReclaimYieldedWorkout({ completedAt: null, setCount: 16, initialSetCount: 16, editedSetCount: 1 }) === false);
-check('W-START: an insert with added sets is never reclaimed',
-  S.canReclaimYieldedWorkout({ completedAt: null, setCount: 17, initialSetCount: 16, editedSetCount: 0 }) === false);
+// W-FINISH-001 pending-add boundary: settlePendingAdds joins the
+// shared registry before any flush/seal. A landed add's new set must
+// reach the finish gate as an ordinary (incomplete) set — never a
+// silent complete over a set nobody checked.
+{
+  const res = await C.settlePendingAdds(() => []);
+  check('W-FINISH(adds): empty registry settles ok and stable', res.ok === true && res.stable === true);
+}
+{
+  // An add is in flight when finish is pressed; it lands
+  // successfully (dashboard refreshed, new SetRow registered). The
+  // composed flow — settle adds, then flush + gate over the handle
+  // registry — must judge the NEW set: incomplete, so the finish
+  // stops at the confirmation instead of completing silently.
+  const addGate = deferred();
+  let addLanded = false;
+  const pendingAdd = (async () => { await addGate.promise; addLanded = true; })();
+  const registry = new Set([pendingAdd]);
+  const getPending = () => [...registry];
+  void pendingAdd.then(() => registry.delete(pendingAdd));
+  const settlePromise = C.settlePendingAdds(getPending);
+  addGate.resolve();
+  const res = await settlePromise;
+  check('W-FINISH(adds): an in-flight add is awaited before the finish proceeds',
+    res.ok === true && addLanded === true);
+  const existing = {
+    id: 1, getStatus: () => 'saved', flush: async () => true,
+    isBlocked: () => false, isCompleted: () => true,
+    seal: () => {}, sealAndSettle: async () => true, unseal: () => {},
+  };
+  const landed = {
+    id: 2, getStatus: () => 'saved', flush: async () => true,
+    isBlocked: () => false, isCompleted: () => false,
+    seal: () => {}, sealAndSettle: async () => true, unseal: () => {},
+  };
+  const handles = [existing, landed]; // the landed add's SetRow registered after the refetch
+  const { results, stable } = await C.flushAllHandles(() => [...handles]);
+  const decision = C.finishGateDecision(handles.map((h, i) => ({
+    flushOk: stable && results[i], status: h.getStatus(), blocked: h.isBlocked(), completed: h.isCompleted(),
+  })));
+  check('W-FINISH(adds): the landed add joins the gate as an incomplete set (confirmation, not silent complete)',
+    decision.proceed === false && decision.reason === 'incomplete');
+}
+{
+  // The add was issued in the same tick as the finish press and
+  // registers during settlePendingAdds' empty-read yield: it must
+  // still be awaited, not skipped by the first empty read.
+  const registry = new Set();
+  let awaited = false;
+  const lateAdd = (async () => { await new Promise((r) => setTimeout(r, 5)); awaited = true; })();
+  setTimeout(() => {
+    registry.add(lateAdd);
+    void lateAdd.then(() => registry.delete(lateAdd));
+  }, 0);
+  const res = await C.settlePendingAdds(() => [...registry]);
+  check('W-FINISH(adds): an add registering during the empty-read yield is still joined',
+    res.ok === true && awaited === true);
+}
+{
+  // A failed add aborts the finish: failure state, no complete.
+  let completeCalled = false;
+  const failingAdd = Promise.reject(new Error('add failed'));
+  const res = await C.settlePendingAdds(() => [failingAdd]);
+  if (res.ok) completeCalled = true; // the finish paths only proceed on ok
+  check('W-FINISH(adds): a failed add aborts the finish and complete is never called',
+    res.ok === false && completeCalled === false);
+}
+{
+  // A registry that keeps gaining adds never stabilises.
+  const res = await C.settlePendingAdds(() => [Promise.resolve()], 3);
+  check('W-FINISH(adds): a never-empty registry reports stable:false (caller aborts)',
+    res.ok === false && res.stable === false);
+}
+
+// W-START-001: reclaim decision matrix (pure mirror of the
+// conditional DELETE). Under the invisible-initialization contract
+// reclaim needs no edit heuristics: still-initializing + active is
+// provably untouched, because no mutation may target it at all.
+check('W-START: a still-initializing active insert may be reclaimed',
+  S.canReclaimInitializingWorkout({ initializing: true, completedAt: null }) === true);
+check('W-START: a ready (visible) workout is never reclaimed',
+  S.canReclaimInitializingWorkout({ initializing: false, completedAt: null }) === false);
+check('W-START: a completed workout is never reclaimed',
+  S.canReclaimInitializingWorkout({ initializing: true, completedAt: '2026-10-17T00:00:00.000Z' }) === false);
+
+// W-START-001 simulation: an in-memory world whose start/finish
+// steps run the REAL extracted pure decisions (resolveStartConflict,
+// canReclaimInitializingWorkout, mutationTargetDecision) in the same
+// order startWorkout runs them against the database.
+function makeStartWorld() {
+  const rows = new Map();
+  let nextId = 1;
+  const insertInitializing = () => {
+    const id = nextId++;
+    rows.set(id, { id, completed_at: null, initializing: true });
+    return id;
+  };
+  // The post-insert phase of startWorkout: re-check all other
+  // actives (ready AND initializing), yield or flip ready.
+  const finishStart = (id) => {
+    const row = rows.get(id);
+    const others = [...rows.values()]
+      .filter((w) => w.id !== id && w.completed_at == null)
+      .map((w) => w.id)
+      .sort((a, b) => a - b);
+    const conflict = S.resolveStartConflict(others[0] ?? null, id);
+    if (conflict.action === 'yield') {
+      if (S.canReclaimInitializingWorkout({ initializing: row.initializing, completedAt: row.completed_at })) {
+        rows.delete(id);
+        return conflict.keepId;
+      }
+      return id;
+    }
+    row.initializing = false;
+    return id;
+  };
+  const failInitialization = (id) => { rows.delete(id); }; // startWorkout's catch cleanup
+  const visibleActiveIds = () => [...rows.values()]
+    .filter((w) => w.completed_at == null && !w.initializing)
+    .map((w) => w.id);
+  const targetOf = (id) => {
+    const w = rows.get(id);
+    return S.mutationTargetDecision(w ? { completed_at: w.completed_at, initializing: w.initializing } : null);
+  };
+  return { rows, insertInitializing, finishStart, failInitialization, visibleActiveIds, targetOf };
+}
+
+// Double start, out of order: B finishes initializing first, A
+// second. Both must return the same (earlier) workout; at no read
+// moment is more than one usable active visible; while either is
+// initializing the dashboard sees nothing.
+{
+  const world = makeStartWorld();
+  const a = world.insertInitializing();
+  const b = world.insertInitializing();
+  check('W-START: getDashboard sees no active while starts are initializing',
+    world.visibleActiveIds().length === 0);
+  check('W-START: an initializing workout is not a mutation target (edited-but-invisible is impossible)',
+    world.targetOf(a) === 'initializing' && world.targetOf(b) === 'initializing');
+  const returnedByB = world.finishStart(b); // B re-checks first: A is earlier, B yields
+  check('W-START: the later start yields to the earlier one and returns it',
+    returnedByB === a && !world.rows.has(b));
+  check('W-START: still no usable active until the survivor flips ready',
+    world.visibleActiveIds().length === 0);
+  const returnedByA = world.finishStart(a);
+  check('W-START: two concurrent starts return the same effective target',
+    returnedByA === a && returnedByB === returnedByA);
+  check('W-START: exactly one usable active after both starts settle',
+    JSON.stringify(world.visibleActiveIds()) === JSON.stringify([a]));
+  check('W-START: the surviving ready workout accepts writes (serial flow unregressed)',
+    world.targetOf(a) === 'ok');
+  world.rows.get(a).completed_at = '2026-10-17T01:00:00.000Z';
+  check('W-START: after completion the target is history, never writable again',
+    world.targetOf(a) === 'not-active' && world.visibleActiveIds().length === 0);
+}
+
+// Initialization failure: the failed start removes its own
+// initializing row, and a retry starts cleanly.
+{
+  const world = makeStartWorld();
+  const failed = world.insertInitializing();
+  world.failInitialization(failed);
+  check('W-START: a failed initialization leaves no row behind',
+    !world.rows.has(failed) && world.visibleActiveIds().length === 0);
+  const retry = world.insertInitializing();
+  const returned = world.finishStart(retry);
+  check('W-START: start retries cleanly after an initialization failure',
+    returned === retry && JSON.stringify(world.visibleActiveIds()) === JSON.stringify([retry]));
+}
+
+// A ready active already present is returned as-is by a later
+// start; nothing is deleted.
+{
+  const world = makeStartWorld();
+  const first = world.insertInitializing();
+  world.finishStart(first); // now ready
+  check('W-START: a visible/edited/completed record is never deleted by a yield',
+    S.canReclaimInitializingWorkout({ initializing: false, completedAt: null }) === false
+    && world.rows.has(first) && world.targetOf(first) === 'ok');
+}
 
 // settle() with nothing running judges from the machine alone.
 {
@@ -297,6 +505,10 @@ check('W-START: an insert with added sets is never reclaimed',
 check('W0.3: missing workout is not-found', S.mutationTargetDecision(null) === 'not-found');
 check('W0.3: completed workout is not-active', S.mutationTargetDecision({ completed_at: '2026-10-17T00:00:00.000Z' }) === 'not-active');
 check('W0.3: active workout is ok', S.mutationTargetDecision({ completed_at: null }) === 'ok');
+check('W-START: an initializing workout is its own non-target verdict',
+  S.mutationTargetDecision({ completed_at: null, initializing: true }) === 'initializing');
+check('W-START: initializing wins over the completed check (never writable either way)',
+  S.mutationTargetDecision({ completed_at: '2026-10-17T00:00:00.000Z', initializing: true }) === 'initializing');
 check('W0.4: earlier active wins and the insert yields',
   JSON.stringify(S.resolveStartConflict(3, 9)) === JSON.stringify({ action: 'yield', keepId: 3 }));
 check('W0.4: no other active keeps the insert',
@@ -323,6 +535,12 @@ check('W0.4: a later active does not displace the insert',
   const settled = row.queue.settle();
   gate.resolve();
   check('mutation: settle without awaiting the drain judges too early (detected)', await settled === false);
+}
+{
+  const mutated = clientSrc.replace('return { ok: false, stable: true };', 'return { ok: true, stable: true };');
+  const CM = buildClient(mutated);
+  const res = await CM.settlePendingAdds(() => [Promise.reject(new Error('add failed'))]);
+  check('mutation: treating a failed add as settled lets the finish proceed (detected)', res.ok === true);
 }
 {
   const mutated = clientSrc.replace('if (stable) return { handles, results, stable: true };', 'return { handles, results, stable: true };');

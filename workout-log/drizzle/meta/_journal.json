@@ -15,6 +15,13 @@
       "when": 1790984816333,
       "tag": "0002_create_workout_log",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792254075890,
+      "tag": "0003_add_initializing_flag_to_workouts",
+      "breakpoints": true
     }
   ]
 }
