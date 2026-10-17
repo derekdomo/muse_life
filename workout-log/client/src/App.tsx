@@ -540,9 +540,17 @@ export function setSaveBlocked(machine: SetSaveMachine): boolean {
 
 export function editSetDraft(machine: SetSaveMachine, draft: SetDraft): SetSaveMachine {
   let status: SetSaveStatus;
-  if (sameSetDraft(draft, machine.confirmed)) status = "saved";
-  else if (machine.inflightDraft && sameSetDraft(draft, machine.inflightDraft)) status = "saving";
-  else status = "dirty";
+  if (machine.inflightDraft) {
+    // A write is in flight: only the exact in-flight payload reads as
+    // saving. Anything else is dirty — including reverting to the old
+    // confirmed values, which must never read as saved while the write
+    // is still undecided.
+    status = sameSetDraft(draft, machine.inflightDraft) ? "saving" : "dirty";
+  } else if (sameSetDraft(draft, machine.confirmed)) {
+    status = "saved";
+  } else {
+    status = "dirty";
+  }
   return { ...machine, draft, status };
 }
 
@@ -600,7 +608,108 @@ export function hasUnsavedSetStatus(statuses: SetSaveStatus[]): boolean {
 export type SetSaveHandle = {
   getStatus: () => SetSaveStatus;
   flush: () => Promise<boolean>;
+  isBlocked: () => boolean;
+  isCompleted: () => boolean;
+  seal: () => void;
 };
+
+// --- W-UI-001 rework: single-writer save queue per set ---
+// drainSetSaves is the only loop that issues writes for a set. Each
+// successful save re-reads the latest machine; if the draft moved on
+// while the write was in flight, the loop saves the newest draft (the
+// intermediate values are coalesced — only the latest full payload is
+// sent) until the row is clean, blocked, or a save fails. The business
+// result is checked, not just transport success: a resolved response
+// with ok !== true (e.g. { ok: false, forbidden: true }) takes the
+// same failure path as a thrown error — input kept, status error /
+// dirty, retryable, never marked saved. Once sealed, the drain issues
+// no new writes.
+export type SetSaveEnv = {
+  getMachine: () => SetSaveMachine;
+  setMachine: (machine: SetSaveMachine) => void;
+  send: (draft: SetDraft) => Promise<{ ok: boolean }>;
+  isSealed: () => boolean;
+  onSaved: () => void;
+};
+
+export async function drainSetSaves(env: SetSaveEnv): Promise<boolean> {
+  for (;;) {
+    if (env.isSealed()) return false;
+    const begun = beginSetSave(env.getMachine());
+    if (!begun) {
+      const machine = env.getMachine();
+      return machine.status === "saved" && !setSaveBlocked(machine) && machine.inflightDraft == null;
+    }
+    env.setMachine(begun.machine);
+    const payload = begun.machine.inflightDraft;
+    if (!payload) return false;
+    let result: { ok: boolean };
+    try {
+      result = await env.send(payload);
+    } catch {
+      env.setMachine(applySetSaveFailure(env.getMachine(), begun.seq));
+      return false;
+    }
+    if (!result || result.ok !== true) {
+      env.setMachine(applySetSaveFailure(env.getMachine(), begun.seq));
+      return false;
+    }
+    env.setMachine(applySetSaveSuccess(env.getMachine(), begun.seq));
+    env.onSaved();
+  }
+}
+
+// createSaveQueue funnels every save request for one set through a
+// single shared drain: concurrent requestSave / flush callers join the
+// same in-flight promise instead of each issuing their own write after
+// waiting, so at most one write per set is ever in flight.
+export type SetSaveQueue = {
+  requestSave: () => Promise<boolean>;
+  flush: () => Promise<boolean>;
+};
+
+export function createSaveQueue(env: SetSaveEnv): SetSaveQueue {
+  let running: Promise<boolean> | null = null;
+  const start = (): Promise<boolean> => {
+    if (env.isSealed()) return Promise.resolve(false);
+    if (running) return running;
+    const run = drainSetSaves(env);
+    running = run;
+    const clear = () => {
+      if (running === run) running = null;
+    };
+    void run.then(clear, clear);
+    return run;
+  };
+  return { requestSave: start, flush: start };
+}
+
+// --- W-UI-001 rework: finish gate ---
+// Finish proceeds only when every set flushed clean, is saved, is not
+// blocked (completed without reps), and is completed. Otherwise the
+// reason is picked by priority: unsaved > blocked > incomplete.
+export type FinishGateSnapshot = {
+  flushOk: boolean;
+  status: SetSaveStatus;
+  blocked: boolean;
+  completed: boolean;
+};
+export type FinishGateReason = "unsaved" | "blocked" | "incomplete";
+export type FinishGateDecision = { proceed: boolean; reason: FinishGateReason | null };
+
+export function finishGateDecision(snapshots: FinishGateSnapshot[]): FinishGateDecision {
+  const allClean = snapshots.every(
+    (snapshot) => snapshot.flushOk && snapshot.status === "saved" && !snapshot.blocked && snapshot.completed,
+  );
+  if (allClean) return { proceed: true, reason: null };
+  if (snapshots.some((snapshot) => !snapshot.flushOk || snapshot.status !== "saved")) {
+    return { proceed: false, reason: "unsaved" };
+  }
+  if (snapshots.some((snapshot) => snapshot.blocked)) {
+    return { proceed: false, reason: "blocked" };
+  }
+  return { proceed: false, reason: "incomplete" };
+}
 
 export type RestTimerState = { endsAt: number | null; durationSec: number; muted: boolean; done: boolean };
 
@@ -692,12 +801,32 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
   const [machine, setMachineState] = useState<SetSaveMachine>(() => initSetSaveMachine(set));
   const machineRef = useRef(machine);
   const timerRef = useRef<number | null>(null);
-  const inflightRef = useRef<Promise<boolean> | null>(null);
+  const sealedRef = useRef(false);
+  const onSavedRef = useRef(onSaved);
+  onSavedRef.current = onSaved;
 
   const setMachine = (next: SetSaveMachine) => {
     machineRef.current = next;
     setMachineState(next);
   };
+
+  // All saves for this set go through one queue: at most one updateSet
+  // in flight, concurrent callers share the same drain promise.
+  const [saveQueue] = useState<SetSaveQueue>(() => createSaveQueue({
+    getMachine: () => machineRef.current,
+    setMachine: (next) => {
+      machineRef.current = next;
+      setMachineState(next);
+    },
+    send: async (payload: SetDraft) => await api.updateSet({
+      id: set.id,
+      weight: payload.weight.trim() === "" ? null : Number(payload.weight),
+      reps: payload.reps.trim() === "" ? null : Number(payload.reps),
+      completed: payload.completed,
+    }),
+    isSealed: () => sealedRef.current,
+    onSaved: () => onSavedRef.current(),
+  }));
 
   useEffect(() => {
     setMachine(adoptServerDraft(machineRef.current, setDraftFromSet(set)));
@@ -710,53 +839,28 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [set.id]);
 
-  async function requestSave(): Promise<boolean> {
-    // Serialize per set: wait out an in-flight save first so requests
-    // reach the server in issue order; the seq guard in the machine is
-    // the second line of defence for status updates.
-    if (inflightRef.current) {
-      await inflightRef.current.catch(() => false);
-    }
-    const begun = beginSetSave(machineRef.current);
-    if (!begun) return machineRef.current.status === "saved" && !setSaveBlocked(machineRef.current);
-    setMachine(begun.machine);
-    const payload = begun.machine.inflightDraft;
-    if (!payload) return false;
-    const run = (async () => {
-      try {
-        await api.updateSet({
-          id: set.id,
-          weight: payload.weight.trim() === "" ? null : Number(payload.weight),
-          reps: payload.reps.trim() === "" ? null : Number(payload.reps),
-          completed: payload.completed,
-        });
-        setMachine(applySetSaveSuccess(machineRef.current, begun.seq));
-        onSaved();
-        return machineRef.current.status === "saved";
-      } catch {
-        setMachine(applySetSaveFailure(machineRef.current, begun.seq));
-        return false;
-      }
-    })();
-    inflightRef.current = run;
-    void run.finally(() => {
-      if (inflightRef.current === run) inflightRef.current = null;
-    });
-    return run;
+  function requestSave(): Promise<boolean> {
+    return saveQueue.requestSave();
   }
 
   async function flushSave(): Promise<boolean> {
     if (timerRef.current != null) window.clearTimeout(timerRef.current);
-    let ok = await requestSave();
-    if (!ok) return false;
-    if (!sameSetDraft(machineRef.current.draft, machineRef.current.confirmed)) {
-      ok = await requestSave();
-    }
-    return ok && machineRef.current.status === "saved";
+    const ok = await saveQueue.flush();
+    const current = machineRef.current;
+    return ok && current.status === "saved" && !setSaveBlocked(current) && current.inflightDraft == null;
   }
 
   useEffect(() => {
-    onRegister(set.id, { getStatus: () => machineRef.current.status, flush: flushSave });
+    onRegister(set.id, {
+      getStatus: () => machineRef.current.status,
+      flush: flushSave,
+      isBlocked: () => setSaveBlocked(machineRef.current),
+      isCompleted: () => machineRef.current.draft.completed,
+      seal: () => {
+        sealedRef.current = true;
+        if (timerRef.current != null) window.clearTimeout(timerRef.current);
+      },
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [set.id, machine]);
 
@@ -958,7 +1062,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const queryClient = useQueryClient();
   const [, setClock] = useState(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  const [confirmFinishUnsaved, setConfirmFinishUnsaved] = useState(false);
+  const [finishBlock, setFinishBlock] = useState<FinishGateReason | null>(null);
   const [finishing, setFinishing] = useState(false);
   const [unsavedPresent, setUnsavedPresent] = useState(false);
   const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
@@ -1025,20 +1129,35 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   });
 
   // W-UI-001 finish gate: flush every set first (dirty sets save now,
-  // in-flight saves are awaited); only finish directly when all sets
-  // are saved. Failed or blocked sets need an explicit confirmation
-  // because finishing would lose those edits.
+  // in-flight saves are awaited), then let finishGateDecision consume
+  // the full result of that same batch of handles. Only a fully clean
+  // batch finishes directly; anything else shows the confirmation for
+  // its reason, because finishing would lose edits or skip sets.
   async function handleFinish() {
     setFinishing(true);
     const handles = [...setHandlesRef.current.values()];
-    await Promise.all(handles.map((handle) => handle.flush().catch(() => false)));
-    const statuses = [...setHandlesRef.current.values()].map((entry) => entry.getStatus());
-    setUnsavedPresent(hasUnsavedSetStatus(statuses));
+    const flushResults = await Promise.all(handles.map((handle) => handle.flush().catch(() => false)));
+    const snapshots = handles.map((handle, index) => ({
+      flushOk: flushResults[index] ?? false,
+      status: handle.getStatus(),
+      blocked: handle.isBlocked(),
+      completed: handle.isCompleted(),
+    }));
+    setUnsavedPresent(hasUnsavedSetStatus(handles.map((handle) => handle.getStatus())));
     setFinishing(false);
-    if (hasUnsavedSetStatus(statuses)) {
-      setConfirmFinishUnsaved(true);
+    const decision = finishGateDecision(snapshots);
+    if (decision.proceed) {
+      complete.mutate();
       return;
     }
+    setFinishBlock(decision.reason);
+  }
+
+  // Confirmed discard of pending edits: seal every set's save queue
+  // first so no queued write can land after the workout is finished.
+  function confirmFinishAnyway() {
+    for (const handle of setHandlesRef.current.values()) handle.seal();
+    setFinishBlock(null);
     complete.mutate();
   }
   const discard = useMutation({
@@ -1112,11 +1231,17 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
         </button>
       </section>
 
-      {confirmFinishUnsaved ? (
+      {finishBlock ? (
         <div className="inline-confirm finish-confirm" role="group" aria-label="确认结束训练">
-          <span>仍有未保存的修改，结束训练会丢失这些修改</span>
-          <button type="button" onClick={() => setConfirmFinishUnsaved(false)}>返回继续编辑</button>
-          <button type="button" className="danger" onClick={() => complete.mutate()} disabled={complete.isPending}>仍要结束</button>
+          <span>
+            {finishBlock === "unsaved"
+              ? "仍有未保存的修改，结束训练会丢失这些修改"
+              : finishBlock === "blocked"
+                ? "有已完成但缺次数的组，请先补次数，或确认直接结束"
+                : "还有未完成的组，确认结束训练吗？"}
+          </span>
+          <button type="button" onClick={() => setFinishBlock(null)}>返回继续编辑</button>
+          <button type="button" className="danger" onClick={confirmFinishAnyway} disabled={complete.isPending}>仍要结束</button>
         </div>
       ) : null}
 

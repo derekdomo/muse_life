@@ -218,5 +218,219 @@ fm = forceMut.editSetDraft(fbeg.machine, { weight: '115', reps: '8', completed: 
 fm = forceMut.applySetSaveSuccess({ ...fm, seq: fbeg.seq, inflightSeq: fbeg.seq, inflightDraft: fbeg.machine.inflightDraft }, fbeg.seq);
 check('mutation: forcing saved on success hides a mid-save edit', fm.status === 'saved');
 
+// --- W-UI-001 rework (PM 2026-10-16 23:50): single-writer queue,
+// business-result check, in-flight revert, finish-gate consumption ---
+// These run the REAL drainSetSaves / createSaveQueue / finishGateDecision
+// extracted from App.tsx against a controllable deferred transport that
+// mimics updateSet's unconditional full-payload write, reproducing the
+// PM counterexamples: (1) multiple waiters forking after a shared
+// in-flight save so a late write overwrites the newest value; (2) a
+// resolved { ok: false, forbidden: true } being marked saved, and an
+// in-flight revert to the confirmed value being reported clean so a
+// refetch can overwrite it; (3) flush() returning false for a blocked
+// legacy set (completed, reps null, status saved) being ignored by the
+// finish path.
+function extractAsyncFunction(source, name) {
+  const idx = source.search(new RegExp(`async function ${name}\\(`));
+  if (idx < 0) throw new Error(`async function ${name} not found`);
+  const openParen = source.indexOf('(', idx);
+  const closeParen = matchDelim(source, openParen, '(', ')');
+  const bodyStart = source.indexOf('{', closeParen);
+  const bodyEnd = matchDelim(source, bodyStart, '{', '}');
+  return source.slice(idx, bodyEnd + 1);
+}
+const QFN = [...FN, 'finishGateDecision'];
+function buildQueue(src) {
+  const parts = FN.map((n) => extractFunction(src, n));
+  parts.push(extractAsyncFunction(src, 'drainSetSaves'));
+  parts.push(extractFunction(src, 'createSaveQueue'));
+  parts.push(extractFunction(src, 'finishGateDecision'));
+  return new Function(`${stripTypeScriptTypes(parts.join('\n'))}\nreturn { ${[...QFN, 'drainSetSaves', 'createSaveQueue'].join(', ')} };`)();
+}
+const Q = buildQueue(clientSrc);
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function makeRow(QM, initialSet, sendImpl) {
+  let machine = QM.initSetSaveMachine(initialSet);
+  let sealed = false;
+  const calls = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const env = {
+    getMachine: () => machine,
+    setMachine: (next) => { machine = next; },
+    send: async (draft) => {
+      inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+      calls.push({ ...draft });
+      try { return await sendImpl(draft, calls.length); }
+      finally { inFlight--; }
+    },
+    isSealed: () => sealed,
+    onSaved: () => {},
+  };
+  return {
+    env,
+    queue: QM.createSaveQueue(env),
+    edit: (draft) => { machine = QM.editSetDraft(machine, draft); },
+    get machine() { return machine; },
+    calls,
+    get maxInFlight() { return maxInFlight; },
+    seal: () => { sealed = true; },
+  };
+}
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+check('source: finish consumes flush results via finishGateDecision', clientSrc.includes('const decision = finishGateDecision(snapshots);') && clientSrc.includes('flushOk: flushResults[index] ?? false'));
+check('source: confirm-discard seals every handle before completing', clientSrc.includes('handle.seal()') && clientSrc.includes('confirmFinishAnyway'));
+check('source: drain checks the business ok flag', clientSrc.includes('result.ok !== true'));
+
+await (async () => {
+  // (1) Fork counterexample: A=20 in flight; two more requestSave calls
+  // and an edit to 30 arrive while A is pending; then a further edit to
+  // 40 during the second write. Writes must stay strictly serial, the
+  // waiters must share the one drain, and the last persisted value must
+  // be the last input (40) — no late 30 may land after it.
+  {
+    const gates = [deferred(), deferred(), deferred()];
+    let persisted = '100';
+    const row = makeRow(Q, SET, async (draft, n) => { await gates[n - 1].promise; persisted = draft.weight; return { ok: true }; });
+    row.edit({ weight: '20', reps: '8', completed: false });
+    const p1 = row.queue.requestSave();
+    row.edit({ weight: '30', reps: '8', completed: false });
+    const p2 = row.queue.requestSave();
+    const p3 = row.queue.flush();
+    check('queue: concurrent callers share one drain (single write in flight)', row.calls.length === 1 && row.maxInFlight === 1);
+    gates[0].resolve(); await tick();
+    check('queue: after first save the drain sends the latest draft (30), not a forked duplicate', row.calls.length === 2 && row.calls[1].weight === '30');
+    row.edit({ weight: '40', reps: '8', completed: false });
+    gates[1].resolve(); await tick();
+    check('queue: mid-drain edit is picked up by the same drain (40 next)', row.calls.length === 3 && row.calls[2].weight === '40');
+    gates[2].resolve();
+    const results = await Promise.all([p1, p2, p3]);
+    check('queue: all waiters resolve true and final persisted value equals last input', results.every(Boolean) && persisted === '40' && row.machine.status === 'saved' && row.machine.confirmed.weight === '40', `persisted=${persisted}`);
+    check('queue: writes were strictly serial throughout', row.maxInFlight === 1);
+  }
+
+  // (2a) Business rejection: resolved { ok:false, forbidden:true } must
+  // fail like a thrown error — input kept, never saved, retry recovers.
+  {
+    let allow = false;
+    let persisted = '100';
+    const row = makeRow(Q, SET, async (draft) => { if (!allow) return { ok: false, forbidden: true }; persisted = draft.weight; return { ok: true }; });
+    row.edit({ weight: '20', reps: '8', completed: false });
+    const ok = await row.queue.requestSave();
+    check('queue: resolved {ok:false} returns false, status error, draft kept, nothing persisted',
+      ok === false && row.machine.status === 'error' && row.machine.draft.weight === '20' && row.machine.confirmed.weight === '100' && persisted === '100');
+    allow = true;
+    const retried = await row.queue.requestSave();
+    check('queue: retry after rejection saves and clears error', retried === true && row.machine.status === 'saved' && persisted === '20');
+  }
+
+  // (2b) Thrown transport error takes the same failure path.
+  {
+    const row = makeRow(Q, SET, async () => { throw new Error('network'); });
+    row.edit({ weight: '20', reps: '8', completed: false });
+    const ok = await row.queue.requestSave();
+    check('queue: thrown error returns false and keeps the draft as error', ok === false && row.machine.status === 'error' && row.machine.draft.weight === '20');
+  }
+
+  // (2c) In-flight revert: 10 -> save 20 in flight -> user reverts to
+  // 10. The row must not read saved while the write is undecided, a
+  // refetch must not adopt over it, and after the 20 lands the drain
+  // must issue a compensation save so 10 is the final persisted value.
+  {
+    const gate = deferred();
+    let persisted = '100';
+    const row = makeRow(Q, { id: 7, weight: 100, reps: 8, completed: false }, async (draft, n) => { if (n === 1) await gate.promise; persisted = draft.weight; return { ok: true }; });
+    row.edit({ weight: '20', reps: '8', completed: false });
+    const p = row.queue.requestSave();
+    row.edit({ weight: '100', reps: '8', completed: false });
+    check('queue: in-flight revert to confirmed is dirty, not saved', row.machine.status === 'dirty');
+    const adopted = Q.adoptServerDraft(row.machine, { weight: '999', reps: '1', completed: true });
+    check('queue: refetch cannot adopt over an in-flight revert', adopted.draft.weight === '100');
+    gate.resolve();
+    const ok = await p;
+    check('queue: compensation save persists the reverted value last', ok === true && persisted === '100' && row.calls.length === 2 && row.calls[1].weight === '100' && row.machine.status === 'saved', `persisted=${persisted} calls=${row.calls.length}`);
+  }
+
+  // (3) Blocked legacy set: completed with reps null starts saved and
+  // blocked. flush must return false with zero writes, and the finish
+  // decision must not proceed.
+  {
+    const row = makeRow(Q, { id: 9, weight: 50, reps: null, completed: true }, async () => ({ ok: true }));
+    check('queue: legacy blocked set starts saved-but-blocked', row.machine.status === 'saved' && Q.setSaveBlocked(row.machine) === true);
+    const flushed = await row.queue.flush();
+    check('queue: flush of a blocked set returns false and writes nothing', flushed === false && row.calls.length === 0);
+    const decision = Q.finishGateDecision([{ flushOk: flushed, status: row.machine.status, blocked: true, completed: true }]);
+    check('finish: blocked snapshot cannot proceed silently', decision.proceed === false);
+  }
+
+  // Finish decision matrix.
+  {
+    const good = { flushOk: true, status: 'saved', blocked: false, completed: true };
+    check('finish: all-clean batch proceeds', Q.finishGateDecision([good, good]).proceed === true);
+    check('finish: flush failure is unsaved', Q.finishGateDecision([{ ...good, flushOk: false }]).reason === 'unsaved');
+    check('finish: error status is unsaved', Q.finishGateDecision([{ ...good, status: 'error' }]).reason === 'unsaved');
+    check('finish: blocked-only batch reports blocked', Q.finishGateDecision([{ ...good, blocked: true }]).reason === 'blocked');
+    check('finish: incomplete-only batch reports incomplete', Q.finishGateDecision([{ ...good, completed: false }]).reason === 'incomplete');
+    check('finish: unsaved outranks incomplete', Q.finishGateDecision([{ ...good, completed: false }, { ...good, flushOk: false }]).reason === 'unsaved');
+  }
+
+  // Seal: after sealing, no new writes are issued and queued edits stop.
+  {
+    const gate = deferred();
+    const row = makeRow(Q, SET, async (draft, n) => { if (n === 1) await gate.promise; return { ok: true }; });
+    row.edit({ weight: '20', reps: '8', completed: false });
+    const p = row.queue.requestSave();
+    row.edit({ weight: '30', reps: '8', completed: false });
+    row.seal();
+    gate.resolve();
+    await p;
+    const after = await row.queue.requestSave();
+    check('queue: sealed queue issues no further writes', row.calls.length === 1 && after === false, `calls=${row.calls.length}`);
+  }
+
+  // Mutations: removing the ok check lets a rejection pass as saved;
+  // restoring the old editSetDraft (confirmed-first) revives the
+  // in-flight-revert false-clean; dropping the blocked term lets a
+  // blocked batch proceed.
+  const noOkSrc = clientSrc.replace('if (!result || result.ok !== true) {', 'if (!result) {');
+  check('mutation setup: ok-check variant differs', noOkSrc !== clientSrc);
+  const QNoOk = buildQueue(noOkSrc);
+  {
+    const row = makeRow(QNoOk, SET, async () => ({ ok: false, forbidden: true }));
+    row.edit({ weight: '20', reps: '8', completed: false });
+    const ok = await row.queue.requestSave();
+    check('mutation: without the ok check a business rejection is marked saved', ok === true && row.machine.status === 'saved');
+  }
+  const oldEditSrc = clientSrc.replace(
+    extractFunction(clientSrc, 'editSetDraft'),
+    extractFunction(clientSrc, 'editSetDraft')
+      .replace('  if (machine.inflightDraft) {', '  if (false) {'),
+  );
+  check('mutation setup: inflight-first edit variant differs', oldEditSrc !== clientSrc);
+  const QOldEdit = buildQueue(oldEditSrc);
+  {
+    const gate = deferred();
+    const row = makeRow(QOldEdit, SET, async () => { await gate.promise; return { ok: true }; });
+    row.edit({ weight: '20', reps: '8', completed: false });
+    void row.queue.requestSave();
+    row.edit({ weight: '100', reps: '8', completed: false });
+    check('mutation: confirmed-first edit logic revives the false-clean in-flight revert', row.machine.status === 'saved');
+    gate.resolve(); await tick();
+  }
+  const noBlockedSrc = clientSrc
+    .replace('&& !snapshot.blocked && snapshot.completed', '&& snapshot.completed')
+    .replace('if (snapshots.some((snapshot) => snapshot.blocked)) {', 'if (snapshots.some(() => false)) {');
+  check('mutation setup: blocked-term variant differs', noBlockedSrc !== clientSrc);
+  const QNoBlocked = buildQueue(noBlockedSrc);
+  check('mutation: without the blocked term a blocked batch proceeds',
+    QNoBlocked.finishGateDecision([{ flushOk: true, status: 'saved', blocked: true, completed: true }]).proceed === true);
+})();
+
 console.log(`\n${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
