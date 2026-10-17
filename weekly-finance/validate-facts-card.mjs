@@ -1,4 +1,5 @@
-// F0.2 (status honesty) + F2.1-D1 / F1.2 (first balance fact card)
+// F0.2 (status honesty) + F2.1-D1 (balance fact card source summary,
+// balance rows only) + F1.1/F0.4 (complete-month spend basis)
 // validation. Behaviour runs against the real pure helpers extracted
 // from client/src/App.tsx (type annotations stripped mechanically);
 // wiring assertions run against the real source text of App.tsx and
@@ -13,13 +14,13 @@ function check(name, cond) {
 }
 
 // --- extract the real exported helpers from App.tsx ---
-function extractFn(src, name) {
+function extractFn(src, name, specific = []) {
   const start = src.indexOf(`export function ${name}`);
   if (start < 0) throw new Error(`helper not found: ${name}`);
   const end = src.indexOf("\n}\n", start) + 3;
-  return src.slice(start, end)
-    .replace("export function", "function")
-    .replace("accounts: Array<{ live: boolean }>", "accounts")
+  let text = src.slice(start, end).replace("export function", "function");
+  for (const [from, to] of specific) text = text.replace(from, to);
+  return text
     .replaceAll(": string | null", "")
     .replaceAll(": number | null", "")
     .replaceAll(": RefreshStatus", "")
@@ -28,15 +29,24 @@ function extractFn(src, name) {
     .replaceAll(": string", "")
     .replaceAll(": number", "");
 }
-function loadHelper(name) {
-  const text = extractFn(appSrc, name);
+function loadHelper(name, specific) {
+  const text = extractFn(appSrc, name, specific);
   return new Function(`${text}; return ${name};`)();
 }
 const statusPillText = loadHelper("statusPillText");
 const emptyFooterText = loadHelper("emptyFooterText");
 const safeRefreshMessage = loadHelper("safeRefreshMessage");
 const weeklyDeltaView = loadHelper("weeklyDeltaView");
-const balanceSourceSummary = loadHelper("balanceSourceSummary");
+const balanceSourceSummary = loadHelper("balanceSourceSummary", [
+  ["accounts: Array<{ type: string; live: boolean }>", "accounts"],
+]);
+const completeSpendBasis = loadHelper("completeSpendBasis", [
+  ["months: Month[]", "months"],
+  [": { averageMonthlySpend: number | null; usedMonths: number; missingMonths: number }", ""],
+]);
+const integrityLabel = loadHelper("integrityLabel", [
+  ['integrity: Month["integrity"]', "integrity"],
+]);
 
 // --- F0.2: four states, status pill ---
 check("state a (never synced): pill 等待首次同步", statusPillText(false, "idle") === "等待首次同步");
@@ -111,16 +121,74 @@ check("card null state: 暂无可比快照", cardSrc.includes("暂无可比快�
 check("card stale marker: 本次未更新", cardSrc.includes("本次未更新"));
 check("card source line shows asOf date", cardSrc.includes("数据日期 {asOfText}"));
 check("card source line shows sourceMonth separately", cardSrc.includes("月度快照 {data.sourceMonth}"));
+check("card source line uses balanceSourceSummary(data.accounts)", cardSrc.includes("balanceSourceSummary(data.accounts)"));
 check("card never claims a fixed week", !/一周|7 天|七天|每周/.test(cardSrc));
 check("card makes no attribution claim", !/市场|投入|消费/.test(cardSrc));
 check("hero delta label matches the card wording", appSrc.includes("较上次成功快照") && !appSrc.includes("较上次周更"));
 check("no stale 等待第二次周更 copy remains", !appSrc.includes("等待第二次周更"));
 
-// --- source summary: asOf/sourceMonth are distinct fields; missing -> 未提供 ---
-check("source summary: empty accounts -> 未提供", balanceSourceSummary([]) === "未提供");
-check("source summary: mixed live/fallback counts", balanceSourceSummary([{ live: true }, { live: true }, { live: false }]) === "2 个账户为本周实时余额，1 个账户沿用月度快照值");
-check("source summary: all live", balanceSourceSummary([{ live: true }]) === "全部 1 个账户为本周实时余额");
-check("source summary: all snapshot", balanceSourceSummary([{ live: false }, { live: false }]) === "全部 2 个账户沿用月度快照值");
+// --- F2.1-D1: source summary counts balance rows only ---
+const bal = (type, live) => ({ type, live });
+check("summary: empty accounts -> 未提供", balanceSourceSummary([]) === "未提供");
+check("summary: income only, no balance rows -> 未提供", balanceSourceSummary([bal("income", true), bal("income", false)]) === "未提供");
+check("summary: pure balance, all live", balanceSourceSummary([bal("investment", true), bal("account", true)]) === "全部 2 个余额账户为同步读取值");
+check("summary: pure balance, all snapshot", balanceSourceSummary([bal("account", false), bal("account", false)]) === "全部 2 个余额账户沿用月度快照值");
+check("summary: pure balance, mixed", balanceSourceSummary([bal("investment", true), bal("account", true), bal("account", false)]) === "2 个余额账户为同步读取值，1 个余额账户沿用月度快照值");
+// the reported bug: one live balance row plus non-balance rows was
+// summarised as "1 live account, 2 snapshot accounts"
+const bugCase = [bal("investment", true), bal("income", false), bal("fixed_spend", false)];
+check("summary: reported bug case counts only the balance row", balanceSourceSummary(bugCase) === "全部 1 个余额账户为同步读取值");
+// inserting arbitrary non-balance entries never changes the summary
+const nonBalance = [bal("income", true), bal("fixed_spend", false), bal("transfer", true), bal("investment_contribution", false)];
+for (const [name, base] of [
+  ["all live", [bal("investment", true)]],
+  ["all snapshot", [bal("account", false)]],
+  ["mixed", [bal("investment", true), bal("account", false)]],
+  ["none", []],
+]) {
+  check(`summary: non-balance entries do not change the ${name} summary`,
+    balanceSourceSummary([...base, ...nonBalance]) === balanceSourceSummary(base));
+}
+check("summary: never claims 本周实时 from the live flag", !balanceSourceSummary([bal("account", true)]).includes("本周"));
+check("summary: account rows use 同步读取 wording", appSrc.includes('account.live ? "同步读取" : "月度快照"'));
+check("summary: account rows no longer claim 本周实时", !appSrc.includes('account.live ? "本周实时"'));
+// mutation sensitivity: the old all-rows counter miscounts the bug case
+const oldSummary = (accounts) => {
+  const liveCount = accounts.filter((a) => a.live).length;
+  return `${liveCount}/${accounts.length}`;
+};
+check("mutation: unfiltered counting changes the bug-case result", oldSummary(bugCase) !== "1/1" && balanceSourceSummary(bugCase).startsWith("全部 1 个"));
+
+// --- F1.1 / F0.4: complete-month spend basis ---
+const cm = (integrity, anomaly, fixedSpend, flexibleSpend = 0) => ({
+  integrity, flexibleSpendAnomaly: anomaly, fixedSpend, flexibleSpend,
+});
+const basis3 = completeSpendBasis([cm("complete", false, 3000), cm("complete", false, 3600), cm("complete", false, 4200)]);
+check("F1.1: 3 complete months average", basis3.usedMonths === 3 && basis3.missingMonths === 0 && basis3.averageMonthlySpend === 3600);
+const basisMixed = completeSpendBasis([
+  cm("complete", false, 3000), cm("complete", true, 9000), cm("unknown", false, 9000),
+  cm("partial", false, 9000), cm("complete", false, 5000),
+]);
+check("F1.1: anomaly/unknown/partial excluded from the denominator", basisMixed.usedMonths === 2 && basisMixed.missingMonths === 1);
+check("F1.1: average uses valid months only", basisMixed.averageMonthlySpend === 4000);
+const basisNone = completeSpendBasis([cm("unknown", false, 3000), cm("partial", false, 3000)]);
+check("F1.1: no valid months -> average null, never 0-filled", basisNone.averageMonthlySpend === null && basisNone.usedMonths === 0 && basisNone.missingMonths === 3);
+const basisMany = completeSpendBasis([1000, 2000, 3000, 4000, 5000].map((v) => cm("complete", false, v)));
+check("F1.1: only the last 3 valid months are used", basisMany.averageMonthlySpend === 4000 && basisMany.usedMonths === 3);
+const basisZero = completeSpendBasis([cm("complete", false, 0), cm("complete", false, 0), cm("complete", false, 0)]);
+check("F1.1: real zero spend stays a real 0 (distinct from missing)", basisZero.averageMonthlySpend === 0 && basisZero.missingMonths === 0);
+check("F1.1: emergency metric wired to completeSpendBasis", appSrc.includes("completeSpendBasis(data.months)") && appSrc.includes("完整有效月不足：已有"));
+check("F1.1: negative flexible spend clamped in the basis", completeSpendBasis([cm("complete", false, 1000, -400)]).averageMonthlySpend === 1000);
+
+// --- F0.4: integrity labels are text, not colour-only ---
+check("label: complete -> 完整", integrityLabel("complete") === "完整");
+check("label: partial -> 部分", integrityLabel("partial") === "部分");
+check("label: unknown -> 完整性未提供", integrityLabel("unknown") === "完整性未提供");
+check("monthly records section rendered", appSrc.includes("function MonthlyRecords") && appSrc.includes("<MonthlyRecords months={data.months} />"));
+check("monthly row shows 截至 date + integrity label", appSrc.includes("截至 {snapshotDate} · {integrityLabel(month.integrity)}"));
+check("monthly detail shows superseded count", appSrc.includes("month.supersededSnapshots"));
+check("monthly detail shows integrity basis / anomaly reason", appSrc.includes("month.integrityBasis") && appSrc.includes("month.anomalyReason"));
+check("FIRE gap state gated on completeMonthsUsed", appSrc.includes("data.fire.completeMonthsUsed === 0"));
 
 console.log(`validate-facts-card: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

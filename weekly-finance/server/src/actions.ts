@@ -68,6 +68,14 @@ const monthSchema = z.object({
   flexibleSpendAnomaly: z.boolean().default(false),
   totalSpend: z.number(),
   investmentReturn: z.number().nullable(),
+  // F0.3/F0.4 additive monthly-fact fields. Defaults keep pre-existing
+  // stored payloads readable: they honestly report integrity "unknown"
+  // and are never backfilled as complete.
+  snapshotDate: z.string().default(""),
+  supersededSnapshots: z.number().int().nonnegative().default(0),
+  integrity: z.enum(["partial", "complete", "unknown"]).default("unknown"),
+  integrityBasis: z.string().nullable().default(null),
+  anomalyReason: z.string().nullable().default(null),
 });
 
 const holdingSchema = z.object({
@@ -109,12 +117,30 @@ const dashboardSchema = z.object({
     target: z.number(),
     progress: z.number().nullable(),
     gap: z.number(),
+    completeMonthsUsed: z.number().int().nonnegative().default(0),
   }),
 });
 
 type Dashboard = z.infer<typeof dashboardSchema>;
+
+export type DashboardPayloadParseResult = { ok: true; data: Dashboard } | { ok: false };
+
+export function parseDashboardPayload(payload: string): DashboardPayloadParseResult {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(payload);
+  } catch {
+    return { ok: false };
+  }
+  const parsed = dashboardSchema.safeParse(raw);
+  return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
+}
 type SourceEntry = z.infer<typeof sourceEntrySchema>;
 type RawMonth = z.infer<typeof rawMonthSchema>;
+type NormalizedMonth = RawMonth & { supersededSnapshots: number };
+type MonthNormalization =
+  | { ok: true; months: NormalizedMonth[] }
+  | { ok: false; issue: string };
 type PlaidAccount = z.infer<typeof plaidAccountSchema>;
 type HoldingInput = z.infer<typeof holdingInputSchema>;
 type PlaidTransaction = z.infer<typeof plaidTransactionSchema>;
@@ -126,7 +152,11 @@ const refreshResponse = z.object({
   message: z.string(),
 });
 
-const ingestResponse = z.object({ ok: z.boolean(), savedMonths: z.number() });
+const ingestResponse = z.object({
+  ok: z.boolean(),
+  savedMonths: z.number(),
+  issue: z.string().nullable().default(null),
+});
 
 const excludedLiveSources = new Set([
   "titan",
@@ -149,6 +179,64 @@ function displayLabel(source: string): string {
 
 function contribution(month: { investmentContribution: number; transfer: number }): number {
   return month.investmentContribution || month.transfer || 0;
+}
+
+// F0.3: strict real-calendar-date check. A key like 2026-02-30 must be
+// rejected outright, never rolled into March by Date arithmetic.
+function isRealDateKey(key: string): boolean {
+  const match = key.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(0, 0, 0, 0);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function entriesSignature(entries: SourceEntry[]): string {
+  return entries
+    .map((entry) => JSON.stringify([entry.financeSource, entry.type, entry.number]))
+    .sort()
+    .join("\n");
+}
+
+// F0.3: the single normalized monthly selection every consumer shares
+// (charts, latestRaw fallback, FIRE, summaries). One snapshot per
+// calendar month: the latest valid date in that month. Identical
+// same-day duplicates dedupe; conflicting same-day snapshots and
+// non-existent calendar dates are input problems, never silently
+// resolved. Issue text names only the date and the problem category.
+function normalizeRawMonths(rawMonths: RawMonth[]): MonthNormalization {
+  for (const month of rawMonths) {
+    if (!isRealDateKey(month.key)) {
+      return { ok: false, issue: `快照日期 ${month.key} 不是真实日历日期` };
+    }
+  }
+  const byDate = new Map<string, RawMonth>();
+  for (const month of rawMonths) {
+    const existing = byDate.get(month.key);
+    if (!existing) {
+      byDate.set(month.key, month);
+    } else if (entriesSignature(existing.entries) !== entriesSignature(month.entries)) {
+      return { ok: false, issue: `${month.key} 同日存在内容不一致的多份快照` };
+    }
+  }
+  const byMonth = new Map<string, NormalizedMonth[]>();
+  for (const month of byDate.values()) {
+    const monthKey = month.key.slice(0, 7);
+    byMonth.set(monthKey, [...(byMonth.get(monthKey) ?? []), { ...month, supersededSnapshots: 0 }]);
+  }
+  const normalized: NormalizedMonth[] = [];
+  for (const group of byMonth.values()) {
+    const sortedGroup = [...group].sort((a, b) => a.key.localeCompare(b.key));
+    const chosen = sortedGroup.at(-1);
+    if (!chosen) continue;
+    normalized.push({ ...chosen, supersededSnapshots: sortedGroup.length - 1 });
+  }
+  return { ok: true, months: normalized.sort((a, b) => a.key.localeCompare(b.key)) };
 }
 
 function monthEnd(monthKey: string): string {
@@ -190,14 +278,12 @@ function transactionSpendForMonth(
 }
 
 function aggregateMonths(
-  rawMonths: RawMonth[],
+  normalizedMonths: NormalizedMonth[],
   transactions: PlaidTransaction[],
   coverage: TransactionCoverage,
   asOf: string,
 ): Dashboard["months"] {
-  const sorted = [...rawMonths]
-    .filter((month) => !Number.isNaN(new Date(`${month.key}T00:00:00`).getTime()))
-    .sort((a, b) => a.key.localeCompare(b.key));
+  const sorted = [...normalizedMonths].sort((a, b) => a.key.localeCompare(b.key));
 
   const base = sorted.map((month) => {
     const result = {
@@ -262,15 +348,46 @@ function aggregateMonths(
     const investmentReturn = previous
       ? month.investment - previous.investment - monthContribution
       : null;
+    const flexibleSpendAnomaly = transactionSpend == null
+      ? (shouldHaveTransactionCoverage || rawFlexibleSpend < 0)
+      : rawFlexibleSpend < 0;
+    // F0.4 integrity: the asOf month is always partial. A finished month
+    // is complete only with a coverage basis — full transaction
+    // coverage of the whole month, or a month-end snapshot. Anything
+    // else stays unknown; it is never backfilled as complete.
+    const source = sorted[index];
+    const monthKey = month.key.slice(0, 7);
+    const asOfMonth = asOf.slice(0, 7);
+    let integrity: "partial" | "complete" | "unknown";
+    let integrityBasis: string | null = null;
+    if (monthKey >= asOfMonth) {
+      integrity = "partial";
+      integrityBasis = `当月尚未结束，快照截至 ${month.key}`;
+    } else if (fullTransactionCoverage && coverage) {
+      integrity = "complete";
+      integrityBasis = `交易覆盖 ${coverage.start} 至 ${coverage.end} 完整覆盖本月`;
+    } else if (end && month.key === end) {
+      integrity = "complete";
+      integrityBasis = `月末快照 ${month.key} 覆盖整月`;
+    } else {
+      integrity = "unknown";
+    }
     return {
       ...month,
       contribution: monthContribution,
       flexibleSpend,
-      flexibleSpendAnomaly: transactionSpend == null
-        ? (shouldHaveTransactionCoverage || rawFlexibleSpend < 0)
-        : rawFlexibleSpend < 0,
+      flexibleSpendAnomaly,
       totalSpend: month.fixedSpend + flexibleSpend,
       investmentReturn,
+      snapshotDate: month.key,
+      supersededSnapshots: source?.supersededSnapshots ?? 0,
+      integrity,
+      integrityBasis,
+      anomalyReason: !flexibleSpendAnomaly
+        ? null
+        : rawFlexibleSpend < 0
+          ? "灵活支出推算为负数，已按 0 计"
+          : "交易覆盖不完整，灵活支出为推算值，未能核实",
     };
   });
 }
@@ -371,14 +488,31 @@ function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function completeFireMonths(months: Dashboard["months"], asOf: string): Dashboard["months"] {
-  const asOfMonth = asOf.match(/^\d{4}-\d{2}/)?.[0];
-  if (!asOfMonth) return months.slice(-12);
-  return months.filter((month) => month.key.slice(0, 7) < asOfMonth).slice(-12);
+// F0.4 consumption boundary: only complete, non-anomalous months are
+// "完整且有效月" and may enter FIRE denominators. Partial, unknown and
+// anomalous months are excluded — never replaced with 0.
+function validCompleteMonths(months: Dashboard["months"]): Dashboard["months"] {
+  return months.filter((month) => month.integrity === "complete" && !month.flexibleSpendAnomaly);
 }
 
 function normalizedFireSpend(month: Dashboard["months"][number]): number {
   return Math.max(0, month.fixedSpend + Math.max(0, month.flexibleSpend));
+}
+
+function computeFire(months: Dashboard["months"], netWorth: number): Dashboard["fire"] {
+  const used = validCompleteMonths(months).slice(-12);
+  const annualContribution = average(used.map((month) => month.contribution)) * 12;
+  const annualSpend = average(used.map(normalizedFireSpend)) * 12;
+  const target = annualSpend > 0 ? annualSpend / 0.04 : 0;
+  const progress = target > 0 ? netWorth / target : null;
+  return {
+    annualContribution,
+    annualSpend,
+    target,
+    progress,
+    gap: Math.max(0, target - netWorth),
+    completeMonthsUsed: used.length,
+  };
 }
 
 function normalizeFireMetrics(dashboard: Dashboard): Dashboard {
@@ -392,36 +526,26 @@ function normalizeFireMetrics(dashboard: Dashboard): Dashboard {
       totalSpend: month.fixedSpend + flexibleSpend,
     };
   });
-  const fireMonths = completeFireMonths(months, dashboard.asOf);
-  const fireSpendMonths = fireMonths.filter((month) => !month.flexibleSpendAnomaly);
-  const annualContribution = average(fireMonths.map((month) => month.contribution)) * 12;
-  const annualSpend = average(fireSpendMonths.map(normalizedFireSpend)) * 12;
-  const target = annualSpend > 0 ? annualSpend / 0.04 : 0;
-  const progress = target > 0 ? dashboard.live.netWorth / target : null;
   return {
     ...dashboard,
     months,
-    fire: {
-      annualContribution,
-      annualSpend,
-      target,
-      progress,
-      gap: Math.max(0, target - dashboard.live.netWorth),
-    },
+    fire: computeFire(months, dashboard.live.netWorth),
   };
 }
 
 function buildDashboard(
   asOf: string,
-  rawMonths: RawMonth[],
+  normalizedMonths: NormalizedMonth[],
   plaidAccounts: PlaidAccount[],
   holdingInputs: HoldingInput[],
   plaidTransactions: PlaidTransaction[],
   transactionCoverage: TransactionCoverage,
   previousLiveNetWorth: number | null,
 ): Dashboard | null {
-  const months = aggregateMonths(rawMonths, plaidTransactions, transactionCoverage, asOf);
-  const latestRaw = [...rawMonths].sort((a, b) => a.key.localeCompare(b.key)).at(-1);
+  const months = aggregateMonths(normalizedMonths, plaidTransactions, transactionCoverage, asOf);
+  // Same normalized selection as the charts: the latest month's chosen
+  // snapshot is the one and only latestRaw for balance fallback.
+  const latestRaw = normalizedMonths.at(-1);
   if (!latestRaw || months.length === 0) return null;
   const accounts = mergeLatestEntries(latestRaw.entries, plaidAccounts);
   const liveInvestment = accounts
@@ -436,12 +560,6 @@ function buildDashboard(
     .reduce((sum, account) => sum + Math.abs(account.value), 0);
   const liveSaving = liveDeposits - liveLoans;
   const liveNetWorth = liveInvestment + liveDeposits - liveLoans;
-  const recent = completeFireMonths(months, asOf);
-  const recentSpendMonths = recent.filter((month) => !month.flexibleSpendAnomaly);
-  const annualContribution = average(recent.map((month) => month.contribution)) * 12;
-  const annualSpend = average(recentSpendMonths.map(normalizedFireSpend)) * 12;
-  const target = annualSpend > 0 ? annualSpend / 0.04 : 0;
-  const progress = target > 0 ? liveNetWorth / target : null;
   const normalized = normalizeHoldings(holdingInputs);
 
   return {
@@ -463,13 +581,7 @@ function buildDashboard(
       if (a.type !== b.type) return a.type.localeCompare(b.type);
       return Math.abs(b.value) - Math.abs(a.value);
     }),
-    fire: {
-      annualContribution,
-      annualSpend,
-      target,
-      progress,
-      gap: Math.max(0, target - liveNetWorth),
-    },
+    fire: computeFire(months, liveNetWorth),
   };
 }
 
@@ -562,21 +674,6 @@ async function writeState(
     .onConflictDoUpdate({ target: schema.financeState.id, set: row });
 }
 
-// F0.2: the single payload-reading entry point. A corrupt stored
-// payload (JSON syntax error or schema mismatch) returns
-// { ok: false } instead of throwing, so callers can surface a typed
-// error / take the recovery path; payload content is never echoed.
-export function parseDashboardPayload(
-  payload: string,
-): { ok: true; data: Dashboard } | { ok: false } {
-  try {
-    const parsed = dashboardSchema.safeParse(JSON.parse(payload));
-    return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
-  } catch {
-    return { ok: false };
-  }
-}
-
 export const Actions = {
   getDashboard: defineAction({
     request: z.object({}),
@@ -599,19 +696,24 @@ export const Actions = {
       }
       const state = await getState(ctx);
       let data: Dashboard | null = null;
-      let payloadCorrupt = false;
+      let payloadCorrupted = false;
       if (state?.payload) {
         const parsed = parseDashboardPayload(state.payload);
-        if (parsed.ok) data = normalizeFireMetrics(ensureSplitBalances(ensureSeparatedCashPosition(parsed.data)));
-        else payloadCorrupt = true;
+        if (parsed.ok) {
+          data = normalizeFireMetrics(ensureSplitBalances(ensureSeparatedCashPosition(parsed.data)));
+        } else {
+          payloadCorrupted = true;
+        }
       }
       const staleRunning = isStaleRunningState(state);
       return {
         access: "owner" as const,
         data,
         refresh: {
-          status: payloadCorrupt || staleRunning ? "error" : (state?.status ?? "idle"),
-          message: payloadCorrupt ? "已保存数据损坏，重新更新可恢复" : staleRunning ? "上次更新未完成，可以重新更新" : (state?.message ?? null),
+          status: payloadCorrupted ? "error" : staleRunning ? "error" : (state?.status ?? "idle"),
+          message: payloadCorrupted
+            ? "已保存数据损坏，重新更新可恢复"
+            : staleRunning ? "上次更新未完成，可以重新更新" : (state?.message ?? null),
           updatedAt: state?.updatedAt?.toISOString() ?? null,
         },
       };
@@ -660,11 +762,24 @@ export const Actions = {
     ]),
     response: ingestResponse,
     async handler(ctx, args): Promise<z.infer<typeof ingestResponse>> {
-      if (!isOwner(ctx)) return { ok: false, savedMonths: 0 };
+      if (!isOwner(ctx)) return { ok: false, savedMonths: 0, issue: null };
       if (!args.success) {
         await writeState(ctx, { status: "error", message: "本次更新失败，显示上次数据" });
         ctx.invalidateQueries();
-        return { ok: false, savedMonths: 0 };
+        return { ok: false, savedMonths: 0, issue: null };
+      }
+      // F0.3 gate: invalid calendar dates and conflicting same-day
+      // snapshots are input problems. The stored payload and its asOf
+      // are left untouched; the issue names only the date and the
+      // problem category, never the submitted values.
+      const normalization = normalizeRawMonths(args.months);
+      if (!normalization.ok) {
+        await writeState(ctx, {
+          status: "error",
+          message: `本次更新未保存：${normalization.issue}。已保留上次成功数据，修正后可重新更新。`,
+        });
+        ctx.invalidateQueries();
+        return { ok: false, savedMonths: 0, issue: normalization.issue };
       }
       const state = await getState(ctx);
       let previousLiveNetWorth: number | null = null;
@@ -674,7 +789,7 @@ export const Actions = {
       }
       const dashboard = buildDashboard(
         args.asOf,
-        args.months,
+        normalization.months,
         args.plaidAccounts,
         args.holdings,
         args.plaidTransactions,
@@ -684,7 +799,7 @@ export const Actions = {
       if (!dashboard) {
         await writeState(ctx, { status: "error", message: "本次更新没有可用的月度数据，显示上次数据" });
         ctx.invalidateQueries();
-        return { ok: false, savedMonths: 0 };
+        return { ok: false, savedMonths: 0, issue: null };
       }
       await writeState(ctx, {
         payload: JSON.stringify(dashboard),
@@ -693,7 +808,7 @@ export const Actions = {
         message: "更新完成",
       });
       ctx.invalidateQueries();
-      return { ok: true, savedMonths: dashboard.months.length };
+      return { ok: true, savedMonths: dashboard.months.length, issue: null };
     },
   }),
 } satisfies ActionsModule;

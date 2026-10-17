@@ -111,13 +111,39 @@ export function weeklyDeltaView(delta: number | null, netWorth: number): WeeklyD
   };
 }
 
-export function balanceSourceSummary(accounts: Array<{ live: boolean }>): string {
-  if (accounts.length === 0) return "未提供";
-  const liveCount = accounts.filter((account) => account.live).length;
-  const snapshotCount = accounts.length - liveCount;
-  if (snapshotCount === 0) return `全部 ${liveCount} 个账户为本周实时余额`;
-  if (liveCount === 0) return `全部 ${snapshotCount} 个账户沿用月度快照值`;
-  return `${liveCount} 个账户为本周实时余额，${snapshotCount} 个账户沿用月度快照值`;
+// F2.1-D1: the source summary counts only the rows that actually
+// compose net worth — the same balance selection the server uses
+// (type "account" / "investment"). Income, spend, transfer and
+// contribution entries are never counted as accounts or balance
+// coverage. Without per-source success timestamps the live flag only
+// supports "同步读取" wording, never a "本周实时" claim; the read date
+// itself is stated separately via asOf.
+export function balanceSourceSummary(accounts: Array<{ type: string; live: boolean }>): string {
+  const balanceAccounts = accounts.filter((account) => account.type === "account" || account.type === "investment");
+  if (balanceAccounts.length === 0) return "未提供";
+  const liveCount = balanceAccounts.filter((account) => account.live).length;
+  const snapshotCount = balanceAccounts.length - liveCount;
+  if (snapshotCount === 0) return `全部 ${liveCount} 个余额账户为同步读取值`;
+  if (liveCount === 0) return `全部 ${snapshotCount} 个余额账户沿用月度快照值`;
+  return `${liveCount} 个余额账户为同步读取值，${snapshotCount} 个余额账户沿用月度快照值`;
+}
+
+// F1.1 / F0.4: average monthly spend over the most recent 3 valid
+// complete months (integrity complete and not anomalous). Missing
+// months are reported as a count, never filled with 0.
+export function completeSpendBasis(months: Month[]): { averageMonthlySpend: number | null; usedMonths: number; missingMonths: number } {
+  const valid = months.filter((month) => month.integrity === "complete" && !month.flexibleSpendAnomaly);
+  const used = valid.slice(-3);
+  const averageMonthlySpend = used.length > 0
+    ? used.reduce((sum, month) => sum + Math.max(0, month.fixedSpend + Math.max(0, month.flexibleSpend)), 0) / used.length
+    : null;
+  return { averageMonthlySpend, usedMonths: used.length, missingMonths: Math.max(0, 3 - used.length) };
+}
+
+export function integrityLabel(integrity: Month["integrity"]): string {
+  if (integrity === "complete") return "完整";
+  if (integrity === "partial") return "部分";
+  return "完整性未提供";
 }
 
 function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number; color?: string }>; label?: string }) {
@@ -186,7 +212,7 @@ function DistributionPanel({ current, live }: { current: Month; live: Dashboard[
         {assetRows.map((item) => <DistributionRow key={item.label} {...item} maximum={assetMax} />)}
       </div>
       <div className="distribution-group">
-        <p>本月支出</p>
+        <p>本月支出 · 截至 {current.snapshotDate || current.key}</p>
         {spendRows.map((item) => <DistributionRow key={item.label} {...item} maximum={spendMax} />)}
       </div>
     </article>
@@ -257,6 +283,35 @@ function TrendCharts({ months, current, live }: { months: Month[]; current: Mont
   );
 }
 
+function MonthlyRecords({ months }: { months: Month[] }) {
+  const rows = [...months].reverse();
+  return (
+    <div className="month-records">
+      {rows.map((month) => {
+        const snapshotDate = month.snapshotDate || month.key;
+        return (
+          <details className="month-record" key={month.key}>
+            <summary aria-label={`${monthLabel.format(monthDate(month.key))}月度记录详情`}>
+              <span className="month-record__title">{monthLabel.format(monthDate(month.key))}</span>
+              <span className="month-record__meta">截至 {snapshotDate} · {integrityLabel(month.integrity)}</span>
+              {month.flexibleSpendAnomaly ? <span className="month-record__flag">数据异常</span> : null}
+              <span className="month-record__total">{currency.format(month.total)}</span>
+            </summary>
+            <div className="month-record__detail">
+              <p>所用快照：{snapshotDate}{month.supersededSnapshots > 0 ? `（同月另有 ${month.supersededSnapshots} 份较早快照已被替代）` : "（同月仅此一份快照）"}</p>
+              <p>完整性：{integrityLabel(month.integrity)}{month.integrityBasis ? ` · ${month.integrityBasis}` : " · 无完整覆盖依据"}</p>
+              {month.flexibleSpendAnomaly ? (
+                <p>数据异常：{month.anomalyReason ?? "灵活支出未能核实"}（保留在月度记录中，不进入图表与 FIRE 计算）</p>
+              ) : null}
+              <p>收入 {currency.format(month.income)} · 支出 {currency.format(month.totalSpend)} · 投入 {currency.format(month.contribution)}</p>
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 function FireProgress({ data }: { data: Dashboard }) {
   const rawProgress = Math.max(0, data.fire.progress ?? 0);
   const ringProgress = Math.min(rawProgress, 1);
@@ -269,7 +324,8 @@ function FireProgress({ data }: { data: Dashboard }) {
       : null;
   const history = data.months
     .map((month, index) => {
-      const prior = data.months.slice(Math.max(0, index - 12), index).filter((item) => !item.flexibleSpendAnomaly);
+      const prior = data.months.slice(Math.max(0, index - 12), index)
+        .filter((item) => item.integrity === "complete" && !item.flexibleSpendAnomaly);
       const monthlySpend = prior.length > 0 ? prior.reduce((sum, item) => sum + item.totalSpend, 0) / prior.length : 0;
       const target = monthlySpend > 0 ? monthlySpend * 12 * 25 : 0;
       return {
@@ -278,6 +334,21 @@ function FireProgress({ data }: { data: Dashboard }) {
       };
     })
     .filter((item) => item.progress != null);
+
+  if (data.fire.completeMonthsUsed === 0) {
+    return (
+      <div className="fire-layout">
+        <p className="fire-gap-note">
+          暂无完整且有效的月份可用于计算 FIRE 目标：当月为部分数据，其余月份完整性未提供或存在数据异常。
+          月度事实仍可在上方「月度记录」中查看；形成完整月份后，这里会按近 12 个完整有效月自动计算，不以不完整月份推算。
+        </p>
+        <div className="fire-history">
+          <div className="chart-heading"><h3>FIRE% 历史轨迹</h3><span>观察斜率</span></div>
+          <div className="fire-history__chart"><p className="empty-inline">等待更多完整月份后生成轨迹。</p></div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fire-layout">
@@ -294,7 +365,7 @@ function FireProgress({ data }: { data: Dashboard }) {
           <strong>{currency.format(data.fire.target)}</strong>
           <p className="fire-gap">缺口 {currency.format(data.fire.gap)}</p>
           <p className="fire-years">{years == null ? "当前投入节奏不足以估算达标时间" : years === 0 ? "已达到目标" : `距目标还差 ${years} 年`}</p>
-          {years != null && years > 0 ? <small>按近 12 个完整月的投入节奏估算</small> : null}
+          {years != null && years > 0 ? <small>按近 {data.fire.completeMonthsUsed} 个完整有效月的投入节奏估算</small> : null}
         </div>
       </div>
 
@@ -402,7 +473,20 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
   const monthDelta = previous ? current.total - previous.total : null;
   const deltaView = weeklyDeltaView(data.live.weeklyDelta, data.live.netWorth);
   const savingsRate = current.income > 0 ? (current.income - current.totalSpend) / current.income : null;
-  const emergencyMonths = current.totalSpend > 0 ? (data.live.deposits ?? 0) / current.totalSpend : null;
+  // F1.1: emergency coverage divides deposits by the average spend of
+  // the last 3 valid complete months only. With fewer than 3, no
+  // coverage figure is produced — the gap is stated, never 0-filled.
+  const spendBasis = completeSpendBasis(data.months);
+  const emergencyMonths = spendBasis.missingMonths === 0
+    && spendBasis.averageMonthlySpend != null
+    && spendBasis.averageMonthlySpend > 0
+    ? (data.live.deposits ?? 0) / spendBasis.averageMonthlySpend
+    : null;
+  const emergencyNote = spendBasis.missingMonths > 0
+    ? `完整有效月不足：已有 ${spendBasis.usedMonths} 个，缺 ${spendBasis.missingMonths} 个`
+    : spendBasis.averageMonthlySpend === 0
+      ? "近 3 个完整有效月平均支出为 0，覆盖无法计算"
+      : "存款 ÷ 近 3 个完整有效月平均支出";
 
   const grouped = new Map<string, Account[]>();
   for (const account of data.accounts) {
@@ -421,7 +505,7 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
 
       <section className="hero" aria-labelledby="hero-title">
         <div className="hero__main">
-          <p id="hero-title" className="eyebrow">本周实时净资产</p>
+          <p id="hero-title" className="eyebrow">同步读取净资产</p>
           <div className="hero__value">{currency.format(data.live.netWorth)}</div>
           <div className={`delta ${valueTone(data.live.weeklyDelta)}`}>
             {data.live.weeklyDelta == null ? (
@@ -442,7 +526,7 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
         <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />
         <Metric label="月支出" value={<span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} tone="negative" note={`固定 ${compactCurrency.format(current.fixedSpend)}`} />
         <Metric label="储蓄率" value={savingsRate == null ? "—" : percent.format(savingsRate)} tone={valueTone(savingsRate)} note="（收入 − 支出）÷ 收入" />
-        <Metric label="应急金覆盖" value={emergencyMonths == null ? "—" : `${number.format(emergencyMonths)} 个月`} note="存款 ÷ 月支出" />
+        <Metric label="应急金覆盖" value={emergencyMonths == null ? "—" : `${number.format(emergencyMonths)} 个月`} note={emergencyNote} />
         <Metric label="投资" value={<span title={currency.format(data.live.investment)}>{compactCurrency.format(data.live.investment)}</span>} note="已融合实时余额" />
         <Metric label="存款" value={<span title={currency.format(data.live.deposits ?? 0)}>{compactCurrency.format(data.live.deposits ?? 0)}</span>} note="现金与银行账户" />
         <Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} tone="negative" note="按未偿余额显示" />
@@ -462,8 +546,13 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
         <TrendCharts months={months} current={current} live={data.live} />
       </section>
 
+      <section className="section-block">
+        <SectionTitle title="月度记录" meta="每月一份快照 · 点按展开" />
+        <MonthlyRecords months={data.months} />
+      </section>
+
       <section className="fire-section section-block">
-        <SectionTitle title="FIRE 进度" meta="4% 规则 · 近12个完整月" />
+        <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
         <FireProgress data={data} />
       </section>
 
@@ -503,7 +592,7 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
                     <div className="account-row" key={`${account.type}-${account.source}`}>
                       <div>
                         <strong>{account.label}</strong>
-                        <span>{accountTypeLabel(account.type)} · {account.live ? "本周实时" : "Firance 快照"}{account.mask ? ` ···${account.mask}` : ""}</span>
+                        <span>{accountTypeLabel(account.type)} · {account.live ? "同步读取" : "月度快照"}{account.mask ? ` ···${account.mask}` : ""}</span>
                       </div>
                       <b className={isLoan ? "negative" : "neutral"}>{currencyPrecise.format(isLoan ? Math.abs(account.value) : account.value)}</b>
                     </div>

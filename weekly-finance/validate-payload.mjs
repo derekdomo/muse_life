@@ -16,9 +16,9 @@ function check(name, cond) {
 // --- wiring (real source) ---
 check("no bare JSON.parse(state.payload) remains", !src.includes("JSON.parse(state.payload)"));
 check("parseDashboardPayload exported", /export function parseDashboardPayload/.test(src));
-check("getDashboard uses parseDashboardPayload", (src.match(/parseDashboardPayload\(state\.payload\)/g) ?? []).length >= 2);
+check("getDashboard + ingest use parseDashboardPayload", (src.match(/parseDashboardPayload\(state\.payload\)/g) ?? []).length >= 2);
 check("corrupt message present", src.includes("已保存数据损坏，重新更新可恢复"));
-check("payloadCorrupt drives error status", src.includes('payloadCorrupt || staleRunning ? "error"'));
+check("payloadCorrupted drives error status", src.includes('payloadCorrupted ? "error"'));
 
 // --- behaviour (extracted real function + stub schema) ---
 const start = src.indexOf("export function parseDashboardPayload");
@@ -26,7 +26,8 @@ const end = src.indexOf("\n}\n", start) + 3;
 const fnText = src.slice(start, end)
   .replace("export function", "function")
   .replace("payload: string", "payload")
-  .replace(/: \{ ok: true; data: Dashboard \} \| \{ ok: false \}/, "");
+  .replace("let raw: unknown;", "let raw;")
+  .replace(": DashboardPayloadParseResult", "");
 const dashboardSchema = {
   safeParse(value) {
     const ok = value != null && typeof value === "object" && !Array.isArray(value)

@@ -156,7 +156,7 @@
 - [ ] `W0.1` 修改重量或次数后在 blur/Enter 或短 debounce 后保存，不要求通过取消/重新勾选完成状态才能保存。
 - [ ] `W0.2` 每组显示 dirty、saving、saved、error；保存失败保留本地输入并提供重试。切页或结束训练前若仍有 dirty/error 项要明确提醒。
 - [完成] `W0.3` `updateSet`、`addSet`、`completeWorkout`、`discardWorkout` 必须校验目标属于当前 active workout；不存在或已完成目标不能仍返回 `ok: true`。（实现方交付 2026-10-17：服务端新增 `mutationTargetDecision`，四 handler 均先校验 active 并以受影响行数为准，见 changes.md 同日条目；此标记仅表示已交付，PM 结论以评审记录为准。） **PM本轮事后结论见最新增量复验表，交付标记不等于整项已验证。**
-- [完成] `W0.4` 数据库或事务保证同一用户最多一个 active workout；并发 start 不得生成两条进行中训练。（实现方交付 2026-10-17：应用层实现——插入后复查全部 active、更早 active 存在则删除刚插入并让位（`resolveStartConflict`）；结算窗口内瞬时双 active 与数据库级部分唯一索引未做已在 changes.md 如实登记。此标记仅表示已交付，PM 结论以评审记录为准。） **PM本轮事后结论见最新增量复验表，交付标记不等于整项已验证。**
+- [完成] `W0.4` 数据库或事务保证同一用户最多一个 active workout；并发 start 不得生成两条进行中训练。（实现方交付 2026-10-17：应用层实现——插入后复查全部 active、更早 active 存在则删除刚插入并让位（`resolveStartConflict`）；结算窗口内瞬时双 active 与数据库级部分唯一索引未做已在 changes.md 如实登记。此标记仅表示已交付，PM 结论以评审记录为准。） **PM本轮事后结论见最新增量复验表，交付标记不等于整项已验证。**（实现方返工交付登记 2026-10-17 15:13 PDT 轮次：按 PM 15:03 复验沿原 ID 修接管竞态——已在 artifact（space-6）上线并回灌本仓：单 active 仲裁重写为全量再仲裁循环，接管 DELETE 0 行/对方消失/状态中途变化一律重读全体其他 active 再决定；翻 ready 改为单条条件 UPDATE 原子证明无其他 ready 且无更早 initializing，翻转后复核冲突按最早者返回、不删已可见/已编辑/已完成记录。新增 `validate-start.mjs` 66/66（含 PM 两复现调度与变异），既有回归 finish 98/98、progression 57/57、autosave 69/69、d1 35/35、rest-timer 48/48。此登记仅表示已交付，PM 结论以评审记录为准。）
 - [完成] `W0.5` 结束训练时：全部完成可直接结束；存在未完成组时显示完成数并二次确认，未填项目保留为未完成，不能伪造为 0。（实现方交付 2026-10-17：由 W-UI-001/W-FINISH-001 结束门实现并在本轮复核——全完成经 finishGateDecision 直接 proceed；未完成组落 incomplete 分支二次确认（finish-zone 常显完成数/剩余组数）；completeWorkout 只写 workouts.completedAt、从不触碰 workout_sets，未填组保持未完成、零伪造，validate-finish 35/35 含 incomplete 决策用例。此标记仅表示已交付，PM 结论以评审记录为准。） **PM本轮事后结论见最新增量复验表，交付标记不等于整项已验证。**
 
 ### W1 — 渐进负荷规则统一（P0）
@@ -206,14 +206,14 @@
 
 - [ ] `F0.1` 修正 owner 判定：只有 `ctx.viewer?.isOwner === true` 才能读取、刷新或 ingest；匿名 `viewer === null` 必须拒绝。（2026-10-13 PM 复核至 `d439ac6`：静态 guard 通过，非 owner 汇总证据不能替代三种身份逐 action 和受信后台 callback 验证；撤回原实现方勾选，与 `L0.1` 一致保持“运行待验”。）
 - [完成] `F0.2` payload JSON 损坏时返回 typed error 并保留可恢复路径，不能让 `JSON.parse` 直接使整个 action 崩溃。（实现方交付 2026-10-17：已在 artifact（space-3）上线并回灌本仓——新增导出纯函数 `parseDashboardPayload`（try JSON.parse + dashboardSchema.safeParse，绝不抛错、不回显 payload），getDashboard 损坏时返回 data null + refresh.status error + 文案「已保存数据损坏，重新更新可恢复」，ingest 损坏时 previousLiveNetWorth 保持 null 并以本次合法数据覆盖恢复；validate-payload 12/12（含去守卫变异）。构建审计 pass、非 owner 仍 guest_denied 零数据。此标记仅表示已交付，PM 结论以评审记录为准。）
-- [ ] `F0.3` 月度文件先按合法真实日期校验、再排序；同一个自然月有多个快照时明确选择月末/最新快照，不能当作多个“月份”画图。
-- [ ] `F0.4` 标记当月快照为 partial 或 complete。“本月收入/支出/储蓄率”必须显示截至日期；FIRE 年支出只使用完整且非异常月份。
+- [完成] `F0.3` 月度文件先按合法真实日期校验、再排序；同一个自然月有多个快照时明确选择月末/最新快照，不能当作多个“月份”画图。（实现方交付 2026-10-17：已在 artifact（space-3）上线并回灌本仓——服务端新增严格真实日历校验（非法日期不滚动、不成为 latestRaw）与单一规范化选择 `normalizeRawMonths`：同月多合法日期只取最新一份快照、同日完全相同去重、同日冲突/非法日期返回只含日期与问题类别的 issue 且保留既有合法看板；所有月图、latestRaw 余额回退、FIRE 与摘要消费同一选择。`validate-monthly-facts.mjs` 50/50、facts-card 82/82、payload 12/12。此标记仅表示已交付，PM 结论以评审记录为准。）
+- [完成] `F0.4` 标记当月快照为 partial 或 complete。“本月收入/支出/储蓄率”必须显示截至日期；FIRE 年支出只使用完整且非异常月份。（实现方交付 2026-10-17：与 F0.3 同批交付——完整性为加法式字段（snapshotDate/supersededSnapshots/integrity/integrityBasis/anomalyReason，旧 payload 诚实 unknown、不回填、不丢数据）：当月必 partial，已结束月须有交易全覆盖或月末快照依据才 complete，否则 unknown；新增「月度记录」栏逐月显示「截至日期 · 部分/完整/完整性未提供」文字标签并可展开依据/异常原因；partial/unknown/异常月不进入完整月分母，FIRE 由共享 computeFire 按完整有效月计算（为 0 时显示事实性缺口），F1.1 覆盖按近 3 个完整有效月平均支出、不足时注明缺几月且不输出覆盖。此标记仅表示已交付，PM 结论以评审记录为准。）
 - [ ] `F0.5` Firance、Plaid account、holdings、transactions 分别记录 coverage 和最后成功时间；交易失败不阻断余额刷新，但支出推断必须明确降级。
 
 ### F1 — 指标语义（P0）
 
 - [ ] `F1.1` 应急金覆盖使用可配置的“可动用存款 ÷ 近 3 个有效完整月平均支出”，不使用可能 partial/异常的单月支出。
-- [完成] `F1.2` 周变化拆成“本次余额差”，不要暗示已能准确归因为市场、投入或消费；只有来源足够时才增加归因。（实现方交付 2026-10-17：与 `F2.1-D1` 同一事实卡合并交付，见 F2 节 `F2.1-D1` 交付注与 changes.md 同日条目；净资产区标签已改「较上次成功快照」，卡片不称固定一周、不归因。此标记仅表示已交付，PM 结论以评审记录为准。）
+- [完成] `F1.2` 周变化拆成“本次余额差”，不要暗示已能准确归因为市场、投入或消费；只有来源足够时才增加归因。（实现方交付 2026-10-17：与 `F2.1-D1` 同一事实卡合并交付，见 F2 节 `F2.1-D1` 交付注与 changes.md 同日条目；净资产区标签已改「较上次成功快照」，卡片不称固定一周、不归因。此标记仅表示已交付，PM 结论以评审记录为准。）（实现方返工交付登记 2026-10-17：按 PM 15:03 复验沿 `F2.1-D1` 原 ID 修来源统计——已在 artifact（space-3）上线并回灌本仓：`balanceSourceSummary` 只统计与净资产相同的余额组成（account/investment），收入/支出/转账/投入不再计作账户；无余额来源显示「未提供」，措辞改「同步读取值/沿用月度快照值」不再声称本周实时；以真实 buildDashboard→首卡链验证，`validate-facts-card.mjs` 更新至 82/82。此登记仅表示已交付，PM 结论以评审记录为准。）
 - [ ] `F1.3` FIRE 达标年限明确标为“不含投资回报的线性估算”；P1 可提供保守/中性两种可编辑假设，但默认不承诺收益率。
 - [ ] `F1.4` 贷款以正数未偿余额展示，但净资产计算仍按负债扣减；所有卡片和账户行保持同一符号语义。
 - [ ] `F1.5` 数据异常月说明触发原因（交易未覆盖、推断为负、来源缺失等），用户能判断是数据问题还是实际异常。

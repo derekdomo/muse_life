@@ -2,7 +2,7 @@
 
 ## Context provenance
 - `按我这个app的逻辑，搞一个artifact，每周更新` (current user request; establishes that the artifact must reproduce the user's existing app logic and refresh weekly)
-- `"按我这个app的逻辑"指用户自研 Electron 应用 Firance（源码在用户 Mac 上，完整本地路径不入 Git，L0.4 脱敏 2026-10-13），仪表盘必须 1:1 复刻其 Home 与 Dashboard 视图的计算口径。` (parent-agent clarification derived from the user's app investigation; defines the authoritative calculation and display model)
+- `"按我这个app的逻辑"指用户自研 Electron 应用 Firance（源码在用户 Mac，完整本地路径已省略，未记录），仪表盘必须 1:1 复刻其 Home 与 Dashboard 视图的计算口径。` (parent-agent clarification derived from the user's app investigation; defines the authoritative calculation and display model)
 - `月度快照：Mac 目录 ~/Library/Application Support/Firance/FinanceData/，文件名即 key（YYYY-MM-DD 格式，无扩展名）。每条记录 3 行：finance_source / type / number。` (parent-agent supplied source finding; defines the historical snapshot source and parser requirements)
 - Parent-agent supplied exact Firance formulas for monthly aggregation, contribution fallback, flexible spend, investment return, and FIRE metrics; these formulas will be implemented directly rather than reinterpreted.
 
@@ -15,8 +15,8 @@
 
 ### Firance monthly snapshot files on the user's Mac
 **Used by**: `refreshFinanceData` background retrieval -> `ingestFinanceData`; all monthly charts, monthly KPIs, FIRE calculations, and grouped account details
-**Test command**: Source behavior was already established in the parent conversation from reads of the FinanceData directory (date-named files, one per snapshot); this builder seat has no direct device-file connector, so it will use the requested `ctx.agent.spawnTask` retrieval path at runtime.
-**Sample output**: Parent conversation reports the historical files were re-read and verified after mortgage backfill; current files use three-line records containing `finance_source`, `type`, and `number`, while field order differs across years.
+**Test command**: Source behavior was established from reads of the FinanceData directory (date-named files, one per snapshot); this builder seat has no direct device-file connector, so it will use the requested `ctx.agent.spawnTask` retrieval path at runtime.
+**Sample output**: Historical files were re-read and verified after mortgage backfill; current files use three-line records containing `finance_source`, `type`, and `number`, while field order differs across years.
 **Processing**: The retrieval agent lists files first, then reads all date-named files without writing to the Mac. The parser groups each three-line record and reads keys by name rather than position. Date filenames are parsed and sorted chronologically. Monthly rows are recomputed from source records using the exact Firance aggregation rules. If the Mac is unavailable or no valid files are returned, the action retains the last server-cached monthly dataset.
 
 ## Agent-task sources
