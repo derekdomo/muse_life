@@ -562,6 +562,21 @@ async function writeState(
     .onConflictDoUpdate({ target: schema.financeState.id, set: row });
 }
 
+// F0.2: the single payload-reading entry point. A corrupt stored
+// payload (JSON syntax error or schema mismatch) returns
+// { ok: false } instead of throwing, so callers can surface a typed
+// error / take the recovery path; payload content is never echoed.
+export function parseDashboardPayload(
+  payload: string,
+): { ok: true; data: Dashboard } | { ok: false } {
+  try {
+    const parsed = dashboardSchema.safeParse(JSON.parse(payload));
+    return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export const Actions = {
   getDashboard: defineAction({
     request: z.object({}),
@@ -584,17 +599,19 @@ export const Actions = {
       }
       const state = await getState(ctx);
       let data: Dashboard | null = null;
+      let payloadCorrupt = false;
       if (state?.payload) {
-        const parsed = dashboardSchema.safeParse(JSON.parse(state.payload));
-        if (parsed.success) data = normalizeFireMetrics(ensureSplitBalances(ensureSeparatedCashPosition(parsed.data)));
+        const parsed = parseDashboardPayload(state.payload);
+        if (parsed.ok) data = normalizeFireMetrics(ensureSplitBalances(ensureSeparatedCashPosition(parsed.data)));
+        else payloadCorrupt = true;
       }
       const staleRunning = isStaleRunningState(state);
       return {
         access: "owner" as const,
         data,
         refresh: {
-          status: staleRunning ? "error" : (state?.status ?? "idle"),
-          message: staleRunning ? "上次更新未完成，可以重新更新" : (state?.message ?? null),
+          status: payloadCorrupt || staleRunning ? "error" : (state?.status ?? "idle"),
+          message: payloadCorrupt ? "已保存数据损坏，重新更新可恢复" : staleRunning ? "上次更新未完成，可以重新更新" : (state?.message ?? null),
           updatedAt: state?.updatedAt?.toISOString() ?? null,
         },
       };
@@ -652,8 +669,8 @@ export const Actions = {
       const state = await getState(ctx);
       let previousLiveNetWorth: number | null = null;
       if (state?.payload) {
-        const prior = dashboardSchema.safeParse(JSON.parse(state.payload));
-        if (prior.success) previousLiveNetWorth = prior.data.live.netWorth;
+        const prior = parseDashboardPayload(state.payload);
+        if (prior.ok) previousLiveNetWorth = prior.data.live.netWorth;
       }
       const dashboard = buildDashboard(
         args.asOf,

@@ -205,7 +205,7 @@
 ### F0 — 权限与数据完整性（P0）
 
 - [ ] `F0.1` 修正 owner 判定：只有 `ctx.viewer?.isOwner === true` 才能读取、刷新或 ingest；匿名 `viewer === null` 必须拒绝。（2026-10-13 PM 复核至 `d439ac6`：静态 guard 通过，非 owner 汇总证据不能替代三种身份逐 action 和受信后台 callback 验证；撤回原实现方勾选，与 `L0.1` 一致保持“运行待验”。）
-- [ ] `F0.2` payload JSON 损坏时返回 typed error 并保留可恢复路径，不能让 `JSON.parse` 直接使整个 action 崩溃。
+- [完成] `F0.2` payload JSON 损坏时返回 typed error 并保留可恢复路径，不能让 `JSON.parse` 直接使整个 action 崩溃。（实现方交付 2026-10-17：已在 artifact（space-3）上线并回灌本仓——新增导出纯函数 `parseDashboardPayload`（try JSON.parse + dashboardSchema.safeParse，绝不抛错、不回显 payload），getDashboard 损坏时返回 data null + refresh.status error + 文案「已保存数据损坏，重新更新可恢复」，ingest 损坏时 previousLiveNetWorth 保持 null 并以本次合法数据覆盖恢复；validate-payload 12/12（含去守卫变异）。构建审计 pass、非 owner 仍 guest_denied 零数据。此标记仅表示已交付，PM 结论以评审记录为准。）
 - [ ] `F0.3` 月度文件先按合法真实日期校验、再排序；同一个自然月有多个快照时明确选择月末/最新快照，不能当作多个“月份”画图。
 - [ ] `F0.4` 标记当月快照为 partial 或 complete。“本月收入/支出/储蓄率”必须显示截至日期；FIRE 年支出只使用完整且非异常月份。
 - [ ] `F0.5` Firance、Plaid account、holdings、transactions 分别记录 coverage 和最后成功时间；交易失败不阻断余额刷新，但支出推断必须明确降级。
