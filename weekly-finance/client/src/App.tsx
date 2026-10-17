@@ -55,13 +55,18 @@ const timestampLabel = new Intl.DateTimeFormat("zh-CN", {
   hour: "2-digit",
   minute: "2-digit",
 });
+const dateLabel = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+});
 
 function monthDate(key: string): Date {
   return new Date(`${key}T00:00:00`);
 }
 
 function signedCurrency(value: number | null): string {
-  if (value == null) return "等待第二次周更后生成对比";
+  if (value == null) return "暂无可比快照";
   const sign = value > 0 ? "+" : "";
   return `${sign}${currency.format(value)}`;
 }
@@ -69,6 +74,50 @@ function signedCurrency(value: number | null): string {
 function valueTone(value: number | null): "neutral" | "positive" | "negative" {
   if (value == null || value === 0) return "neutral";
   return value > 0 ? "positive" : "negative";
+}
+
+type RefreshStatus = "idle" | "running" | "error";
+
+type WeeklyDeltaView = {
+  comparable: boolean;
+  direction: "增加" | "减少" | "持平" | null;
+  percent: number | null;
+};
+
+export function statusPillText(hasData: boolean, status: RefreshStatus): string {
+  if (status === "running") return "正在更新";
+  if (status === "error") return hasData ? "显示上次数据" : "数据暂不可用";
+  return hasData ? "数据已同步" : "等待首次同步";
+}
+
+export function emptyFooterText(status: RefreshStatus): string {
+  return status === "error" ? "数据暂不可用，请重新更新。" : "尚未完成首次更新";
+}
+
+export function safeRefreshMessage(message: string | null, hasData: boolean): string | null {
+  if (!message) return null;
+  if (hasData) return message;
+  if (message.includes("显示上次数据") || message.includes("首次")) return null;
+  return message;
+}
+
+export function weeklyDeltaView(delta: number | null, netWorth: number): WeeklyDeltaView {
+  if (delta == null) return { comparable: false, direction: null, percent: null };
+  const prior = netWorth - delta;
+  return {
+    comparable: true,
+    direction: delta > 0 ? "增加" : delta < 0 ? "减少" : "持平",
+    percent: prior !== 0 ? delta / Math.abs(prior) : null,
+  };
+}
+
+export function balanceSourceSummary(accounts: Array<{ live: boolean }>): string {
+  if (accounts.length === 0) return "未提供";
+  const liveCount = accounts.filter((account) => account.live).length;
+  const snapshotCount = accounts.length - liveCount;
+  if (snapshotCount === 0) return `全部 ${liveCount} 个账户为本周实时余额`;
+  if (liveCount === 0) return `全部 ${snapshotCount} 个账户沿用月度快照值`;
+  return `${liveCount} 个账户为本周实时余额，${snapshotCount} 个账户沿用月度快照值`;
 }
 
 function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number; color?: string }>; label?: string }) {
@@ -302,7 +351,40 @@ function accountTypeLabel(type: Account["type"]): string {
   return "历史转入";
 }
 
-function DashboardView({ data }: { data: Dashboard }) {
+function BalanceDeltaCard({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
+  const delta = data.live.weeklyDelta;
+  const view = weeklyDeltaView(delta, data.live.netWorth);
+  const asOfDate = new Date(data.asOf);
+  const asOfText = Number.isNaN(asOfDate.getTime()) ? "未提供" : dateLabel.format(asOfDate);
+  return (
+    <section className="fact-card" aria-label="本次余额差（较上次成功快照）">
+      <div className="fact-card__heading">
+        <h2>本次余额差</h2>
+        <span>较上次成功快照（日期未留存）</span>
+      </div>
+      {view.comparable ? (
+        <div className={`fact-card__value ${valueTone(delta)}`}>
+          <strong>{signedCurrency(delta)}</strong>
+          {view.percent != null ? <span>{`${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}`}</span> : null}
+          <span>{view.direction}</span>
+        </div>
+      ) : (
+        <div className="fact-card__value neutral">
+          <strong className="fact-card__none">暂无可比快照</strong>
+        </div>
+      )}
+      <p className="fact-card__note">
+        {view.comparable
+          ? "与上次成功快照的净资产之差；两次快照的间隔不固定，不代表固定时间间隔。"
+          : "首次同步、或上次快照不可用时没有可比对象；当前净资产见下方，下一次成功同步后生成对比。"}
+      </p>
+      {refreshFailed ? <p className="fact-card__stale">本次未更新：本次更新未成功，以上仍为上次成功同步的数据，数据日期未推进。</p> : null}
+      <p className="fact-card__source">数据日期 {asOfText} · 月度快照 {data.sourceMonth} · 余额来源：{balanceSourceSummary(data.accounts)}</p>
+    </section>
+  );
+}
+
+function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
   const [range, setRange] = useState<Range>("12m");
   const months = useMemo(() => {
     if (range === "6m") return data.months.slice(-6);
@@ -318,8 +400,7 @@ function DashboardView({ data }: { data: Dashboard }) {
   if (!current) return null;
 
   const monthDelta = previous ? current.total - previous.total : null;
-  const priorLive = data.live.weeklyDelta == null ? null : data.live.netWorth - data.live.weeklyDelta;
-  const weeklyPercent = data.live.weeklyDelta != null && priorLive != null && priorLive !== 0 ? data.live.weeklyDelta / Math.abs(priorLive) : null;
+  const deltaView = weeklyDeltaView(data.live.weeklyDelta, data.live.netWorth);
   const savingsRate = current.income > 0 ? (current.income - current.totalSpend) / current.income : null;
   const emergencyMonths = current.totalSpend > 0 ? (data.live.deposits ?? 0) / current.totalSpend : null;
 
@@ -336,22 +417,24 @@ function DashboardView({ data }: { data: Dashboard }) {
 
   return (
     <>
+      <BalanceDeltaCard data={data} refreshFailed={refreshFailed} />
+
       <section className="hero" aria-labelledby="hero-title">
         <div className="hero__main">
           <p id="hero-title" className="eyebrow">本周实时净资产</p>
           <div className="hero__value">{currency.format(data.live.netWorth)}</div>
           <div className={`delta ${valueTone(data.live.weeklyDelta)}`}>
             {data.live.weeklyDelta == null ? (
-              <span>等待第二次周更后生成对比</span>
+              <span>暂无可比快照</span>
             ) : (
-              <><span>{signedCurrency(data.live.weeklyDelta)}</span><span>{weeklyPercent == null ? "" : `（${weeklyPercent > 0 ? "+" : ""}${percent.format(weeklyPercent)}）`}</span><span className="delta__label">较上次周更</span></>
+              <><span>{signedCurrency(data.live.weeklyDelta)}</span><span>{deltaView.percent == null ? "" : `（${deltaView.percent > 0 ? "+" : ""}${percent.format(deltaView.percent)}）`}</span><span className="delta__label">较上次成功快照</span></>
             )}
           </div>
         </div>
         <div className="snapshot-compare">
           <span>月度快照 · {data.sourceMonth}</span>
           <strong>{currency.format(current.total)}</strong>
-          <small className={valueTone(monthDelta)}>{signedCurrency(monthDelta)} 环比</small>
+          <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${signedCurrency(monthDelta)} 环比`}</small>
         </div>
       </section>
 
@@ -448,9 +531,10 @@ export function App() {
   });
 
   const response = dashboard.data;
-  const status = response?.refresh.status ?? "idle";
+  const status: RefreshStatus = response?.refresh.status ?? "idle";
   const isRefreshing = status === "running" || refresh.isPending;
   const guestDenied = response?.access === "guest_denied";
+  const visibleMessage = safeRefreshMessage(response?.refresh.message ?? null, response?.data != null);
 
   return (
     <div className="app-shell">
@@ -460,7 +544,7 @@ export function App() {
           <div className="utility-row">
             <div className={`source-status source-status--${status}`}>
               <span className="status-dot" />
-              {status === "running" ? "正在更新" : status === "error" ? "显示上次数据" : response?.data ? "数据已同步" : "等待首次同步"}
+              {statusPillText(response?.data != null, status)}
             </div>
             <button type="button" className="refresh-button" onClick={() => refresh.mutate()} disabled={isRefreshing} aria-label="立即更新财务数据">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M18.5 9A7 7 0 0 0 6.4 6.4L4 9m16 6-2.4 2.6A7 7 0 0 1 5.5 15" /></svg>
@@ -476,7 +560,14 @@ export function App() {
         ) : guestDenied ? (
           <div className="state-screen private-state"><div className="private-state__mark" aria-hidden="true">$</div><h1>财务数据仅所有者可查看</h1><p>此看板包含私人账户与持仓信息，已停止向共享访客展示。</p></div>
         ) : response?.data ? (
-          <DashboardView data={response.data} />
+          <DashboardView data={response.data} refreshFailed={status === "error"} />
+        ) : status === "error" ? (
+          <div className="empty-state">
+            <div className="empty-state__rule" />
+            <p>数据暂不可用：已保存的数据当前无法读取，这里没有可展示的旧值。请重新更新，从数据源重新读取后即可恢复显示。</p>
+            <button type="button" onClick={() => refresh.mutate()} disabled={isRefreshing}>{isRefreshing ? "正在更新…" : "重新更新"}</button>
+            {visibleMessage ? <small>{visibleMessage}</small> : null}
+          </div>
         ) : (
           <div className="empty-state">
             <div className="empty-state__rule" />
@@ -488,8 +579,8 @@ export function App() {
 
         {!guestDenied ? (
           <footer>
-            <p>{response?.data ? `更新时间 ${timestampLabel.format(new Date(response.data.asOf))}` : "尚未完成首次更新"}</p>
-            {status === "error" ? <p className="footer-error">{response?.refresh.message ?? "本次更新失败，显示上次数据。"}</p> : null}
+            <p>{response?.data ? `更新时间 ${timestampLabel.format(new Date(response.data.asOf))}` : emptyFooterText(status)}</p>
+            {status === "error" ? <p className="footer-error">{visibleMessage ?? (response?.data ? "本次更新失败，显示上次数据。" : "数据暂不可用，请重新更新。")}</p> : null}
             <p>月度来自 Firance 快照；投资与银行余额每周经 Plaid 刷新，非 Plaid 账户沿用快照值；银行同步可能延迟；内容仅供参考，不构成投资建议。</p>
           </footer>
         ) : null}

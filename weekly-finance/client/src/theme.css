@@ -156,6 +156,33 @@ main {
 .negative { color: var(--negative) !important; }
 .neutral { color: inherit; }
 
+.fact-card {
+  padding: 18px 20px 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.fact-card__heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.fact-card__heading h2 { margin: 0; font-size: 15px; letter-spacing: -.02em; }
+.fact-card__heading span { color: var(--dim); font-size: 11px; }
+.fact-card__value {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 12px;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.fact-card__value strong { font-size: clamp(26px, 7.4vw, 36px); line-height: 1.05; letter-spacing: -.05em; font-weight: 760; overflow-wrap: anywhere; }
+.fact-card__value strong.fact-card__none { font-size: clamp(20px, 6vw, 28px); }
+.fact-card__value span { font-size: 13px; font-weight: 720; }
+.fact-card__note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
+.fact-card__stale { margin: 8px 0 0; color: var(--negative); font-size: 11px; font-weight: 700; line-height: 1.5; }
+.fact-card__source { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--border); color: var(--dim); font-size: 10px; line-height: 1.55; }
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
