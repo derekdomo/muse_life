@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
@@ -602,11 +602,92 @@ export type SetSaveHandle = {
   flush: () => Promise<boolean>;
 };
 
-function SetRow({ set, unit, onSaved, onRegister }: {
+export type RestTimerState = { endsAt: number | null; durationSec: number; muted: boolean; done: boolean };
+
+export const REST_DURATIONS = [60, 90, 120];
+export const DEFAULT_REST_SEC = 90;
+
+export function initRestTimer(durationSec: number = DEFAULT_REST_SEC): RestTimerState {
+  return {
+    endsAt: null,
+    durationSec: REST_DURATIONS.includes(durationSec) ? durationSec : DEFAULT_REST_SEC,
+    muted: false,
+    done: false,
+  };
+}
+
+export function startRestTimer(state: RestTimerState, nowMs: number): RestTimerState {
+  return { ...state, endsAt: nowMs + state.durationSec * 1000, done: false };
+}
+
+export function restRemainingSec(state: RestTimerState, nowMs: number): number | null {
+  if (state.endsAt == null) return null;
+  return Math.max(0, Math.ceil((state.endsAt - nowMs) / 1000));
+}
+
+export function restTimerDone(state: RestTimerState, nowMs: number): boolean {
+  return state.endsAt != null && nowMs >= state.endsAt;
+}
+
+export function addRestTime(state: RestTimerState, seconds: number, nowMs: number): RestTimerState {
+  if (state.endsAt == null) return state;
+  if (nowMs >= state.endsAt) return { ...state, endsAt: nowMs + seconds * 1000, done: false };
+  return { ...state, endsAt: state.endsAt + seconds * 1000 };
+}
+
+export function skipRestTimer(state: RestTimerState): RestTimerState {
+  return { ...state, endsAt: null, done: false };
+}
+
+export function setRestDuration(state: RestTimerState, seconds: number): RestTimerState {
+  if (!REST_DURATIONS.includes(seconds)) return state;
+  return { ...state, durationSec: seconds };
+}
+
+export function toggleRestMuted(state: RestTimerState): RestTimerState {
+  return { ...state, muted: !state.muted };
+}
+
+export function restTimerLabel(state: RestTimerState, nowMs: number): string {
+  if (state.endsAt == null) return "";
+  if (restTimerDone(state, nowMs)) return "休息结束";
+  const remaining = restRemainingSec(state, nowMs) ?? 0;
+  const minutes = Math.floor(remaining / 60);
+  const seconds = remaining % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function playRestBeep() {
+  try {
+    const AudioCtor = window.AudioContext
+      ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtor) return;
+    const context = new AudioCtor();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.22, context.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.45);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.5);
+    oscillator.onended = () => {
+      void context.close();
+    };
+  } catch {
+    // Audio is a nicety only; the on-screen 休息结束 state still shows.
+  }
+}
+
+function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
   set: WorkoutSet;
   unit: Unit;
   onSaved: () => void;
   onRegister: (id: number, handle: SetSaveHandle | null) => void;
+  onCompleted?: () => void;
 }) {
   const [machine, setMachineState] = useState<SetSaveMachine>(() => initSetSaveMachine(set));
   const machineRef = useRef(machine);
@@ -655,11 +736,12 @@ function SetRow({ set, unit, onSaved, onRegister }: {
       } catch {
         setMachine(applySetSaveFailure(machineRef.current, begun.seq));
         return false;
-      } finally {
-        if (inflightRef.current === run) inflightRef.current = null;
       }
     })();
     inflightRef.current = run;
+    void run.finally(() => {
+      if (inflightRef.current === run) inflightRef.current = null;
+    });
     return run;
   }
 
@@ -700,11 +782,19 @@ function SetRow({ set, unit, onSaved, onRegister }: {
     void requestSave();
   }
 
-  function onEnterSave(event: KeyboardEvent<HTMLInputElement>) {
+  function onEnterSave(event: ReactKeyboardEvent<HTMLInputElement>) {
     if (event.key === "Enter") {
       event.preventDefault();
       event.currentTarget.blur();
     }
+  }
+
+  function toggleCompleted() {
+    const next = { ...machineRef.current.draft, completed: !machineRef.current.draft.completed };
+    editDraft(next, true);
+    // Only a fresh completion that is not blocked by 先填次数 starts the
+    // rest timer; un-completing a set never does.
+    if (next.completed && !setSaveBlocked({ ...machineRef.current, draft: next })) onCompleted?.();
   }
 
   const { draft, status } = machine;
@@ -750,7 +840,7 @@ function SetRow({ set, unit, onSaved, onRegister }: {
         type="button"
         aria-label={draft.completed ? `${set.exercise_name} 第 ${set.set_number} 组取消完成` : `${set.exercise_name} 第 ${set.set_number} 组完成`}
         aria-pressed={draft.completed}
-        onClick={() => editDraft({ ...machineRef.current.draft, completed: !machineRef.current.draft.completed }, true)}
+        onClick={toggleCompleted}
       >
         {draft.completed ? "✓" : ""}
       </button>
@@ -764,11 +854,12 @@ function SetRow({ set, unit, onSaved, onRegister }: {
   );
 }
 
-function ExerciseBlock({ workout, exercise, previous, onChanged, onOpenGuide, onRegisterSet }: {
+function ExerciseBlock({ workout, exercise, previous, onChanged, onSetCompleted, onOpenGuide, onRegisterSet }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
   previous?: WorkoutSet;
   onChanged: () => void;
+  onSetCompleted: () => void;
   onOpenGuide: (guide: ExerciseGuide) => void;
   onRegisterSet: (id: number, handle: SetSaveHandle | null) => void;
 }) {
@@ -813,12 +904,52 @@ function ExerciseBlock({ workout, exercise, previous, onChanged, onOpenGuide, on
       </div>
       <div className="set-list">
         {exercise.sets.map((set) => (
-          <SetRow key={set.id} set={set} unit={workout.unit} onSaved={onChanged} onRegister={onRegisterSet} />
+          <SetRow key={set.id} set={set} unit={workout.unit} onSaved={onChanged} onRegister={onRegisterSet} onCompleted={onSetCompleted} />
         ))}
       </div>
       <button className="add-set" type="button" onClick={() => addSet.mutate()} disabled={addSet.isPending}>
         {addSet.isPending ? "添加中…" : "+ 加一组"}
       </button>
+    </section>
+  );
+}
+
+function RestTimerPanel({ timer, nowMs, onChange }: {
+  timer: RestTimerState;
+  nowMs: number;
+  onChange: (updater: (state: RestTimerState) => RestTimerState) => void;
+}) {
+  const done = restTimerDone(timer, nowMs);
+  return (
+    <section className={`rest-timer${done ? " is-done" : ""}`} aria-label="休息计时器">
+      <div className="rest-timer-head">
+        <span className="rest-timer-caption">{done ? "休息结束" : "组间休息"}</span>
+        <strong className="rest-timer-time" role="timer">{restTimerLabel(timer, nowMs)}</strong>
+      </div>
+      <div className="rest-timer-controls">
+        <div className="rest-timer-durations" role="group" aria-label="休息时长（下一次启动生效）">
+          {REST_DURATIONS.map((seconds) => (
+            <button
+              key={seconds}
+              type="button"
+              aria-pressed={timer.durationSec === seconds}
+              onClick={() => onChange((state) => setRestDuration(state, seconds))}
+            >
+              {seconds} 秒
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={() => onChange((state) => addRestTime(state, 30, Date.now()))}>+30秒</button>
+        <button
+          type="button"
+          aria-pressed={timer.muted}
+          onClick={() => onChange((state) => toggleRestMuted(state))}
+        >
+          {timer.muted ? "已静音" : "静音"}
+        </button>
+        <button type="button" onClick={() => onChange((state) => skipRestTimer(state))}>跳过</button>
+      </div>
+      <p className="rest-timer-note">刷新页面后计时器会重置</p>
     </section>
   );
 }
@@ -831,6 +962,38 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const [finishing, setFinishing] = useState(false);
   const [unsavedPresent, setUnsavedPresent] = useState(false);
   const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
+  // Rest timer lives only in this component's memory: no server writes, no
+  // localStorage, so a page refresh resets it (workout data itself is still
+  // covered by the per-set autosave).
+  const [restTimer, setRestTimer] = useState<RestTimerState>(() => initRestTimer());
+  const [restNow, setRestNow] = useState(() => Date.now());
+
+  const handleSetCompleted = useCallback(() => {
+    setRestTimer((state) => startRestTimer(state, Date.now()));
+  }, []);
+
+  const updateRestTimer = useCallback((updater: (state: RestTimerState) => RestTimerState) => {
+    setRestTimer(updater);
+  }, []);
+
+  // The interval only triggers re-renders; the remaining time is always
+  // derived from endsAt and Date.now(), so backgrounding stays accurate.
+  useEffect(() => {
+    if (restTimer.endsAt == null) return undefined;
+    setRestNow(Date.now());
+    const tick = window.setInterval(() => setRestNow(Date.now()), 300);
+    return () => window.clearInterval(tick);
+  }, [restTimer.endsAt]);
+
+  // Beep exactly once when the countdown reaches zero (unless muted), and
+  // mark done so the 休息结束 state stays until skip or the next set.
+  useEffect(() => {
+    if (restTimer.endsAt == null || restTimer.done) return;
+    if (!restTimerDone(restTimer, restNow)) return;
+    if (!restTimer.muted) playRestBeep();
+    setRestTimer((state) => (state.done ? state : { ...state, done: true }));
+  }, [restTimer, restNow]);
+
   const setHandlesRef = useRef(new Map<number, SetSaveHandle>());
 
   useEffect(() => {
@@ -928,11 +1091,16 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
             exercise={exercise}
             previous={previousByExercise.get(exercise.key)}
             onChanged={refresh}
+            onSetCompleted={handleSetCompleted}
             onOpenGuide={setSelectedGuide}
             onRegisterSet={registerSet}
           />
         ))}
       </div>
+
+      {restTimer.endsAt != null ? (
+        <RestTimerPanel timer={restTimer} nowMs={restNow} onChange={updateRestTimer} />
+      ) : null}
 
       <section className="finish-zone">
         <div>
