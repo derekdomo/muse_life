@@ -48,6 +48,11 @@ const workoutResponse = z.object({
   started_at: z.string(),
   completed_at: z.string().nullable(),
   sets: z.array(setResponse),
+  // W1.3 (additive): true only on a workout freshly created by
+  // startWorkout whose prefill weights were converted from the previous
+  // comparable workout's different unit. Omitted/false everywhere else;
+  // older clients ignore it.
+  prefill_unit_converted: z.boolean().optional(),
 });
 
 async function loadWorkout(ctx: Ctx, workoutId: number) {
@@ -256,21 +261,106 @@ function targetRepRange(target: string) {
   return { min: first, max: values[1] ?? first };
 }
 
-async function loadPreviousCompletedSets(ctx: Ctx, routine: z.infer<typeof routineSchema>, unit: z.infer<typeof unitSchema>) {
+// W1.1–W1.4: the single progressive-overload rule, shared verbatim with
+// the client (WeeklyReview). Pure: no IO, no side effects. `sets` is one
+// exercise's sets from its most recent comparable workout; plannedSets is
+// that workout's planned set count for the exercise.
+export function progressionDecision(input: {
+  plannedSets: number;
+  sets: { weight: number | null; reps: number | null; completed: boolean }[];
+  targetMin: number;
+  targetMax: number;
+  unit: "lb" | "kg";
+}): { action: "increase" | "hold" | "reduce" | "none"; suggestedWeight: number | null; suggestedReps: number | null } {
+  const none: { action: "none"; suggestedWeight: null; suggestedReps: null } = {
+    action: "none",
+    suggestedWeight: null,
+    suggestedReps: null,
+  };
+  if (input.sets.length === 0 || input.plannedSets <= 0) return none;
+  const completed = input.sets.filter((set) => set.completed);
+  if (completed.length === 0) return none;
+  const weightedWeights = completed
+    .map((set) => set.weight)
+    .filter((weight): weight is number => weight != null);
+  // W1.4: bodyweight / unmeasured sets (weight null) never stand in as a
+  // comparable load of 0 — with no weighed completed set there is no
+  // weight suggestion at all.
+  if (weightedWeights.length === 0) return none;
+  const base = Math.max(...weightedWeights);
+  const increment = input.unit === "lb" ? 5 : 2.5;
+  if (completed.length < input.plannedSets) {
+    // Not all planned sets were done: hold the weight; per-set reps are
+    // carried over by the caller (suggestedReps null = carry over).
+    return { action: "hold", suggestedWeight: base, suggestedReps: null };
+  }
+  if (completed.some((set) => set.reps == null)) return none;
+  if (completed.every((set) => set.weight != null && set.reps != null && set.reps >= input.targetMax)) {
+    return {
+      action: "increase",
+      suggestedWeight: Math.round((base + increment) * 2) / 2,
+      suggestedReps: input.targetMin,
+    };
+  }
+  if (completed.some((set) => set.reps != null && set.reps < input.targetMin)) {
+    return {
+      action: "reduce",
+      suggestedWeight: Math.max(0, Math.round((base - increment) * 2) / 2),
+      suggestedReps: null,
+    };
+  }
+  return { action: "hold", suggestedWeight: base, suggestedReps: null };
+}
+
+// W1.3: cross-unit comparability. Weights from a workout recorded in the
+// other unit are converted with this constant and rounded to the nearest
+// 0.5; reps are never converted.
+export const LB_TO_KG = 0.45359237;
+
+export function convertWeight(weight: number | null, from: "lb" | "kg", to: "lb" | "kg"): number | null {
+  if (weight == null || from === to) return weight;
+  const converted = from === "lb" ? weight * LB_TO_KG : weight / LB_TO_KG;
+  return Math.round(converted * 2) / 2;
+}
+
+type PreviousComparable = {
+  sets: { exerciseKey: string; setNumber: number; weight: number | null; reps: number | null; completed: boolean }[];
+  converted: boolean;
+};
+
+// W1.3: the previous comparable workout is the routine's most recent
+// completed workout in ANY unit; when its unit differs from the new
+// workout's, every weight is converted into the new unit.
+async function loadPreviousCompletedSets(
+  ctx: Ctx,
+  routine: z.infer<typeof routineSchema>,
+  unit: z.infer<typeof unitSchema>,
+): Promise<PreviousComparable> {
   const db = ctx.db<typeof schema>();
   const rows = await db
-    .select({ id: schema.workouts.id })
+    .select({ id: schema.workouts.id, unit: schema.workouts.unit })
     .from(schema.workouts)
-    .where(and(eq(schema.workouts.routine, routine), eq(schema.workouts.unit, unit), isNotNull(schema.workouts.completedAt)))
+    .where(and(eq(schema.workouts.routine, routine), isNotNull(schema.workouts.completedAt)))
     .orderBy(desc(schema.workouts.completedAt))
     .limit(1);
-  const workoutId = rows[0]?.id;
-  if (!workoutId) return [];
-  return db
+  const previous = rows[0];
+  if (!previous) return { sets: [], converted: false };
+  const setRows = await db
     .select()
     .from(schema.workoutSets)
-    .where(and(eq(schema.workoutSets.workoutId, workoutId), eq(schema.workoutSets.completed, true)))
+    .where(and(eq(schema.workoutSets.workoutId, previous.id), eq(schema.workoutSets.completed, true)))
     .orderBy(asc(schema.workoutSets.id));
+  const converted = previous.unit !== unit;
+  return {
+    converted,
+    sets: setRows.map((row) => ({
+      exerciseKey: row.exerciseKey,
+      setNumber: row.setNumber,
+      weight: converted ? convertWeight(row.weight, previous.unit, unit) : row.weight,
+      reps: row.reps,
+      completed: row.completed,
+    })),
+  };
 }
 
 export const Actions = {
@@ -386,26 +476,31 @@ export const Actions = {
       const workoutId = inserted[0]?.id;
       if (!workoutId) throw new Error("未能开始训练");
 
-      const previousSets = await loadPreviousCompletedSets(ctx, args.routine, args.unit);
+      const previous = await loadPreviousCompletedSets(ctx, args.routine, args.unit);
       const values = ROUTINES[args.routine].flatMap((exercise) => {
-        const history = previousSets.filter((set) => set.exerciseKey === exercise.key);
+        const history = previous.sets.filter((set) => set.exerciseKey === exercise.key);
         const { min: targetMin, max: targetMax } = targetRepRange(exercise.target);
-        const achievedTopOfRange = history.length >= exercise.sets
-          && history.slice(0, exercise.sets).every((set) => set.weight != null && set.reps != null && set.reps >= targetMax);
-        const increment = args.unit === "lb" ? 5 : 2.5;
+        // W1.2: prefill comes from the same progressionDecision the
+        // weekly review uses — one rule, one verdict for "next time".
+        const decision = progressionDecision({
+          plannedSets: exercise.sets,
+          sets: history,
+          targetMin,
+          targetMax,
+          unit: args.unit,
+        });
 
         return Array.from({ length: exercise.sets }, (_, index) => {
           const prior = history.find((set) => set.setNumber === index + 1) ?? history[index] ?? history[history.length - 1];
-          const suggestedWeight = prior?.weight == null
-            ? null
-            : achievedTopOfRange
-              ? Math.round((prior.weight + increment) * 2) / 2
-              : prior.weight;
-          const suggestedReps = prior
-            ? achievedTopOfRange
-              ? targetMin
-              : prior.reps
-            : null;
+          let suggestedWeight: number | null = null;
+          let suggestedReps: number | null = null;
+          if (decision.action === "increase") {
+            suggestedWeight = decision.suggestedWeight;
+            suggestedReps = decision.suggestedReps;
+          } else if (decision.action === "hold" || decision.action === "reduce") {
+            suggestedWeight = decision.suggestedWeight;
+            suggestedReps = prior ? prior.reps : null;
+          }
           return {
             workoutId,
             exerciseKey: exercise.key,
@@ -443,7 +538,10 @@ export const Actions = {
       const workout = await loadWorkout(ctx, workoutId);
       if (!workout) throw new Error("未能读取新训练");
       ctx.invalidateQueries();
-      return { forbidden: false, workout };
+      return {
+        forbidden: false,
+        workout: previous.converted ? { ...workout, prefill_unit_converted: true } : workout,
+      };
     },
   }),
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
@@ -232,6 +232,66 @@ function targetRange(target: string) {
   return { min: first, max: values[1] ?? first };
 }
 
+// W1.1–W1.4: the single progressive-overload rule — a line-for-line copy
+// of progressionDecision in server/src/actions.ts (same name, signature
+// and logic), so the start-of-workout prefill and this weekly review can
+// never disagree about the "next time" suggestion again. Pure: no IO.
+export function progressionDecision(input: {
+  plannedSets: number;
+  sets: { weight: number | null; reps: number | null; completed: boolean }[];
+  targetMin: number;
+  targetMax: number;
+  unit: "lb" | "kg";
+}): { action: "increase" | "hold" | "reduce" | "none"; suggestedWeight: number | null; suggestedReps: number | null } {
+  const none: { action: "none"; suggestedWeight: null; suggestedReps: null } = {
+    action: "none",
+    suggestedWeight: null,
+    suggestedReps: null,
+  };
+  if (input.sets.length === 0 || input.plannedSets <= 0) return none;
+  const completed = input.sets.filter((set) => set.completed);
+  if (completed.length === 0) return none;
+  const weightedWeights = completed
+    .map((set) => set.weight)
+    .filter((weight): weight is number => weight != null);
+  // W1.4: bodyweight / unmeasured sets (weight null) never stand in as a
+  // comparable load of 0 — with no weighed completed set there is no
+  // weight suggestion at all.
+  if (weightedWeights.length === 0) return none;
+  const base = Math.max(...weightedWeights);
+  const increment = input.unit === "lb" ? 5 : 2.5;
+  if (completed.length < input.plannedSets) {
+    // Not all planned sets were done: hold the weight; per-set reps are
+    // carried over by the caller (suggestedReps null = carry over).
+    return { action: "hold", suggestedWeight: base, suggestedReps: null };
+  }
+  if (completed.some((set) => set.reps == null)) return none;
+  if (completed.every((set) => set.weight != null && set.reps != null && set.reps >= input.targetMax)) {
+    return {
+      action: "increase",
+      suggestedWeight: Math.round((base + increment) * 2) / 2,
+      suggestedReps: input.targetMin,
+    };
+  }
+  if (completed.some((set) => set.reps != null && set.reps < input.targetMin)) {
+    return {
+      action: "reduce",
+      suggestedWeight: Math.max(0, Math.round((base - increment) * 2) / 2),
+      suggestedReps: null,
+    };
+  }
+  return { action: "hold", suggestedWeight: base, suggestedReps: null };
+}
+
+// W1.3: same conversion constant and rounding as the server.
+export const LB_TO_KG = 0.45359237;
+
+export function convertWeightValue(weight: number, from: Unit, to: Unit): number {
+  if (from === to) return weight;
+  const converted = from === "lb" ? weight * LB_TO_KG : weight / LB_TO_KG;
+  return Math.round(converted * 2) / 2;
+}
+
 function compactDate(value: Date) {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(value);
 }
@@ -323,49 +383,55 @@ function weightTrend(review: ExerciseReview) {
   return `${weightText} · 平均次数${repDelta === 0 ? "持平" : `较前一周${repDelta > 0 ? "+" : ""}${repDelta}`}`;
 }
 
-function reviewRecommendation(review: ExerciseReview) {
-  const increment = review.unit === "lb" ? 5 : 2.5;
-  const prior = review.prior;
-  if (!prior || prior.bestWeight == null || review.bestWeight == null) {
-    return `${review.name}：前一周没有可比重量记录，暂不做重量建议`;
+function reviewRecommendation(review: ExerciseReview, workouts: Workout[]) {
+  // W1: the "next time" suggestion is decided by this exercise's most
+  // recent comparable workout in recent_workouts (same key; either unit —
+  // weights are converted into the review unit first), fed through the
+  // same progressionDecision the server prefill uses. The week-over-week
+  // evidence above stays display-only and no longer derives a second,
+  // conflicting verdict.
+  let comparable: { workout: Workout; exercise: ReturnType<typeof groupSets>[number] } | null = null;
+  for (const workout of workouts) {
+    const exercise = groupSets(workout.sets).find((group) => group.key === review.key);
+    if (exercise) {
+      comparable = { workout, exercise };
+      break;
+    }
   }
-  if (review.completed < review.planned) {
-    return `${review.name}：本周少完成 ${review.planned - review.completed} 组，数据不完整；下周先保持 ${review.bestWeight}${review.unit} 并补齐`;
+  if (!comparable) return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
+  const { min, max } = targetRange(comparable.exercise.target);
+  const unitConverted = comparable.workout.unit !== review.unit;
+  const sets = comparable.exercise.sets.map((set) => ({
+    weight: set.weight == null
+      ? null
+      : unitConverted
+        ? convertWeightValue(set.weight, comparable.workout.unit, review.unit)
+        : set.weight,
+    reps: set.reps,
+    completed: set.completed,
+  }));
+  const planned = comparable.exercise.sets.length;
+  const decision = progressionDecision({
+    plannedSets: planned,
+    sets,
+    targetMin: min,
+    targetMax: max,
+    unit: review.unit,
+  });
+  if (decision.action === "increase") {
+    return `${review.name}：上次全部 ${planned} 组完成且都达到次数上限 ${max}，下次增至 ${decision.suggestedWeight}${review.unit}`;
   }
-
-  const currentAverage = averageReps(review);
-  const priorAverage = averageReps(prior);
-  const averageDrop = currentAverage != null && priorAverage != null
-    ? Math.round((priorAverage - currentAverage) * 10) / 10
-    : 0;
-  const currentAllAtTop = review.planned > 0
-    && review.completed === review.planned
-    && review.repsLogged === review.completed
-    && review.atTop === review.completed;
-  const priorAllAtTop = prior.planned > 0
-    && prior.completed === prior.planned
-    && prior.repsLogged === prior.completed
-    && prior.atTop === prior.completed;
-
-  if (currentAllAtTop && priorAllAtTop) {
-    const next = Math.round((review.bestWeight + increment) * 2) / 2;
-    return `${review.name}：连续两周全部做到次数上限，下次增至 ${next}${review.unit}`;
+  if (decision.action === "reduce") {
+    return `${review.name}：上次有组低于目标下限 ${min}，下次降至 ${decision.suggestedWeight}${review.unit}，先回到目标区间`;
   }
-  if (review.belowMin > 0) {
-    const reduced = Math.max(0, Math.round((review.bestWeight - increment) * 2) / 2);
-    const declineReason = averageDrop > 0 ? `，平均次数较前一周下降 ${averageDrop}` : "";
-    return `${review.name}：${review.belowMin} 组低于目标下限${declineReason}；下次降至 ${reduced}${review.unit}，先回到目标区间`;
+  if (decision.action === "hold") {
+    const completedCount = sets.filter((set) => set.completed).length;
+    if (completedCount < planned) {
+      return `${review.name}：上次少完成 ${planned - completedCount} 组，下次保持 ${decision.suggestedWeight}${review.unit}`;
+    }
+    return `${review.name}：上次未全部达到次数上限，下次保持 ${decision.suggestedWeight}${review.unit}`;
   }
-  if (averageDrop > 0) {
-    return `${review.name}：平均次数较前一周下降 ${averageDrop}，但仍在目标区间；下次保持 ${review.bestWeight}${review.unit}`;
-  }
-  if (review.bestWeight === prior.bestWeight) {
-    return `${review.name}：连续两周重量持平，但尚未连续两周全部到上限；下次保持 ${review.bestWeight}${review.unit}`;
-  }
-  if (review.bestWeight > prior.bestWeight) {
-    return `${review.name}：本周已加重 ${Math.round((review.bestWeight - prior.bestWeight) * 10) / 10}${review.unit}；下次保持 ${review.bestWeight}${review.unit}，先稳定次数`;
-  }
-  return `${review.name}：本周最高重量较前一周下降 ${Math.round((prior.bestWeight - review.bestWeight) * 10) / 10}${review.unit}；下次保持 ${review.bestWeight}${review.unit}，完成目标后再加`;
+  return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
 }
 
 function WeeklyReview({ workouts }: { workouts: Workout[] }) {
@@ -381,7 +447,7 @@ function WeeklyReview({ workouts }: { workouts: Workout[] }) {
   );
   const missing = (Object.keys(ROUTINE_META) as Routine[]).filter((routine) => !routines.has(routine));
   const reviews = exerciseReviews(week, priorWeek);
-  const recommendations = reviews.map(reviewRecommendation);
+  const recommendations = reviews.map((review) => reviewRecommendation(review, workouts));
   const endInclusive = new Date(end);
   endInclusive.setDate(endInclusive.getDate() - 1);
 
@@ -400,8 +466,8 @@ function WeeklyReview({ workouts }: { workouts: Workout[] }) {
         {week.length === 0
           ? "上周一到周日没有完成记录。沿用当前安排，完成推、拉、腿各一练后再判断动作调整。"
           : completeRound
-            ? "上周已完成推、拉、腿各一轮。负荷建议会对照前一完整周；只有连续两周全部做到次数上限才建议增重。"
-            : `上周${routines.size > 0 ? `记录了 ${Array.from(routines).map((routine) => ROUTINE_META[routine].label).join("、")}` : "没有有效训练"}${missing.length > 0 ? `，缺少 ${missing.map((routine) => ROUTINE_META[routine].label).join("、")}` : "，但至少一次训练未完成全部组数"}；已记录动作仍按两周趋势判断负荷，但不据此新增动作。`}
+            ? "上周已完成推、拉、腿各一轮。负荷建议只看最近一次可比训练：全部组完成且都达到次数上限才增重，有组低于下限则建议降重，未完成则保持，无可比记录不给建议。"
+            : `上周${routines.size > 0 ? `记录了 ${Array.from(routines).map((routine) => ROUTINE_META[routine].label).join("、")}` : "没有有效训练"}${missing.length > 0 ? `，缺少 ${missing.map((routine) => ROUTINE_META[routine].label).join("、")}` : "，但至少一次训练未完成全部组数"}；已记录动作仍按最近一次可比训练判断负荷：全部组完成且都达到次数上限才增重，有组低于下限则建议降重，未完成则保持，无可比记录不给建议。`}
       </p>
 
       {reviews.length > 0 ? (
@@ -431,7 +497,7 @@ function WeeklyReview({ workouts }: { workouts: Workout[] }) {
           </>
         ) : (
           <>
-            <strong>动作结构不变，按两周趋势调负荷</strong>
+            <strong>动作结构不变，按最近一次可比训练调负荷</strong>
             <ul>{recommendations.map((recommendation) => <li key={recommendation}>{recommendation}</li>)}</ul>
             <p>
               {completeRound
@@ -770,7 +836,15 @@ export function finishGateDecision(snapshots: FinishGateSnapshot[]): FinishGateD
   return { proceed: false, reason: "incomplete" };
 }
 
-export type RestTimerState = { endsAt: number | null; durationSec: number; muted: boolean; done: boolean };
+export type RestTimerState = {
+  endsAt: number | null;
+  durationSec: number;
+  muted: boolean;
+  done: boolean;
+  // W-TIMER-001: per-workout opt-out for auto-starting the rest timer on
+  // a completed set. In-memory only — never persisted anywhere.
+  autoEnabled: boolean;
+};
 
 export const REST_DURATIONS = [60, 90, 120];
 export const DEFAULT_REST_SEC = 90;
@@ -781,7 +855,19 @@ export function initRestTimer(durationSec: number = DEFAULT_REST_SEC): RestTimer
     durationSec: REST_DURATIONS.includes(durationSec) ? durationSec : DEFAULT_REST_SEC,
     muted: false,
     done: false,
+    autoEnabled: true,
   };
+}
+
+// Flips only the auto-start switch: an in-progress countdown keeps its
+// endsAt, and turning auto back on does not start a timer by itself —
+// the next completed set does.
+export function toggleRestAuto(state: RestTimerState): RestTimerState {
+  return { ...state, autoEnabled: !state.autoEnabled };
+}
+
+export function shouldAutoStartRest(state: RestTimerState): boolean {
+  return state.autoEnabled;
 }
 
 export function startRestTimer(state: RestTimerState, nowMs: number): RestTimerState {
@@ -1026,10 +1112,19 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
   );
 }
 
-function ExerciseBlock({ workout, exercise, previous, onChanged, onSetCompleted, onOpenGuide, onRegisterSet }: {
+// W1.3: the "上次" mark for an exercise — the latest completed set's
+// weight/reps, with the weight already converted into the active
+// workout's unit when the source workout used the other unit.
+export type PreviousMark = { weight: number | null; reps: number | null; converted: boolean };
+
+function ExerciseBlock({ workout, exercise, previous, timerSlot, onChanged, onSetCompleted, onOpenGuide, onRegisterSet }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
-  previous?: WorkoutSet;
+  previous?: PreviousMark;
+  // W-TIMER-001: the rest-timer UI (auto toggle + panel) injected by
+  // ActiveWorkout into the current exercise's block only. Purely an
+  // extra child node — SetRow mounting/registration is untouched.
+  timerSlot?: ReactNode;
   onChanged: () => void;
   onSetCompleted: () => void;
   onOpenGuide: (guide: ExerciseGuide) => void;
@@ -1063,12 +1158,12 @@ function ExerciseBlock({ workout, exercise, previous, onChanged, onSetCompleted,
           <p>
             {exercise.sets.length} 组 · 每组 {exercise.target} 次
             {previous && exercise.sets.some((set) => set.weight != null || set.reps != null) ? (
-              <span className="prefill-note"> · 已按上次表现预填</span>
+              <span className="prefill-note"> · {workout.prefill_unit_converted ? "已按上次表现预填（含单位换算）" : "已按上次表现预填"}</span>
             ) : null}
           </p>
         </div>
         {previous && previous.weight != null ? (
-          <span className="previous-mark">上次 {previous.weight}{workout.unit} × {previous.reps ?? "—"}</span>
+          <span className="previous-mark">上次 {previous.weight}{workout.unit} × {previous.reps ?? "—"}{previous.converted ? "（已换算）" : ""}</span>
         ) : null}
       </div>
       <div className="set-columns" aria-hidden="true">
@@ -1082,6 +1177,7 @@ function ExerciseBlock({ workout, exercise, previous, onChanged, onSetCompleted,
       <button className="add-set" type="button" onClick={() => addSet.mutate()} disabled={addSet.isPending}>
         {addSet.isPending ? "添加中…" : "+ 加一组"}
       </button>
+      {timerSlot}
     </section>
   );
 }
@@ -1121,8 +1217,26 @@ function RestTimerPanel({ timer, nowMs, onChange }: {
         </button>
         <button type="button" onClick={() => onChange((state) => skipRestTimer(state))}>跳过</button>
       </div>
-      <p className="rest-timer-note">刷新页面后计时器会重置</p>
+      <p className="rest-timer-note">本次自动休息计时：{timer.autoEnabled ? "开" : "关"} · 刷新页面后计时器会重置</p>
     </section>
+  );
+}
+
+// W-TIMER-001: the always-visible per-workout auto-timer switch. Local
+// UI state only — no server write, no localStorage, no set is touched.
+function RestAutoToggle({ timer, onChange }: {
+  timer: RestTimerState;
+  onChange: (updater: (state: RestTimerState) => RestTimerState) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="rest-auto-toggle"
+      aria-pressed={timer.autoEnabled}
+      onClick={() => onChange((state) => toggleRestAuto(state))}
+    >
+      本次自动休息计时：{timer.autoEnabled ? "开" : "关"}
+    </button>
   );
 }
 
@@ -1142,7 +1256,10 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const [restNow, setRestNow] = useState(() => Date.now());
 
   const handleSetCompleted = useCallback(() => {
-    setRestTimer((state) => startRestTimer(state, Date.now()));
+    // W-TIMER-001: with auto off, completing a set neither starts nor
+    // restarts the timer (an already-running countdown is untouched);
+    // with auto on this behaves exactly as before.
+    setRestTimer((state) => (shouldAutoStartRest(state) ? startRestTimer(state, Date.now()) : state));
   }, []);
 
   const updateRestTimer = useCallback((updater: (state: RestTimerState) => RestTimerState) => {
@@ -1263,19 +1380,45 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   });
 
   const previousByExercise = useMemo(() => {
-    const result = new Map<string, WorkoutSet>();
+    // W1.3: cross-unit workouts are comparable too — take the latest
+    // completed set per exercise from the most recent completed workout
+    // that has one, converting its weight into this workout's unit.
+    const result = new Map<string, PreviousMark>();
     for (const oldWorkout of recent) {
-      if (oldWorkout.unit !== workout.unit) continue;
+      const unitConverted = oldWorkout.unit !== workout.unit;
       for (const set of [...oldWorkout.sets].reverse()) {
-        if (set.completed && !result.has(set.exercise_key)) result.set(set.exercise_key, set);
+        if (set.completed && !result.has(set.exercise_key)) {
+          result.set(set.exercise_key, {
+            weight: set.weight == null
+              ? null
+              : unitConverted
+                ? convertWeightValue(set.weight, oldWorkout.unit, workout.unit)
+                : set.weight,
+            reps: set.reps,
+            converted: unitConverted && set.weight != null,
+          });
+        }
       }
     }
     return result;
-  }, [recent]);
+  }, [recent, workout.unit]);
 
   const done = completedCount(workout);
   const total = workout.sets.length;
   const meta = ROUTINE_META[workout.routine];
+  const exerciseGroups = groupSets(workout.sets);
+  // W-TIMER-001: the current exercise is the first one (in groupSets
+  // order) that still has an unfinished set; when every set is done
+  // there is none and the timer UI falls back below the stack.
+  const currentExercise = exerciseGroups.find((group) => group.sets.some((set) => !set.completed)) ?? null;
+  const restTimerUi = (
+    <>
+      <RestAutoToggle timer={restTimer} onChange={updateRestTimer} />
+      {restTimer.endsAt != null ? (
+        <RestTimerPanel timer={restTimer} nowMs={restNow} onChange={updateRestTimer} />
+      ) : null}
+    </>
+  );
 
   return (
     <main className="active-shell">
@@ -1300,12 +1443,13 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
       </details>
 
       <div className="exercise-stack">
-        {groupSets(workout.sets).map((exercise) => (
+        {exerciseGroups.map((exercise) => (
           <ExerciseBlock
             key={exercise.key}
             workout={workout}
             exercise={exercise}
             previous={previousByExercise.get(exercise.key)}
+            timerSlot={currentExercise != null && exercise.key === currentExercise.key ? restTimerUi : undefined}
             onChanged={refresh}
             onSetCompleted={handleSetCompleted}
             onOpenGuide={setSelectedGuide}
@@ -1314,9 +1458,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
         ))}
       </div>
 
-      {restTimer.endsAt != null ? (
-        <RestTimerPanel timer={restTimer} nowMs={restNow} onChange={updateRestTimer} />
-      ) : null}
+      {currentExercise == null ? <div className="rest-timer-fallback">{restTimerUi}</div> : null}
 
       <section className="finish-zone">
         <div>

@@ -50,6 +50,7 @@ function extractFunction(source, name) {
 const FN = [
   'initRestTimer', 'startRestTimer', 'restRemainingSec', 'restTimerDone',
   'addRestTime', 'skipRestTimer', 'setRestDuration', 'toggleRestMuted', 'restTimerLabel',
+  'toggleRestAuto', 'shouldAutoStartRest',
 ];
 const CONSTS = [
   'export const REST_DURATIONS = [60, 90, 120];',
@@ -71,9 +72,18 @@ check('source: completion toggle starts the timer only when fresh and unblocked'
   clientSrc.includes('if (next.completed && !setSaveBlocked(') && clientSrc.includes('onCompleted?.()'));
 check('source: panel renders only while a deadline exists',
   clientSrc.includes('restTimer.endsAt != null ? (') && clientSrc.includes('<RestTimerPanel timer={restTimer}'));
-check('source: panel sits between the exercise stack and the finish zone',
-  clientSrc.indexOf('className="exercise-stack"') < clientSrc.indexOf('<RestTimerPanel')
-  && clientSrc.indexOf('<RestTimerPanel') < clientSrc.indexOf('className="finish-zone"'));
+check('source: panel lives in the current exercise block via timerSlot, with a below-stack fallback',
+  clientSrc.includes('const currentExercise = exerciseGroups.find(')
+  && clientSrc.includes('timerSlot={currentExercise != null && exercise.key === currentExercise.key ? restTimerUi : undefined}')
+  && clientSrc.includes('{timerSlot}')
+  && clientSrc.includes('currentExercise == null ? <div className="rest-timer-fallback">{restTimerUi}</div>'));
+check('source: completing a set auto-starts only when autoEnabled',
+  clientSrc.includes('shouldAutoStartRest(state) ? startRestTimer(state, Date.now()) : state'));
+check('source: auto toggle is a 44px aria-pressed button that never calls a data action',
+  clientSrc.includes('className="rest-auto-toggle"') && clientSrc.includes('aria-pressed={timer.autoEnabled}')
+  && clientSrc.includes('本次自动休息计时') && themeCss.includes('.rest-auto-toggle {')
+  && themeCss.includes('min-height: 44px')
+  && !extractFunction(clientSrc, 'RestAutoToggle').includes('api.'));
 check('source: tick only re-renders (300ms), remaining comes from the deadline',
   clientSrc.includes('window.setInterval(() => setRestNow(Date.now()), 300)'));
 check('source: beep is gated by the mute flag', clientSrc.includes('if (!restTimer.muted) playRestBeep();'));
@@ -88,8 +98,8 @@ check('source: timer controls meet the 44px touch minimum',
 // --- behaviour over synthetic timestamps ---
 const T0 = 1_700_000_000_000;
 let s = T.initRestTimer();
-check('init: defaults to 90s, idle, unmuted, not done',
-  s.endsAt === null && s.durationSec === 90 && s.muted === false && s.done === false);
+check('init: defaults to 90s, idle, unmuted, not done, auto-start on',
+  s.endsAt === null && s.durationSec === 90 && s.muted === false && s.done === false && s.autoEnabled === true);
 check('init: a listed duration is accepted', T.initRestTimer(60).durationSec === 60 && T.initRestTimer(120).durationSec === 120);
 check('init: an unlisted duration falls back to 90', T.initRestTimer(45).durationSec === 90);
 
@@ -136,6 +146,22 @@ check('mute: toggles both ways without touching the deadline',
   T.toggleRestMuted(s).muted === true && T.toggleRestMuted(T.toggleRestMuted(s)).muted === false
   && T.toggleRestMuted(s).endsAt === s.endsAt);
 
+// Auto-start toggle (W-TIMER-001 gap closure): session-local only.
+check('auto: shouldAutoStartRest mirrors autoEnabled',
+  T.shouldAutoStartRest(T.initRestTimer()) === true
+  && T.shouldAutoStartRest(T.toggleRestAuto(T.initRestTimer())) === false);
+const runningToggled = T.toggleRestAuto(s);
+check('auto: toggling mid-run flips only the flag, never the running deadline or settings',
+  runningToggled.autoEnabled === false && runningToggled.endsAt === s.endsAt
+  && runningToggled.durationSec === s.durationSec && runningToggled.muted === s.muted
+  && runningToggled.done === s.done);
+check('auto: toggling back on does not start a timer by itself',
+  T.toggleRestAuto(T.toggleRestAuto(T.initRestTimer())).endsAt === null);
+check('auto: start/skip/duration/mute all preserve the flag',
+  T.startRestTimer(T.toggleRestAuto(T.initRestTimer()), T0).autoEnabled === false
+  && T.skipRestTimer(T.toggleRestAuto(s)).autoEnabled === false
+  && T.setRestDuration(T.toggleRestAuto(s), 60).autoEnabled === false);
+
 // --- mutation sensitivity (executed) ---
 const noCeilSrc = clientSrc.replace(
   'return Math.max(0, Math.ceil((state.endsAt - nowMs) / 1000));',
@@ -163,6 +189,16 @@ const noDoneTimer = buildTimer(noDoneLabelSrc);
 const ndState = noDoneTimer.startRestTimer(noDoneTimer.initRestTimer(), T0);
 check('mutation: without the done branch the finished label collapses to 0:00',
   noDoneTimer.restTimerLabel(ndState, T0 + 90_000) === '0:00');
+
+const toggleCancelsSrc = clientSrc.replace(
+  'return { ...state, autoEnabled: !state.autoEnabled };',
+  'return { ...state, autoEnabled: !state.autoEnabled, endsAt: null };',
+);
+check('mutation setup: toggle-cancels variant differs', toggleCancelsSrc !== clientSrc);
+const toggleCancelsTimer = buildTimer(toggleCancelsSrc);
+const tcState = toggleCancelsTimer.startRestTimer(toggleCancelsTimer.initRestTimer(), T0);
+check('mutation: a toggle that clears the deadline kills the running countdown',
+  toggleCancelsTimer.toggleRestAuto(tcState).endsAt === null && tcState.endsAt === T0 + 90_000);
 
 console.log(`\n${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
