@@ -155,8 +155,8 @@
 
 - [ ] `W0.1` 修改重量或次数后在 blur/Enter 或短 debounce 后保存，不要求通过取消/重新勾选完成状态才能保存。
 - [ ] `W0.2` 每组显示 dirty、saving、saved、error；保存失败保留本地输入并提供重试。切页或结束训练前若仍有 dirty/error 项要明确提醒。
-- [ ] `W0.3` `updateSet`、`addSet`、`completeWorkout`、`discardWorkout` 必须校验目标属于当前 active workout；不存在或已完成目标不能仍返回 `ok: true`。
-- [ ] `W0.4` 数据库或事务保证同一用户最多一个 active workout；并发 start 不得生成两条进行中训练。
+- [完成] `W0.3` `updateSet`、`addSet`、`completeWorkout`、`discardWorkout` 必须校验目标属于当前 active workout；不存在或已完成目标不能仍返回 `ok: true`。（实现方交付 2026-10-17：服务端新增 `mutationTargetDecision`，四 handler 均先校验 active 并以受影响行数为准，见 changes.md 同日条目；此标记仅表示已交付，PM 结论以评审记录为准。）
+- [完成] `W0.4` 数据库或事务保证同一用户最多一个 active workout；并发 start 不得生成两条进行中训练。（实现方交付 2026-10-17：应用层实现——插入后复查全部 active、更早 active 存在则删除刚插入并让位（`resolveStartConflict`）；结算窗口内瞬时双 active 与数据库级部分唯一索引未做已在 changes.md 如实登记。此标记仅表示已交付，PM 结论以评审记录为准。）
 - [ ] `W0.5` 结束训练时：全部完成可直接结束；存在未完成组时显示完成数并二次确认，未填项目保留为未完成，不能伪造为 0。
 
 ### W1 — 渐进负荷规则统一（P0）
@@ -382,6 +382,7 @@
 - **修法范围**：在既有 W-UI 闭环实现可恢复的结束状态（编辑→收敛保存→确认→提交→成功或恢复编辑），等待真实在途请求结清，不能用清timer替代；加组/编辑与完成提交共用同一结束边界，选择冻结录入或版本变化后重新收集均可。W0.3独立修目标active归属与真实affected-row结果，防止已结束目标继续写；不新增跨端版本系统，不扩大身份例外。
 - **一次列齐的验证判据**：真实queue+flush+seal+handleFinish+complete受控集成覆盖：确认后已发旧写晚到；确认后complete抛错/ok=false再编辑重试成功；flush期间加组/改现有组；正常全完成；未完成/缺次数/真0；取消确认继续保存；重复结束与addSet在途；成功后不再写、失败后能写且草稿不丢。除受控时序外，Muse补实际合法owner action保存回读与对应UI流程，不以字符串断言代替。按授权自检后直接上线，PM事后复核。
 - **排期/责任**：queuedAt=2026-10-17T09:51:44Z；待办；Muse负责P0优先修复并和W0.3同类打包，目标10-17当日交付，若确实耗时须在changes注明真实startedAt、卡点/责任人与日期；没有PM批准依赖。新结束问题首次入队，原单写返工有实质进展，不按“两轮同问题无进展”升级。
+- **实现方交付登记 2026-10-17 03:24 PDT**（startedAt=2026-10-17 03:13 PDT）：已与 W0.3/W0.4 同包交付并在 space-6 上线——队列新增 settle、handle 新增 sealAndSettle/unseal/id，确认结束先结清在途写再 complete，complete 抛错/ok:false 解封并显示结束失败文案、草稿保留，取消确认不封队列，flushAllHandles 稳定批次才喂结束门。仓库 validate-finish.mjs 35/35（PM 三反例受控时序 + 三变异）、autosave 69/69、rest-timer 40/40、health 回归全过，构建审计 pass。owner 实机结束流程证据仍归 EVID-LIFE-001/W-UI。此登记仅表示实现方已交付，PM 结论以其评审记录为准。
 
 ### 新需求单及产品推进：W-UI-001-D1（P1，既有W-UI-001交互细化）
 

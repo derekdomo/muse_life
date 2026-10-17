@@ -606,11 +606,20 @@ export function hasUnsavedSetStatus(statuses: SetSaveStatus[]): boolean {
 }
 
 export type SetSaveHandle = {
+  id: number;
   getStatus: () => SetSaveStatus;
   flush: () => Promise<boolean>;
   isBlocked: () => boolean;
   isCompleted: () => boolean;
   seal: () => void;
+  // W-FINISH-001: seal the queue (no new writes) AND wait for the
+  // in-flight drain to fully settle — its success/failure applied to
+  // the machine — before resolving. Resolves true only when the row
+  // ends up clean (saved, unblocked, nothing in flight).
+  sealAndSettle: () => Promise<boolean>;
+  // Undo a seal (e.g. a finish attempt failed): the row becomes
+  // editable and saveable again with its draft untouched.
+  unseal: () => void;
 };
 
 // --- W-UI-001 rework: single-writer save queue per set ---
@@ -666,6 +675,10 @@ export async function drainSetSaves(env: SetSaveEnv): Promise<boolean> {
 export type SetSaveQueue = {
   requestSave: () => Promise<boolean>;
   flush: () => Promise<boolean>;
+  // W-FINISH-001: join the in-flight drain (if any) and resolve with
+  // the machine's settled state. Never starts a new write: with no
+  // drain running it reports purely from the current machine state.
+  settle: () => Promise<boolean>;
 };
 
 export function createSaveQueue(env: SetSaveEnv): SetSaveQueue {
@@ -681,7 +694,53 @@ export function createSaveQueue(env: SetSaveEnv): SetSaveQueue {
     void run.then(clear, clear);
     return run;
   };
-  return { requestSave: start, flush: start };
+  const settledClean = (): boolean => {
+    const machine = env.getMachine();
+    return machine.status === "saved" && !setSaveBlocked(machine) && machine.inflightDraft == null;
+  };
+  const settle = async (): Promise<boolean> => {
+    if (running) {
+      // Wait for the drain to finish applying its outcome to the
+      // machine, then judge cleanliness from that settled state — the
+      // drain itself may report false simply because the queue was
+      // sealed mid-flight even though the write landed.
+      await running;
+    }
+    return settledClean();
+  };
+  return { requestSave: start, flush: start, settle };
+}
+
+// --- W-FINISH-001: finish flush over a consistent handle set ---
+// Collect the registered set handles, flush them, then re-read the
+// registry: if the set changed while flushing (e.g. an add-set request
+// landed mid-flush and registered a brand-new row), flush the new set
+// again. Only a round whose handle set is identical before and after
+// its flush is a stable batch whose results may feed the finish gate;
+// an unstable batch must be treated as unsaved, never completed on.
+export type FlushAllHandlesResult = {
+  handles: SetSaveHandle[];
+  results: boolean[];
+  stable: boolean;
+};
+
+export async function flushAllHandles(
+  getHandles: () => SetSaveHandle[],
+  maxRounds = 3,
+): Promise<FlushAllHandlesResult> {
+  let lastHandles: SetSaveHandle[] = [];
+  let lastResults: boolean[] = [];
+  for (let round = 0; round < maxRounds; round += 1) {
+    const handles = getHandles();
+    const results = await Promise.all(handles.map((handle) => handle.flush().catch(() => false)));
+    lastHandles = handles;
+    lastResults = results;
+    const afterIds = getHandles().map((handle) => handle.id);
+    const stable = handles.length === afterIds.length
+      && handles.every((handle, index) => handle.id === afterIds[index]);
+    if (stable) return { handles, results, stable: true };
+  }
+  return { handles: lastHandles, results: lastResults, stable: false };
 }
 
 // --- W-UI-001 rework: finish gate ---
@@ -852,6 +911,7 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
 
   useEffect(() => {
     onRegister(set.id, {
+      id: set.id,
       getStatus: () => machineRef.current.status,
       flush: flushSave,
       isBlocked: () => setSaveBlocked(machineRef.current),
@@ -859,6 +919,14 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
       seal: () => {
         sealedRef.current = true;
         if (timerRef.current != null) window.clearTimeout(timerRef.current);
+      },
+      sealAndSettle: async () => {
+        sealedRef.current = true;
+        if (timerRef.current != null) window.clearTimeout(timerRef.current);
+        return saveQueue.settle();
+      },
+      unseal: () => {
+        sealedRef.current = false;
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1063,6 +1131,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const [, setClock] = useState(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [finishBlock, setFinishBlock] = useState<FinishGateReason | null>(null);
+  const [finishFailed, setFinishFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [unsavedPresent, setUnsavedPresent] = useState(false);
   const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
@@ -1128,17 +1197,37 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     onSuccess: refresh,
   });
 
-  // W-UI-001 finish gate: flush every set first (dirty sets save now,
-  // in-flight saves are awaited), then let finishGateDecision consume
-  // the full result of that same batch of handles. Only a fully clean
-  // batch finishes directly; anything else shows the confirmation for
-  // its reason, because finishing would lose edits or skip sets.
+  // W-FINISH-001: a finish attempt only counts when the complete
+  // request resolves with ok === true — a business refusal
+  // ({ ok: false }) is a failure just like a thrown error. On failure
+  // every set is unsealed so all drafts stay editable and saveable,
+  // and the failure is surfaced in words.
+  async function runComplete(): Promise<boolean> {
+    let result: { ok: boolean } | null = null;
+    try {
+      result = await complete.mutateAsync();
+    } catch {
+      result = null;
+    }
+    if (result && result.ok === true) return true;
+    for (const handle of setHandlesRef.current.values()) handle.unseal();
+    setFinishFailed(true);
+    return false;
+  }
+
+  // W-UI-001 finish gate + W-FINISH-001: flush every set over a
+  // consistent handle set (flushAllHandles re-reads the registry and
+  // re-flushes if the set changed mid-flush; an unstable batch counts
+  // as unsaved), then let finishGateDecision consume the full result
+  // of that same stable batch. Only a fully clean batch finishes
+  // directly; anything else shows the confirmation for its reason,
+  // because finishing would lose edits or skip sets.
   async function handleFinish() {
+    setFinishFailed(false);
     setFinishing(true);
-    const handles = [...setHandlesRef.current.values()];
-    const flushResults = await Promise.all(handles.map((handle) => handle.flush().catch(() => false)));
+    const { handles, results, stable } = await flushAllHandles(() => [...setHandlesRef.current.values()]);
     const snapshots = handles.map((handle, index) => ({
-      flushOk: flushResults[index] ?? false,
+      flushOk: stable && (results[index] ?? false),
       status: handle.getStatus(),
       blocked: handle.isBlocked(),
       completed: handle.isCompleted(),
@@ -1147,18 +1236,26 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     setFinishing(false);
     const decision = finishGateDecision(snapshots);
     if (decision.proceed) {
-      complete.mutate();
+      await runComplete();
       return;
     }
     setFinishBlock(decision.reason);
   }
 
-  // Confirmed discard of pending edits: seal every set's save queue
-  // first so no queued write can land after the workout is finished.
-  function confirmFinishAnyway() {
-    for (const handle of setHandlesRef.current.values()) handle.seal();
+  // Confirmed finish despite pending edits: seal AND settle every
+  // set's save queue first — no queued write may still be in flight
+  // when the complete request is sent, so nothing can land after the
+  // workout is finished. If the complete then fails (thrown or
+  // ok !== true), runComplete unseals everything and the workout
+  // stays editable with all drafts intact.
+  async function confirmFinishAnyway() {
+    const handles = [...setHandlesRef.current.values()];
     setFinishBlock(null);
-    complete.mutate();
+    setFinishFailed(false);
+    setFinishing(true);
+    await Promise.all(handles.map((handle) => handle.sealAndSettle().catch(() => false)));
+    setFinishing(false);
+    await runComplete();
   }
   const discard = useMutation({
     mutationFn: () => api.discardWorkout({ workout_id: workout.id }),
@@ -1241,8 +1338,12 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
                 : "还有未完成的组，确认结束训练吗？"}
           </span>
           <button type="button" onClick={() => setFinishBlock(null)}>返回继续编辑</button>
-          <button type="button" className="danger" onClick={confirmFinishAnyway} disabled={complete.isPending}>仍要结束</button>
+          <button type="button" className="danger" onClick={() => void confirmFinishAnyway()} disabled={complete.isPending || finishing}>仍要结束</button>
         </div>
+      ) : null}
+
+      {finishFailed ? (
+        <p className="error-banner" role="alert">结束失败，修改已保留，可以继续编辑保存后重试结束</p>
       ) : null}
 
       <div className="discard-zone">

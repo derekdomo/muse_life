@@ -126,6 +126,32 @@ function isOwnerOrSyncChannel(ctx: Ctx): boolean {
   return ctx.viewer === undefined || ctx.viewer === null || ctx.viewer.isOwner === true;
 }
 
+// W0.3: mutation target ownership. A set/workout mutation may only land
+// on a workout that exists and is still active (completed_at null). A
+// missing workout is "not-found"; an already-completed one is
+// "not-active" — its rows are history and must never be written,
+// completed again, or deleted by a mutation aimed at a stale id.
+export function mutationTargetDecision(
+  workout: { completed_at: string | null } | null,
+): "ok" | "not-found" | "not-active" {
+  if (!workout) return "not-found";
+  if (workout.completed_at != null) return "not-active";
+  return "ok";
+}
+
+// W0.4: single-active guarantee. startWorkout inserts optimistically
+// and then re-checks: if an earlier active workout (smaller id) exists
+// alongside the just-inserted one, the insert must yield to it.
+export function resolveStartConflict(
+  existingActiveId: number | null,
+  insertedId: number,
+): { action: "created" | "yield"; keepId: number } {
+  if (existingActiveId != null && existingActiveId < insertedId) {
+    return { action: "yield", keepId: existingActiveId };
+  }
+  return { action: "created", keepId: insertedId };
+}
+
 // Whole-week coverage summaries (H-UNITS-001). Pure and self-contained so
 // it can be extracted and run standalone: workouts carry id, completed_at
 // (ISO string) and unit; sets carry workout_id, weight, reps, completed;
@@ -392,6 +418,28 @@ export const Actions = {
         });
       });
       await db.insert(schema.workoutSets).values(values);
+
+      // W0.4: re-check for a single active workout. A concurrent start
+      // may have inserted its own workout after the pre-check above;
+      // if an earlier active workout (smaller id) now exists, this
+      // insert yields: delete the just-inserted workout and its sets
+      // and return the earlier active one instead.
+      const activeRows = await db
+        .select({ id: schema.workouts.id })
+        .from(schema.workouts)
+        .where(isNull(schema.workouts.completedAt))
+        .orderBy(asc(schema.workouts.id));
+      const earliestOtherActiveId = activeRows.map((row) => row.id).find((id) => id !== workoutId) ?? null;
+      const conflict = resolveStartConflict(earliestOtherActiveId, workoutId);
+      if (conflict.action === "yield") {
+        await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
+        await db.delete(schema.workouts).where(eq(schema.workouts.id, workoutId));
+        const kept = await loadWorkout(ctx, conflict.keepId);
+        if (!kept) throw new Error("未能读取进行中的训练");
+        ctx.invalidateQueries();
+        return { forbidden: false, workout: kept };
+      }
+
       const workout = await loadWorkout(ctx, workoutId);
       if (!workout) throw new Error("未能读取新训练");
       ctx.invalidateQueries();
@@ -412,10 +460,33 @@ export const Actions = {
         return { ok: false, forbidden: true };
       }
       const db = ctx.db<typeof schema>();
-      await db
+      // W0.3: resolve the set's owning workout first and only write
+      // when that workout exists and is still active. A stale write
+      // aimed at a completed (or deleted) workout is refused without
+      // touching the database.
+      const setRows = await db
+        .select({ workoutId: schema.workoutSets.workoutId })
+        .from(schema.workoutSets)
+        .where(eq(schema.workoutSets.id, args.id))
+        .limit(1);
+      const owner = setRows[0];
+      if (!owner) return { ok: false, forbidden: false };
+      const workoutRows = await db
+        .select({ completedAt: schema.workouts.completedAt })
+        .from(schema.workouts)
+        .where(eq(schema.workouts.id, owner.workoutId))
+        .limit(1);
+      const target = workoutRows[0];
+      const decision = mutationTargetDecision(
+        target ? { completed_at: target.completedAt?.toISOString() ?? null } : null,
+      );
+      if (decision !== "ok") return { ok: false, forbidden: false };
+      const updated = await db
         .update(schema.workoutSets)
         .set({ weight: args.weight, reps: args.reps, completed: args.completed, updatedAt: new Date() })
-        .where(eq(schema.workoutSets.id, args.id));
+        .where(eq(schema.workoutSets.id, args.id))
+        .returning({ id: schema.workoutSets.id });
+      if (updated.length === 0) return { ok: false, forbidden: false };
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },
@@ -429,6 +500,17 @@ export const Actions = {
         return { forbidden: true, set: null };
       }
       const db = ctx.db<typeof schema>();
+      // W0.3: only an existing, still-active workout may gain sets.
+      const workoutRows = await db
+        .select({ completedAt: schema.workouts.completedAt })
+        .from(schema.workouts)
+        .where(eq(schema.workouts.id, args.workout_id))
+        .limit(1);
+      const target = workoutRows[0];
+      const decision = mutationTargetDecision(
+        target ? { completed_at: target.completedAt?.toISOString() ?? null } : null,
+      );
+      if (decision !== "ok") return { forbidden: false, set: null };
       const rows = await db
         .select()
         .from(schema.workoutSets)
@@ -475,10 +557,15 @@ export const Actions = {
         return { ok: false, forbidden: true };
       }
       const db = ctx.db<typeof schema>();
-      await db
+      // W0.3: complete only a workout that exists and is still active;
+      // the affected-row count is the verdict, so an already-completed
+      // or missing workout reports ok: false instead of success.
+      const updated = await db
         .update(schema.workouts)
         .set({ completedAt: new Date() })
-        .where(and(eq(schema.workouts.id, args.workout_id), isNull(schema.workouts.completedAt)));
+        .where(and(eq(schema.workouts.id, args.workout_id), isNull(schema.workouts.completedAt)))
+        .returning({ id: schema.workouts.id });
+      if (updated.length === 0) return { ok: false, forbidden: false };
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },
@@ -492,6 +579,19 @@ export const Actions = {
         return { ok: false, forbidden: true };
       }
       const db = ctx.db<typeof schema>();
+      // W0.3: discard only ever deletes an active workout. A completed
+      // workout is history and must survive a discard aimed at its id;
+      // a missing one has nothing to delete. Both report ok: false.
+      const workoutRows = await db
+        .select({ completedAt: schema.workouts.completedAt })
+        .from(schema.workouts)
+        .where(eq(schema.workouts.id, args.workout_id))
+        .limit(1);
+      const target = workoutRows[0];
+      const decision = mutationTargetDecision(
+        target ? { completed_at: target.completedAt?.toISOString() ?? null } : null,
+      );
+      if (decision !== "ok") return { ok: false, forbidden: false };
       await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, args.workout_id));
       await db.delete(schema.workouts).where(eq(schema.workouts.id, args.workout_id));
       ctx.invalidateQueries();

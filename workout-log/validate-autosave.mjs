@@ -284,8 +284,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-check('source: finish consumes flush results via finishGateDecision', clientSrc.includes('const decision = finishGateDecision(snapshots);') && clientSrc.includes('flushOk: flushResults[index] ?? false'));
-check('source: confirm-discard seals every handle before completing', clientSrc.includes('handle.seal()') && clientSrc.includes('confirmFinishAnyway'));
+check('source: finish consumes flush results via finishGateDecision', clientSrc.includes('const decision = finishGateDecision(snapshots);') && clientSrc.includes('flushOk: stable && (results[index] ?? false)'));
+check('source: confirm-discard seals and settles every handle before completing', clientSrc.includes('handle.sealAndSettle()') && clientSrc.includes('confirmFinishAnyway'));
 check('source: drain checks the business ok flag', clientSrc.includes('result.ok !== true'));
 
 await (async () => {
