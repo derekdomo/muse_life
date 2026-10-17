@@ -13,8 +13,12 @@
 //    hasStrength are untouched even by strength-typed HK sessions.
 //  - A date with only HK workouts still gets a timeline row (hasHealth).
 //  - unifiedHkLabel: "" for none; otherwise 运动 N 次 · 类型… plus a
-//    共 X 分 segment only when at least one group duration is known
-//    (a real known total of 0 still renders 共 0 分).
+//    已知时长 X 分 segment only when at least one group duration is
+//    known (a real known total of 0 still renders 已知时长 0 分).
+//    PM 2026-10-16 17:50 rework: the summed duration is only the known
+//    subtotal, so it must never render as an unconditional 共 X 分
+//    total; both timeline render sites carry the visible note
+//    仅汇总有记录的时长，缺失不按0.
 // Mutations are executed (null-duration guard removed, type sort
 // reversed, client session-sum broken) and must flip outcomes.
 // Viewport/page evidence and the health-cli same-window count stay
@@ -60,6 +64,11 @@ check('source: aggregation reads historyWorkouts only',
 check('source: client label consumed at both timeline render sites',
   (clientSrc.match(/unifiedHkLabel\(day\)/g) ?? []).length === 4,
   `occurrences=${(clientSrc.match(/unifiedHkLabel\(day\)/g) ?? []).length}`);
+check('source: known-duration note visible at both timeline render sites',
+  (clientSrc.match(/运动时长说明：仅汇总有记录的时长，缺失不按0/g) ?? []).length === 2,
+  `occurrences=${(clientSrc.match(/运动时长说明：仅汇总有记录的时长，缺失不按0/g) ?? []).length}`);
+check('source: label never renders an unconditional 共 X 分 total',
+  !clientSrc.includes('· 共 ${'));
 
 // --- real server function ---
 function buildTimeline(src) {
@@ -127,17 +136,40 @@ check('no HK workouts: day still present with hkWorkouts []',
 check('neither source: timeline empty', buildUnifiedTimeline(null, null).length === 0);
 
 // --- real client label ---
-check('label: mixed day totals sessions and known duration',
-  unifiedHkLabel(tl[0]) === '运动 3 次 · Running、Swimming · 共 50 分', unifiedHkLabel(tl[0]));
+check('label: mixed day (same-type partial missing) totals sessions, duration marked known-only',
+  unifiedHkLabel(tl[0]) === '运动 3 次 · Running、Swimming · 已知时长 50 分', unifiedHkLabel(tl[0]));
+check('label: partial missing never renders as unconditional total',
+  !unifiedHkLabel(tl[0]).includes('共 '), unifiedHkLabel(tl[0]));
+// Same-type partial missing through the real producer: Swimming 30 + null.
+const sameTypePartial = buildUnifiedTimeline(healthSnap([
+  HK('p1', '2026-10-07', 'Swimming', 30),
+  HK('p2', '2026-10-07', 'Swimming', null),
+]), null);
+check('label: same-type partial missing -> 已知时长 subtotal via producer',
+  unifiedHkLabel(sameTypePartial[0]) === '运动 2 次 · Swimming · 已知时长 30 分', unifiedHkLabel(sameTypePartial[0]));
+// Cross-type partial missing through the real producer: Yoga null + Running 12.5.
+const crossTypePartial = buildUnifiedTimeline(healthSnap([
+  HK('q1', '2026-10-06', 'Yoga', null),
+  HK('q2', '2026-10-06', 'Running', 12.5),
+]), null);
+check('label: cross-type partial missing -> 已知时长 subtotal via producer',
+  unifiedHkLabel(crossTypePartial[0]) === '运动 2 次 · Running、Yoga · 已知时长 12.5 分', unifiedHkLabel(crossTypePartial[0]));
+// All durations known through the real producer.
+const allKnown = buildUnifiedTimeline(healthSnap([
+  HK('k1', '2026-10-05', 'Running', 20),
+  HK('k2', '2026-10-05', 'Swimming', 30),
+]), null);
+check('label: all durations known -> 已知时长 full sum via producer',
+  unifiedHkLabel(allKnown[0]) === '运动 2 次 · Running、Swimming · 已知时长 50 分', unifiedHkLabel(allKnown[0]));
 check('label: all durations unknown -> count and types only, no duration segment',
   unifiedHkLabel({ hkWorkouts: [{ type: 'Yoga', sessions: 2, durationMinutes: null }] }) === '运动 2 次 · Yoga');
-check('label: real known zero duration renders 共 0 分',
-  unifiedHkLabel({ hkWorkouts: [{ type: 'Walking', sessions: 1, durationMinutes: 0 }] }) === '运动 1 次 · Walking · 共 0 分');
+check('label: real known zero duration renders 已知时长 0 分',
+  unifiedHkLabel({ hkWorkouts: [{ type: 'Walking', sessions: 1, durationMinutes: 0 }] }) === '运动 1 次 · Walking · 已知时长 0 分');
 check('label: empty groups -> empty string', unifiedHkLabel({ hkWorkouts: [] }) === '');
 check('label: missing field (older payload) -> empty string', unifiedHkLabel({}) === '');
 check('label: partial knowledge sums only known groups',
-  unifiedHkLabel({ hkWorkouts: [{ type: 'Yoga', sessions: 1, durationMinutes: null }, { type: 'Running', sessions: 1, durationMinutes: 12.5 }] }) === '运动 2 次 · Running、Yoga · 共 12.5 分'
-  || unifiedHkLabel({ hkWorkouts: [{ type: 'Yoga', sessions: 1, durationMinutes: null }, { type: 'Running', sessions: 1, durationMinutes: 12.5 }] }) === '运动 2 次 · Yoga、Running · 共 12.5 分');
+  unifiedHkLabel({ hkWorkouts: [{ type: 'Yoga', sessions: 1, durationMinutes: null }, { type: 'Running', sessions: 1, durationMinutes: 12.5 }] }) === '运动 2 次 · Running、Yoga · 已知时长 12.5 分'
+  || unifiedHkLabel({ hkWorkouts: [{ type: 'Yoga', sessions: 1, durationMinutes: null }, { type: 'Running', sessions: 1, durationMinutes: 12.5 }] }) === '运动 2 次 · Yoga、Running · 已知时长 12.5 分');
 
 // --- mutation sensitivity (executed) ---
 const nullGuardSrc = serverSrc.replace('durationMinutes: group.hasDuration ? round(group.durationSum, 1) : null', 'durationMinutes: round(group.durationSum, 1)');
@@ -154,6 +186,11 @@ const sumSrc = clientSrc.replace('sum + group.sessions', 'sum + 1');
 check('mutation setup: label session-sum variant differs', sumSrc !== clientSrc);
 check('mutation: broken session sum changes the label total',
   buildLabel(sumSrc)(tl[0]) !== unifiedHkLabel(tl[0]));
+
+const wordingSrc = clientSrc.replace('已知时长 ${', '共 ${');
+check('mutation setup: wording variant differs', wordingSrc !== clientSrc);
+check('mutation: reverting to unconditional 共 wording flips the partial-missing label',
+  buildLabel(wordingSrc)(tl[0]) === '运动 3 次 · Running、Swimming · 共 50 分');
 
 console.log(`\n${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

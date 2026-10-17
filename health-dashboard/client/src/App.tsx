@@ -879,6 +879,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
       {unifiedTimeline.length ? (
         <div className="unified-timeline" aria-label="统一时间线">
           <h3>统一时间线 · 最近 {Math.min(unifiedTimeline.length, 7)} 天</h3>
+          <p className="empty-inline">运动时长说明：仅汇总有记录的时长，缺失不按0。</p>
           <div className="unified-list">
             {unifiedTimeline.slice(0, 7).map((day) => (
               <div className="unified-row" key={day.date}>
@@ -991,10 +992,13 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
 // fields stay null here and render as "—" in the list; nothing is filled in.
 // H-WORKOUTS-001 (2): parallel label for the day's HealthKit workout
 // sessions on the unified timeline. Empty when the day has no HK workouts
-// (or the field is absent on an older payload). The total duration sums
-// only groups with a known duration; when every group is unknown the
-// duration segment is omitted entirely — never shown as 0. A real known
-// total of 0 renders as 共 0 分. Types are shown verbatim.
+// (or the field is absent on an older payload). The duration sums only
+// groups with a known duration, so it is labelled 已知时长 (known
+// duration), never as an unconditional total: when every group is
+// unknown the duration segment is omitted entirely — never shown as 0.
+// A real known total of 0 renders as 已知时长 0 分. Types are shown
+// verbatim. Both timeline render sites carry the visible note
+// 仅汇总有记录的时长，缺失不按0 next to the list.
 function unifiedHkLabel(day: UnifiedDay): string {
   const groups = day.hkWorkouts ?? [];
   if (!groups.length) return "";
@@ -1003,7 +1007,7 @@ function unifiedHkLabel(day: UnifiedDay): string {
   const known = groups.filter((group) => group.durationMinutes !== null);
   if (!known.length) return `运动 ${totalSessions} 次 · ${types}`;
   const totalMinutes = known.reduce((sum, group) => sum + (group.durationMinutes ?? 0), 0);
-  return `运动 ${totalSessions} 次 · ${types} · 共 ${Math.round(totalMinutes * 10) / 10} 分`;
+  return `运动 ${totalSessions} 次 · ${types} · 已知时长 ${Math.round(totalMinutes * 10) / 10} 分`;
 }
 
 function allWorkoutsList(historyWorkouts: Snapshot["historyWorkouts"]): Snapshot["historyWorkouts"] {
@@ -1021,6 +1025,7 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
       {unifiedTimeline && unifiedTimeline.length ? (
         <section className="history-section" aria-labelledby="unified-history-title">
           <div className="section-heading"><div><p className="section-kicker">一体时间线</p><h2 id="unified-history-title">每天合在一起看</h2></div><span className="record-count">{unifiedTimeline.length} 天</span></div>
+          <p className="empty-inline">运动时长说明：仅汇总有记录的时长，缺失不按0。</p>
           <div className="unified-list">
             {unifiedTimeline.map((day) => (
               <div className="unified-row" key={day.date}>
