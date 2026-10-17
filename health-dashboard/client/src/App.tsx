@@ -658,6 +658,20 @@ interface SevenDayFactsResult {
   coverageIncomplete: boolean;
 }
 
+// Today's America/Los_Angeles calendar date as YYYY-MM-DD, computed via
+// Intl so DST transitions and the LA midnight boundary are handled by
+// the platform tz database. `now` is injectable so the computation stays
+// testable around midnight and across DST; production callers use the
+// default (the current instant).
+function laTodayDateString(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(now);
+  const part = (type: string): string => parts.find((entry) => entry.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 // H-LOAD-001-D1: the seven-day facts strip. Pure derivation over the
 // already-legal historyDaily rows only — no new data path, no scoring.
 // The window is the 7 consecutive America/Los_Angeles calendar dates
@@ -669,17 +683,24 @@ interface SevenDayFactsResult {
 // value; any disagreement (including value vs null) marks the day
 // conflict/unavailable — never summed, never max-picked. covered counts
 // only days carrying a usable value. The boundary is unsatisfied when
-// dataDate is not a real calendar date (no window can be anchored) or
-// when dataDate itself has no daily row (that day is not complete), and
-// the strip must then not read as a complete trend. Sleep is NOT offered:
-// the legacy historySleeps totalHours basis is unproven. Self-contained
-// so repo-side validate-seven-day-facts.mjs can extract it by name and
+// dataDate is not a real calendar date (no window can be anchored),
+// when dataDate itself has no daily row (that day is not complete), or
+// when dataDate has not strictly ended yet — a row for LA today is
+// partial data for a day still in progress, and a future dataDate is a
+// boundary anomaly; having a row never by itself proves the day ended.
+// todayLa is the caller's LA today (see laTodayDateString); this
+// function never reads the system clock, so it stays testable. The raw
+// per-day values are still presented in every unsatisfied case, with
+// the boundary note as the warning. Sleep is NOT offered: the legacy
+// historySleeps totalHours basis is unproven. Self-contained so
+// repo-side validate-seven-day-facts.mjs can extract it by name and
 // run it standalone over synthetic fixtures.
 function sevenDayFacts(
   historyDaily: Array<Pick<Daily, "date" | "steps" | "exerciseMinutes" | "hrvMs" | "restingHr">>,
   dataDate: string,
   coverageIncomplete: boolean,
   metricKey: SevenDayMetricKey,
+  todayLa: string,
 ): SevenDayFactsResult {
   const defs: Record<SevenDayMetricKey, Omit<SevenDayMetricDef, "key">> = {
     exerciseMinutes: { label: "运动分钟", unit: "分钟", digits: 0 },
@@ -689,10 +710,12 @@ function sevenDayFacts(
   };
   const metric: SevenDayMetricDef = { key: metricKey, ...defs[metricKey] };
   const metrics: SevenDayMetricDef[] = (Object.keys(defs) as SevenDayMetricKey[]).map((key) => ({ key, ...defs[key] }));
-  const parsed = new Date(`${dataDate}T12:00:00Z`);
-  const validDate = /^\d{4}-\d{2}-\d{2}$/.test(dataDate)
-    && !Number.isNaN(parsed.getTime())
-    && parsed.toISOString().slice(0, 10) === dataDate;
+  const isRealDate = (value: string): boolean => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const candidate = new Date(`${value}T12:00:00Z`);
+    return !Number.isNaN(candidate.getTime()) && candidate.toISOString().slice(0, 10) === value;
+  };
+  const validDate = isRealDate(dataDate);
   if (!validDate) {
     return {
       metric, metrics, days: [], covered: 0, boundaryOk: false,
@@ -718,10 +741,22 @@ function sevenDayFacts(
     return { date, value: distinct[0] ?? null, conflict: false };
   });
   const covered = days.filter((day) => !day.conflict && day.value !== null).length;
-  const boundaryOk = valuesByDate.has(dataDate);
+  const hasEndRow = valuesByDate.has(dataDate);
+  // Complete-day boundary: the end day must exist AND have strictly
+  // ended, i.e. dataDate is before LA today. dataDate === todayLa means
+  // the day is still in progress (partial); dataDate after todayLa is a
+  // future-date anomaly. An unusable todayLa can never prove the day
+  // ended, so it also fails the boundary.
+  const boundaryOk = hasEndRow && isRealDate(todayLa) && dataDate < todayLa;
+  let boundaryNote: string | null = null;
+  if (!boundaryOk) {
+    if (!hasEndRow) boundaryNote = "日期边界未满足：数据日期当天尚无完整的每日记录，以下逐日值不作为完整趋势。";
+    else if (!isRealDate(todayLa)) boundaryNote = "日期边界未满足：无法确认数据日期是否已结束，以下逐日值不作为完整趋势。";
+    else if (dataDate === todayLa) boundaryNote = "日期边界未满足：数据日期为今天，当天尚未结束，以下逐日值为当日未完整数据，不作为完整趋势。";
+    else boundaryNote = "日期边界未满足：数据日期在未来，日期边界异常，以下逐日值不作为完整趋势。";
+  }
   return {
-    metric, metrics, days, covered, boundaryOk,
-    boundaryNote: boundaryOk ? null : "日期边界未满足：数据日期当天尚无完整的每日记录，以下逐日值不作为完整趋势。",
+    metric, metrics, days, covered, boundaryOk, boundaryNote,
     coverageIncomplete,
   };
 }
@@ -842,7 +877,7 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
 function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
   const [metricKey, setMetricKey] = useState<SevenDayMetricKey>("exerciseMinutes");
   const [openDate, setOpenDate] = useState<string | null>(null);
-  const facts = sevenDayFacts(snapshot.historyDaily, snapshot.dataDate, snapshot.coverageIncomplete, metricKey);
+  const facts = sevenDayFacts(snapshot.historyDaily, snapshot.dataDate, snapshot.coverageIncomplete, metricKey, laTodayDateString());
   const openCell = openDate === null ? undefined : facts.days.find((day) => day.date === openDate);
   const cellText = (day: SevenDayCell): string => day.conflict ? "冲突/不可用" : day.value === null ? "无记录" : `${numberLabel(day.value, facts.metric.digits)} ${facts.metric.unit}`;
   return (

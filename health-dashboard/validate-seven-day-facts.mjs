@@ -39,7 +39,18 @@ function buildFn(src) {
   const code = extractFunction(src, 'sevenDayFacts');
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { sevenDayFacts };`)().sevenDayFacts;
 }
-const sevenDayFacts = buildFn(clientSrc);
+function buildLaToday(src) {
+  const code = extractFunction(src, 'laTodayDateString');
+  return new Function(`${stripTypeScriptTypes(code)}\nreturn { laTodayDateString };`)().laTodayDateString;
+}
+const rawSevenDayFacts = buildFn(clientSrc);
+const laTodayDateString = buildLaToday(clientSrc);
+// Existing fixtures were written when 2026-10-14 was a completed day;
+// pin LA "today" to 2026-10-15 by default so those cases keep exercising
+// the ended-day path, and pass an explicit todayLa for the new boundary
+// cases (LA today / future / yesterday).
+const sevenDayFacts = (rows, dataDate, coverageIncomplete, metricKey, todayLa = '2026-10-15') =>
+  rawSevenDayFacts(rows, dataDate, coverageIncomplete, metricKey, todayLa);
 
 // ---------------------------------------------------------- source wiring
 check('source: strip renders inside WhoopHero after the load verdict block',
@@ -55,6 +66,11 @@ check('source: coverage-incomplete note is rendered from the facts result, no ne
   clientSrc.includes('来源覆盖不完整：健康数据还没同步完') && clientSrc.includes('facts.coverageIncomplete'));
 check('source: no sleep metric is offered anywhere in the facts function',
   !/totalHours|sleep/i.test(extractFunction(clientSrc, 'sevenDayFacts')));
+check('source: caller passes the LA today computed by laTodayDateString',
+  clientSrc.includes('sevenDayFacts(snapshot.historyDaily, snapshot.dataDate, snapshot.coverageIncomplete, metricKey, laTodayDateString())'));
+check('source: sevenDayFacts takes an explicit todayLa parameter and never reads the clock itself',
+  /function sevenDayFacts\([\s\S]*?todayLa: string/.test(clientSrc)
+  && !/new Date\(\)|Date\.now/.test(extractFunction(clientSrc, 'sevenDayFacts')));
 
 // ------------------------------------------------------------ synthetic data
 const row = (date, patch = {}) => ({
@@ -159,6 +175,55 @@ const DATES = ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11', '2026-10-
   check('complete coverage: flag stays false', r2.coverageIncomplete === false);
 }
 
+// ------------------------------------------- complete-day boundary vs LA today
+{
+  // dataDate IS LA today and the day has a row: the day has not ended,
+  // so the row is partial — boundary unsatisfied with the partial note,
+  // while the raw per-day values stay visible.
+  const r = sevenDayFacts(base, '2026-10-14', false, 'exerciseMinutes', '2026-10-14');
+  check('LA today with a row: boundary unsatisfied (day still in progress)',
+    r.boundaryOk === false && r.boundaryNote.includes('日期边界未满足')
+    && r.boundaryNote.includes('数据日期为今天') && r.boundaryNote.includes('当天尚未结束')
+    && r.boundaryNote.includes('未完整数据') && r.boundaryNote.includes('不作为完整趋势'));
+  check('LA today with a row: raw values still presented, not hidden',
+    r.days.length === 7 && r.days[6].date === '2026-10-14' && r.days[6].value === 60 && r.covered === 5);
+}
+{
+  // dataDate AFTER LA today (future date) with a row: boundary anomaly,
+  // a distinct note from both the partial-today and the no-row notes.
+  const r = sevenDayFacts(base, '2026-10-14', false, 'steps', '2026-10-13');
+  check('future dataDate with a row: boundary unsatisfied (future-date note)',
+    r.boundaryOk === false && r.boundaryNote.includes('数据日期在未来')
+    && r.boundaryNote.includes('日期边界异常') && !r.boundaryNote.includes('数据日期为今天')
+    && !r.boundaryNote.includes('尚无完整的每日记录'));
+  check('future dataDate with a row: raw values still presented',
+    r.days.length === 7 && r.days[6].value === 12345);
+}
+{
+  // dataDate is a real yesterday relative to LA today, with a row: the
+  // day has ended, so the boundary is satisfied and there is no note.
+  const r = sevenDayFacts(base, '2026-10-14', false, 'steps', '2026-10-15');
+  check('real yesterday with a row: boundary satisfied, no note',
+    r.boundaryOk === true && r.boundaryNote === null && r.covered === 6);
+  // Same day, but as LA today with a real 0 on the end day: the 0 still
+  // counts as covered even though the boundary fails as partial.
+  const zeroDay = [row('2026-10-14', { exerciseMinutes: 0 })];
+  const rz = sevenDayFacts(zeroDay, '2026-10-14', false, 'exerciseMinutes', '2026-10-14');
+  check('real 0 on LA today: counts as covered, boundary still partial',
+    rz.days[6].value === 0 && rz.covered === 1 && rz.boundaryOk === false
+    && rz.boundaryNote.includes('数据日期为今天'));
+  // Duplicate conflict on LA today: conflict marking is unchanged.
+  const dup = [row('2026-10-14', { exerciseMinutes: 10 }), row('2026-10-14', { exerciseMinutes: 25 })];
+  const rd = sevenDayFacts(dup, '2026-10-14', false, 'exerciseMinutes', '2026-10-14');
+  check('duplicate conflict on LA today: still conflict/unavailable, boundary partial',
+    rd.days[6].conflict === true && rd.days[6].value === null && rd.covered === 0
+    && rd.boundaryOk === false && rd.boundaryNote.includes('数据日期为今天'));
+  // An unusable todayLa can never prove the day ended.
+  const rb = sevenDayFacts(base, '2026-10-14', false, 'steps', 'not-a-date');
+  check('invalid todayLa: boundary unsatisfied, never silently complete',
+    rb.boundaryOk === false && rb.boundaryNote.includes('日期边界未满足'));
+}
+
 // ------------------------------------------------------------ LA calendar edges
 {
   // Spring forward 2026-03-08 (America/Los_Angeles): the 7 calendar days
@@ -182,18 +247,49 @@ const DATES = ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11', '2026-10-
     leap.days.map((d) => d.date).join(',') === '2024-02-24,2024-02-25,2024-02-26,2024-02-27,2024-02-28,2024-02-29,2024-03-01');
 }
 
+// ------------------------------------------- client LA-today computation
+{
+  // Around LA midnight (PDT, UTC-7): 06:59:59Z is still 2026-10-16 in
+  // Los Angeles; 07:00:00Z is exactly LA midnight of 2026-10-17.
+  check('laTodayDateString: just before LA midnight stays on the previous LA day',
+    laTodayDateString(new Date('2026-10-17T06:59:59Z')) === '2026-10-16');
+  check('laTodayDateString: at LA midnight rolls to the new LA day',
+    laTodayDateString(new Date('2026-10-17T07:00:00Z')) === '2026-10-17');
+  // Spring forward 2026-03-08 (02:00 PST -> 03:00 PDT): 07:59:59Z is
+  // 2026-03-07 23:59:59 PST; 08:00:00Z is 2026-03-08 00:00 PST; later
+  // that morning (10:00Z = 03:00 PDT) is still 2026-03-08.
+  check('laTodayDateString: spring-forward eve stays 2026-03-07',
+    laTodayDateString(new Date('2026-03-08T07:59:59Z')) === '2026-03-07');
+  check('laTodayDateString: spring-forward morning is 2026-03-08 (no skipped day)',
+    laTodayDateString(new Date('2026-03-08T08:00:00Z')) === '2026-03-08'
+    && laTodayDateString(new Date('2026-03-08T10:00:00Z')) === '2026-03-08');
+  // Fall back 2026-11-01 (02:00 PDT -> 01:00 PST): 06:59:59Z is
+  // 2026-10-31 23:59:59 PDT; 07:00:00Z is 2026-11-01 00:00 PDT; the
+  // repeated 01:00 hour (09:00Z, PST) is still 2026-11-01.
+  check('laTodayDateString: fall-back eve stays 2026-10-31',
+    laTodayDateString(new Date('2026-11-01T06:59:59Z')) === '2026-10-31');
+  check('laTodayDateString: fall-back repeated hour stays 2026-11-01 (no doubled day)',
+    laTodayDateString(new Date('2026-11-01T07:00:00Z')) === '2026-11-01'
+    && laTodayDateString(new Date('2026-11-01T09:00:00Z')) === '2026-11-01');
+}
+
 // ------------------------------------------------------------ mutation sensitivity
 {
   const noConflictGate = buildFn(clientSrc.replace('if (distinct.length > 1) return { date, value: null, conflict: true };', 'if (distinct.length > 999) return { date, value: null, conflict: true };'));
   const dupConflict = [...base, row('2026-10-12', { exerciseMinutes: 50 })];
   check('mutation: dropping the conflict gate lets a conflicting day pass as a value',
     sevenDayFacts(dupConflict, '2026-10-14', false, 'exerciseMinutes').days[4].conflict === true
-    && noConflictGate(dupConflict, '2026-10-14', false, 'exerciseMinutes').days[4].conflict === false);
+    && noConflictGate(dupConflict, '2026-10-14', false, 'exerciseMinutes', '2026-10-15').days[4].conflict === false);
 
   const gapsCovered = buildFn(clientSrc.replace('const covered = days.filter((day) => !day.conflict && day.value !== null).length;', 'const covered = days.filter((day) => !day.conflict).length;'));
   check('mutation: counting gaps as covered inflates x/7',
     sevenDayFacts(base, '2026-10-14', false, 'exerciseMinutes').covered === 5
-    && gapsCovered(base, '2026-10-14', false, 'exerciseMinutes').covered === 7);
+    && gapsCovered(base, '2026-10-14', false, 'exerciseMinutes', '2026-10-15').covered === 7);
+
+  const noEndedGate = buildFn(clientSrc.replace('const boundaryOk = hasEndRow && isRealDate(todayLa) && dataDate < todayLa;', 'const boundaryOk = hasEndRow;'));
+  check('mutation: dropping the ended-day gate presents LA today as a complete trend',
+    sevenDayFacts(base, '2026-10-14', false, 'exerciseMinutes', '2026-10-14').boundaryOk === false
+    && noEndedGate(base, '2026-10-14', false, 'exerciseMinutes', '2026-10-14').boundaryOk === true);
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);
