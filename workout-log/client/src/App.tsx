@@ -673,6 +673,9 @@ export function hasUnsavedSetStatus(statuses: SetSaveStatus[]): boolean {
 
 export type SetSaveHandle = {
   id: number;
+  // W-UI-001-D1: owning exercise, for the top save aggregate's
+  // first-abnormal jump and per-exercise head status.
+  exerciseKey: string;
   getStatus: () => SetSaveStatus;
   flush: () => Promise<boolean>;
   isBlocked: () => boolean;
@@ -908,6 +911,128 @@ export function finishGateDecision(snapshots: FinishGateSnapshot[]): FinishGateD
   return { proceed: false, reason: "incomplete" };
 }
 
+// --- W-UI-001-D1: top save aggregate (pure) ---
+// The aggregate is a pure projection of the registered save handles:
+// it never becomes a save source of truth. Priority is fixed — a save
+// failure outranks a blocked (completed-but-missing-reps) set, which
+// outranks a dirty draft, then saving; a pending add or a finish in
+// progress must never read as "全部已保存".
+export type SetSaveSnapshot = {
+  id: number;
+  exerciseKey: string;
+  status: SetSaveStatus;
+  blocked: boolean;
+};
+export type SaveAggregateKind = "error" | "blocked" | "dirty" | "saving" | "adding" | "finishing" | "saved";
+export type SaveAggregate = {
+  kind: SaveAggregateKind;
+  label: string;
+  errorCount: number;
+  blockedCount: number;
+  firstAbnormal: SetSaveSnapshot | null;
+};
+
+export function aggregateSaveStates(
+  snapshots: SetSaveSnapshot[],
+  flags: { pendingAdds: number; finishing: boolean },
+): SaveAggregate {
+  const errors = snapshots.filter((snapshot) => snapshot.status === "error");
+  const blockedList = snapshots.filter((snapshot) => snapshot.blocked);
+  const counts = { errorCount: errors.length, blockedCount: blockedList.length };
+  if (errors.length > 0) {
+    return { kind: "error", label: `有 ${errors.length} 组保存失败`, ...counts, firstAbnormal: errors[0] };
+  }
+  if (blockedList.length > 0) {
+    return { kind: "blocked", label: `有 ${blockedList.length} 组需补次数`, ...counts, firstAbnormal: blockedList[0] };
+  }
+  const dirty = snapshots.filter((snapshot) => snapshot.status === "dirty");
+  if (dirty.length > 0) {
+    return { kind: "dirty", label: "有未保存的修改", ...counts, firstAbnormal: dirty[0] };
+  }
+  if (snapshots.some((snapshot) => snapshot.status === "saving")) {
+    return { kind: "saving", label: "正在保存", ...counts, firstAbnormal: null };
+  }
+  if (flags.finishing) {
+    return { kind: "finishing", label: "正在结束…", ...counts, firstAbnormal: null };
+  }
+  if (flags.pendingAdds > 0) {
+    return { kind: "adding", label: "正在添加一组", ...counts, firstAbnormal: null };
+  }
+  return { kind: "saved", label: "全部已保存", ...counts, firstAbnormal: null };
+}
+
+// --- W-UI-001-D1: current exercise selection (pure) ---
+// A manual header selection wins while that exercise still exists and
+// is never stolen by save callbacks or timer ticks; otherwise the
+// first exercise with an incomplete set; when everything is complete
+// the last exercise stays current so the page never collapses to none.
+export type ExerciseProgressSummary = { key: string; hasIncomplete: boolean };
+
+export function resolveCurrentExerciseKey(
+  groups: ExerciseProgressSummary[],
+  selectedKey: string | null,
+): string | null {
+  if (groups.length === 0) return null;
+  if (selectedKey != null && groups.some((group) => group.key === selectedKey)) return selectedKey;
+  const firstIncomplete = groups.find((group) => group.hasIncomplete);
+  return (firstIncomplete ?? groups[groups.length - 1]).key;
+}
+
+export type ExerciseHeadInfo = {
+  doneCount: number;
+  statusText: string | null;
+  statusKind: SaveAggregateKind | null;
+};
+
+export function exerciseHeadInfo(doneCount: number, snapshots: SetSaveSnapshot[]): ExerciseHeadInfo {
+  const errors = snapshots.filter((snapshot) => snapshot.status === "error");
+  if (errors.length > 0) {
+    return { doneCount, statusText: `有 ${errors.length} 组保存失败`, statusKind: "error" };
+  }
+  const blockedList = snapshots.filter((snapshot) => snapshot.blocked);
+  if (blockedList.length > 0) {
+    return {
+      doneCount,
+      statusText: blockedList.length > 1 ? `有 ${blockedList.length} 组需补次数` : "需补次数",
+      statusKind: "blocked",
+    };
+  }
+  if (snapshots.some((snapshot) => snapshot.status === "dirty")) {
+    return { doneCount, statusText: "有未保存修改", statusKind: "dirty" };
+  }
+  if (snapshots.some((snapshot) => snapshot.status === "saving")) {
+    return { doneCount, statusText: "保存中…", statusKind: "saving" };
+  }
+  return { doneCount, statusText: null, statusKind: null };
+}
+
+// --- W-UI-001-D1: keyboard next-field order (pure) ---
+// Enter moves weight -> this set's reps -> next set's weight, across
+// exercises in group order; the last field falls back to the finish
+// button. Enter never toggles completion.
+export type FocusFieldRef = { exerciseKey: string; setId: number; field: "weight" | "reps" };
+export type FocusTarget = { kind: "field"; target: FocusFieldRef } | { kind: "finish" };
+
+export function buildFocusOrder(groups: { key: string; sets: { id: number }[] }[]): FocusFieldRef[] {
+  const order: FocusFieldRef[] = [];
+  for (const group of groups) {
+    for (const set of group.sets) {
+      order.push({ exerciseKey: group.key, setId: set.id, field: "weight" });
+      order.push({ exerciseKey: group.key, setId: set.id, field: "reps" });
+    }
+  }
+  return order;
+}
+
+export function nextFocusTarget(order: FocusFieldRef[], current: FocusFieldRef): FocusTarget | null {
+  const index = order.findIndex(
+    (entry) => entry.exerciseKey === current.exerciseKey && entry.setId === current.setId && entry.field === current.field,
+  );
+  if (index < 0) return null;
+  if (index === order.length - 1) return { kind: "finish" };
+  return { kind: "field", target: order[index + 1] };
+}
+
 export type RestTimerState = {
   endsAt: number | null;
   durationSec: number;
@@ -1008,9 +1133,12 @@ function playRestBeep() {
   }
 }
 
-function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
+function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNext }: {
   set: WorkoutSet;
   unit: Unit;
+  // W-UI-001-D1: after Enter's blur-save, the owner moves focus along
+  // buildFocusOrder; Enter itself never toggles completion.
+  onEnterNext?: (field: "weight" | "reps") => void;
   // W-FINISH-001: while a finish flow owns the workout, entry is
   // locked — inputs, the completion toggle and retry are disabled so
   // no new edit can start behind the seal.
@@ -1074,6 +1202,7 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
   useEffect(() => {
     onRegister(set.id, {
       id: set.id,
+      exerciseKey: set.exercise_key,
       getStatus: () => machineRef.current.status,
       flush: flushSave,
       isBlocked: () => setSaveBlocked(machineRef.current),
@@ -1116,10 +1245,13 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
     void requestSave();
   }
 
-  function onEnterSave(event: ReactKeyboardEvent<HTMLInputElement>) {
+  function onEnterSave(event: ReactKeyboardEvent<HTMLInputElement>, field: "weight" | "reps") {
     if (event.key === "Enter") {
       event.preventDefault();
+      // Blur first: the normal blur-save path runs, then the owner
+      // moves focus along the D1 focus order.
       event.currentTarget.blur();
+      onEnterNext?.(field);
     }
   }
 
@@ -1141,6 +1273,8 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
         <span className="sr-only">第 {set.set_number} 组重量（{unit}）</span>
         <input
           aria-label={`${set.exercise_name} 第 ${set.set_number} 组重量，单位 ${unit}`}
+          data-focus-set={set.id}
+          data-focus-field="weight"
           inputMode="decimal"
           type="number"
           min="0"
@@ -1149,7 +1283,7 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
           disabled={locked}
           onChange={(event) => numericChange(event, "weight")}
           onBlur={onBlurSave}
-          onKeyDown={onEnterSave}
+          onKeyDown={(event) => onEnterSave(event, "weight")}
           placeholder="—"
         />
         <small>{unit}</small>
@@ -1158,6 +1292,8 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
         <span className="sr-only">第 {set.set_number} 组次数</span>
         <input
           aria-label={`${set.exercise_name} 第 ${set.set_number} 组次数`}
+          data-focus-set={set.id}
+          data-focus-field="reps"
           inputMode="numeric"
           type="number"
           min="0"
@@ -1166,7 +1302,7 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
           disabled={locked}
           onChange={(event) => numericChange(event, "reps")}
           onBlur={onBlurSave}
-          onKeyDown={onEnterSave}
+          onKeyDown={(event) => onEnterSave(event, "reps")}
           placeholder={set.target_reps}
         />
         <small>次</small>
@@ -1196,10 +1332,17 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
 // workout's unit when the source workout used the other unit.
 export type PreviousMark = { weight: number | null; reps: number | null; converted: boolean };
 
-function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, onChanged, onSetCompleted, onOpenGuide, onRegisterSet, onRegisterPendingAdd }: {
+function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, expanded, headInfo, onSelect, onEnterNextSet, onChanged, onSetCompleted, onOpenGuide, onRegisterSet, onRegisterPendingAdd }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
   previous?: PreviousMark;
+  // W-UI-001-D1: single-expand card. The body is only hidden with the
+  // `hidden` attribute — SetRows stay mounted and their save handles
+  // stay registered, so an in-flight draft survives a card switch.
+  expanded: boolean;
+  headInfo: ExerciseHeadInfo;
+  onSelect: () => void;
+  onEnterNextSet: (setId: number, field: "weight" | "reps") => void;
   // W-TIMER-001: the rest-timer UI (auto toggle + panel) injected by
   // ActiveWorkout into the current exercise's block only. Purely an
   // extra child node — SetRow mounting/registration is untouched.
@@ -1244,41 +1387,55 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, on
   return (
     <section className="exercise-block" aria-labelledby={`exercise-${exercise.key}`}>
       <div className="exercise-heading">
-        <div>
-          <div className="exercise-title-line">
-            <h2 id={`exercise-${exercise.key}`}>{exercise.name}</h2>
-            {guide ? (
-              <button
-                className="guide-trigger"
-                type="button"
-                aria-label={`查看${exercise.name}动作要领`}
-                onClick={() => onOpenGuide(guide)}
-              >要领</button>
+        <div className="exercise-side">
+          <button
+            className="exercise-select"
+            type="button"
+            aria-expanded={expanded}
+            aria-label={`${exercise.name}，${headInfo.doneCount}/${exercise.sets.length} 组完成${headInfo.statusText ? `，${headInfo.statusText}` : ""}`}
+            onClick={onSelect}
+          >
+            <span className="exercise-title-line">
+              <h2 id={`exercise-${exercise.key}`}>{exercise.name}</h2>
+              <span className="exercise-chevron" aria-hidden="true">{expanded ? "收起 ▴" : "展开 ▾"}</span>
+            </span>
+            <span className="exercise-meta-line">
+              {headInfo.doneCount}/{exercise.sets.length} 组完成 · 每组 {exercise.target} 次
+              {previous && exercise.sets.some((set) => set.weight != null || set.reps != null) ? (
+                <span className="prefill-note"> · {workout.prefill_unit_converted ? "已按上次表现预填（含单位换算）" : "已按上次表现预填"}</span>
+              ) : null}
+            </span>
+            {headInfo.statusText ? (
+              <span className="exercise-head-status" data-kind={headInfo.statusKind ?? undefined}>{headInfo.statusText}</span>
             ) : null}
-          </div>
-          <p>
-            {exercise.sets.length} 组 · 每组 {exercise.target} 次
-            {previous && exercise.sets.some((set) => set.weight != null || set.reps != null) ? (
-              <span className="prefill-note"> · {workout.prefill_unit_converted ? "已按上次表现预填（含单位换算）" : "已按上次表现预填"}</span>
-            ) : null}
-          </p>
+          </button>
+          {guide ? (
+            <button
+              className="guide-trigger"
+              type="button"
+              aria-label={`查看${exercise.name}动作要领`}
+              onClick={() => onOpenGuide(guide)}
+            >要领</button>
+          ) : null}
         </div>
         {previous && previous.weight != null ? (
           <span className="previous-mark">上次 {previous.weight}{workout.unit} × {previous.reps ?? "—"}{previous.converted ? "（已换算）" : ""}</span>
         ) : null}
       </div>
-      <div className="set-columns" aria-hidden="true">
-        <span>组</span><span>重量</span><span>次数</span><span>完成</span>
+      <div className="exercise-body" hidden={!expanded}>
+        <div className="set-columns" aria-hidden="true">
+          <span>组</span><span>重量</span><span>次数</span><span>完成</span>
+        </div>
+        <div className="set-list">
+          {exercise.sets.map((set) => (
+            <SetRow key={set.id} set={set} unit={workout.unit} locked={entryLocked} onSaved={onChanged} onRegister={onRegisterSet} onCompleted={onSetCompleted} onEnterNext={(field) => onEnterNextSet(set.id, field)} />
+          ))}
+        </div>
+        <button className="add-set" type="button" onClick={handleAddSet} disabled={addSet.isPending || entryLocked}>
+          {addSet.isPending ? "添加中…" : "+ 加一组"}
+        </button>
+        {timerSlot}
       </div>
-      <div className="set-list">
-        {exercise.sets.map((set) => (
-          <SetRow key={set.id} set={set} unit={workout.unit} locked={entryLocked} onSaved={onChanged} onRegister={onRegisterSet} onCompleted={onSetCompleted} />
-        ))}
-      </div>
-      <button className="add-set" type="button" onClick={handleAddSet} disabled={addSet.isPending || entryLocked}>
-        {addSet.isPending ? "添加中…" : "+ 加一组"}
-      </button>
-      {timerSlot}
     </section>
   );
 }
@@ -1349,6 +1506,18 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const [finishFailed, setFinishFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [unsavedPresent, setUnsavedPresent] = useState(false);
+  // W-UI-001-D1: manual current-exercise selection (null = automatic),
+  // a mirror of the registered save handles for the top aggregate and
+  // per-exercise head status (mirror only — the handles stay the save
+  // source of truth), the in-flight add count, and the finish button
+  // ref for the Enter focus chain's last step.
+  const [selectedExerciseKey, setSelectedExerciseKey] = useState<string | null>(null);
+  const [handleMirror, setHandleMirror] = useState<{ snapshots: SetSaveSnapshot[]; completed: Record<number, boolean> }>({
+    snapshots: [],
+    completed: {},
+  });
+  const [pendingAddCount, setPendingAddCount] = useState(0);
+  const finishButtonRef = useRef<HTMLButtonElement | null>(null);
   const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
   // Rest timer lives only in this component's memory: no server writes, no
   // localStorage, so a page refresh resets it (workout data itself is still
@@ -1397,8 +1566,10 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const pendingAddsRef = useRef(new Set<Promise<unknown>>());
   const registerPendingAdd = useCallback((promise: Promise<unknown>) => {
     pendingAddsRef.current.add(promise);
+    setPendingAddCount((count) => count + 1);
     const unregister = () => {
       pendingAddsRef.current.delete(promise);
+      setPendingAddCount((count) => Math.max(0, count - 1));
     };
     void promise.then(unregister, unregister);
   }, []);
@@ -1421,8 +1592,21 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const registerSet = (id: number, handle: SetSaveHandle | null) => {
     if (handle) setHandlesRef.current.set(id, handle);
     else setHandlesRef.current.delete(id);
-    const statuses = [...setHandlesRef.current.values()].map((entry) => entry.getStatus());
+    const handles = [...setHandlesRef.current.values()];
+    const statuses = handles.map((entry) => entry.getStatus());
     setUnsavedPresent(hasUnsavedSetStatus(statuses));
+    // W-UI-001-D1: refresh the display mirror (aggregate + draft-aware
+    // completion) from the same handles; registration re-runs whenever
+    // a row's save machine changes, so the mirror tracks every save.
+    setHandleMirror({
+      snapshots: handles.map((entry) => ({
+        id: entry.id,
+        exerciseKey: entry.exerciseKey,
+        status: entry.getStatus(),
+        blocked: entry.isBlocked(),
+      })),
+      completed: Object.fromEntries(handles.map((entry) => [entry.id, entry.isCompleted()])),
+    });
   };
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -1570,10 +1754,55 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const total = workout.sets.length;
   const meta = ROUTINE_META[workout.routine];
   const exerciseGroups = groupSets(workout.sets);
-  // W-TIMER-001: the current exercise is the first one (in groupSets
-  // order) that still has an unfinished set; when every set is done
-  // there is none and the timer UI falls back below the stack.
-  const currentExercise = exerciseGroups.find((group) => group.sets.some((set) => !set.completed)) ?? null;
+  // W-UI-001-D1: draft-aware completion (a set toggled complete in its
+  // row counts before the dashboard refetch lands), the resolved
+  // current exercise (manual selection first, then first incomplete,
+  // then the last exercise), and the top save aggregate. The rest
+  // timer anchors to that same current exercise.
+  const isSetCompleted = (set: WorkoutSet) => handleMirror.completed[set.id] ?? set.completed;
+  const doneCount = exerciseGroups.length > 0 && Object.keys(handleMirror.completed).length > 0
+    ? workout.sets.filter(isSetCompleted).length
+    : done;
+  const currentKey = resolveCurrentExerciseKey(
+    exerciseGroups.map((group) => ({
+      key: group.key,
+      hasIncomplete: group.sets.some((set) => !isSetCompleted(set)),
+    })),
+    selectedExerciseKey,
+  );
+  const aggregate = aggregateSaveStates(handleMirror.snapshots, {
+    pendingAdds: pendingAddCount,
+    finishing,
+  });
+  const currentExercise = exerciseGroups.find((group) => group.key === currentKey) ?? null;
+
+  const focusSetInput = (setId: number, field: "weight" | "reps") => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLInputElement>(`input[data-focus-set="${setId}"][data-focus-field="${field}"]`)
+          ?.focus();
+      });
+    });
+  };
+
+  const handleEnterNext = (exerciseKey: string, setId: number, field: "weight" | "reps") => {
+    const target = nextFocusTarget(buildFocusOrder(exerciseGroups), { exerciseKey, setId, field });
+    if (!target) return;
+    if (target.kind === "finish") {
+      finishButtonRef.current?.focus();
+      return;
+    }
+    setSelectedExerciseKey(target.target.exerciseKey);
+    focusSetInput(target.target.setId, target.target.field);
+  };
+
+  const handleViewAbnormal = () => {
+    const abnormal = aggregate.firstAbnormal;
+    if (!abnormal) return;
+    setSelectedExerciseKey(abnormal.exerciseKey);
+    focusSetInput(abnormal.id, abnormal.blocked ? "reps" : "weight");
+  };
   const restTimerUi = (
     <>
       <RestAutoToggle timer={restTimer} onChange={updateRestTimer} />
@@ -1592,12 +1821,22 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
         </div>
         <div className="timer" aria-label={`训练时长 ${formatDuration(workout.started_at)}`}>
           <strong>{formatDuration(workout.started_at)}</strong>
-          <span>{done}/{total} 组</span>
+          <span>{doneCount}/{total} 组</span>
         </div>
       </header>
 
-      <div className="progress-track" aria-label={`已完成 ${done} 组，共 ${total} 组`}>
-        <span style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
+      <div className="workout-status-bar">
+        <span className="completion-count">已完成 {doneCount} / {total} 组</span>
+        <span className="save-aggregate" data-kind={aggregate.kind} role="status">
+          {aggregate.label}
+          {aggregate.kind === "error" || aggregate.kind === "blocked" ? (
+            <button type="button" className="save-aggregate-view" onClick={handleViewAbnormal}>查看</button>
+          ) : null}
+        </span>
+      </div>
+
+      <div className="progress-track" aria-label={`已完成 ${doneCount} 组，共 ${total} 组`}>
+        <span style={{ width: `${total ? (doneCount / total) * 100 : 0}%` }} />
       </div>
 
       <details className="warmup-strip">
@@ -1614,6 +1853,13 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
             previous={previousByExercise.get(exercise.key)}
             timerSlot={currentExercise != null && exercise.key === currentExercise.key ? restTimerUi : undefined}
             entryLocked={finishing}
+            expanded={exercise.key === currentKey}
+            headInfo={exerciseHeadInfo(
+              exercise.sets.filter(isSetCompleted).length,
+              handleMirror.snapshots.filter((snapshot) => snapshot.exerciseKey === exercise.key),
+            )}
+            onSelect={() => setSelectedExerciseKey(exercise.key)}
+            onEnterNextSet={(setId, field) => handleEnterNext(exercise.key, setId, field)}
             onChanged={refresh}
             onSetCompleted={handleSetCompleted}
             onOpenGuide={setSelectedGuide}
@@ -1627,10 +1873,10 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
 
       <section className="finish-zone">
         <div>
-          <p>{done === total ? "全部完成" : `还剩 ${total - done} 组`}</p>
+          <p>{doneCount === total ? "全部完成" : `还剩 ${total - doneCount} 组`}</p>
           <span>{unsavedPresent ? "有未保存的修改，结束前会先保存" : "完成后会进入历史记录"}</span>
         </div>
-        <button type="button" className="finish-button" onClick={() => void handleFinish()} disabled={complete.isPending || finishing}>
+        <button ref={finishButtonRef} type="button" className="finish-button" onClick={() => void handleFinish()} disabled={complete.isPending || finishing}>
           {complete.isPending || finishing ? "正在结束…" : "结束训练"}
         </button>
       </section>
