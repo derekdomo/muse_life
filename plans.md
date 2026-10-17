@@ -327,10 +327,10 @@
 
 以下是本轮真实审查游标；交付主状态、PM 事后结论和补证队列分别记录。历史“待验／唯一下一项／发布门槛”均不产生门控效力，以本文批量结案表和当前单一队列为准。
 
-- 上次已审查源 commit：`5992544712cfe5eb5bbdaf224091e949bb083b11`
-- 上次运行：2026-10-17 12:05 PDT（本轮开始 origin/main HEAD 为 `5992544712cfe5eb5bbdaf224091e949bb083b11`）
-- 上次结论：六笔新增提交全部事后标注，见12:05最新表。W-START隔离/正常收敛已验证，提前返回初始化目标及历史读取失败后重试卡住继续原P0；W-FINISH已join加组promise，React注册屏障仍缺；W1最新缺动作已修，但两端20条窗口不同。H-LOAD-D1原值/缺口通过，当前/未来日期边界P1；F0.2崩溃/恢复源码关闭，无数据却称显示上次数据的P1继续；W-UI-D1源码呈现分项已验证，实际运行补证分账。
-- 当前应推动：W-START/W-FINISH两项P0及L1/H0/H1/F0/HH0按统一队列持续推进；W1/H-LOAD-D1目标10-18，F0.2状态文字10-18，F1.2/F2.1-D1同一事实卡交付目标10-19。W-UI-D1不因缺owner视角重开已修源码。L0.1指定例外保持；A运行补证与B形式尾巴不作PM门控。
+- 上次已审查源 commit：`bb539fb68a1e61a55155020bb30203e2cedaa05c`
+- 上次运行：2026-10-17 15:03 PDT（本轮开始 origin/main HEAD 为 `bb539fb68a1e61a55155020bb30203e2cedaa05c`）
+- 上次结论：四笔新增交付逐项事后标注，见15:03最新表。W-START历史失败清理/新鲜初始化重试已验证，超时接管仍可产生两条可用active，原P0继续；W-FINISH注册延迟、W1跨窗口、H-LOAD-D1完整日、F0.2四态源码返工关闭。F2.1-D1数值/比较语义通过，余额来源把非余额条目计作账户，沿原ID P1修。源码关闭与A运行补证分账。
+- 当前应推动：W-START原P0及L1/H0/H1/F0/HH0既有P0按统一队列继续；F2.1-D1来源统计目标10-18，F0.3/F0.4月度唯一事实/完整性设计已细化、目标10-18，旧10-20周上限不延长。W-FINISH/W1/H-LOAD-D1/F0.2源码已修不因缺owner视角重开；A运行补证EVID和B形式尾巴不作PM门控，L0.1四入口批准例外保持。
 
 ### 自动审查记录
 
@@ -342,9 +342,60 @@
 
 统一按 P0（数据安全／权限／管道缺陷、线上与存档级 bug）＞用户直提需求＞PM 需求与普通 bug＞证据与文档尾巴排序。W-UI 保存闭环、W-TIMER 已有缺口、健康首屏与全部运动等独立需求按真实队列连续处理，不等 PM 复验；L1/H0 刷新与来源、W0/W1 记录可靠性、H1 公式、H3/W3 周复盘等保留既有编号和业务边界，以真实技术依赖决定实现次序，不能将旧待验框当依赖。H4/W5/F3 已批准候选仍入 backlog，看房暂缓候选保持所有者决定；新方向提案与队列并行，实施先等所有者拍板。
 
+## 2026-10-17 15:03 PDT PM 增量复验与产品推进
+
+本节是最新PM事后结论；旧表是历史记录，交付与PM结论分账。指标截点2026-10-17T22:03:25Z；全部验证fixture明确synthetic，责任方Muse，PM只维护plans。
+
+### 用户可见增量、等待时长与上线事实
+
+- **本轮已交付用户可见行为增量6项**：开始失败可清理重试且不再成功返回初始化空记录；结束等待最终组注册；跨全局20条窗口的建议与预填同源；财务无可读数据时的诚实恢复入口；首条余额差事实卡；七日事实区分LA当日/未来与已结束日。按六项具体行为计，开始接管和余额来源仍有下列问题，不能称六项需求整体验证完毕。PM文档产品增量0。
+- **全队列中位等待不可计算**：仍缺本批真实startedAt及部分旧项queuedAt，不能把Git/上线申报时间反推开工。新增完整开工样本0；历史完整样本n=1仍仅W-FINISH，09:51:44Z→10:13Z约21分钟，不是总体中位数。F2.1-D1已有交付，移出完全未开工样本；旧可算完全未开工样本n=0。F0.3/F0.4是既有需求细化，保留原缺失时间，不拿本轮设计时间重置等待。
+- 起始origin/main及源游标`bb539fb68a1e61a55155020bb30203e2cedaa05c`。上轮源`5992544`之后先是`bcc0bfa5a8b52c8ab1193fd6f109debee459584b`（PM-only，已在上轮审完），本轮新增逐笔为`fe004d24cd7ede2ec0208d9413533aae1f5b94cf`、`f5917b8bc3ca25c4695e51551ccdc53b79e24683`、`d2df20dad4b542b1b6f42a18973db8b79660fb3d`、`bb539fb68a1e61a55155020bb30203e2cedaa05c`。清洁main安全ff；提交文件和四段Gate全部枚举，无漏审。
+- Muse在changes申报space-6、space-3、space-4经build/audit后已上线；Git交付时间分别20:21:35Z、20:21:56Z、20:33:46Z、20:43:24Z，**这些是Git时间，不是独立submit生效时间**。本会话无builder/invoke_action，未独立观察最终版本/源码映射，新增所有者实际打开确认0；PM主状态均记**已交付**，不伪称已上线在用。常规Life直接上线授权保持，无需等PM。
+
+### 全部新增交付事后结案
+
+| ID / SHA | 主状态 | PM已验证分项（源码/受控实际函数） | 问题与去向 |
+| --- | --- | --- | --- |
+| W-START-001 / W0.4 · fe004d2 | 已交付 | A历史查询失败清理后实际重试恢复；新鲜初始化阻塞时返回明确重试错误，原请求恢复后唯一ready，成功有完整组 | 有问题：超时接管失去删除竞争、两个等待者遇同一残留均能产生双ready，原P0继续；原空返回/历史失败分项关闭 |
+| W-FINISH-001 / W0.5 / W-UI-001 · fe004d2 | 已交付 | A真实加组落库，最终dashboard IDs与延迟handle注册屏障使直接结束进入incomplete；注册始终缺失时两结束路径均中止、保留active；确认路径等注册后才能完成 | 上轮pending-add/注册窗口源码返工关闭；原保存/失败恢复/seal检查复用。实际SDK/React调度/owner运行仍EVID补证，不重开P0 |
+| W1-CONSISTENCY-001 / W1.1–W1.4 · d2df20d | 已交付 | A同一内存库执行真实getDashboard→review与start：全局第21条卧推两端105lb；候选按routine20条同源，旧服务缺字段回退保留 | 上轮跨窗口源码返工关闭；原额外组/null/跨单位矩阵57/57复用并通过；实际SDK附加响应/线上读回仍EVID |
+| F0.2 · f5917b8 | 已交付 | A无值error与有值error诚实区分，B顶部/空态/页脚/恢复入口接线；原typed损坏恢复链未改、复用上轮已验证分项 | 上轮无值却称显示上次数据的源码返工关闭；四态运行及真实schema仍EVID，不因缺截图重开源码 |
+| F1.2 / F2.1-D1 · f5917b8 | 已交付 | A正负/真0/null、与既有净资产同公式、连续producer对比；B比较对象日期未留存/非固定间隔/失败保留旧日期文案 | 有问题：来源统计消费全accounts，将收入/固定支出等计为余额账户；沿F2.1-D1 P1修，首卡其余分项保留 |
+| H-LOAD-001-D1 · bb539fb | 已交付 | A实际函数LA昨天通过、今天/未来警告保留原值，真0与全局coverage独立；LA午夜/DST脚本通过；无服务端/公式/管道变更 | 上轮日期边界源码返工关闭，非七日readiness历史交付；B owner页面与发布源码映射沿EVID，不作门控 |
+
+### Bug单：一项原P0继续、一项真实P1来源缺陷
+
+- **W-START-001 · P0/A · fe004d2，当前server/actions.ts:881–910（消失分支:900）。** 复现1：实际A已写完组、停在ready UPDATE前，其started_at已超过30秒；B有界轮询耗尽并决定takeover，在B条件DELETE执行前恢复A，使A变ready并经实际updateSet写入synthetic草稿。B的DELETE匹配0行，却无条件break→自身ready；A/B均成功返回16组且最终两条ready active，A草稿保留但dashboard只选B。复现2：同一过期初始化父行，B/C两个真实start都完成自己的组并读到该父；一方删除残留，另一方轮询读到消失，分别进入takeover/proceed-self，最终两个不同可用active。实际违反原“同一可用目标/唯一active”，影响多端或慢初始化后的训练可达性，不声称已删除用户数据。修法：接管/消失后重新参与全体active仲裁，并把“是否可成为唯一ready”作为原子条件或等效串行化；不能以一次条件DELETE或30秒年龄证明拿到唯一资格，也不能无条件补删已可见/已编辑/已完成记录。固定原并发/失败矩阵具体涵盖这两个调度及删除0行、多个竞争者、原请求恢复/完成/放弃对照；每次成功必须可读写且只留下一个usable active，失败可重试。原queuedAt=2026-10-17T13:00:07Z、startedAt缺失、目标10-17、Muse；不重置。历史读取失败/新鲜等待/旧已完成保护等已修分项不重开。每轮有实际修复进展，不新增“两轮无进展”裁决。
+- **F2.1-D1（同F1.2首卡）· P1/A来源口径 · f5917b8 finance client/App.tsx:114–120、382；producer server/actions.ts:425–435。** synthetic合法producer输入一个可实时匹配的存款账户，另有收入与固定支出条目；buildDashboard.accounts保留三种类型，净资产只消费account/investment，但balanceSourceSummary全量计数，首卡称“1个实时账户、2个月度账户”。实际全部余额账户均为live；预期余额来源只统计实际净资产组成，不把收入/支出/转账/投入当账户或余额覆盖。影响用户误判数据是否新鲜/哪些余额回退，普通P1而非数据丢失P0。修法：同一净资产组成选择器/显式type过滤驱动来源摘要，保持数值公式；无余额来源写未提供，混合只数真实余额行，成功读取与数据日期分开。缺逐源成功时间时不由live布尔位保证“本周实时”，沿已有asOf说明同步读取/快照回退；真正逐源时钟仍属既有F0.5，不能编造。验证一次列齐：纯余额全live/全fallback/混合、插入任意非余额条目摘要不变、无余额但有收入、空列表、旧数据刷新失败；以真实buildDashboard→首卡调用者运行，而非手工传两个live布尔值。原queuedAt=2026-10-17T19:05:00Z保留，startedAt缺，本缺陷发现22:03:25Z，Muse目标10-18（父切片原10-19不延后）。
+
+### 新需求单与产品推进：细化既有F0.3/F0.4月度事实基础
+
+**产品判断：首条余额事实卡已交，下一步优先让财务月度事实可被信任，再消费到现金覆盖/支出摘要。** 健康D1已诚实展示完整日原值，训练D1继续把唯一训练与结束可靠性放首位；本轮不再扩健康评分或训练分析。财务现有aggregateMonths仍把同月两个日期画作两个月份，真实函数也接受会滚动到下月的非法日；这些是既有F0.3问题的独立确认，不另造bug编号。看房HH0正确性队列继续，新候选仍按所有者决定暂缓。
+
+**F0.3 / F0.4 · 既有P0/A范围细化；F1.1、F2.1其余摘要消费它，不等PM复验。** 原入队日期/缺失queuedAt保持，Muse目标10-18交付可用切片，旧10-20上限不变；这是一组现有财务事实与交互设计，不是新方向/系统。
+
+| 输入事实 | 选择与消费 | 页面表达/交互 |
+| --- | --- | --- |
+| 同月多个合法日期 | 严格真实日历校验后按自然月分组，每月只取最新有效日期的一份快照；所有月图、latestRaw余额回退、FIRE和摘要消费同一规范化选择，不能各自再排rawMonths | 每月一个点，标“快照截至日期”；展开可看使用哪日及该月替代快照数，无需展示真实账户标识 |
+| 非法日期/同日重复 | 无效日不滚动成别日、不成为latestRaw；完全相同快照去重，同日冲突不能静默挑一份或求和，返回明确输入问题并保留上次合法看板 | 更新失败解释日期/冲突类别与可重试路径，不回显原payload；既有合法数据和日期不推进，其他独立工作继续 |
+| 当月、已结束月、旧payload | 当月一定partial；已结束不自动证明来源完整，完整状态必须有相应来源/日期覆盖依据；无证明为unknown，不能把“月已结束”当complete。日期/完整性可用附加契约表达，旧payload诚实unknown，不能伪回填 | 月度栏显示“截至… · 部分/完整/完整性未提供”，用户展开看来源覆盖、异常原因；无完整依据的旧值仍能看事实，不假称完整月 |
+| 用于支出/FIRE/现金覆盖 | partial/unknown/异常月不进入“完整且有效月”分母；F1.1按原近3个有效完整月平均支出，实际不足时说明缺几月、暂不输出覆盖，不用0顶替；F2现金/支出摘要只在各自真实依赖满足时出现 | 首条余额卡继续可用；缺比较基础时写事实性缺口，禁止以不完整月推算月末支出、FIRE承诺或自动理财建议 |
+
+固定判据沿F0.3/F0.4并具体化：日期乱序/同月多日/跨月、闰日与非法日、同日相同/冲突、latestRaw与图表同源、当月partial/结束但coverage未知/可证明完整、旧payload未知、全无效时保留旧数据；完整性/异常排除后FIRE及F1.1实际分母可核对，0与缺失分开。以合法synthetic输入跑真实ingest→持久化→getDashboard→呈现，说明附加schema/旧blob兼容与保数据回滚；这些是A数据契约，不能以B表格/静态字符串断言关单。B布局仍用build audit＋脚本，未变数据的呈现对账不适用。不增加账户操作、外发或新发布目标。
+
+### PM反馈、期限与次要跟进
+
+- 原W1/H-LOAD-D1 10-18、F2-D1 10-19、旧P1 10-20、W-UI父10-22期限保持；对应已修源码已标验证，实际运行仅EVID分账。原H/W方向两周期方案已给出且D1交付，不重置10-15周期。L1原排期裁决仍保留、不重复同一问询；L1/H0/H1/F0/HH0明确可执行项继续，不能用当前热修整包挤掉而不注明逐ID真实耗时/责任/日期，缺排程说明仍是文档尾巴。
+- 本轮8组交付检查退出0：finish98/98、progression57/57、autosave69/69、D1 35/35、rest48/48、facts-card55/55、payload12/12、seven-day52/52；聚合Gate bcc0bfa→bb539fb为11files/4scripts/9implementation，四笔逐段Gate均过，diff检查过。未变hash已过检查复用，不重复旧缺依赖命令。
+- PM独立**44项synthetic控制断言**通过，包含成功复现问题，不等于44项验收全过。完整实际workout server模块/真实handler与raw SQL，受控Drizzle形状查询adapter执行原0002+0003迁移在SQLite `:memory:`、FK ON；客户端真实结束函数配可控注册延迟/查询，真实历史producer→页面建议/预填；health真实日期函数；finance真实buildDashboard→来源摘要/差额。SDK/Zod以明确链式stub替代，未运行真实SDK请求/响应校验、Drizzle实现、React scheduler或artifact；不得冒充线上结果。首跑临时harness引用0003文件名不符，按实际文件名更正后完成；仅测试工具修正。
+- EVID-LIFE-001保持A真实SDK/action/0003平台迁移/owner保存回读、最终部署引用和源码映射原范围；结构性owner视角不作上线审批，B形式缺口次要跟进。health changes称独立sevenDayBoundary helper，仓库等价逻辑实际在sevenDayFacts内，功能52/52已证；记录非逐字映射尾巴，不重开源码。W1附加optional comparable_history无DB迁移，旧消费者忽略/旧服务回退；不能用附加schema静态兼容假称实际action通过。指定L0.1例外维持且未扩展。
+- 为保留20条流水，最老3b26882记录归并到持久条目：L1-RACE-001双路严格>原子保存、同版本同内容duplicate/不同内容conflict、旧值ignored/null不覆盖、拒写无saved/invalidate及读取开始时刻契约源码已关闭，42交付＋84独立控制证据仍保留此摘要和顶层条目。原未完成证据为真实schema/action双路倒序/重复/冲突拒写后保存回读与台账不变、旧格式、实际agent读源前定版本、可复核artifact/发布引用/最终hash及匹配页面；仅隔离synthetic，禁止生产写探针。不能因移除旧流水丢失这些判据或重开已关闭源码。
+- 无builder/invoke_action；未本地build/安装依赖/访问app.db或修改业务/schema/changes。仅plans有实质变更；临时控制脚本验证后清理，提交前再次fetch动态核对。PM-only Gate及正常push结果记automation memory，不强推、不改历史。
+
 ## 2026-10-17 12:05 PDT PM 增量复验与产品推进
 
-本节是最新PM事后结论；旧表仅保留历史交付和固定判据，冲突以本节为准。指标截点2026-10-17T19:05:00Z；全部验证输入明确synthetic，责任方Muse，PM仅改plans。
+本节为12:05当时结论；后续以15:03最新表为准，交付SHA和原固定判据继续保留。指标截点2026-10-17T19:05:00Z；全部验证输入明确synthetic，责任方Muse，PM仅改plans。
 
 ### 用户可见增量、等待时长与上线事实
 
@@ -573,12 +624,6 @@
 - [ ] 同类产品调研候选已排入队列：`H4` 5 项、`W5` 3 项、`F3` 5 项（用户 2026-10-13 批准启动）；调研候选 T2/T3 已被 `W3.1/W3.3/W3.5` 覆盖、未重复纳入；看房类候选暂不纳入。
 - [ ] 在实际 artifact 对 P0 做首轮运行验收。
 
-- 2026-10-15 14:32 PDT · `3b26882` · `L1-RACE-001`：**源码/本地回归通过，两条返工关闭；artifact运行待验，整项不勾选**。清洁main由05776a3安全快进至本轮起始远端 `3b2688206f8789ee5a5cf8557d346b4d457fc7fc`；忽略游标后的05776a3 PM-only。仅此一项交付，changes有明确ID、4文件范围、兼容/回滚及证据限制；已读根/health AGENTS、plans/changes、实现与测试diff，追踪snapshotSchema/strengthTrainingSchema→既有guard→两个save handler→normalize/persist→saved/invalidate→getDashboard合并与客户端task轮询。schema.ts/migration及UI无diff；响应增加duplicate/conflict，ok/forbidden保持，旧blob读取兼容，回滚无migration但恢复原重复saved缺陷。
-  - **源码关闭范围。** `health-dashboard/server/src/actions.ts:1083` 的HealthKit prompt已删除完成时刻版本，要求任一health-cli查询前记录readStartedAt并作为updatedAt，与:729力量契约一致；这是生成契约修正，实际agent遵守仍待验。:580-640双路使用单语句严格 > 条件upsert+RETURNING；:593-599/:630-636仅在拒写后分类，不能由分类读触发覆盖；同版本同payload返回duplicate，冲突返回conflict且首写胜出，旧版本ignored。三个拒写结果均不写saved/不invalidate，力量null epoch不回退有效版本。:942-974 handler直接返回typed outcome。此前P1完成时刻契约、P2重复saved/冲突覆盖源码返工关闭，不再要求重复修改。
-  - **独立验证。** `node health-dashboard/validate-persist-race.mjs`退出0，42/42，现已抽取真实persist与两个handler运行并含守卫/版本契约变异。其schema safeParse恒false会跳过旧strength保留分支，部分payload断言不足；PM补充Node stdin从当前实际源码独立抽取真实handler、persist、normalizeSleepSnapshot和normalizeStoredSnapshot，复用已审阅受控adapter并注入明确schema桩，只用SQLite `:memory:`：84断言通过。双路owner/null/缺viewer各执行applied→并行duplicate/conflict/旧版本→更新版本，精确比较拒写前后整行payload/时间、saved和invalidate；两种首次并发落库顺序均保留新版本；guest零行/零日志/零invalidate；另覆盖真实health handler的旧strength保留与相同请求重试duplicate。该控制不批准null权限例外，不证明真实请求schema/SDK/Drizzle生成SQL、跨worker锁或artifact运行。无新增源码缺陷，不计两轮无进展。
-  - **运行证据与下一项。** changes新增构建方沙箱invoke的双路applied→duplicate→conflict→ignored/null拒旧及audit pass摘要，是新证据，但只写space-4，缺精确artifact/version、可复跑脱敏步骤/typed结果、保存后getDashboard回读与匹配数据页面。原要求允许隔离测试artifact，不要求把2099探针写生产库；下次补真实schema/action通路、两来源倒序callback、重复/冲突拒写后回读与台账不变、旧格式兼容及页面保持新版本，并证明实际agent在读源前定版本，按plan→build→audit→submit提供版本与页面证据。本会话无Muse builder/invoke_action，不能独立复验沙箱或页面，保持运行待验；不得以静态/42+84断言或实现方tsc/build/audit声明勾选。未本地build、安装依赖或访问app.db，不重复旧L0.4/权限/手机阻塞。下一业务实现只做已有H-UNITS-001，再H-SOURCE-001；P0隐私/身份门槛保留。
-  - **交接与安全。** `node scripts/validate-handoff.mjs e3c6848 3b26882`及`05776a3 3b26882`均退出0（4 files/1 script/2 implementation），`git diff --check e3c6848..3b26882`退出0。修改前重fetch确认远端未变；本轮仅plans.md，游标为开始远端，保留20条审查记录。提交前再次fetch并检查并发，只有文档实质变化才提交推送。
-
 - 2026-10-15 17:35 PDT · `561d1d5`（主验 `923417c`，整合至本轮起始远端）· `H-UNITS-001`：**换算源码/本地回归通过；缺失组可比性返工；页面运行待验，整项不勾选**。清洁main由ba6cc1a安全快进；忽略该PM-only，f59efe4更正此前独立tsc误报（实际缺SDK、退出2），不把builder build/audit当独立tsc。3992638为用户H-UI-001 Whoop方向追加，保留其恢复参考/置信度及原截图约束，未当作已实现。已读根/health AGENTS、plans/changes和本轮8文件diff；两项实现各有ID/范围/兼容/回滚说明。本轮只推动H-UNITS，不同时新开来源或视觉返工。
   - **通过边界与独立证据。** actions.ts:235-249按每次训练原unit换算再汇总，:442 readiness.currentVolume与:972时间线共用同口径，单次历史仍用原unit；来源回调schema、persist版本幂等、权限guard均未改，schema/migration无diff。追踪strength request/旧blob→standalone或内嵌合并→两聚合→今日DataStatusPanel(:373,406)/历史(:486)展示单位；周趋势仍由STRENGTH_SYNC_PROMPT按displayUnit生成，未因最多20条workouts而重算8周，实际agent计算另待证据。交付`node health-dashboard/validate-units.mjs`25/25通过；PM在Node stdin复用已读抽取器/fixture，从当前真实函数独立检查28断言：混单位两目标、仅力量与合并路径、全lb/全kg、空/有效零、周一窗口排除上周/次日、原记录不变与切单位readiness score/component不变；真正执行删除timeline换算与删除readiness换算两个变异，分别检出错误总和与文案，断言拒绝。均为synthetic纯函数控制，不是schema/SDK/action/页面实测。交付脚本:173-181只验证变异字符串变化，不能将其自述当作已跑变异测试；本轮独立控制补足本地证据。
   - **P1返工（既有要求遗漏，非声称新回归）。** 当前client/src/App.tsx:202-206直接用两周volume算delta，:225-226显示0负荷/-100%；server/src/actions.ts:76,83要求volume数值，:820同步契约对缺weight/reps组不计量，:972仍累计数值；validate-units.mjs:147-156仅传totalVolume=0且exercises为空，未验证缺失组或比较文案。复现（synthetic，未写库）：本周一个completed组weight=null、reps有值，按既有prompt汇总totalVolume/weeklyTrend.volume=0；上周同单位有效周volume=100。PM抽取实际client delta表达式，结果-100%，真实timeline函数结果0，证明表示层无可比性判断；这是受控输入/表达式反例，未声称artifact执行了prompt。用户会把未知记录当作训练负荷下降，违反本条“不把未知重量当0生成比较结论”。预期有效零与未知/部分缺失可区分；任一周无可信可比依据时显示无法比较/缺项，而非升降百分比或PR。下一次仅在本条修正该边界，必要时附加式表达coverage/可比性并说明旧快照降级；不得盲用20条截断workouts推断完整周，也不改readiness评分、PR引擎或扩功能。需可复跑真实生产函数/组件断言覆盖缺weight、缺reps、全未知、部分缺失、有效零、自重不可比、全有效混单位及切单位无假进步；给修前反例/修后结果与匹配页面。此轮换算有实际进展，未触发两轮同问题无进展升级。
@@ -664,3 +709,5 @@
 - 2026-10-17 09:03 PDT · `42ef240` · **四范围全部事后结案；W-ACTIVE源码竞态关闭，W-START/W-FINISH/W1-CONSISTENCY原边界继续，D1交互/字段映射方案已交。** 清洁main安全快进，起始远端及游标42ef240602fb1d9e03e88078a5fd6b35fea9d98e，完整增量排除8a472f9 PM-only。逐文件diff/changes/输入→owner→并发→持久化→返回→页面独立追踪；交付45/69/34/48与Gate5/1/3通过，PM真实函数/内存SQLite受控40断言通过，不是SDK/React/artifact运行。三原晚到写拒绝与已完成B保护已验证；持续双active、pending-add未注册时静默结束、最近训练缺动作建议分歧沿原ID/固定矩阵记录，已修分项不重开。4项具体已交付行为，Muse07:22PDT上线申报、独立生效/owner确认无；全队列中位等待缺时间戳，已有开工样本n1约21分钟，完全未开工可算样本H-LOAD-D1 n1约3小时3分，均不冒充总体。W-UI-D1状态/焦点与H-LOAD-D1四字段/缺值日期映射已给出，10-18目标及原方向/P1上限保持。L1原排期裁决不重复发问，其余P0继续，指定L0.1例外不重开；A实际运行缺证仍EVID尾巴、B形式不阻塞。仅改plans；不build/装依赖/碰app.db，临时脚本清理，提交前fetch动态核对并保留20条流水，PM-only Gate和推送结果记memory。
 
 - 2026-10-17 12:05 PDT · `5992544`（六笔新增，源清单见本轮正文）· **七项交付行为全部事后标注；两P0三P1沿原ID继续，F1.2/F2.1-D1首条事实卡入队。** 清洁main从6031848安全fetch/快进，起始origin/main5992544712cfe5eb5bbdaf224091e949bb083b11，排除6031848 PM-only；受影响root/三app AGENTS、changes、逐笔diff及调用链已审。七组交付脚本76/47/35/69/48/35/12全过，聚合16/5/14与六笔逐段Gate/diff过；PM真实函数/内存SQLite受控59断言，非SDK/schema/React/artifact成功声明。正常初始化隔离、窗口内缺动作回退、财务损坏恢复、D1聚合/折叠/焦点源码分项已验证；初始化让位/失败恢复、加组延迟注册、两端20条范围、七日完整日、财务无值状态原ID问题已给全判据。缺运行证据EVID、B形式尾巴不阻塞，L0.1批准例外不重开。交付行为7、owner新确认0，全队列等待缺真实时间戳；历史开工n1约21分钟不冒充总体，H-LOAD-D1移出未开工样本。F2.1-D1既有方向首条余额事实卡10-19，原10-18/10-20/10-22期限不延长；L1旧排期裁决不重复。仅plans实质变更；临时合成脚本清理，未本地build/安装/碰app.db。提交前fetch保护并发，20条流水，PM-only Gate/推送结果记memory。
+
+- 2026-10-17 15:03 PDT · `bb539fb`（四笔源SHA见正文）· **六项交付行为全部事后标注；W-START接管竞态原P0继续，F2.1-D1余额来源P1，F0.3/F0.4月度事实设计已细化。** 清洁main bcc0bfa安全fetch/ff；逐笔四段Gate和聚合11/4/9、八组脚本98/57/69/35/48/55/12/52退出0，PM真实函数＋内存SQLite受控44断言通过（含反例），非SDK/React/artifact成功。W-FINISH注册/W1跨窗口/H-LOAD完整日/F0.2四态源码返工关闭；start历史失败已修，接管删除0行或多个等待者可双ready，F2首卡把非余额条目计作账户，原ID/固定判据排期保留。六项具体交付增量，所有者新增确认0，全队列中位等待缺时间戳不可算，历史开工n1约21分不冒充总体。F0.3/F0.4同月唯一选择＋完整性unknown/partial/complete与消费边界设计10-18，旧10-20上限不重置，健康/训练重点与HH暂缓决定保持；L1原裁决不重复。EVID运行与B形式尾巴不阻塞，L0.1批准例外不重开。仅plans；最老L1记录未完判据迁入最新持久段，保留20条；临时脚本清理，无本地build/依赖安装/app.db，提交前fetch及PM-only Gate/推送结果记memory。
