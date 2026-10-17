@@ -885,7 +885,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
                 <span className="unified-date">{dateLabel(day.date)}</span>
                 <div className="unified-main">
                   <strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong>
-                  <small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${displayUnit} · ${day.strengthRoutines.map((r) => ROUTINE_LABELS[r as StrengthWorkout["routine"]] ?? r).join("、")}` : "当天没有力量训练"}{day.restingHr !== null ? ` · 静息 ${day.restingHr.toFixed(0)} bpm` : ""}{day.hrvMs !== null ? ` · HRV ${day.hrvMs.toFixed(0)} ms` : ""}</small>
+                  <small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${displayUnit} · ${day.strengthRoutines.map((r) => ROUTINE_LABELS[r as StrengthWorkout["routine"]] ?? r).join("、")}` : "当天没有力量训练"}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}{day.restingHr !== null ? ` · 静息 ${day.restingHr.toFixed(0)} bpm` : ""}{day.hrvMs !== null ? ` · HRV ${day.hrvMs.toFixed(0)} ms` : ""}</small>
                 </div>
                 <span className={`unified-badge ${day.hasHealth && day.hasStrength ? "both" : ""}`}>{day.hasHealth && day.hasStrength ? "两边都有" : day.hasStrength ? "只有力量" : "只有健康"}</span>
               </div>
@@ -989,6 +989,23 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
 // newest first; same-day ties break by id so the order is stable across
 // renders. Returns a copy — the snapshot array is never mutated. Missing
 // fields stay null here and render as "—" in the list; nothing is filled in.
+// H-WORKOUTS-001 (2): parallel label for the day's HealthKit workout
+// sessions on the unified timeline. Empty when the day has no HK workouts
+// (or the field is absent on an older payload). The total duration sums
+// only groups with a known duration; when every group is unknown the
+// duration segment is omitted entirely — never shown as 0. A real known
+// total of 0 renders as 共 0 分. Types are shown verbatim.
+function unifiedHkLabel(day: UnifiedDay): string {
+  const groups = day.hkWorkouts ?? [];
+  if (!groups.length) return "";
+  const totalSessions = groups.reduce((sum, group) => sum + group.sessions, 0);
+  const types = groups.map((group) => group.type).join("、");
+  const known = groups.filter((group) => group.durationMinutes !== null);
+  if (!known.length) return `运动 ${totalSessions} 次 · ${types}`;
+  const totalMinutes = known.reduce((sum, group) => sum + (group.durationMinutes ?? 0), 0);
+  return `运动 ${totalSessions} 次 · ${types} · 共 ${Math.round(totalMinutes * 10) / 10} 分`;
+}
+
 function allWorkoutsList(historyWorkouts: Snapshot["historyWorkouts"]): Snapshot["historyWorkouts"] {
   return historyWorkouts.slice().sort((a, b) => (a.date === b.date ? (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : a.date < b.date ? 1 : -1));
 }
@@ -1008,7 +1025,7 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
             {unifiedTimeline.map((day) => (
               <div className="unified-row" key={day.date}>
                 <span className="unified-date">{dateLabel(day.date)}</span>
-                <div className="unified-main"><strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong><small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${snapshot.strengthTraining.displayUnit}` : "没有力量训练"}</small></div>
+                <div className="unified-main"><strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong><small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${snapshot.strengthTraining.displayUnit}` : "没有力量训练"}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}</small></div>
                 <span className={`unified-badge ${day.hasHealth && day.hasStrength ? "both" : ""}`}>{day.hasHealth && day.hasStrength ? "两边都有" : day.hasStrength ? "只有力量" : "只有健康"}</span>
               </div>
             ))}

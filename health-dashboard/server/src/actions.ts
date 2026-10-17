@@ -775,6 +775,16 @@ const unifiedDaySchema = z.object({
   strengthSessions: z.number().int().nonnegative(),
   strengthVolume: z.number().nonnegative(),
   strengthRoutines: z.array(z.string()),
+  // HealthKit workout sessions aggregated per day and type (H-WORKOUTS-001
+  // (2)): sourced only from historyWorkouts (the sessions query), never
+  // derived from daily summaries and never merged into the strength counts.
+  // durationMinutes is the sum of the known durations, or null when every
+  // session of that type that day has an unknown duration.
+  hkWorkouts: z.array(z.object({
+    type: z.string(),
+    sessions: z.number().int().positive(),
+    durationMinutes: z.number().nonnegative().nullable(),
+  })),
   hasHealth: z.boolean(),
   hasStrength: z.boolean(),
 });
@@ -961,7 +971,7 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
   const ensure = (date: string): UnifiedDay => {
     const existing = byDate.get(date);
     if (existing) return existing;
-    const created: UnifiedDay = { date, steps: null, sleepHours: null, restingHr: null, hrvMs: null, strengthSessions: 0, strengthVolume: 0, strengthRoutines: [], hasHealth: false, hasStrength: false };
+    const created: UnifiedDay = { date, steps: null, sleepHours: null, restingHr: null, hrvMs: null, strengthSessions: 0, strengthVolume: 0, strengthRoutines: [], hkWorkouts: [], hasHealth: false, hasStrength: false };
     byDate.set(date, created);
     return created;
   };
@@ -976,6 +986,28 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
     for (const sleep of healthSnapshot.historySleeps) {
       const day = ensure(sleep.date);
       day.sleepHours = round(totalSleepHours(sleep, sleep.totalHours), 1);
+      day.hasHealth = true;
+    }
+    // HealthKit workout sessions merge into the timeline by local date
+    // (H-WORKOUTS-001 (2)): grouped by date, then by the verbatim type.
+    // Sessions only — never derived from historyDaily summaries (exercise
+    // minutes / swimMeters keep their own meaning) and never counted as
+    // strength: even a strength-typed HK session stays in hkWorkouts,
+    // separate from the training-log strengthSessions/strengthVolume.
+    const hkByDateType = new Map<string, Map<string, { sessions: number; durationSum: number; hasDuration: boolean }>>();
+    for (const workout of healthSnapshot.historyWorkouts ?? []) {
+      let byType = hkByDateType.get(workout.date);
+      if (!byType) { byType = new Map(); hkByDateType.set(workout.date, byType); }
+      let group = byType.get(workout.type);
+      if (!group) { group = { sessions: 0, durationSum: 0, hasDuration: false }; byType.set(workout.type, group); }
+      group.sessions += 1;
+      if (workout.durationMinutes !== null) { group.durationSum += workout.durationMinutes; group.hasDuration = true; }
+    }
+    for (const [date, byType] of hkByDateType) {
+      const day = ensure(date);
+      day.hkWorkouts = [...byType.entries()]
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+        .map(([type, group]) => ({ type, sessions: group.sessions, durationMinutes: group.hasDuration ? round(group.durationSum, 1) : null }));
       day.hasHealth = true;
     }
   }
