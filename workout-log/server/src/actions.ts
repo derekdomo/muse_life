@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const routineSchema = z.enum(["push", "pull", "legs"]);
@@ -136,6 +136,10 @@ function isOwnerOrSyncChannel(ctx: Ctx): boolean {
 // missing workout is "not-found"; an already-completed one is
 // "not-active" — its rows are history and must never be written,
 // completed again, or deleted by a mutation aimed at a stale id.
+// W-ACTIVE-001: the handlers no longer decide with this function —
+// each write carries the same condition inside its single statement,
+// so a completeWorkout landing between a check and a write cannot be
+// overwritten. This pure mirror remains for validation scripts.
 export function mutationTargetDecision(
   workout: { completed_at: string | null } | null,
 ): "ok" | "not-found" | "not-active" {
@@ -155,6 +159,27 @@ export function resolveStartConflict(
     return { action: "yield", keepId: existingActiveId };
   }
   return { action: "created", keepId: insertedId };
+}
+
+// W-START-001: whether a just-inserted workout that must yield to an
+// earlier active one may be safely reclaimed (deleted). Safe only
+// while it is still active, no set row was user-edited after creation
+// (updated_at moved past created_at), and the set count still equals
+// the initially inserted count (no addSet landed). startWorkout
+// enforces exactly these conditions inside its single conditional
+// DELETE — the DELETE is the verdict; this pure mirror exists so
+// validation scripts can exercise the decision without the database.
+export function canReclaimYieldedWorkout(input: {
+  completedAt: string | null;
+  setCount: number;
+  initialSetCount: number;
+  editedSetCount: number;
+}): boolean {
+  return (
+    input.completedAt == null &&
+    input.editedSetCount === 0 &&
+    input.setCount === input.initialSetCount
+  );
 }
 
 // Whole-week coverage summaries (H-UNITS-001). Pure and self-contained so
@@ -331,6 +356,10 @@ type PreviousComparable = {
 // W1.3: the previous comparable workout is the routine's most recent
 // completed workout in ANY unit; when its unit differs from the new
 // workout's, every weight is converted into the new unit.
+// W1-CONSISTENCY-001: ALL of that workout's sets are returned —
+// completed and uncompleted alike. The prefill (here) and the weekly
+// review (client) must judge the identical set collection, or the
+// same history yields two different "next time" verdicts.
 async function loadPreviousCompletedSets(
   ctx: Ctx,
   routine: z.infer<typeof routineSchema>,
@@ -348,7 +377,7 @@ async function loadPreviousCompletedSets(
   const setRows = await db
     .select()
     .from(schema.workoutSets)
-    .where(and(eq(schema.workoutSets.workoutId, previous.id), eq(schema.workoutSets.completed, true)))
+    .where(eq(schema.workoutSets.workoutId, previous.id))
     .orderBy(asc(schema.workoutSets.id));
   const converted = previous.unit !== unit;
   return {
@@ -483,7 +512,12 @@ export const Actions = {
         // W1.2: prefill comes from the same progressionDecision the
         // weekly review uses — one rule, one verdict for "next time".
         const decision = progressionDecision({
-          plannedSets: exercise.sets,
+          // W1-CONSISTENCY-001: planned is the exercise's actual set
+          // count in that previous workout (history length — all
+          // sets, completed or not), exactly as the weekly review
+          // computes it. Only with no history does the template
+          // count apply.
+          plannedSets: history.length > 0 ? history.length : exercise.sets,
           sets: history,
           targetMin,
           targetMax,
@@ -517,8 +551,8 @@ export const Actions = {
       // W0.4: re-check for a single active workout. A concurrent start
       // may have inserted its own workout after the pre-check above;
       // if an earlier active workout (smaller id) now exists, this
-      // insert yields: delete the just-inserted workout and its sets
-      // and return the earlier active one instead.
+      // insert yields to it — subject to the W-START-001 reclaim
+      // guard below.
       const activeRows = await db
         .select({ id: schema.workouts.id })
         .from(schema.workouts)
@@ -527,12 +561,38 @@ export const Actions = {
       const earliestOtherActiveId = activeRows.map((row) => row.id).find((id) => id !== workoutId) ?? null;
       const conflict = resolveStartConflict(earliestOtherActiveId, workoutId);
       if (conflict.action === "yield") {
-        await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
-        await db.delete(schema.workouts).where(eq(schema.workouts.id, workoutId));
-        const kept = await loadWorkout(ctx, conflict.keepId);
-        if (!kept) throw new Error("未能读取进行中的训练");
+        // W-START-001: reclaim the just-inserted workout ONLY if it is
+        // provably untouched — a single conditional DELETE whose guard
+        // mirrors canReclaimYieldedWorkout: still active, no set was
+        // user-edited after creation (updated_at past created_at),
+        // and the set count still equals the initially inserted count
+        // (no addSet landed). The DELETE itself is the verdict.
+        const reclaimed = await db.all(sql`
+          DELETE FROM workouts
+          WHERE id = ${workoutId}
+            AND completed_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM workout_sets
+              WHERE workout_id = ${workoutId} AND updated_at > created_at
+            )
+            AND (SELECT COUNT(*) FROM workout_sets WHERE workout_id = ${workoutId}) = ${values.length}
+          RETURNING id
+        `);
+        if (reclaimed.length > 0) {
+          await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, workoutId));
+          const kept = await loadWorkout(ctx, conflict.keepId);
+          if (!kept) throw new Error("未能读取进行中的训练");
+          ctx.invalidateQueries();
+          return { forbidden: false, workout: kept };
+        }
+        // The insert was already completed or written by the user:
+        // delete nothing and return that workout itself, so a saved
+        // or completed record is never lost to the single-active
+        // yield.
+        const own = await loadWorkout(ctx, workoutId);
+        if (!own) throw new Error("未能读取进行中的训练");
         ctx.invalidateQueries();
-        return { forbidden: false, workout: kept };
+        return { forbidden: false, workout: own };
       }
 
       const workout = await loadWorkout(ctx, workoutId);
@@ -558,33 +618,24 @@ export const Actions = {
         return { ok: false, forbidden: true };
       }
       const db = ctx.db<typeof schema>();
-      // W0.3: resolve the set's owning workout first and only write
-      // when that workout exists and is still active. A stale write
-      // aimed at a completed (or deleted) workout is refused without
-      // touching the database.
-      const setRows = await db
-        .select({ workoutId: schema.workoutSets.workoutId })
-        .from(schema.workoutSets)
-        .where(eq(schema.workoutSets.id, args.id))
-        .limit(1);
-      const owner = setRows[0];
-      if (!owner) return { ok: false, forbidden: false };
-      const workoutRows = await db
-        .select({ completedAt: schema.workouts.completedAt })
-        .from(schema.workouts)
-        .where(eq(schema.workouts.id, owner.workoutId))
-        .limit(1);
-      const target = workoutRows[0];
-      const decision = mutationTargetDecision(
-        target ? { completed_at: target.completedAt?.toISOString() ?? null } : null,
-      );
-      if (decision !== "ok") return { ok: false, forbidden: false };
-      const updated = await db
-        .update(schema.workoutSets)
-        .set({ weight: args.weight, reps: args.reps, completed: args.completed, updatedAt: new Date() })
-        .where(eq(schema.workoutSets.id, args.id))
-        .returning({ id: schema.workoutSets.id });
-      if (updated.length === 0) return { ok: false, forbidden: false };
+      // W-ACTIVE-001: the active guard lives INSIDE this single UPDATE
+      // — the write lands only when the set's owning workout is still
+      // active (completed_at IS NULL) at write time, so a
+      // completeWorkout that lands between any earlier read and this
+      // statement can no longer be overwritten. RETURNING is the
+      // verdict: zero rows means the set is missing or its workout is
+      // already history, and nothing was written.
+      const updatedRows = await db.all(sql`
+        UPDATE workout_sets
+        SET weight = ${args.weight}, reps = ${args.reps}, completed = ${args.completed ? 1 : 0}, updated_at = ${Date.now()}
+        WHERE id = ${args.id}
+          AND EXISTS (
+            SELECT 1 FROM workouts
+            WHERE workouts.id = workout_sets.workout_id AND workouts.completed_at IS NULL
+          )
+        RETURNING id
+      `);
+      if (updatedRows.length === 0) return { ok: false, forbidden: false };
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },
@@ -598,17 +649,9 @@ export const Actions = {
         return { forbidden: true, set: null };
       }
       const db = ctx.db<typeof schema>();
-      // W0.3: only an existing, still-active workout may gain sets.
-      const workoutRows = await db
-        .select({ completedAt: schema.workouts.completedAt })
-        .from(schema.workouts)
-        .where(eq(schema.workouts.id, args.workout_id))
-        .limit(1);
-      const target = workoutRows[0];
-      const decision = mutationTargetDecision(
-        target ? { completed_at: target.completedAt?.toISOString() ?? null } : null,
-      );
-      if (decision !== "ok") return { forbidden: false, set: null };
+      // Reading the exercise's previous set (set_number / name /
+      // target / carried weight) may happen before the write, but the
+      // insert itself carries the active guard (W-ACTIVE-001).
       const rows = await db
         .select()
         .from(schema.workoutSets)
@@ -616,32 +659,45 @@ export const Actions = {
         .orderBy(desc(schema.workoutSets.setNumber));
       const previous = rows[0];
       if (!previous) throw new Error("没有找到这个动作");
-      const inserted = await db
-        .insert(schema.workoutSets)
-        .values({
-          workoutId: args.workout_id,
-          exerciseKey: previous.exerciseKey,
-          exerciseName: previous.exerciseName,
-          setNumber: previous.setNumber + 1,
-          targetReps: previous.targetReps,
-          weight: previous.weight,
-        })
-        .returning();
-      const row = inserted[0];
-      if (!row) throw new Error("未能添加一组");
+      const nowMs = Date.now();
+      // INSERT … SELECT: the row is created only when the target
+      // workout exists and is still active at insert time, so a
+      // completeWorkout that landed after the read above gains no new
+      // sets. RETURNING is the verdict: zero rows, zero inserted.
+      const insertedRows = await db.all(sql`
+        INSERT INTO workout_sets (workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, completed, created_at, updated_at)
+        SELECT id, ${previous.exerciseKey}, ${previous.exerciseName}, ${previous.setNumber + 1}, ${previous.targetReps}, ${previous.weight}, NULL, 0, ${nowMs}, ${nowMs}
+        FROM workouts
+        WHERE id = ${args.workout_id} AND completed_at IS NULL
+        RETURNING id, workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, completed
+      `);
+      const row = insertedRows[0] as
+        | {
+            id: number;
+            workout_id: number;
+            exercise_key: string;
+            exercise_name: string;
+            set_number: number;
+            target_reps: string;
+            weight: number | null;
+            reps: number | null;
+            completed: number;
+          }
+        | undefined;
+      if (!row) return { forbidden: false, set: null };
       ctx.invalidateQueries();
       return {
         forbidden: false,
         set: {
           id: row.id,
-          workout_id: row.workoutId,
-          exercise_key: row.exerciseKey,
-          exercise_name: row.exerciseName,
-          set_number: row.setNumber,
-          target_reps: row.targetReps,
+          workout_id: row.workout_id,
+          exercise_key: row.exercise_key,
+          exercise_name: row.exercise_name,
+          set_number: row.set_number,
+          target_reps: row.target_reps,
           weight: row.weight,
           reps: row.reps,
-          completed: row.completed,
+          completed: row.completed === 1,
         },
       };
     },
@@ -677,21 +733,19 @@ export const Actions = {
         return { ok: false, forbidden: true };
       }
       const db = ctx.db<typeof schema>();
-      // W0.3: discard only ever deletes an active workout. A completed
-      // workout is history and must survive a discard aimed at its id;
-      // a missing one has nothing to delete. Both report ok: false.
-      const workoutRows = await db
-        .select({ completedAt: schema.workouts.completedAt })
-        .from(schema.workouts)
-        .where(eq(schema.workouts.id, args.workout_id))
-        .limit(1);
-      const target = workoutRows[0];
-      const decision = mutationTargetDecision(
-        target ? { completed_at: target.completedAt?.toISOString() ?? null } : null,
-      );
-      if (decision !== "ok") return { ok: false, forbidden: false };
+      // W-ACTIVE-001: delete the workout row FIRST, with the active
+      // guard inside the single DELETE — RETURNING is the verdict.
+      // Only a workout still active at delete time is removed, and
+      // only then are its sets deleted. A completed workout (history)
+      // or a missing id matches zero rows: ok: false, and no set is
+      // ever touched.
+      const deletedRows = await db.all(sql`
+        DELETE FROM workouts
+        WHERE id = ${args.workout_id} AND completed_at IS NULL
+        RETURNING id
+      `);
+      if (deletedRows.length === 0) return { ok: false, forbidden: false };
       await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, args.workout_id));
-      await db.delete(schema.workouts).where(eq(schema.workouts.id, args.workout_id));
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },

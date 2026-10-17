@@ -65,7 +65,7 @@ const CLIENT_FN = [
   'editSetDraft', 'beginSetSave', 'applySetSaveSuccess', 'applySetSaveFailure',
   'adoptServerDraft', 'createSaveQueue', 'finishGateDecision',
 ];
-const CLIENT_ASYNC_FN = ['drainSetSaves', 'flushAllHandles'];
+const CLIENT_ASYNC_FN = ['drainSetSaves', 'flushAllHandles', 'sealAllAndSettleStable'];
 function extractAsyncFunction(source, name) {
   const idx = source.search(new RegExp(`async function ${name}\\(`));
   if (idx < 0) throw new Error(`async function ${name} not found`);
@@ -81,7 +81,7 @@ function buildClient(src) {
   const names = [...CLIENT_FN, ...CLIENT_ASYNC_FN];
   return new Function(`${stripTypeScriptTypes(parts.join('\n'))}\nreturn { ${names.join(', ')} };`)();
 }
-const SERVER_FN = ['mutationTargetDecision', 'resolveStartConflict'];
+const SERVER_FN = ['mutationTargetDecision', 'resolveStartConflict', 'canReclaimYieldedWorkout'];
 function buildServer(src) {
   const code = SERVER_FN.map((n) => extractFunction(src, n)).join('\n');
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { ${SERVER_FN.join(', ')} };`)();
@@ -105,22 +105,31 @@ check('source: cancel confirmation does not seal',
   clientSrc.includes('onClick={() => setFinishBlock(null)}>返回继续编辑'));
 check('source: handleFinish consumes flushAllHandles stability',
   clientSrc.includes('flushOk: stable && (results[index] ?? false)'));
-check('server: updateSet gates on mutationTargetDecision before writing',
-  serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('updateSet: defineAction')) > -1
-  && serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('updateSet: defineAction'))
-     < serverSrc.indexOf('.update(schema.workoutSets)', serverSrc.indexOf('updateSet: defineAction')));
+check('server: updateSet is a single UPDATE with the active guard inside (W-ACTIVE-001)',
+  serverSrc.indexOf('UPDATE workout_sets', serverSrc.indexOf('updateSet: defineAction')) > -1
+  && serverSrc.indexOf('AND EXISTS (', serverSrc.indexOf('updateSet: defineAction')) > -1
+  && serverSrc.indexOf('workouts.completed_at IS NULL', serverSrc.indexOf('updateSet: defineAction')) > -1
+  && serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('updateSet: defineAction')) === -1);
 check('server: updateSet verdict uses affected rows',
-  serverSrc.includes('if (updated.length === 0) return { ok: false, forbidden: false };'));
-check('server: addSet refuses non-active targets without inserting',
-  serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('addSet: defineAction')) > -1
-  && serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('addSet: defineAction'))
-     < serverSrc.indexOf('.insert(schema.workoutSets)', serverSrc.indexOf('addSet: defineAction')));
+  serverSrc.includes('if (updatedRows.length === 0) return { ok: false, forbidden: false };'));
+check('server: addSet inserts via INSERT..SELECT with the active guard inside (W-ACTIVE-001)',
+  serverSrc.indexOf('INSERT INTO workout_sets', serverSrc.indexOf('addSet: defineAction')) > -1
+  && serverSrc.indexOf('completed_at IS NULL', serverSrc.indexOf('addSet: defineAction')) > -1
+  && serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('addSet: defineAction')) === -1);
 check('server: completeWorkout verdict uses affected rows',
   /completeWorkout: defineAction[\s\S]*?updated\.length === 0/.test(serverSrc));
-check('server: discardWorkout gates on mutationTargetDecision',
-  serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('discardWorkout: defineAction')) > -1
-  && serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('discardWorkout: defineAction'))
-     < serverSrc.indexOf('db.delete(schema.workoutSets)', serverSrc.indexOf('discardWorkout: defineAction')));
+check('server: discardWorkout conditionally deletes the workout row BEFORE its sets (W-ACTIVE-001)',
+  serverSrc.indexOf('DELETE FROM workouts', serverSrc.indexOf('discardWorkout: defineAction')) > -1
+  && serverSrc.indexOf('DELETE FROM workouts', serverSrc.indexOf('discardWorkout: defineAction'))
+     < serverSrc.indexOf('db.delete(schema.workoutSets)', serverSrc.indexOf('discardWorkout: defineAction'))
+  && serverSrc.indexOf('mutationTargetDecision', serverSrc.indexOf('discardWorkout: defineAction')) === -1);
+check('server: startWorkout reclaim DELETE carries the W-START-001 conditions',
+  serverSrc.indexOf('DELETE FROM workouts', serverSrc.indexOf('startWorkout: defineAction')) > -1
+  && serverSrc.indexOf('NOT EXISTS (', serverSrc.indexOf('startWorkout: defineAction')) > -1);
+check('source: direct finish seals the batch before completing (W-FINISH-001)',
+  /handle\.seal\(\)/.test(clientSrc) && clientSrc.includes('sealAllAndSettleStable'));
+check('source: inputs lock while finishing (W-FINISH-001)',
+  clientSrc.includes('entryLocked') && clientSrc.includes('正在结束'));
 check('server: startWorkout re-checks actives and yields via resolveStartConflict',
   serverSrc.includes('resolveStartConflict(earliestOtherActiveId, workoutId)'));
 
@@ -243,6 +252,38 @@ const SET = { id: 7, weight: 100, reps: 8, completed: true };
   const { stable } = await C.flushAllHandles(getHandles, 3);
   check('repro3b: a registry that never stabilises reports stable:false', stable === false);
 }
+
+// W-FINISH-001 remaining window: a set registering DURING the
+// confirm-finish seal loop must itself be sealed+settled before the
+// batch counts as stable; a registry that never stabilises aborts.
+{
+  const sealedOrder = [];
+  const mkHandle = (id) => ({
+    id, getStatus: () => 'saved', flush: async () => true,
+    isBlocked: () => false, isCompleted: () => true,
+    seal: () => {}, sealAndSettle: async () => { sealedOrder.push(id); return true; }, unseal: () => {},
+  });
+  const h1 = mkHandle(1); const h2 = mkHandle(2);
+  let registry = [h1];
+  let calls = 0;
+  const getHandles = () => { calls++; if (calls >= 2 && !registry.includes(h2)) registry = [h1, h2]; return [...registry]; };
+  const res = await C.sealAllAndSettleStable(getHandles);
+  check('W-FINISH: mid-seal registration is sealed in a later round', sealedOrder.join(',') === '1,1,2', sealedOrder.join(','));
+  check('W-FINISH: seal batch stable only after covering the new set', res.stable === true && res.handles.length === 2);
+  let n = 0;
+  const unstable = await C.sealAllAndSettleStable(() => [mkHandle(++n)], 3);
+  check('W-FINISH: never-stable registry reports stable:false (caller aborts)', unstable.stable === false);
+}
+
+// W-START-001: reclaim decision matrix (pure mirror of the DELETE).
+check('W-START: untouched active insert may be reclaimed',
+  S.canReclaimYieldedWorkout({ completedAt: null, setCount: 16, initialSetCount: 16, editedSetCount: 0 }) === true);
+check('W-START: a completed insert is never reclaimed',
+  S.canReclaimYieldedWorkout({ completedAt: '2026-10-17T00:00:00.000Z', setCount: 16, initialSetCount: 16, editedSetCount: 0 }) === false);
+check('W-START: a user-edited insert is never reclaimed',
+  S.canReclaimYieldedWorkout({ completedAt: null, setCount: 16, initialSetCount: 16, editedSetCount: 1 }) === false);
+check('W-START: an insert with added sets is never reclaimed',
+  S.canReclaimYieldedWorkout({ completedAt: null, setCount: 17, initialSetCount: 16, editedSetCount: 0 }) === false);
 
 // settle() with nothing running judges from the machine alone.
 {

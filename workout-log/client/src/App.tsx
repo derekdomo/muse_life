@@ -809,6 +809,40 @@ export async function flushAllHandles(
   return { handles: lastHandles, results: lastResults, stable: false };
 }
 
+// --- W-FINISH-001 (stable seal boundary): the confirmed-finish twin
+// of flushAllHandles. Seal-and-settle the current registry, then
+// re-read it: a handle registered mid-round (e.g. an add-set landing
+// while earlier queues settled) must itself be sealed and settled
+// before complete is sent, so repeat until one full round ends with
+// the registry identical to the round's start. Only then is the batch
+// stable; exhausting the rounds reports stable: false and the caller
+// must abort the finish (unseal everything) rather than complete over
+// unchecked sets.
+export type SealAllAndSettleStableResult = {
+  handles: SetSaveHandle[];
+  results: boolean[];
+  stable: boolean;
+};
+
+export async function sealAllAndSettleStable(
+  getHandles: () => SetSaveHandle[],
+  maxRounds = 5,
+): Promise<SealAllAndSettleStableResult> {
+  let lastHandles: SetSaveHandle[] = [];
+  let lastResults: boolean[] = [];
+  for (let round = 0; round < maxRounds; round += 1) {
+    const handles = getHandles();
+    const results = await Promise.all(handles.map((handle) => handle.sealAndSettle().catch(() => false)));
+    lastHandles = handles;
+    lastResults = results;
+    const afterIds = getHandles().map((handle) => handle.id);
+    const stable = handles.length === afterIds.length
+      && handles.every((handle, index) => handle.id === afterIds[index]);
+    if (stable) return { handles, results, stable: true };
+  }
+  return { handles: lastHandles, results: lastResults, stable: false };
+}
+
 // --- W-UI-001 rework: finish gate ---
 // Finish proceeds only when every set flushed clean, is saved, is not
 // blocked (completed without reps), and is completed. Otherwise the
@@ -936,9 +970,13 @@ function playRestBeep() {
   }
 }
 
-function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
+function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted }: {
   set: WorkoutSet;
   unit: Unit;
+  // W-FINISH-001: while a finish flow owns the workout, entry is
+  // locked — inputs, the completion toggle and retry are disabled so
+  // no new edit can start behind the seal.
+  locked: boolean;
   onSaved: () => void;
   onRegister: (id: number, handle: SetSaveHandle | null) => void;
   onCompleted?: () => void;
@@ -1070,6 +1108,7 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
           min="0"
           step="0.5"
           value={draft.weight}
+          disabled={locked}
           onChange={(event) => numericChange(event, "weight")}
           onBlur={onBlurSave}
           onKeyDown={onEnterSave}
@@ -1086,6 +1125,7 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
           min="0"
           step="1"
           value={draft.reps}
+          disabled={locked}
           onChange={(event) => numericChange(event, "reps")}
           onBlur={onBlurSave}
           onKeyDown={onEnterSave}
@@ -1098,6 +1138,7 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
         type="button"
         aria-label={draft.completed ? `${set.exercise_name} 第 ${set.set_number} 组取消完成` : `${set.exercise_name} 第 ${set.set_number} 组完成`}
         aria-pressed={draft.completed}
+        disabled={locked}
         onClick={toggleCompleted}
       >
         {draft.completed ? "✓" : ""}
@@ -1105,7 +1146,7 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
       <div className="set-status" data-status={status} role="status">
         <span>{blocked ? "先填次数" : setSaveStatusLabel(status)}</span>
         {status === "error" ? (
-          <button type="button" className="set-retry" onClick={() => void requestSave()}>重试</button>
+          <button type="button" className="set-retry" disabled={locked} onClick={() => void requestSave()}>重试</button>
         ) : null}
       </div>
     </div>
@@ -1117,7 +1158,7 @@ function SetRow({ set, unit, onSaved, onRegister, onCompleted }: {
 // workout's unit when the source workout used the other unit.
 export type PreviousMark = { weight: number | null; reps: number | null; converted: boolean };
 
-function ExerciseBlock({ workout, exercise, previous, timerSlot, onChanged, onSetCompleted, onOpenGuide, onRegisterSet }: {
+function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, onChanged, onSetCompleted, onOpenGuide, onRegisterSet }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
   previous?: PreviousMark;
@@ -1125,6 +1166,9 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, onChanged, onSe
   // ActiveWorkout into the current exercise's block only. Purely an
   // extra child node — SetRow mounting/registration is untouched.
   timerSlot?: ReactNode;
+  // W-FINISH-001: entry lock while a finish flow owns the workout —
+  // set rows render disabled and no new set can be added.
+  entryLocked: boolean;
   onChanged: () => void;
   onSetCompleted: () => void;
   onOpenGuide: (guide: ExerciseGuide) => void;
@@ -1171,10 +1215,10 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, onChanged, onSe
       </div>
       <div className="set-list">
         {exercise.sets.map((set) => (
-          <SetRow key={set.id} set={set} unit={workout.unit} onSaved={onChanged} onRegister={onRegisterSet} onCompleted={onSetCompleted} />
+          <SetRow key={set.id} set={set} unit={workout.unit} locked={entryLocked} onSaved={onChanged} onRegister={onRegisterSet} onCompleted={onSetCompleted} />
         ))}
       </div>
-      <button className="add-set" type="button" onClick={() => addSet.mutate()} disabled={addSet.isPending}>
+      <button className="add-set" type="button" onClick={() => addSet.mutate()} disabled={addSet.isPending || entryLocked}>
         {addSet.isPending ? "添加中…" : "+ 加一组"}
       </button>
       {timerSlot}
@@ -1336,43 +1380,68 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   // consistent handle set (flushAllHandles re-reads the registry and
   // re-flushes if the set changed mid-flush; an unstable batch counts
   // as unsaved), then let finishGateDecision consume the full result
-  // of that same stable batch. Only a fully clean batch finishes
-  // directly; anything else shows the confirmation for its reason,
-  // because finishing would lose edits or skip sets.
+  // of that same stable batch. Entry is locked from the moment the
+  // finish flow starts (`finishing`) and stays locked until it ends.
+  // Only a fully clean batch finishes directly — and then only after
+  // sealing that exact batch, so no queued write can land after the
+  // workout completes; anything else shows the confirmation for its
+  // reason, because finishing would lose edits or skip sets.
   async function handleFinish() {
     setFinishFailed(false);
     setFinishing(true);
-    const { handles, results, stable } = await flushAllHandles(() => [...setHandlesRef.current.values()]);
-    const snapshots = handles.map((handle, index) => ({
-      flushOk: stable && (results[index] ?? false),
-      status: handle.getStatus(),
-      blocked: handle.isBlocked(),
-      completed: handle.isCompleted(),
-    }));
-    setUnsavedPresent(hasUnsavedSetStatus(handles.map((handle) => handle.getStatus())));
-    setFinishing(false);
-    const decision = finishGateDecision(snapshots);
-    if (decision.proceed) {
-      await runComplete();
-      return;
+    try {
+      const { handles, results, stable } = await flushAllHandles(() => [...setHandlesRef.current.values()]);
+      const snapshots = handles.map((handle, index) => ({
+        flushOk: stable && (results[index] ?? false),
+        status: handle.getStatus(),
+        blocked: handle.isBlocked(),
+        completed: handle.isCompleted(),
+      }));
+      setUnsavedPresent(hasUnsavedSetStatus(handles.map((handle) => handle.getStatus())));
+      const decision = finishGateDecision(snapshots);
+      if (decision.proceed) {
+        // Seal the batch first: the save queues issue no new writes
+        // from here on. `finishing` is NOT reset before runComplete
+        // returns; on failure runComplete unseals everything and the
+        // drafts stay editable, and only then does the finally below
+        // unlock entry.
+        for (const handle of handles) handle.seal();
+        await runComplete();
+        return;
+      }
+      setFinishBlock(decision.reason);
+    } finally {
+      setFinishing(false);
     }
-    setFinishBlock(decision.reason);
   }
 
   // Confirmed finish despite pending edits: seal AND settle every
   // set's save queue first — no queued write may still be in flight
   // when the complete request is sent, so nothing can land after the
-  // workout is finished. If the complete then fails (thrown or
-  // ok !== true), runComplete unseals everything and the workout
-  // stays editable with all drafts intact.
+  // workout is finished. The seal runs through
+  // sealAllAndSettleStable: the registry is re-read after each round
+  // and any handle registered mid-round is sealed and settled too,
+  // so complete is never sent over an unchecked new set. If the
+  // registry never stabilises, the finish aborts — everything is
+  // unsealed, the failure is surfaced, and no complete is attempted.
+  // If the complete then fails (thrown or ok !== true), runComplete
+  // unseals everything and the workout stays editable with all drafts
+  // intact. Entry stays locked (`finishing`) until the flow ends.
   async function confirmFinishAnyway() {
-    const handles = [...setHandlesRef.current.values()];
     setFinishBlock(null);
     setFinishFailed(false);
     setFinishing(true);
-    await Promise.all(handles.map((handle) => handle.sealAndSettle().catch(() => false)));
-    setFinishing(false);
-    await runComplete();
+    try {
+      const { stable } = await sealAllAndSettleStable(() => [...setHandlesRef.current.values()]);
+      if (!stable) {
+        for (const handle of setHandlesRef.current.values()) handle.unseal();
+        setFinishFailed(true);
+        return;
+      }
+      await runComplete();
+    } finally {
+      setFinishing(false);
+    }
   }
   const discard = useMutation({
     mutationFn: () => api.discardWorkout({ workout_id: workout.id }),
@@ -1450,6 +1519,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
             exercise={exercise}
             previous={previousByExercise.get(exercise.key)}
             timerSlot={currentExercise != null && exercise.key === currentExercise.key ? restTimerUi : undefined}
+            entryLocked={finishing}
             onChanged={refresh}
             onSetCompleted={handleSetCompleted}
             onOpenGuide={setSelectedGuide}
@@ -1466,7 +1536,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
           <span>{unsavedPresent ? "有未保存的修改，结束前会先保存" : "完成后会进入历史记录"}</span>
         </div>
         <button type="button" className="finish-button" onClick={() => void handleFinish()} disabled={complete.isPending || finishing}>
-          {complete.isPending || finishing ? "保存中…" : "结束训练"}
+          {complete.isPending || finishing ? "正在结束…" : "结束训练"}
         </button>
       </section>
 
