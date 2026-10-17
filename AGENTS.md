@@ -3,7 +3,7 @@
 ## Authority and roles
 
 - Read root `CHARTER.md` first. The product owner's 2026-10-17 shared Incubator/Life fast iteration charter overrides conflicting older instructions here, in `plans.md`, and in review history. Implementation never waits for PM acceptance; PM feedback is information, never a gate for subsequent work or release preparation.
-- Muse is the implementer and a proposal source. PM is a feedback source, requirement source, and product driver; PM does not implement production code. The product owner alone approves new directions and publication.
+- Muse is the implementer and a proposal source. PM is a feedback source, requirement source, and product driver; PM does not implement production code. The product owner approves new directions, new publication targets, and game publication. Routine self-checked Life updates already have direct-go-live authorization.
 - Every substantive PM review includes actionable bug findings (explicitly say if none were found), numbered/scoped/prioritized requirements, and at least one substantive product advancement. Do not fabricate bugs or duplicate requirements to fill a quota.
 
 ## One queue, continuous implementation
