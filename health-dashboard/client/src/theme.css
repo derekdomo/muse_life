@@ -151,6 +151,27 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .whoop-load-head strong { color: var(--whoop-color); font-size: 13px; }
 .whoop-load p { margin: 6px 0 0; color: #c3ccc4; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .whoop-load .whoop-load-note { color: var(--whoop-dim); font-size: 10px; }
+
+.seven-facts { margin-top: 14px; padding: 13px 14px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
+.seven-facts-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.seven-facts-head > span:first-child { color: var(--whoop-dim); font-size: 11px; font-weight: 800; }
+.seven-facts-coverage { color: #e6ede7; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.seven-facts-note { margin: 6px 0 0; color: var(--whoop-dim); font-size: 10px; line-height: 1.55; }
+.seven-facts-switch { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.seven-facts-switch button { min-height: 30px; border: 1px solid rgba(255, 255, 255, .24); border-radius: 999px; padding: 4px 11px; background: transparent; color: #c3ccc4; font-size: 11px; font-weight: 700; cursor: pointer; }
+.seven-facts-switch button.selected { background: #f2f5f0; border-color: #f2f5f0; color: #101410; }
+.seven-facts-warn { margin: 8px 0 0; color: #f2c66d; font-size: 11px; font-weight: 700; line-height: 1.55; overflow-wrap: anywhere; }
+.seven-facts-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin-top: 10px; }
+.seven-facts-day { display: flex; min-width: 0; flex-direction: column; align-items: center; gap: 2px; padding: 7px 2px; border: 1px solid transparent; border-radius: 8px; background: rgba(255, 255, 255, .04); color: #f2f5f0; cursor: pointer; }
+.seven-facts-day span { color: var(--whoop-dim); font-size: 9px; font-weight: 700; }
+.seven-facts-day strong { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.seven-facts-day small { color: var(--whoop-dim); font-size: 9px; }
+.seven-facts-day.gap strong { color: var(--whoop-dim); }
+.seven-facts-day.conflict strong, .seven-facts-day.conflict small { color: #f2c66d; }
+.seven-facts-day[aria-expanded="true"] { border-color: rgba(255, 255, 255, .45); }
+.seven-facts-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin: 10px 0 0; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, .1); }
+.seven-facts-detail dt { color: var(--whoop-dim); font-size: 9px; font-weight: 700; }
+.seven-facts-detail dd { margin: 2px 0 0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .whoop-readiness-trend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 8px; color: #c3ccc4; font-size: 11px; font-variant-numeric: tabular-nums; }
 .whoop-readiness-trend .whoop-trend-label { color: var(--whoop-dim); font-weight: 800; }
 .whoop-readiness-trend .whoop-trend-point { white-space: nowrap; }

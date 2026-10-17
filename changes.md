@@ -388,3 +388,13 @@
 - 已知限制（如实记录）：(1) 审计/探针无 owner 会话，owner 视角结束全流程（直接结束锁定、确认结束 mid-seal 新组、三视口）未实机驱动，归 EVID-LIFE-001 运行待验；单语句原子性由 SQLite 语句串行化语义＋源码接线断言支撑，未在生产库做并发写探针。(2) 安全评审对 getDashboard 的 isOwnerOrSyncChannel 无 viewer 只读放行再次给 high critique——属所有者 2026-10-17 已拍板知情接受的 L0.1 例外（space-6 getDashboard 只读，例外范围明确），本轮按 brief 未改权限门禁语义，非本轮引入，不重开。(3) 精确 artifact version 平台未提供；回灌与线上工作树仅 App.tsx/actions.ts 两文件有差异并已同步。
 - 修改文件：`workout-log/server/src/actions.ts`、`workout-log/client/src/App.tsx`、`workout-log/validate-finish.mjs`、`plans.md`、`changes.md`。回滚：revert 本次提交即恢复旧两步守卫/让位删除/结束路径/预填组集合口径；无 schema/migration、无数据变更。
 - 本轮顺延（按吞吐规则注明）：`H-LOAD-001-D1`（P1，七日原始事实条，space-4）与 `W-UI-001-D1` 其余视觉范围（目标 10-18 不变）未在本轮开工——本轮 P0 同类包构建＋校验已占满，下一轮继续；L1/H0/H1/F0/F1/HH0 等其余积压按队列推进，PM 要求下次交接分项补齐各自顺延原因/责任方/日期，本条即该说明的一部分（责任方均为实现方，H-LOAD-D1 与 W-UI-001-D1 目标 10-18）。
+
+## 2026-10-17（muse-life-plans-sync：H-LOAD-001-D1 七日事实条，space-4）
+
+- `H-LOAD-001-D1`（P1）：健康看板首屏负荷判定块内（WhoopHero 的 whoop-load 块之后）新增「近 7 天事实」条。新增纯函数 `sevenDayFacts(historyDaily, dataDate, coverageIncomplete, metricKey)`（`health-dashboard/client/src/App.tsx`，自包含、可按名提取单跑）与 `SevenDayFacts` 组件：只用已有合法 `historyDaily`，不新建数据管道、不改任何评分公式/数据口径/服务端同步与保存管道/schema，服务端零改动。
+- 字段映射按 PM 细化：exerciseMinutes→运动分钟（单位 分钟，默认选中）、steps→步数（单位 步）、hrvMs→HRV（单位 ms）、restingHr→静息心率（单位 bpm）；指标切换只换数值与单位。睡眠不开放（legacy totalHours 口径未证明），文案明示「逐日原始记录，不是恢复或负荷评分」。
+- 窗口与缺口规则：以 dataDate 结尾、按 LA 日历连续 7 格（纯日期串日历运算，跨 DST/月界/年界连续）；无行或该指标为 null 画缺口（不补 0、不插值），真实 0 为有效值并计入覆盖；同日重复值相同去重、值不同（含值与 null 混杂）标「冲突/不可用」画缺口，不求和、不挑较大值；覆盖计数 x/7 只计合法非缺失日，头部常显。点击日格只展开该日：原值＋单位（或缺失/冲突说明）、来源与更新时间——逐日记录无独立来源/时间戳字段，详情如实写明未单独标注/记录，并标注整份快照来源 Apple 健康与快照更新时间，不编造逐日字段。
+- 边界与覆盖：dataDate 非合法日历日（格式或真实性校验不过）→「日期边界未满足」且不给窗口；dataDate 当日无每日记录 → 同样明示边界未满足、窗口末日为缺口、不呈现为完整趋势；全局 coverageIncomplete 时条内显示来源缺口提示并指向既有上方同步入口，不新增同步路径、不捏造逐日完整。
+- 验证证据（全部 synthetic）：新增 `health-dashboard/validate-seven-day-facts.mjs` **35/35**——真实生产函数提取单跑，覆盖四指标映射与单位、默认运动分钟（源码断言）、缺口/真 0、相同重复去重、同日冲突与值/null 混杂冲突、x/7 计数、dataDate 无效/当日未完整提示、覆盖不完整透传、LA 日期边界（2026 春季 DST、秋季 DST＋月界、非闰/闰年 2 月）及两项变异敏感性（去冲突门、缺口计覆盖均翻转结果）。既有验证脚本全量回归通过：health-dashboard 其余 12 个脚本全过（validate-steps-contract 需仓内 node_modules 解析 zod——以临时 symlink 指向 artifact 依赖后 ALL CHECKS PASSED，该脚本在裸 checkout 下的 zod 缺失为既有环境问题、与本次改动无关）；workout-log 4 个脚本与 scripts/validate-handoff 亦全过（本轮未改 workout-log）。artifact 构建成功、构建审计 pass（fix_before_attesting 为空，桌面/手机无控制台错误、无横向溢出）。
+- 已知限制（如实记录）：审计探针无 owner 会话，捕获为非所有者拦截页（与改前一致），七日事实条的 owner 视角渲染与点按展开未实机驱动，以生产函数 synthetic 实测＋源码接线断言＋构建类型检查为准，owner 运行证据归 EVID-LIFE-001。plans.md 由 PM 维护，本条不自勾验收。
+- 修改文件：`health-dashboard/client/src/App.tsx`、`health-dashboard/client/src/theme.css`、`health-dashboard/validate-seven-day-facts.mjs`（新增）、`changes.md`（artifact 改动后回灌，两处 App.tsx/theme.css 内容一致）。回滚：revert 本次提交即移除事实条；无 schema/migration、无数据变更。

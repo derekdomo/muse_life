@@ -633,6 +633,99 @@ function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: W
   );
 }
 
+type SevenDayMetricKey = "exerciseMinutes" | "steps" | "hrvMs" | "restingHr";
+
+interface SevenDayMetricDef {
+  key: SevenDayMetricKey;
+  label: string;
+  unit: string;
+  digits: number;
+}
+
+interface SevenDayCell {
+  date: string;
+  value: number | null;
+  conflict: boolean;
+}
+
+interface SevenDayFactsResult {
+  metric: SevenDayMetricDef;
+  metrics: SevenDayMetricDef[];
+  days: SevenDayCell[];
+  covered: number;
+  boundaryOk: boolean;
+  boundaryNote: string | null;
+  coverageIncomplete: boolean;
+}
+
+// H-LOAD-001-D1: the seven-day facts strip. Pure derivation over the
+// already-legal historyDaily rows only — no new data path, no scoring.
+// The window is the 7 consecutive America/Los_Angeles calendar dates
+// ending at dataDate (historyDaily dates are already LA calendar dates,
+// so plain calendar arithmetic on the date strings is DST-safe). A day
+// with no row, or a row whose metric is null, is a gap — never filled
+// with 0 or interpolated; a real 0 is a value and counts as covered.
+// Duplicate rows for one date: identical metric values dedupe to that
+// value; any disagreement (including value vs null) marks the day
+// conflict/unavailable — never summed, never max-picked. covered counts
+// only days carrying a usable value. The boundary is unsatisfied when
+// dataDate is not a real calendar date (no window can be anchored) or
+// when dataDate itself has no daily row (that day is not complete), and
+// the strip must then not read as a complete trend. Sleep is NOT offered:
+// the legacy historySleeps totalHours basis is unproven. Self-contained
+// so repo-side validate-seven-day-facts.mjs can extract it by name and
+// run it standalone over synthetic fixtures.
+function sevenDayFacts(
+  historyDaily: Array<Pick<Daily, "date" | "steps" | "exerciseMinutes" | "hrvMs" | "restingHr">>,
+  dataDate: string,
+  coverageIncomplete: boolean,
+  metricKey: SevenDayMetricKey,
+): SevenDayFactsResult {
+  const defs: Record<SevenDayMetricKey, Omit<SevenDayMetricDef, "key">> = {
+    exerciseMinutes: { label: "运动分钟", unit: "分钟", digits: 0 },
+    steps: { label: "步数", unit: "步", digits: 0 },
+    hrvMs: { label: "HRV", unit: "ms", digits: 1 },
+    restingHr: { label: "静息心率", unit: "bpm", digits: 1 },
+  };
+  const metric: SevenDayMetricDef = { key: metricKey, ...defs[metricKey] };
+  const metrics: SevenDayMetricDef[] = (Object.keys(defs) as SevenDayMetricKey[]).map((key) => ({ key, ...defs[key] }));
+  const parsed = new Date(`${dataDate}T12:00:00Z`);
+  const validDate = /^\d{4}-\d{2}-\d{2}$/.test(dataDate)
+    && !Number.isNaN(parsed.getTime())
+    && parsed.toISOString().slice(0, 10) === dataDate;
+  if (!validDate) {
+    return {
+      metric, metrics, days: [], covered: 0, boundaryOk: false,
+      boundaryNote: `日期边界未满足：数据日期「${dataDate}」不是合法日期，无法确定近 7 天的结束日，不呈现为完整趋势。`,
+      coverageIncomplete,
+    };
+  }
+  const shift = (date: string, days: number): string => {
+    const shifted = new Date(`${date}T12:00:00Z`);
+    shifted.setUTCDate(shifted.getUTCDate() + days);
+    return shifted.toISOString().slice(0, 10);
+  };
+  const dates = Array.from({ length: 7 }, (_, index) => shift(dataDate, index - 6));
+  const valuesByDate = new Map<string, Array<number | null>>();
+  for (const row of historyDaily) {
+    const list = valuesByDate.get(row.date) ?? [];
+    list.push(row[metricKey]);
+    valuesByDate.set(row.date, list);
+  }
+  const days: SevenDayCell[] = dates.map((date) => {
+    const distinct = [...new Set(valuesByDate.get(date) ?? [])];
+    if (distinct.length > 1) return { date, value: null, conflict: true };
+    return { date, value: distinct[0] ?? null, conflict: false };
+  });
+  const covered = days.filter((day) => !day.conflict && day.value !== null).length;
+  const boundaryOk = valuesByDate.has(dataDate);
+  return {
+    metric, metrics, days, covered, boundaryOk,
+    boundaryNote: boundaryOk ? null : "日期边界未满足：数据日期当天尚无完整的每日记录，以下逐日值不作为完整趋势。",
+    coverageIncomplete,
+  };
+}
+
 type HeroActionKind = "sync-health" | "sync-strength" | "view-status";
 type HeroSource = { dataDateLine: string; healthLine: string; strengthLine: string; coverageLine: string | null; action: { kind: HeroActionKind; label: string } };
 
@@ -735,7 +828,71 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
         <p className="whoop-load-note">readiness 近 7 天：当前接口仅返回单日恢复参考，历史未提供，其余日期为缺口，不复制今日值。</p>
         <p className="whoop-load-note">负荷评分公式未经审定，不再显示数值与等级，只呈现数据日期当天的运动时长、活动能量与步数事实及缺失原因。恢复与睡眠分沿用现有服务端 readiness/radar 口径，本轮未改任何评分公式。</p>
       </div>
+      <SevenDayFacts snapshot={snapshot} />
     </section>
+  );
+}
+
+// H-LOAD-001-D1: raw per-day facts for the 7 LA calendar days ending at
+// dataDate, rendered next to the load verdict. Switching the metric only
+// swaps the values and unit; tapping a day expands just that day's raw
+// value, unit, source, and update time. Daily rows carry no per-day
+// source or timestamp fields, so the detail says so instead of inventing
+// them (the snapshot-level source and update time are labelled as such).
+function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
+  const [metricKey, setMetricKey] = useState<SevenDayMetricKey>("exerciseMinutes");
+  const [openDate, setOpenDate] = useState<string | null>(null);
+  const facts = sevenDayFacts(snapshot.historyDaily, snapshot.dataDate, snapshot.coverageIncomplete, metricKey);
+  const openCell = openDate === null ? undefined : facts.days.find((day) => day.date === openDate);
+  const cellText = (day: SevenDayCell): string => day.conflict ? "冲突/不可用" : day.value === null ? "无记录" : `${numberLabel(day.value, facts.metric.digits)} ${facts.metric.unit}`;
+  return (
+    <div className="seven-facts" aria-label="近 7 天事实">
+      <div className="seven-facts-head">
+        <span>近 7 天事实</span>
+        <span className="seven-facts-coverage">覆盖 {facts.covered}/7 天</span>
+      </div>
+      <p className="seven-facts-note">逐日原始记录，不是恢复或负荷评分；缺口表示当天没有该指标的记录，不按 0 计算，真实 0 照常显示。</p>
+      <div className="seven-facts-switch" role="group" aria-label="切换近 7 天事实指标">
+        {facts.metrics.map((metric) => (
+          <button
+            key={metric.key}
+            type="button"
+            className={metric.key === metricKey ? "selected" : ""}
+            aria-pressed={metric.key === metricKey}
+            aria-label={`查看${metric.label}`}
+            onClick={() => setMetricKey(metric.key)}
+          >{metric.label}</button>
+        ))}
+      </div>
+      {facts.boundaryNote ? <p className="seven-facts-warn">{facts.boundaryNote}</p> : null}
+      {facts.coverageIncomplete ? <p className="seven-facts-warn">来源覆盖不完整：健康数据还没同步完，部分日期可能缺记录；请用上方同步入口补全，这里不推测缺失日期的值。</p> : null}
+      {facts.days.length ? (
+        <div className="seven-facts-grid">
+          {facts.days.map((day) => (
+            <button
+              key={day.date}
+              type="button"
+              className={`seven-facts-day${day.conflict ? " conflict" : ""}${!day.conflict && day.value === null ? " gap" : ""}`}
+              aria-expanded={openDate === day.date}
+              aria-label={`${fullDateLabel(day.date)} ${facts.metric.label} ${cellText(day)}`}
+              onClick={() => setOpenDate(openDate === day.date ? null : day.date)}
+            >
+              <span>{dateLabel(day.date)}</span>
+              <strong>{day.conflict ? "冲突" : day.value === null ? "缺口" : numberLabel(day.value, facts.metric.digits)}</strong>
+              <small>{day.conflict ? "不可用" : day.value === null ? "无记录" : facts.metric.unit}</small>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {openCell ? (
+        <dl className="seven-facts-detail">
+          <div><dt>日期</dt><dd>{fullDateLabel(openCell.date)}</dd></div>
+          <div><dt>{facts.metric.label}原值</dt><dd>{openCell.conflict ? "冲突/不可用（同日多条记录数值不一致，未求和、未挑较大值）" : cellText(openCell)}</dd></div>
+          <div><dt>来源</dt><dd>该日记录未单独标注来源（整份快照来自 Apple 健康）</dd></div>
+          <div><dt>更新时间</dt><dd>该日记录未单独记录（快照更新于 {updatedLabel(snapshot.updatedAt)}）</dd></div>
+        </dl>
+      ) : null}
+    </div>
   );
 }
 
