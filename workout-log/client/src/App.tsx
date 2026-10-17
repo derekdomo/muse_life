@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
@@ -497,42 +497,221 @@ function ExerciseGuideDialog({ guide, onClose }: { guide: ExerciseGuide; onClose
   );
 }
 
-function SetRow({ set, unit, onSaved }: { set: WorkoutSet; unit: Unit; onSaved: () => void }) {
-  const [weight, setWeight] = useState(set.weight == null ? "" : String(set.weight));
-  const [reps, setReps] = useState(set.reps == null ? "" : String(set.reps));
-  const [needsReps, setNeedsReps] = useState(false);
+// --- W-UI-001 / W0.1 / W0.2: per-set autosave state machine (pure) ---
+// A set's draft is autosaved on blur / Enter / short debounce instead of
+// only when the completed toggle is flipped. Status is explicit text
+// (dirty / saving / saved / error), never colour alone. Saves carry a
+// per-set increasing sequence number: only the latest issued save may
+// move the status, so a slow earlier response arriving after a newer
+// save cannot flip the row back to saved/error. A server refresh only
+// adopts new values while the row is clean (saved); dirty / saving /
+// error drafts are never overwritten by a refetch.
+export type SetDraft = { weight: string; reps: string; completed: boolean };
+export type SetSaveStatus = "saved" | "dirty" | "saving" | "error";
+export type SetSaveMachine = {
+  confirmed: SetDraft;
+  draft: SetDraft;
+  status: SetSaveStatus;
+  seq: number;
+  inflightSeq: number | null;
+  inflightDraft: SetDraft | null;
+};
+
+export function setDraftFromSet(set: WorkoutSet): SetDraft {
+  return {
+    weight: set.weight == null ? "" : String(set.weight),
+    reps: set.reps == null ? "" : String(set.reps),
+    completed: set.completed,
+  };
+}
+
+export function sameSetDraft(a: SetDraft, b: SetDraft): boolean {
+  return a.weight === b.weight && a.reps === b.reps && a.completed === b.completed;
+}
+
+export function initSetSaveMachine(set: WorkoutSet): SetSaveMachine {
+  const draft = setDraftFromSet(set);
+  return { confirmed: draft, draft, status: "saved", seq: 0, inflightSeq: null, inflightDraft: null };
+}
+
+export function setSaveBlocked(machine: SetSaveMachine): boolean {
+  return machine.draft.completed && machine.draft.reps.trim() === "";
+}
+
+export function editSetDraft(machine: SetSaveMachine, draft: SetDraft): SetSaveMachine {
+  let status: SetSaveStatus;
+  if (sameSetDraft(draft, machine.confirmed)) status = "saved";
+  else if (machine.inflightDraft && sameSetDraft(draft, machine.inflightDraft)) status = "saving";
+  else status = "dirty";
+  return { ...machine, draft, status };
+}
+
+export type BeginSetSaveResult = { machine: SetSaveMachine; seq: number };
+
+export function beginSetSave(machine: SetSaveMachine): BeginSetSaveResult | null {
+  if (sameSetDraft(machine.draft, machine.confirmed)) return null;
+  if (setSaveBlocked(machine)) return null;
+  const seq = machine.seq + 1;
+  return {
+    machine: { ...machine, status: "saving", seq, inflightSeq: seq, inflightDraft: machine.draft },
+    seq,
+  };
+}
+
+export function applySetSaveSuccess(machine: SetSaveMachine, seq: number): SetSaveMachine {
+  if (seq !== machine.seq || machine.inflightDraft == null) return machine;
+  const confirmed = machine.inflightDraft;
+  return {
+    ...machine,
+    confirmed,
+    status: sameSetDraft(machine.draft, confirmed) ? "saved" : "dirty",
+    inflightSeq: null,
+    inflightDraft: null,
+  };
+}
+
+export function applySetSaveFailure(machine: SetSaveMachine, seq: number): SetSaveMachine {
+  if (seq !== machine.seq || machine.inflightDraft == null) return machine;
+  const failedDraft = machine.inflightDraft;
+  return {
+    ...machine,
+    status: sameSetDraft(machine.draft, failedDraft) ? "error" : "dirty",
+    inflightSeq: null,
+    inflightDraft: null,
+  };
+}
+
+export function adoptServerDraft(machine: SetSaveMachine, serverDraft: SetDraft): SetSaveMachine {
+  if (machine.status !== "saved") return machine;
+  return { ...machine, confirmed: serverDraft, draft: serverDraft };
+}
+
+export function setSaveStatusLabel(status: SetSaveStatus): string {
+  if (status === "dirty") return "未保存";
+  if (status === "saving") return "保存中…";
+  if (status === "error") return "保存失败";
+  return "已保存";
+}
+
+export function hasUnsavedSetStatus(statuses: SetSaveStatus[]): boolean {
+  return statuses.some((status) => status !== "saved");
+}
+
+export type SetSaveHandle = {
+  getStatus: () => SetSaveStatus;
+  flush: () => Promise<boolean>;
+};
+
+function SetRow({ set, unit, onSaved, onRegister }: {
+  set: WorkoutSet;
+  unit: Unit;
+  onSaved: () => void;
+  onRegister: (id: number, handle: SetSaveHandle | null) => void;
+}) {
+  const [machine, setMachineState] = useState<SetSaveMachine>(() => initSetSaveMachine(set));
+  const machineRef = useRef(machine);
+  const timerRef = useRef<number | null>(null);
+  const inflightRef = useRef<Promise<boolean> | null>(null);
+
+  const setMachine = (next: SetSaveMachine) => {
+    machineRef.current = next;
+    setMachineState(next);
+  };
 
   useEffect(() => {
-    setWeight(set.weight == null ? "" : String(set.weight));
-    setReps(set.reps == null ? "" : String(set.reps));
-  }, [set.id, set.weight, set.reps]);
+    setMachine(adoptServerDraft(machineRef.current, setDraftFromSet(set)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [set.id, set.weight, set.reps, set.completed]);
 
-  const save = useMutation({
-    mutationFn: (completed: boolean) =>
-      api.updateSet({
-        id: set.id,
-        weight: weight.trim() === "" ? null : Number(weight),
-        reps: reps.trim() === "" ? null : Number(reps),
-        completed,
-      }),
-    onSuccess: onSaved,
-  });
+  useEffect(() => () => {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    onRegister(set.id, null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [set.id]);
 
-  function persist(completed = set.completed) {
-    if (completed && reps.trim() === "") {
-      setNeedsReps(true);
-      return;
+  async function requestSave(): Promise<boolean> {
+    // Serialize per set: wait out an in-flight save first so requests
+    // reach the server in issue order; the seq guard in the machine is
+    // the second line of defence for status updates.
+    if (inflightRef.current) {
+      await inflightRef.current.catch(() => false);
     }
-    setNeedsReps(false);
-    save.mutate(completed);
+    const begun = beginSetSave(machineRef.current);
+    if (!begun) return machineRef.current.status === "saved" && !setSaveBlocked(machineRef.current);
+    setMachine(begun.machine);
+    const payload = begun.machine.inflightDraft;
+    if (!payload) return false;
+    const run = (async () => {
+      try {
+        await api.updateSet({
+          id: set.id,
+          weight: payload.weight.trim() === "" ? null : Number(payload.weight),
+          reps: payload.reps.trim() === "" ? null : Number(payload.reps),
+          completed: payload.completed,
+        });
+        setMachine(applySetSaveSuccess(machineRef.current, begun.seq));
+        onSaved();
+        return machineRef.current.status === "saved";
+      } catch {
+        setMachine(applySetSaveFailure(machineRef.current, begun.seq));
+        return false;
+      } finally {
+        if (inflightRef.current === run) inflightRef.current = null;
+      }
+    })();
+    inflightRef.current = run;
+    return run;
   }
 
-  function numericChange(event: ChangeEvent<HTMLInputElement>, setter: (value: string) => void) {
-    setter(event.target.value);
+  async function flushSave(): Promise<boolean> {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    let ok = await requestSave();
+    if (!ok) return false;
+    if (!sameSetDraft(machineRef.current.draft, machineRef.current.confirmed)) {
+      ok = await requestSave();
+    }
+    return ok && machineRef.current.status === "saved";
   }
+
+  useEffect(() => {
+    onRegister(set.id, { getStatus: () => machineRef.current.status, flush: flushSave });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [set.id, machine]);
+
+  function scheduleDebounce() {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => { void requestSave(); }, 800);
+  }
+
+  function editDraft(draft: SetDraft, immediate: boolean) {
+    setMachine(editSetDraft(machineRef.current, draft));
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    if (immediate) void requestSave();
+    else scheduleDebounce();
+  }
+
+  function numericChange(event: ChangeEvent<HTMLInputElement>, field: "weight" | "reps") {
+    const draft = { ...machineRef.current.draft, [field]: event.target.value };
+    editDraft(draft, false);
+  }
+
+  function onBlurSave() {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    void requestSave();
+  }
+
+  function onEnterSave(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.currentTarget.blur();
+    }
+  }
+
+  const { draft, status } = machine;
+  const blocked = setSaveBlocked(machine);
 
   return (
-    <div className={`set-row ${set.completed ? "is-complete" : ""}`}>
+    <div className={`set-row ${draft.completed ? "is-complete" : ""}`}>
       <span className="set-index" aria-label={`第 ${set.set_number} 组`}>{set.set_number}</span>
       <label className="field-wrap">
         <span className="sr-only">第 {set.set_number} 组重量（{unit}）</span>
@@ -542,8 +721,10 @@ function SetRow({ set, unit, onSaved }: { set: WorkoutSet; unit: Unit; onSaved: 
           type="number"
           min="0"
           step="0.5"
-          value={weight}
-          onChange={(event) => numericChange(event, setWeight)}
+          value={draft.weight}
+          onChange={(event) => numericChange(event, "weight")}
+          onBlur={onBlurSave}
+          onKeyDown={onEnterSave}
           placeholder="—"
         />
         <small>{unit}</small>
@@ -556,8 +737,10 @@ function SetRow({ set, unit, onSaved }: { set: WorkoutSet; unit: Unit; onSaved: 
           type="number"
           min="0"
           step="1"
-          value={reps}
-          onChange={(event) => numericChange(event, setReps)}
+          value={draft.reps}
+          onChange={(event) => numericChange(event, "reps")}
+          onBlur={onBlurSave}
+          onKeyDown={onEnterSave}
           placeholder={set.target_reps}
         />
         <small>次</small>
@@ -565,24 +748,29 @@ function SetRow({ set, unit, onSaved }: { set: WorkoutSet; unit: Unit; onSaved: 
       <button
         className="set-check"
         type="button"
-        aria-label={set.completed ? `${set.exercise_name} 第 ${set.set_number} 组取消完成` : `${set.exercise_name} 第 ${set.set_number} 组完成`}
-        aria-pressed={set.completed}
-        disabled={save.isPending}
-        onClick={() => persist(!set.completed)}
+        aria-label={draft.completed ? `${set.exercise_name} 第 ${set.set_number} 组取消完成` : `${set.exercise_name} 第 ${set.set_number} 组完成`}
+        aria-pressed={draft.completed}
+        onClick={() => editDraft({ ...machineRef.current.draft, completed: !machineRef.current.draft.completed }, true)}
       >
-        {set.completed ? "✓" : ""}
+        {draft.completed ? "✓" : ""}
       </button>
-      {needsReps ? <span className="set-warning">先填次数</span> : null}
+      <div className="set-status" data-status={status} role="status">
+        <span>{blocked ? "先填次数" : setSaveStatusLabel(status)}</span>
+        {status === "error" ? (
+          <button type="button" className="set-retry" onClick={() => void requestSave()}>重试</button>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-function ExerciseBlock({ workout, exercise, previous, onChanged, onOpenGuide }: {
+function ExerciseBlock({ workout, exercise, previous, onChanged, onOpenGuide, onRegisterSet }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
   previous?: WorkoutSet;
   onChanged: () => void;
   onOpenGuide: (guide: ExerciseGuide) => void;
+  onRegisterSet: (id: number, handle: SetSaveHandle | null) => void;
 }) {
   const queryClient = useQueryClient();
   const addSet = useMutation({
@@ -625,7 +813,7 @@ function ExerciseBlock({ workout, exercise, previous, onChanged, onOpenGuide }: 
       </div>
       <div className="set-list">
         {exercise.sets.map((set) => (
-          <SetRow key={set.id} set={set} unit={workout.unit} onSaved={onChanged} />
+          <SetRow key={set.id} set={set} unit={workout.unit} onSaved={onChanged} onRegister={onRegisterSet} />
         ))}
       </div>
       <button className="add-set" type="button" onClick={() => addSet.mutate()} disabled={addSet.isPending}>
@@ -639,18 +827,57 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const queryClient = useQueryClient();
   const [, setClock] = useState(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [confirmFinishUnsaved, setConfirmFinishUnsaved] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [unsavedPresent, setUnsavedPresent] = useState(false);
   const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
+  const setHandlesRef = useRef(new Map<number, SetSaveHandle>());
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock((value) => value + 1), 30000);
     return () => window.clearInterval(timer);
   }, []);
 
+  // W0.2: warn on page leave while any set is dirty / saving / error.
+  useEffect(() => {
+    if (!unsavedPresent) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [unsavedPresent]);
+
+  const registerSet = (id: number, handle: SetSaveHandle | null) => {
+    if (handle) setHandlesRef.current.set(id, handle);
+    else setHandlesRef.current.delete(id);
+    const statuses = [...setHandlesRef.current.values()].map((entry) => entry.getStatus());
+    setUnsavedPresent(hasUnsavedSetStatus(statuses));
+  };
+
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["dashboard"] });
   const complete = useMutation({
     mutationFn: () => api.completeWorkout({ workout_id: workout.id }),
     onSuccess: refresh,
   });
+
+  // W-UI-001 finish gate: flush every set first (dirty sets save now,
+  // in-flight saves are awaited); only finish directly when all sets
+  // are saved. Failed or blocked sets need an explicit confirmation
+  // because finishing would lose those edits.
+  async function handleFinish() {
+    setFinishing(true);
+    const handles = [...setHandlesRef.current.values()];
+    await Promise.all(handles.map((handle) => handle.flush().catch(() => false)));
+    const statuses = [...setHandlesRef.current.values()].map((entry) => entry.getStatus());
+    setUnsavedPresent(hasUnsavedSetStatus(statuses));
+    setFinishing(false);
+    if (hasUnsavedSetStatus(statuses)) {
+      setConfirmFinishUnsaved(true);
+      return;
+    }
+    complete.mutate();
+  }
   const discard = useMutation({
     mutationFn: () => api.discardWorkout({ workout_id: workout.id }),
     onSuccess: refresh,
@@ -702,6 +929,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
             previous={previousByExercise.get(exercise.key)}
             onChanged={refresh}
             onOpenGuide={setSelectedGuide}
+            onRegisterSet={registerSet}
           />
         ))}
       </div>
@@ -709,12 +937,20 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
       <section className="finish-zone">
         <div>
           <p>{done === total ? "全部完成" : `还剩 ${total - done} 组`}</p>
-          <span>完成后会进入历史记录</span>
+          <span>{unsavedPresent ? "有未保存的修改，结束前会先保存" : "完成后会进入历史记录"}</span>
         </div>
-        <button type="button" className="finish-button" onClick={() => complete.mutate()} disabled={complete.isPending}>
-          {complete.isPending ? "保存中…" : "结束训练"}
+        <button type="button" className="finish-button" onClick={() => void handleFinish()} disabled={complete.isPending || finishing}>
+          {complete.isPending || finishing ? "保存中…" : "结束训练"}
         </button>
       </section>
+
+      {confirmFinishUnsaved ? (
+        <div className="inline-confirm finish-confirm" role="group" aria-label="确认结束训练">
+          <span>仍有未保存的修改，结束训练会丢失这些修改</span>
+          <button type="button" onClick={() => setConfirmFinishUnsaved(false)}>返回继续编辑</button>
+          <button type="button" className="danger" onClick={() => complete.mutate()} disabled={complete.isPending}>仍要结束</button>
+        </div>
+      ) : null}
 
       <div className="discard-zone">
         {!confirmDiscard ? (

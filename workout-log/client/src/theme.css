@@ -174,6 +174,12 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .set-row.is-complete .set-check { border-color: var(--accent); background: var(--accent); }
 .set-row.is-complete .field-wrap input { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
 .set-warning { position: absolute; right: 0; bottom: -10px; color: var(--danger); font-size: 10px; font-weight: 700; }
+.set-status { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; min-height: 16px; margin-top: -3px; color: var(--dim); font-size: 10px; font-weight: 650; }
+.set-status[data-status="dirty"] { color: var(--signal); font-weight: 800; }
+.set-status[data-status="error"] { color: var(--danger); font-weight: 800; }
+.set-status[data-status="saved"] { color: color-mix(in srgb, var(--accent) 72%, var(--dim)); }
+.set-retry { min-height: 44px; padding: 0 14px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); border-radius: 3px; background: var(--surface); color: var(--danger); font-size: 11px; font-weight: 800; cursor: pointer; }
+.finish-confirm { margin-top: 12px; border-radius: var(--radius); background: var(--surface); }
 .add-set { margin: 10px 0 0 37px; padding: 7px 0; border: 0; background: transparent; color: var(--dim); font-size: 12px; font-weight: 750; cursor: pointer; }
 .add-set:active { color: var(--accent); }
 .finish-zone { margin-top: 24px; padding: 19px; display: flex; justify-content: space-between; align-items: center; gap: 18px; background: var(--text); color: var(--bg); border-radius: var(--radius); }
