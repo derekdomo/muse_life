@@ -286,5 +286,37 @@ check("UI: holdings detail never added to account balances",
 check("P2/B: the institutions array length is worded as 机构， never as an account count",
   !appSrc.includes("个账户持有") && appSrc.includes("家机构持有") && appSrc.includes("机构：{row.institutions[0]}"));
 
+
+// --- 7b. F2.3 legacy-blob rework (PM 2026-10-18 09:10): a stored
+// payload whose cash row conflicts (CUR:USD ticker, CAD field)
+// is repaired on READ — moved to unclassified, cash total
+// recomputed from the surviving rows — without waiting for a
+// refresh and without touching shares or concentration. ---
+{
+  const oldBlob = {
+    holdings: [], holdingsAll: [],
+    holdingsCash: [{ ticker: "CUR:USD", name: "U.S. Dollar", value: 100, currency: "CAD" }],
+    holdingsUnclassified: [], cashPosition: 100, concentrationTop3: 0,
+  };
+  const out = ensureHoldingsConsistency(oldBlob);
+  check("legacy blob: conflicting stored cash row leaves the cash total on read",
+    out.cashPosition === null && out.holdingsCash.length === 0
+    && out.holdingsUnclassified.length === 1
+    && (out.holdingsUnclassified[0].reason ?? "").includes("币种冲突")
+    && out.holdingsUnclassified[0].value === 100);
+  const mixedBlob = {
+    holdings: [], holdingsAll: [],
+    holdingsCash: [
+      { ticker: "CUR:USD", name: "U.S. Dollar", value: 50, currency: "USD" },
+      { ticker: "CUR:USD", name: "U.S. Dollar", value: 100, currency: "CAD" },
+    ],
+    holdingsUnclassified: [], cashPosition: 150, concentrationTop3: 0,
+  };
+  const mixedOut = ensureHoldingsConsistency(mixedBlob);
+  check("legacy blob: surviving USD cash row keeps its total (50), conflict isolated",
+    mixedOut.cashPosition === 50 && mixedOut.holdingsCash.length === 1
+    && mixedOut.holdingsUnclassified.length === 1);
+}
+
 console.log(`validate-holdings: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

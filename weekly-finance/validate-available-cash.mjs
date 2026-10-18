@@ -50,7 +50,7 @@ const excludedDecl = src.slice(src.indexOf("const excludedLiveSources"), src.ind
 const SERVER_NAMES = [
   "displayLabel", "isRealDateKey", "entriesSignature", "normalizeRawMonths",
   "resolveContribution", "cashflowRoleForEntry", "snapshotCaliber",
-  "isConsecutiveMonth", "monthEnd", "amountMatches", "transactionSpendForMonth",
+  "isConsecutiveMonth", "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "nativeDateString", "nativeBool", "effectiveFlowPeriod", "amountMatches", "transactionSpendForMonth",
   "aggregateMonths", "recomputeInvestmentReturns", "computeInvestmentPerformance",
   "average", "normalizedFireSpend", "validCompleteMonths", "computeFire",
   "normalizeFireMetrics", "sourceCanUseLive", "normalizedLiveValue",
@@ -298,13 +298,46 @@ check("server: verification state is carried from entries to account rows (addit
 check("server: unverified cash is named in the live summary and withheld like stale cash",
   src.includes("availableCashUnverified: summary.unverifiedSources")
   && src.includes("availableCashUnverified: availableCashSummary.unverifiedSources")
-  && src.includes("account.verified === false"));
-check("server: staleness compares the real balanceDate to the snapshot date (no month-prefix compare)",
-  extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("account.balanceDate < sourceMonth")
+  && src.includes("entryUnverified(account)"));
+check("server: staleness compares the exact normalized balanceDate to the snapshot date (no month-prefix compare)",
+  extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("normalizeBalanceDate(account.balanceDate) !== sourceMonth")
   && !extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("slice(0, 7)"));
 check("client: panel shows verification as text per row and names unverified cash both ways",
   appSrc.includes("verificationText(account.verified ?? null)") && appSrc.includes("现金账户未核实")
   && appSrc.includes("未核实现金账户") && appSrc.includes("核实状态未提供"));
+
+
+// --- F1.1 legacy-blob rework (PM 2026-10-18 09:10): an old
+// writer's payload whose ACCOUNT ROWS lost verified=false still
+// degrades on read when the same snapshot's preserved entryMeta
+// carries the mark; native status strings count as unverified;
+// a future balance date is a gap like an older one. ---
+const legacyUnverified = {
+  ...legacy,
+  months: [{
+    key: "2026-09-30",
+    entryMeta: [
+      { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: false },
+    ],
+  }],
+  accounts: [
+    { source: "bank_1234", label: "Bank 1234", type: "account", value: 4000, live: false, institution: null, mask: null },
+  ],
+};
+const legacyUnverifiedRead = ensureAvailableCash(legacyUnverified);
+check("legacy blob: entryMeta verified=false reaches the row on read -> amount null, source named unverified",
+  legacyUnverifiedRead.live.availableCash === null
+  && (legacyUnverifiedRead.live.availableCashUnverified ?? []).join() === "bank_1234"
+  && legacyUnverifiedRead.accounts.find((a) => a.source === "bank_1234").verified === false
+  && legacyUnverifiedRead.accounts.find((a) => a.source === "bank_1234").value === 4000);
+const statusCash = latestEntries([E("bank_1234", "account", 10000, { status: "carried_forward_unverified" })]);
+check("native status: carried_forward_unverified cash -> null + named unverified (not stale)",
+  statusCash.live.availableCash === null
+  && (statusCash.live.availableCashUnverified ?? []).join() === "bank_1234"
+  && (statusCash.live.availableCashStale ?? []).length === 0);
+const futureDated = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-10-01" })]);
+check("exact-date: a future balance date (10-01 vs snapshot 09-30) is a named stale gap",
+  futureDated.live.availableCash === null && (futureDated.live.availableCashStale ?? []).join() === "bank_1234");
 
 console.log(`validate-available-cash: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
