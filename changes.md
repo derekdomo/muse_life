@@ -482,3 +482,13 @@
 - 来源：所有者 2026-10-17 于主聊天批准、经主聊天派入 LIFE 队列；由 finance dash side chat 登记进 plans.md 新增 `F-UI` 节。本条仅为立项登记，未动任何代码。
 - 内容：所有者自述色弱，健康看板（space-4）已按「符号/文字为主要通道、颜色退为辅助＋Okabe-Ito 色板」改造上线；本条把同一标准系统性落到 space-3——涨跌加 ▲/▼ 或「涨/跌」文字冗余通道、中性金额（月支出/贷款）不再用 negative 红色承担语义、色板统一 Okabe-Ito（theme.css `--positive`/`--negative` 为已知缺口）、趋势图按同一清单顺带核对。数据口径与公式不动，纯呈现层，B 类证据分级。
 - 状态：已入队待执行，时限 2026-10-18（周日）08:39 PT 周刷新前。
+
+## 2026-10-17（F0.4 完整性判据 P0 返工 + F-UI-001 色弱冗余通道，space-3 同批交付）
+
+- 需求编号：`F0.4`（PM 2026-10-17 18:07 PDT 复验沿原 ID 继续的 P0/A 返工）、`F-UI-001`（用户直提，P1/B 类）。同 app（weekly-finance / space-3）合并一次构建、一次交付。
+- F0.4 改了什么：`weekly-finance/server/src/actions.ts` 的 `aggregateMonths` 完整性判定——已结束月标 complete 由「月末快照 OR 交易全覆盖」改为三项依据同时成立：所选快照日期恰为该月最后一天、交易 coverage 完整覆盖整月、快照 entries 非空；`integrityBasis` 同时写明「月末快照 {日期} + 交易覆盖 {start} 至 {end} 完整覆盖本月」。仅日期、仅交易覆盖、空 entries 任一情形一律 unknown（basis 为 null）；当月 partial 不变。FIRE `computeFire`/`validCompleteMonths` 与客户端 `completeSpendBasis` 消费口径未动，schema/迁移未动，旧 payload 默认 unknown 不变，回滚 revert 本提交即恢复旧判定。
+- F-UI-001 改了什么：`weekly-finance/client/src/theme.css` 的 `--positive` 改 Okabe-Ito 蓝绿 `#009E73`、`--negative` 改朱红 `#D55E00`；`client/src/App.tsx` 新增导出纯函数 `trendIndicator`（正 ▲ / 负 ▼ / 0 或 null —），Hero 净资产差（另加增加/减少方向文字）、月度快照环比、本次余额差卡、储蓄率四处补符号冗余；「月支出」「贷款」指标删除 negative tone 改中性；账户贷款行改中性色、金额加「−」号、副标签加「负债」文字；DistributionPanel 贷款行 tone 由 danger 改 muted。趋势图已有文字系列名，核对后未动。数据口径与公式一律未动。
+- 验证证据：仓库脚本全过——`validate-monthly-facts.mjs` 更新至 53/53（旧单依据 complete 期望已按新判据改写；新增 PM 复现一：三份空 entries 月末快照无覆盖→全 unknown 且 FIRE completeMonthsUsed=0/目标 0/进度 null；复现二：月中快照+完整交易覆盖→unknown；双依据+非空 entries 正常月→complete 且 basis 双写）；新增 `validate-color-vision.mjs` 16/16（真实 trendIndicator 行为+符号翻转变异对照、Okabe-Ito 色值、四处接线、中性金额接线）；`validate-facts-card.mjs` 82/82、`validate-payload.mjs` 12/12 回归通过。artifact 构建审计 pass（桌面/手机无溢出、零控制台错误；审计环境为访客拦截页、零数据，与改前一致）。
+- 局限（如实）：(1) 构建方自报其基于审计截图的验收清单仅 2/8 可在其环境核验——审计环境非所有者、看不到真实看板，属结构性限制；F-UI-001 按 B 类以所有者本人打开为准，A 类完整性以仓库真实生产函数断言为据，真实 ingest→保存→getDashboard 端到端与最终上线源码映射仍归 EVID-LIFE-001。(2) 新判据下历史月份若缺少「月末快照+全月交易覆盖」双依据，FIRE/应急金将显示完整月不足——这是 PM 判据要求的诚实降级，不是数据丢失，月度事实仍在月度记录中可见。
+- 顺延说明：`HH0.2` 运行中旧回调/并发重复 P0 与 `W4.3-D1` 训练完成回执（目标 10-19）本轮未动——本轮为 space-3 单 app 构建＋自检，责任方 Muse，2026-10-17；两项保留在统一队列，下轮继续（HH0.2 目标 10-18 不变）。
+- 修改文件：`weekly-finance/server/src/actions.ts`、`weekly-finance/client/src/App.tsx`、`weekly-finance/client/src/theme.css`、`weekly-finance/validate-monthly-facts.mjs`、`weekly-finance/validate-color-vision.mjs`（新增）、`plans.md`、`changes.md`。未提交 app.db/.env/任何真实数据。

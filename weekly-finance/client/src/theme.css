@@ -27,8 +27,8 @@
   --accent-soft: #dfeee8;
   --accent-soft-strong: #b8d8cc;
   --chart-muted: #d6ddda;
-  --positive: #147457;
-  --negative: #c84c54;
+  --positive: #009E73;
+  --negative: #D55E00;
   --radius: 18px;
   --shadow: 0 8px 28px rgba(25, 48, 39, 0.055);
   --space-surface: var(--surface);

@@ -352,9 +352,13 @@ function aggregateMonths(
       ? (shouldHaveTransactionCoverage || rawFlexibleSpend < 0)
       : rawFlexibleSpend < 0;
     // F0.4 integrity: the asOf month is always partial. A finished month
-    // is complete only with a coverage basis — full transaction
-    // coverage of the whole month, or a month-end snapshot. Anything
-    // else stays unknown; it is never backfilled as complete.
+    // is complete only when ALL bases hold at once — the chosen
+    // snapshot date is the month's last day, transaction coverage fully
+    // covers the month, and the snapshot has entries. A date alone
+    // proves nothing about coverage, and transaction coverage alone
+    // only proves transaction spend; neither suffices by itself.
+    // Anything missing stays unknown; it is never backfilled as
+    // complete.
     const source = sorted[index];
     const monthKey = month.key.slice(0, 7);
     const asOfMonth = asOf.slice(0, 7);
@@ -363,12 +367,15 @@ function aggregateMonths(
     if (monthKey >= asOfMonth) {
       integrity = "partial";
       integrityBasis = `当月尚未结束，快照截至 ${month.key}`;
-    } else if (fullTransactionCoverage && coverage) {
+    } else if (
+      end &&
+      month.key === end &&
+      fullTransactionCoverage &&
+      coverage &&
+      (source?.entries.length ?? 0) > 0
+    ) {
       integrity = "complete";
-      integrityBasis = `交易覆盖 ${coverage.start} 至 ${coverage.end} 完整覆盖本月`;
-    } else if (end && month.key === end) {
-      integrity = "complete";
-      integrityBasis = `月末快照 ${month.key} 覆盖整月`;
+      integrityBasis = `月末快照 ${month.key} + 交易覆盖 ${coverage.start} 至 ${coverage.end} 完整覆盖本月`;
     } else {
       integrity = "unknown";
     }

@@ -123,8 +123,8 @@ const months = aggregateMonths(normalized.months, [], null, AS_OF);
 check("aggregate: exactly one point per month", months.length === 3 && months.map((m) => m.key).join(",") === "2026-08-31,2026-09-15,2026-10-05");
 check("aggregate: snapshotDate is the chosen snapshot date", months[1].snapshotDate === "2026-09-15");
 check("integrity: current month is always partial", months[2].integrity === "partial");
-check("integrity: finished month with month-end snapshot is complete",
-  months[0].integrity === "complete" && (months[0].integrityBasis ?? "").includes("月末快照"));
+check("integrity: month-end snapshot alone is NOT complete (date proves no coverage)",
+  months[0].integrity === "unknown" && months[0].integrityBasis === null);
 check("integrity: finished month without coverage basis is unknown, not auto-complete",
   months[1].integrity === "unknown" && months[1].integrityBasis === null);
 const covered = aggregateMonths(
@@ -133,8 +133,34 @@ const covered = aggregateMonths(
   { start: "2026-09-01", end: "2026-09-30", complete: true },
   AS_OF,
 );
-check("integrity: full transaction coverage makes a finished month complete",
-  covered[1].integrity === "complete" && (covered[1].integrityBasis ?? "").includes("交易覆盖"));
+check("integrity: full transaction coverage alone is NOT complete for a mid-month snapshot",
+  covered[1].integrity === "unknown" && covered[1].integrityBasis === null);
+const coveredMonthEnd = aggregateMonths(
+  normalizeRawMonths([snap("2026-08-31", 800), snap("2026-09-30", 900)]).months,
+  [],
+  { start: "2026-09-01", end: "2026-09-30", complete: true },
+  AS_OF,
+);
+check("integrity: month-end snapshot + full transaction coverage + entries is complete",
+  coveredMonthEnd[1].integrity === "complete"
+  && (coveredMonthEnd[1].integrityBasis ?? "").includes("月末快照")
+  && (coveredMonthEnd[1].integrityBasis ?? "").includes("交易覆盖"));
+const emptyMonths = aggregateMonths(
+  normalizeRawMonths([
+    { key: "2026-06-30", entries: [] },
+    { key: "2026-07-31", entries: [] },
+    { key: "2026-08-31", entries: [] },
+    snap("2026-10-05", 950),
+  ]).months,
+  [],
+  null,
+  AS_OF,
+);
+check("integrity (PM repro): empty month-end snapshots without coverage stay unknown",
+  emptyMonths.slice(0, 3).every((m) => m.integrity === "unknown"));
+const emptyFire = computeFire(emptyMonths.slice(0, 3), 750000);
+check("FIRE (PM repro): no-basis months never enter the denominator",
+  emptyFire.completeMonthsUsed === 0 && emptyFire.target === 0 && emptyFire.progress === null);
 const partialCoverage = aggregateMonths(
   normalizeRawMonths([snap("2026-08-31", 800), snap("2026-09-15", 900)]).months,
   [],

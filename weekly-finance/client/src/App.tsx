@@ -76,6 +76,13 @@ function valueTone(value: number | null): "neutral" | "positive" | "negative" {
   return value > 0 ? "positive" : "negative";
 }
 
+// F-UI-001: color never carries direction alone — every up/down value
+// also gets a glyph so meaning survives for color-weak readers.
+export function trendIndicator(value: number | null): string {
+  if (value == null || value === 0) return "—";
+  return value > 0 ? "▲" : "▼";
+}
+
 type RefreshStatus = "idle" | "running" | "error";
 
 type WeeklyDeltaView = {
@@ -195,7 +202,7 @@ function DistributionPanel({ current, live }: { current: Month; live: Dashboard[
   const assetRows = [
     { label: "投资", value: live.investment, tone: "primary" as const },
     { label: "存款", value: live.deposits ?? 0, tone: "muted" as const },
-    { label: "贷款", value: live.loans ?? 0, tone: "danger" as const },
+    { label: "贷款", value: live.loans ?? 0, tone: "muted" as const },
   ];
   const spendRows = [
     { label: "固定支出", value: current.fixedSpend, tone: "primary" as const },
@@ -435,7 +442,7 @@ function BalanceDeltaCard({ data, refreshFailed }: { data: Dashboard; refreshFai
       </div>
       {view.comparable ? (
         <div className={`fact-card__value ${valueTone(delta)}`}>
-          <strong>{signedCurrency(delta)}</strong>
+          <strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>
           {view.percent != null ? <span>{`${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}`}</span> : null}
           <span>{view.direction}</span>
         </div>
@@ -511,25 +518,25 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
             {data.live.weeklyDelta == null ? (
               <span>暂无可比快照</span>
             ) : (
-              <><span>{signedCurrency(data.live.weeklyDelta)}</span><span>{deltaView.percent == null ? "" : `（${deltaView.percent > 0 ? "+" : ""}${percent.format(deltaView.percent)}）`}</span><span className="delta__label">较上次成功快照</span></>
+              <><span>{trendIndicator(data.live.weeklyDelta)} {signedCurrency(data.live.weeklyDelta)}</span><span>{deltaView.percent == null ? "" : `（${deltaView.percent > 0 ? "+" : ""}${percent.format(deltaView.percent)}）`}</span>{deltaView.direction ? <span>{deltaView.direction}</span> : null}<span className="delta__label">较上次成功快照</span></>
             )}
           </div>
         </div>
         <div className="snapshot-compare">
           <span>月度快照 · {data.sourceMonth}</span>
           <strong>{currency.format(current.total)}</strong>
-          <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${signedCurrency(monthDelta)} 环比`}</small>
+          <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`}</small>
         </div>
       </section>
 
       <section className="metric-grid" aria-label="本月关键指标">
         <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />
-        <Metric label="月支出" value={<span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} tone="negative" note={`固定 ${compactCurrency.format(current.fixedSpend)}`} />
-        <Metric label="储蓄率" value={savingsRate == null ? "—" : percent.format(savingsRate)} tone={valueTone(savingsRate)} note="（收入 − 支出）÷ 收入" />
+        <Metric label="月支出" value={<span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} note={`固定 ${compactCurrency.format(current.fixedSpend)}`} />
+        <Metric label="储蓄率" value={savingsRate == null ? "—" : <>{trendIndicator(savingsRate)} {percent.format(savingsRate)}</>} tone={valueTone(savingsRate)} note="（收入 − 支出）÷ 收入" />
         <Metric label="应急金覆盖" value={emergencyMonths == null ? "—" : `${number.format(emergencyMonths)} 个月`} note={emergencyNote} />
         <Metric label="投资" value={<span title={currency.format(data.live.investment)}>{compactCurrency.format(data.live.investment)}</span>} note="已融合实时余额" />
         <Metric label="存款" value={<span title={currency.format(data.live.deposits ?? 0)}>{compactCurrency.format(data.live.deposits ?? 0)}</span>} note="现金与银行账户" />
-        <Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} tone="negative" note="按未偿余额显示" />
+        <Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} note="按未偿余额显示" />
       </section>
 
       <section className="section-block">
@@ -592,9 +599,9 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
                     <div className="account-row" key={`${account.type}-${account.source}`}>
                       <div>
                         <strong>{account.label}</strong>
-                        <span>{accountTypeLabel(account.type)} · {account.live ? "同步读取" : "月度快照"}{account.mask ? ` ···${account.mask}` : ""}</span>
+                        <span>{accountTypeLabel(account.type)}{isLoan ? " · 负债" : ""} · {account.live ? "同步读取" : "月度快照"}{account.mask ? ` ···${account.mask}` : ""}</span>
                       </div>
-                      <b className={isLoan ? "negative" : "neutral"}>{currencyPrecise.format(isLoan ? Math.abs(account.value) : account.value)}</b>
+                      <b className="neutral">{isLoan ? `−${currencyPrecise.format(Math.abs(account.value))}` : currencyPrecise.format(account.value)}</b>
                     </div>
                   );
                 })}
