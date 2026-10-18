@@ -289,15 +289,23 @@ export function decideIngestCallback(input: {
 // a generation id when a refresh starts and stores it on refresh_state;
 // the research task must echo it back in its ingestResearch callback,
 // success and failure alike. A callback arriving on the task-return
-// channel while a refresh is running is bound to that generation: a
-// missing or mismatched generation means the callback belongs to an
-// older (or foreign) task and must be ignored without touching state —
-// the pre-contract defect was an old generation's failure callback,
-// which carries no asOf to compare, settling the new generation's
-// running state. Legacy state rows (generation null, written before
-// this contract) keep the previous decide-only behaviour, and callbacks
-// on any other channel are not gated here (the claim arbitration below
-// still binds them).
+// channel is bound to that generation:
+//  - While a refresh is running, a missing or mismatched generation
+//    means the callback belongs to an older (or foreign) task and must
+//    be ignored without touching state — the pre-contract defect was an
+//    old generation's failure callback, which carries no asOf to
+//    compare, settling the new generation's running state.
+//  - Once a generation has settled (idle/error), it is spent: a task
+//    callback can settle its own still-running generation exactly
+//    once, so a late or replayed task return — same generation with a
+//    newer asOf, or a foreign generation — must never publish or
+//    settle again (PM 2026-10-18 03:10 repro: the pre-fix gate passed
+//    every non-running state, and decideIngestCallback then let a
+//    newer-asOf success re-publish over the settled report).
+// Legacy state rows (generation null, written before this contract)
+// keep the previous decide-only behaviour, and callbacks on any other
+// channel are not gated here (the owner channel is the explicit-import
+// path; the claim arbitration below still binds it).
 export function decideGenerationGate(input: {
   fromTaskChannel: boolean;
   refreshStatus: "idle" | "running" | "error" | null | undefined;
@@ -305,8 +313,8 @@ export function decideGenerationGate(input: {
   incomingGeneration: string | null | undefined;
 }): "pass" | "ignore" {
   if (!input.fromTaskChannel) return "pass";
-  if (input.refreshStatus !== "running") return "pass";
   if (input.storedGeneration == null) return "pass";
+  if (input.refreshStatus !== "running") return "ignore";
   if (input.incomingGeneration == null) return "ignore";
   return input.incomingGeneration === input.storedGeneration ? "pass" : "ignore";
 }
@@ -354,19 +362,56 @@ async function setRefreshState(
   }
 }
 
+// HH0.2 spawn-tail CAS (PM 2026-10-18 03:10 repro): refreshReport's
+// post-spawn writes may only attach to the generation they started,
+// and only while that generation is still running and unsettled. The
+// pre-fix tail wrote unconditionally, so a spawn that returned late —
+// after its own generation's callback had already settled it, or after
+// a stale-aged restart had minted a new generation — resurrected the
+// settled state to "running" or overwrote/errored the new generation.
+// One conditional UPDATE matching (id, this generation, still
+// "running"); zero matched rows means this spawn's outcome no longer
+// owns the state row and nothing is written. The patch never touches
+// generation/claimedGeneration/publishedReportId, so an in-flight
+// ingest claim or publish of the same generation is undisturbed.
+async function casSpawnTailState(
+  ctx: Ctx,
+  generation: string,
+  patch: { status: "idle" | "running" | "error"; taskId: string | null; message: string | null },
+): Promise<boolean> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .update(schema.refreshState)
+    .set({ status: patch.status, taskId: patch.taskId, message: patch.message, updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.refreshState.id, 1),
+        eq(schema.refreshState.generation, generation),
+        eq(schema.refreshState.status, "running"),
+      ),
+    )
+    .returning({ id: schema.refreshState.id });
+  return rows.length === 1;
+}
+
 type ReportRow = typeof schema.reports.$inferSelect;
 
 // HH0.3: the visible report is the one the publish pointer names. The
-// pointer is authoritative; the published flag (backfilled by the
-// migration for pre-pointer data) and finally the newest report are
-// fallbacks for rows written before the pointer existed.
+// pointer is authoritative when it names a published report; the
+// published flag (backfilled by the 0003 migration for pre-pointer
+// legacy data) is the only fallback. There is deliberately NO "newest
+// report row" fallback: on a first-run database whose only report is
+// a still-unpublished candidate (published=0), that fallback exposed
+// the half-written candidate — and kept exposing it after its write
+// failed (PM 2026-10-18 03:10 repro). With no published report this
+// returns undefined and getReport honestly reports report=null.
 async function loadPublishedReport(ctx: Ctx): Promise<ReportRow | undefined> {
   const db = ctx.db<typeof schema>();
   const stateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
   const pointer = stateRows[0]?.publishedReportId ?? null;
   if (pointer != null) {
     const byPointer = await db.select().from(schema.reports).where(eq(schema.reports.id, pointer)).limit(1);
-    if (byPointer[0]) return byPointer[0];
+    if (byPointer[0] && byPointer[0].published === 1) return byPointer[0];
   }
   const flagged = await db
     .select()
@@ -374,9 +419,7 @@ async function loadPublishedReport(ctx: Ctx): Promise<ReportRow | undefined> {
     .where(eq(schema.reports.published, 1))
     .orderBy(desc(schema.reports.id))
     .limit(1);
-  if (flagged[0]) return flagged[0];
-  const latest = await db.select().from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
-  return latest[0];
+  return flagged[0];
 }
 
 export const Actions = {
@@ -507,14 +550,51 @@ export const Actions = {
         { expectsAction: "ingestResearch", dedupeKey: "weekly-south-bay-home-report" },
       );
       if (!task.ok) {
-        await setRefreshState(ctx, "error", null, "刷新任务未能启动，请稍后重试");
+        // Spawn-tail CAS: settle to error only if this generation is
+        // still the running one; a late spawn failure must not error
+        // a generation that already settled or a newer generation.
+        const settled = await casSpawnTailState(ctx, generation, {
+          status: "error",
+          taskId: null,
+          message: "刷新任务未能启动，请稍后重试",
+        });
         ctx.invalidateQueries();
-        return { ok: false, status: "error" as const, message: "刷新任务未能启动" };
+        if (settled) {
+          return { ok: false, status: "error" as const, message: "刷新任务未能启动" };
+        }
+        const nowRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
+        const nowState = nowRows[0];
+        if (nowState?.status === "running") {
+          return { ok: true, status: "already_running" as const, message: "刷新已经在进行中" };
+        }
+        if (nowState?.status === "idle") {
+          return { ok: true, status: "started" as const, message: "刷新已完成，报告已更新" };
+        }
+        return { ok: false, status: "error" as const, message: nowState?.message ?? "刷新任务未能启动" };
       }
-      await setRefreshState(ctx, "running", task.taskId, "正在核对房源、街道环境、学校与利率", {
-        generation,
+      // Spawn-tail CAS: record the task id only on this generation's
+      // still-running row. If the callback already settled this
+      // generation (or a new generation replaced it) while spawnTask
+      // was in flight, the state row belongs to that outcome now —
+      // leave it exactly as it is and answer from the actual state.
+      const attached = await casSpawnTailState(ctx, generation, {
+        status: "running",
+        taskId: task.taskId,
+        message: "正在核对房源、街道环境、学校与利率",
       });
-      return { ok: true, status: "started" as const, message: "已开始刷新，完成后会自动更新" };
+      if (attached) {
+        return { ok: true, status: "started" as const, message: "已开始刷新，完成后会自动更新" };
+      }
+      const nowRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
+      const nowState = nowRows[0];
+      ctx.invalidateQueries();
+      if (nowState?.status === "running") {
+        return { ok: true, status: "already_running" as const, message: "刷新已经在进行中" };
+      }
+      if (nowState?.status === "idle") {
+        return { ok: true, status: "started" as const, message: "刷新已完成，报告已更新" };
+      }
+      return { ok: false, status: "error" as const, message: nowState?.message ?? "刷新未能完成，请稍后重试" };
     },
   }),
 
@@ -556,6 +636,8 @@ export const Actions = {
       //     mismatched generation is an old generation's late return
       //     (its failure callbacks carry no asOf, so decideIngestCallback
       //     alone cannot tell them apart) — ignore, state untouched.
+      //     A task-channel callback arriving after its generation has
+      //     settled is likewise ignored: a generation settles once.
       //  2. decideIngestCallback filters provably stale callbacks
       //     against the published report: a success no newer than it, a
       //     success stamped before this refresh started, any late

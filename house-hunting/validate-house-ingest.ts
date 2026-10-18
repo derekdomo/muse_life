@@ -344,5 +344,136 @@ async function waitFor(label: string, cond: () => boolean, ms = 5000) {
   check("migration backfilled pointer + published flag, history intact", st.published_report_id === legacyReportId && flag.published === 1 && reportCount(sqlite) === 1);
 }
 
+// ---------- db wrapper that throws on the first insert into a table ----------
+function wrapDbThrowOnInsert(db: any, table: any) {
+  let armed = true;
+  return new Proxy(db, {
+    get(t, p) {
+      const v = Reflect.get(t, p, t);
+      if (p === "insert" && typeof v === "function") {
+        return (tbl: any) => {
+          if (armed && tbl === table) {
+            armed = false;
+            return { values: () => { throw new Error("synthetic listings write failure"); } };
+          }
+          return v.call(t, tbl);
+        };
+      }
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+}
+
+// =====================================================================
+// Scenario group 10: settled generation cannot re-publish (PM 03:10 #1)
+// =====================================================================
+{
+  const { sqlite, db } = freshDb();
+  await Actions.initializeReport.handler(ownerCtx(db), {});
+  await Actions.refreshReport.handler(ownerCtx(db), {});
+  const gen: string = stateRow(sqlite).generation;
+  const asOf = freshAsOf();
+  const okRes = await Actions.ingestResearch.handler(taskCtx(db), successPayload(gen, asOf));
+  check("setup: generation publishes and settles idle", okRes.saved === 3 && stateRow(sqlite).status === "idle");
+  const settledState = { ...stateRow(sqlite) };
+
+  const repubSame = await Actions.ingestResearch.handler(taskCtx(db), successPayload(gen, freshAsOf()));
+  check("settled + same generation + newer asOf: saved=0, no new report", repubSame.saved === 0 && reportCount(sqlite) === 2);
+  const repubForeign = await Actions.ingestResearch.handler(taskCtx(db), successPayload("gen-OLD", freshAsOf()));
+  check("settled + foreign generation + newer asOf: saved=0, no new report", repubForeign.saved === 0 && reportCount(sqlite) === 2);
+  const lateFail = await Actions.ingestResearch.handler(taskCtx(db), { success: false, error: "late failure after settle", generation: gen });
+  check("settled + late failure: saved=0", lateFail.saved === 0);
+  const after = stateRow(sqlite);
+  check("settled state row unchanged by replays (status/pointer/task)", after.status === "idle" && after.published_report_id === settledState.published_report_id && after.task_id === settledState.task_id);
+  const rep = await Actions.getReport.handler(readerCtx(db), {});
+  check("visible report still the settled issue", rep.report?.asOf === asOf);
+
+  // Error-settled generation is spent too.
+  await Actions.refreshReport.handler(ownerCtx(db), {});
+  const genE: string = stateRow(sqlite).generation;
+  const failRes = await Actions.ingestResearch.handler(taskCtx(db), { success: false, error: "boom", generation: genE });
+  check("setup: current-generation failure settles error", failRes.ok === false && stateRow(sqlite).status === "error");
+  const afterError = await Actions.ingestResearch.handler(taskCtx(db), successPayload(genE, freshAsOf()));
+  check("error-settled + same generation success: saved=0, state stays error", afterError.saved === 0 && stateRow(sqlite).status === "error" && reportCount(sqlite) === 2);
+}
+
+// =====================================================================
+// Scenario group 11: late spawn results cannot overwrite state (PM 03:10 #2)
+// =====================================================================
+{
+  const { sqlite, db } = freshDb();
+  await Actions.initializeReport.handler(ownerCtx(db), {});
+  // A: the generation's callback settles idle while spawnTask is in flight;
+  // the spawn then returns success — its tail must not resurrect "running".
+  let spawnResultA: any;
+  const spawnA = async () => {
+    const gen: string = stateRow(sqlite).generation;
+    const cb = await Actions.ingestResearch.handler(taskCtx(db), successPayload(gen, freshAsOf()));
+    if (cb.saved !== 3) throw new Error("setup callback did not publish");
+    return { ok: true, taskId: "late-task-A" };
+  };
+  spawnResultA = await Actions.refreshReport.handler(ownerCtx(db, { spawnTask: spawnA }), {});
+  const stA = stateRow(sqlite);
+  check("spawn returns after own callback settled: state stays idle, no task resurrection", stA.status === "idle" && stA.task_id == null);
+  check("spawn-after-settle return is honest (not error, completed message)", spawnResultA.ok === true && spawnResultA.message === "刷新已完成，报告已更新");
+  check("spawn-after-settle published exactly one new report", reportCount(sqlite) === 2);
+
+  // B: old spawn still in flight when a stale-aged restart mints G2;
+  // old spawn's success AND failure returns must not touch G2.
+  for (const oldOutcome of ["success", "failure"] as const) {
+    let releaseOld!: () => void;
+    const gateOld = new Promise<void>((res) => { releaseOld = res; });
+    const spawnOld = async () => { await gateOld; return oldOutcome === "success" ? { ok: true, taskId: "old-task" } : { ok: false }; };
+    const pOld = Actions.refreshReport.handler(ownerCtx(db, { spawnTask: spawnOld }), {});
+    await waitFor("old generation minted", () => stateRow(sqlite).status === "running");
+    const genOld: string = stateRow(sqlite).generation;
+    sqlite.exec(`UPDATE refresh_state SET updated_at = ${Date.now() - 3 * 3_600_000} WHERE id = 1`);
+    const startedNew = await Actions.refreshReport.handler(ownerCtx(db), {});
+    const genNew: string = stateRow(sqlite).generation;
+    check(`new generation starts while old spawn in flight (${oldOutcome})`, startedNew.status === "started" && genNew !== genOld && stateRow(sqlite).task_id === "task-harness");
+    releaseOld();
+    const oldRes: any = await pOld;
+    const stNew = stateRow(sqlite);
+    check(`late old spawn ${oldOutcome}: new generation untouched`, stNew.status === "running" && stNew.generation === genNew && stNew.task_id === "task-harness");
+    check(`late old spawn ${oldOutcome}: honest already_running return`, oldRes.ok === true && oldRes.status === "already_running");
+    const genCur: string = stateRow(sqlite).generation;
+    await Actions.ingestResearch.handler(taskCtx(db), { success: false, error: "harness cleanup", generation: genCur });
+  }
+}
+
+// =====================================================================
+// Scenario group 12: first-database candidate never visible (PM 03:10 #3)
+// =====================================================================
+{
+  const { sqlite, db } = freshDb();
+  // No initializeReport: the database has no published report at all.
+  const empty = await Actions.getReport.handler(readerCtx(db), {});
+  check("empty db: report is null", empty.report === null);
+  await Actions.refreshReport.handler(ownerCtx(db), {});
+  const gen: string = stateRow(sqlite).generation;
+
+  let releaseC!: () => void;
+  const gateC = new Promise<void>((res) => { releaseC = res; });
+  const wrappedC = wrapDbPauseOnInsert(db, schema.listings, gateC);
+  const pC = Actions.ingestResearch.handler(taskCtx(wrappedC), successPayload(gen, freshAsOf()));
+  await waitFor("first candidate report row written", () => reportCount(sqlite) === 1);
+  const midRep = await Actions.getReport.handler(readerCtx(db), {});
+  check("first candidate mid-write: getReport still null (no newest-row fallback)", midRep.report === null);
+  releaseC();
+  const resC = await pC;
+  const afterRep = await Actions.getReport.handler(readerCtx(db), {});
+  check("first candidate publishes whole, then becomes visible", resC.saved === 3 && afterRep.report != null && afterRep.report.listings.length === 3);
+
+  // A listings write failure on a fresh db leaves report=null, not the candidate.
+  const f2 = freshDb();
+  await Actions.refreshReport.handler(ownerCtx(f2.db), {});
+  const gen2: string = stateRow(f2.sqlite).generation;
+  const throwing = wrapDbThrowOnInsert(f2.db, schema.listings);
+  const failRes = await Actions.ingestResearch.handler(taskCtx(throwing), successPayload(gen2, freshAsOf()));
+  const failRep = await Actions.getReport.handler(readerCtx(f2.db), {});
+  check("first candidate write failure: saved=0, state error, getReport null", failRes.saved === 0 && stateRow(f2.sqlite).status === "error" && failRep.report === null);
+  check("failed first candidate row exists but stays unpublished", reportCount(f2.sqlite) === 1 && (f2.sqlite.query("SELECT published FROM reports").get() as any).published === 0);
+}
+
 console.log(`validate-house-ingest: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

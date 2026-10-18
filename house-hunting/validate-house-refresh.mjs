@@ -84,11 +84,21 @@ check("gate: task + running + undefined generation ignored", G({ incomingGenerat
 check("gate: task + running + other generation ignored", G({ incomingGeneration: "gen-OLD" }) === "ignore");
 check("gate: task + running + legacy row (stored null) passes with no generation", G({ storedGeneration: null, incomingGeneration: null }) === "pass");
 check("gate: task + running + legacy row (stored null) passes with any generation", G({ storedGeneration: null, incomingGeneration: "gen-X" }) === "pass");
-check("gate: task + settled idle not gated (decide rules apply)", G({ refreshStatus: "idle", incomingGeneration: null }) === "pass");
-check("gate: task + settled error not gated", G({ refreshStatus: "error", incomingGeneration: "gen-OLD" }) === "pass");
-check("gate: task + no state row not gated", G({ refreshStatus: null, incomingGeneration: null }) === "pass");
+// Settled-generation binding (PM 2026-10-18 03:10 repro): a task callback
+// settles its own still-running generation exactly once. After settle,
+// the same generation (even with a newer asOf) and any foreign
+// generation are both ignored on the task channel; legacy rows (stored
+// null) and the owner channel keep the pre-contract behaviour.
+check("gate: task + settled idle + same generation ignored (no re-publish)", G({ refreshStatus: "idle", incomingGeneration: "gen-A" }) === "ignore");
+check("gate: task + settled idle + foreign generation ignored", G({ refreshStatus: "idle", incomingGeneration: "gen-OLD" }) === "ignore");
+check("gate: task + settled idle + missing generation ignored", G({ refreshStatus: "idle", incomingGeneration: null }) === "ignore");
+check("gate: task + settled error + same generation ignored", G({ refreshStatus: "error", incomingGeneration: "gen-A" }) === "ignore");
+check("gate: task + settled error + foreign generation ignored", G({ refreshStatus: "error", incomingGeneration: "gen-OLD" }) === "ignore");
+check("gate: task + settled idle + legacy row (stored null) not gated", G({ refreshStatus: "idle", storedGeneration: null, incomingGeneration: null }) === "pass");
+check("gate: task + no state row (stored null) not gated", G({ refreshStatus: null, storedGeneration: null, incomingGeneration: null }) === "pass");
 check("gate: owner channel never gated", G({ fromTaskChannel: false, incomingGeneration: null }) === "pass");
 check("gate: owner channel mismatched generation passes (claim still arbitrates)", G({ fromTaskChannel: false, incomingGeneration: "gen-OLD" }) === "pass");
+check("gate: owner channel settled generation passes (explicit import path)", G({ fromTaskChannel: false, refreshStatus: "idle", incomingGeneration: "gen-A" }) === "pass");
 
 // --- HH0.2 wiring: getReport maps stale, refreshReport restarts, ingest ignores ---
 check("getReport uses presentRefreshState in both paths", (serverSrc.match(/presentRefreshState\(state, owner\)/g) ?? []).length === 2);
@@ -129,6 +139,15 @@ check("HH0.3 wiring: getReport reads only the published report via the pointer h
   && serverSrc.includes("eq(schema.reports.published, 1)"));
 check("HH0.3 wiring: publish pointer switches in the same settle write",
   serverSrc.includes("...(publishedReportId != null ? { publishedReportId } : {})"));
+check("HH0.2 wiring: spawn tails are generation+running CAS, never unconditional setRefreshState",
+  (() => { const sec = serverSrc.slice(serverSrc.indexOf("refreshReport: defineAction"), serverSrc.indexOf("ingestResearch: defineAction")); const tail = sec.slice(sec.indexOf("const task = await ctx.agent.spawnTask")); return tail.includes("casSpawnTailState(ctx, generation,") && !tail.includes("await setRefreshState(ctx,"); })());
+check("HH0.2 wiring: spawn-tail CAS matches id + generation + still-running and returns row count",
+  serverSrc.includes("eq(schema.refreshState.generation, generation)")
+  && serverSrc.includes('eq(schema.refreshState.status, "running")')
+  && serverSrc.includes("return rows.length === 1;"));
+check("HH0.3 wiring: published loader has no newest-row fallback and pointer requires published=1",
+  !serverSrc.includes("const latest = await db.select().from(schema.reports)")
+  && serverSrc.includes("byPointer[0].published === 1"));
 check("HH0.3 wiring: initializeReport publishes its snapshot and points at it",
   serverSrc.includes("published: 1,") && serverSrc.includes("{ publishedReportId: report.id }"));
 check("HH0.3 migration: additive columns + backfill of the latest pre-existing report",
@@ -162,6 +181,10 @@ const gateMutated = bundle.replace('input.incomingGeneration === input.storedGen
 const gApi = new Function(`const staleRefreshThresholdMs = ${staleRefreshThresholdMs}; ${gateMutated}; return { decideGenerationGate };`)();
 check("mutation: inverted gate equality flips the matching-generation case",
   gApi.decideGenerationGate({ fromTaskChannel: true, refreshStatus: "running", storedGeneration: "gen-A", incomingGeneration: "gen-A" }) === "ignore");
+const settledMutated = bundle.replace('if (input.refreshStatus !== "running") return "ignore";', 'if (input.refreshStatus !== "running") return "pass";');
+const sApi = new Function(`const staleRefreshThresholdMs = ${staleRefreshThresholdMs}; ${settledMutated}; return { decideGenerationGate };`)();
+check("mutation: removing the settled-generation guard flips the settled same-generation case",
+  sApi.decideGenerationGate({ fromTaskChannel: true, refreshStatus: "idle", storedGeneration: "gen-A", incomingGeneration: "gen-A" }) === "pass");
 
 console.log(`validate-house-refresh: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
