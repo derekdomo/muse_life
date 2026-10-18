@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import * as schema from "./schema";
 
 const citySchema = z.enum(["Santa Clara", "Sunnyvale", "Cupertino"]);
@@ -229,28 +229,58 @@ export function isStaleRunningState(
   return now.getTime() - updatedAt.getTime() > staleRefreshThresholdMs;
 }
 
-// Ingest decision for a research callback. While a refresh is running the
-// callback applies exactly as before. Once the refresh state has settled
-// (idle/error), the callback is a duplicate or a late return: a success
-// whose asOf is the same as or older than the latest stored report must
-// not insert a second copy, and a late failure must not flip a completed
-// refresh back to error — both are ignored with state left untouched.
+// Ingest decision for a research callback, with generation binding
+// (HH0.2). A callback may only settle the refresh generation it belongs
+// to:
+//  - A success whose asOf is the same as or older than the latest stored
+//    report never inserts, in ANY refresh state — inserting it would make
+//    the visible report regress or duplicate the current one.
+//  - While a refresh is running, a success whose asOf predates the moment
+//    this refresh started (refreshUpdatedAt) provably belongs to the
+//    previous generation's task: it is ignored and the running state is
+//    left untouched.
+//  - A failure may only settle a still-running refresh; a late failure
+//    arriving after the state settled (idle/error/no row) is ignored.
+// Semantics of "apply": for a running refresh, "apply" only means the
+// callback is ELIGIBLE to enter the handler's atomic generation
+// arbitration (the conditional refresh_state claim in ingestResearch).
+// The arbitration result — not this function — decides whether the
+// callback actually inserts a report or settles the state, so two
+// concurrent callbacks of the same generation cannot both apply.
 export function decideIngestCallback(input: {
   refreshStatus: "idle" | "running" | "error" | null | undefined;
+  refreshUpdatedAt: Date | string | null | undefined;
   latestReportAsOf: string | null | undefined;
   incomingSuccess: boolean;
   incomingAsOf: string | null | undefined;
 }): "apply" | "ignore" {
-  if (input.refreshStatus === "running") return "apply";
-  if (!input.incomingSuccess) return "ignore";
-  if (input.latestReportAsOf != null && input.incomingAsOf != null) {
-    const incomingMs = Date.parse(input.incomingAsOf);
-    const latestMs = Date.parse(input.latestReportAsOf);
+  const incomingMs = input.incomingAsOf != null ? Date.parse(input.incomingAsOf) : NaN;
+  const latestMs = input.latestReportAsOf != null ? Date.parse(input.latestReportAsOf) : NaN;
+  if (input.incomingSuccess) {
+    // No regression or duplicate insert, whatever the refresh state.
     if (!Number.isNaN(incomingMs) && !Number.isNaN(latestMs) && incomingMs <= latestMs) {
       return "ignore";
     }
+    if (input.refreshStatus === "running") {
+      // A result stamped before this refresh started is the previous
+      // generation's task returning late — ignore it, state untouched.
+      const startedMs =
+        input.refreshUpdatedAt instanceof Date
+          ? input.refreshUpdatedAt.getTime()
+          : input.refreshUpdatedAt != null
+            ? Date.parse(input.refreshUpdatedAt)
+            : NaN;
+      if (!Number.isNaN(incomingMs) && !Number.isNaN(startedMs) && incomingMs < startedMs) {
+        return "ignore";
+      }
+    }
+    return "apply";
   }
-  return "apply";
+  // Failure: eligible to settle only while a refresh is still running
+  // (subject to winning the arbitration, per the note above); a failure
+  // arriving after the state settled is a late return and is ignored.
+  if (input.refreshStatus === "running") return "apply";
+  return "ignore";
 }
 
 type RefreshStateRow = typeof schema.refreshState.$inferSelect;
@@ -422,21 +452,62 @@ export const Actions = {
       // daemon-validated "space-task-return-…" channel with no viewer.
       // Any other viewer-less or non-owner call is denied.
       if (!isOwner(ctx) && !isTaskReturnCallback(ctx)) return { ok: false, saved: 0 };
-      // Idempotency: once the refresh state has settled, a duplicate
-      // success callback (asOf same as or older than the latest report)
-      // and a late failure callback are ignored — no new report is
-      // inserted and the settled refresh state is left untouched.
+      // Generation binding + idempotency (HH0.2): decideIngestCallback
+      // first filters out provably stale callbacks — a success no newer
+      // than the stored report, a success stamped before this refresh
+      // started, and any late failure after the state settled. A callback
+      // that passes must then win an atomic generation arbitration before
+      // it may insert a report or settle the state: a conditional UPDATE
+      // on refresh_state that bumps only updatedAt and matches only while
+      // status and updatedAt are exactly what this call just read.
+      // Exactly one concurrent callback can claim a given generation; the
+      // loser (0 rows claimed) re-reads state and the latest report and
+      // re-decides once — if still applicable it proceeds directly, with
+      // no second claim, so arbitration cannot livelock.
       const db = ctx.db<typeof schema>();
-      const ingestStateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
-      const latestReportRows = await db.select({ asOf: schema.reports.asOf }).from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
-      const ingestDecision = decideIngestCallback({
-        refreshStatus: ingestStateRows[0]?.status,
-        latestReportAsOf: latestReportRows[0]?.asOf,
-        incomingSuccess: args.success,
-        incomingAsOf: args.success ? args.asOf : null,
-      });
-      if (ingestDecision === "ignore") {
-        return args.success ? { ok: true, saved: 0 } : { ok: false, saved: 0 };
+      const readIngestInputs = async () => {
+        const stateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
+        const latestRows = await db.select({ asOf: schema.reports.asOf }).from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
+        return { state: stateRows[0], latestAsOf: latestRows[0]?.asOf ?? null };
+      };
+      const decideFor = (state: RefreshStateRow | undefined, latestAsOf: string | null) =>
+        decideIngestCallback({
+          refreshStatus: state?.status,
+          refreshUpdatedAt: state?.updatedAt ?? null,
+          latestReportAsOf: latestAsOf,
+          incomingSuccess: args.success,
+          incomingAsOf: args.success ? args.asOf : null,
+        });
+      const ignoredResult = () => (args.success ? { ok: true, saved: 0 } : { ok: false, saved: 0 });
+
+      const firstRead = await readIngestInputs();
+      if (decideFor(firstRead.state, firstRead.latestAsOf) === "ignore") {
+        return ignoredResult();
+      }
+      let claimed = false;
+      if (firstRead.state) {
+        const claimRows = await db
+          .update(schema.refreshState)
+          .set({ updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.refreshState.id, 1),
+              eq(schema.refreshState.status, firstRead.state.status),
+              eq(schema.refreshState.updatedAt, firstRead.state.updatedAt),
+            ),
+          )
+          .returning({ id: schema.refreshState.id });
+        claimed = claimRows.length === 1;
+      }
+      if (!claimed) {
+        // Lost the claim (or there was no state row to claim): the state
+        // changed under us — re-read and re-decide exactly once.
+        const secondRead = await readIngestInputs();
+        if (decideFor(secondRead.state, secondRead.latestAsOf) === "ignore") {
+          return ignoredResult();
+        }
+        // Still applicable after the re-read: proceed without claiming
+        // again (single retry only).
       }
       if (!args.success) {
         await setRefreshState(ctx, "error", null, args.error);
@@ -450,6 +521,27 @@ export const Actions = {
         .slice(0, 20);
       if (clean.length < 3) {
         await setRefreshState(ctx, "error", null, "刷新结果不足 3 套已核实房源，保留上一期报告");
+        ctx.invalidateQueries();
+        return { ok: false, saved: 0 };
+      }
+      // HH0.3 pre-save integrity: a duplicated URL, or a duplicated
+      // address after case/whitespace normalization, in the filtered
+      // result means this round's data is untrustworthy — insert nothing
+      // and keep the previous report.
+      const seenUrls = new Set<string>();
+      const seenAddresses = new Set<string>();
+      let hasDuplicate = false;
+      for (const item of clean) {
+        const addressKey = item.address.trim().toLowerCase();
+        if (seenUrls.has(item.url) || seenAddresses.has(addressKey)) {
+          hasDuplicate = true;
+          break;
+        }
+        seenUrls.add(item.url);
+        seenAddresses.add(addressKey);
+      }
+      if (hasDuplicate) {
+        await setRefreshState(ctx, "error", null, "刷新结果存在重复房源，保留上一期报告");
         ctx.invalidateQueries();
         return { ok: false, saved: 0 };
       }

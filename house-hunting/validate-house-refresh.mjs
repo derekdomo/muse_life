@@ -45,9 +45,21 @@ check("running undefined updatedAt not stale", isStaleRunningState("running", un
 check("null status not stale", isStaleRunningState(null, ago(5 * 60 * 60 * 1000), now) === false);
 
 // --- HH0.2 ingest idempotency decision ---
-const D = (over) => decideIngestCallback({ refreshStatus: "running", latestReportAsOf: "2026-10-10T12:00:00-07:00", incomingSuccess: true, incomingAsOf: "2026-10-17T12:00:00-07:00", ...over });
+const D = (over) => decideIngestCallback({ refreshStatus: "running", refreshUpdatedAt: null, latestReportAsOf: "2026-10-10T12:00:00-07:00", incomingSuccess: true, incomingAsOf: "2026-10-17T12:00:00-07:00", ...over });
 check("running + success applies", D({}) === "apply");
-check("running + failure applies", D({ incomingSuccess: false, incomingAsOf: null }) === "apply");
+check("running + failure eligible for arbitration", D({ incomingSuccess: false, incomingAsOf: null }) === "apply");
+// Generation binding (PM 18:07/21:00 repro): an old generation's success
+// must never regress the visible report or settle the new refresh.
+check("running + success asOf older than latest report ignored (no regression)",
+  D({ incomingAsOf: "2026-10-03T12:00:00-07:00" }) === "ignore");
+check("running + success asOf equal to latest report ignored (no duplicate)",
+  D({ incomingAsOf: "2026-10-10T12:00:00-07:00" }) === "ignore");
+check("running + success stamped before this generation started ignored",
+  D({ refreshUpdatedAt: new Date("2026-10-17T11:00:00-07:00"), incomingAsOf: "2026-10-17T10:30:00-07:00", latestReportAsOf: null }) === "ignore");
+check("running + success stamped after generation start applies",
+  D({ refreshUpdatedAt: new Date("2026-10-17T11:00:00-07:00"), incomingAsOf: "2026-10-17T12:00:00-07:00", latestReportAsOf: null }) === "apply");
+check("running + success with unparseable asOf not silently dropped",
+  D({ refreshUpdatedAt: new Date("2026-10-17T11:00:00-07:00"), incomingAsOf: "not-a-date", latestReportAsOf: null }) === "apply");
 check("settled idle + duplicate same asOf ignored", D({ refreshStatus: "idle", incomingAsOf: "2026-10-10T12:00:00-07:00" }) === "ignore");
 check("settled idle + older asOf ignored", D({ refreshStatus: "idle", incomingAsOf: "2026-10-03T12:00:00-07:00" }) === "ignore");
 check("settled idle + newer asOf applies", D({ refreshStatus: "idle" }) === "apply");
@@ -62,7 +74,17 @@ check("getReport uses presentRefreshState in both paths", (serverSrc.match(/pres
 check("presentRefreshState maps stale to retryable error message", serverSrc.includes("上次刷新未完成，可以重新刷新") && serverSrc.includes('stale ? ("error" as const)'));
 check("refreshReport only blocks on non-stale running", serverSrc.includes('currentState?.status === "running" && !isStaleRunningState('));
 check("ingest consults decideIngestCallback before any insert", (() => { const sec = serverSrc.slice(serverSrc.indexOf("ingestResearch: defineAction")); return sec.indexOf("decideIngestCallback({") > -1 && sec.indexOf("decideIngestCallback({") < sec.indexOf("db.insert(schema.reports)"); })());
-check("ingest ignore returns saved 0 without state write in branch", /if \(ingestDecision === "ignore"\) \{\s*return args\.success \? \{ ok: true, saved: 0 \} : \{ ok: false, saved: 0 \};\s*\}/.test(serverSrc));
+check("ingest ignore returns saved 0 without state write in branch", serverSrc.includes('if (decideFor(firstRead.state, firstRead.latestAsOf) === "ignore")') && serverSrc.includes("return ignoredResult();"));
+check("ingest arbitration: conditional claim on status+updatedAt with returning",
+  serverSrc.includes("eq(schema.refreshState.status, firstRead.state.status)")
+  && serverSrc.includes("eq(schema.refreshState.updatedAt, firstRead.state.updatedAt)")
+  && serverSrc.includes(".returning({ id: schema.refreshState.id })")
+  && serverSrc.includes("claimed = claimRows.length === 1"));
+check("ingest arbitration: loser re-reads and re-decides exactly once",
+  serverSrc.includes("const secondRead = await readIngestInputs();")
+  && serverSrc.includes('if (decideFor(secondRead.state, secondRead.latestAsOf) === "ignore")'));
+check("HH0.3: duplicate URL/address rejected before insert, previous report kept",
+  (() => { const sec = serverSrc.slice(serverSrc.indexOf("ingestResearch: defineAction")); const dup = sec.indexOf("刷新结果存在重复房源，保留上一期报告"); const ins = sec.indexOf("db.insert(schema.reports)"); return dup > -1 && ins > -1 && dup < ins && sec.includes("seenUrls") && sec.includes("seenAddresses"); })());
 
 // --- L0.2 wiring (builder-delivered alongside HH0.2) ---
 check("refreshReport admits owner or scheduled platform call only", serverSrc.includes("if (!isOwner(ctx) && !isScheduledPlatformCall(ctx))"));
