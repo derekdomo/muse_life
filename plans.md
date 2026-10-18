@@ -63,7 +63,7 @@
 ### L0 — 隐私与权限（P0）
 
 - [ ] `L0.1` 面向真人的私密读取严格校验 `ctx.viewer?.isOwner === true`；其他读写按各自授权契约校验。所有者已批准 space-4 刷新入口与两个保存回调、space-6 getDashboard 只读入口的无身份内部同步例外，维持现状、风险知情接受，不再因缺可验证服务身份重复驳回或停摆同步。平台提供可验证服务身份时复审迁移；用户可随时撤销，代价为同步停摆、页面明示不可用。此前要求先撤销这些例外的审查意见已被本决定替代，其他权限缺陷仍按 A 类独立入队。
-- [ ] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。
+- [完成] `L0.2` 看房报告允许公开读取时，刷新、初始化和 ingest 仍只允许 owner/受信 callback；如果 artifact 被定义为私密，则读写统一 owner-only。（实现方交付 2026-10-17 17:30 PDT：随 HH0.2 同批由构建方在 space-2 附带交付并回灌本仓——报告保持公开读（仅公开挂牌与利率来源数据），但 refresh taskId 改为仅 owner 可见；initializeReport 改为 owner-only；refreshReport 仅接受 owner 或调度平台通道（无 viewer 且 invocationId 为 space-action- 前缀），其余调用在任何状态写入/spawn 前以 forbidden 拒绝；ingestResearch 仅接受 owner 或任务回传通道（space-task-return- 前缀）。实现方探针已实测非 owner 上下文 getReport 正常返回且 taskId 为 null。局限如实记录：space-action-/space-task-return- 通道前缀契约来自构建方对运行时通道的说明，未经一次真实周调度＋研究任务回传的端到端实测；若前缀契约有误，周刷新会在 ingest 被拒并由 HH0.2 stale 恢复兜底（2 小时后可重试），请 PM 在下一次真实周刷新后核对 refresh 状态是否回到 idle。此标记仅表示已交付，PM 结论以评审记录为准。）
 - [ ] `L0.3` 无权限响应使用稳定的 typed state，不依赖前端隐藏；直接调用 action 也不能读取 payload 或修改数据。
 - [ ] `L0.4` 删除仓库中的真实 HealthKit 明细、真实 workout UUID、设备 ID 和可识别的个人健康样例；首次启动显示诚实空态并引导同步。需要 fixture 时使用独立、明确标为 synthetic 的数据，且生产初始化不会写入 fixture。（2026-10-14 PM 复核至 `205f544`：DATA-PLAN 回灌隐私恢复与步数展示脚本修复局部通过，11:19 两处返工关闭；文档除保留一行同步机制说明外与此前脱敏 `8b87c09` 逐字一致，展示脚本 8/8 通过。无业务/schema/UI 改动。完整契约、受信 owner null/零/旧数字快照保存回读、三视口及原运行要求继续待验，整项不勾选。） **PM 2026-10-15 23:38：`34f216b` 当前changes文档脱敏局部通过，该次新增隐私返工关闭；原个人统计语境整行在当前blob精确匹配0，需求来源/范围保留。未改写历史，未把真实值重标synthetic。窄标识扫描不代替全面隐私或首次启动/owner运行验收；整项仍不勾选。**
 - [ ] `L0.5` 日志和错误文案不得包含账户余额、健康数值、训练明细、完整本地路径或上游原始 JSON。
@@ -244,8 +244,8 @@
 
 ### HH0 — 列表与刷新正确性（P0）
 
-- [ ] `HH0.1` 筛选结果为空时不回退显示全局第一名；hero 同步进入空态，避免把不满足筛选条件的房源称为“当前筛选首选”。
-- [ ] `HH0.2` 刷新状态实现 stale recovery 和幂等 callback；任务失联后不能永久卡在 running。
+- [完成] `HH0.1` 筛选结果为空时不回退显示全局第一名；hero 同步进入空态，避免把不满足筛选条件的房源称为“当前筛选首选”。（实现方交付 2026-10-17 17:30 PDT：已在 artifact（space-2）上线并回灌本仓——client `top` 改为只取 `filtered[0]`，筛选为空时 hero 渲染空态（标签「筛选结果」、标题「这个筛选下没有房源」、仅指引文案，无地址/verdict/链接/月供），筛选非空行为不变；构建审计 pass 且探针实测城市切换与空筛选两态正确；仓库 `validate-house-refresh.mjs` 接线断言覆盖本条。此标记仅表示已交付，PM 结论以评审记录为准。）
+- [完成] `HH0.2` 刷新状态实现 stale recovery 和幂等 callback；任务失联后不能永久卡在 running。（实现方交付 2026-10-17 17:30 PDT：已在 artifact（space-2）上线并回灌本仓——复用 weekly-finance 同款模式：导出纯函数 `isStaleRunningState`（running 超 2 小时判 stale）与 `decideIngestCallback`；getReport 双路径共用 `presentRefreshState` 把 stale running 映射为可重试 error 且保留原 updatedAt；refreshReport 仅对未 stale 的 running 返回 already_running，stale 时可重新启动；ingest 在 settled 后对同/旧 asOf 成功回调与迟到失败回调 ignore（不插入、不改状态），running 时正常 apply。仓库 `validate-house-refresh.mjs` 36/36（纯函数边界/决策矩阵＋接线断言＋变异敏感性）。局限：stale 与幂等路径无法在审计浏览器内端到端触发（需伪造 2 小时前 running 行或任务回调通道），以纯函数实测＋源码评审为据；真实调度失联场景待自然发生或 PM 运行复验。此标记仅表示已交付，PM 结论以评审记录为准。）
 - [ ] `HH0.3` 新报告在 report + listings 同一事务中原子保存；不足最低数量、重复 URL/地址或字段不完整时保留上一期。
 - [ ] `HH0.4` 当前挂牌状态必须有核验时间；sold/off-market 从推荐列表移除，pending/contingent 降级展示，不与 active 混为可直接行动。
 - [ ] `HH0.5` 排名必须由明确 rubric 产生并保存分项分：硬条件、环境、学校/私校、房龄/状态、空间、价格/可比成交。agent 不得只返回无法解释的总分。
@@ -269,8 +269,8 @@
 - [x] `AUDIT-01 / P0` 财务 owner 判断为 `ctx.viewer != null && !ctx.viewer.isOwner`；当 `viewer === null` 时会走 owner 数据路径。见 `weekly-finance/server/src/actions.ts` 的 `isSignedInGuest`。（2026-10-13 已修复：`isSignedInGuest` 改为严格 `isOwner` 校验，见 changes.md）
 - [完成] `AUDIT-02` 指定内部通道例外按所有者 2026-10-17 决定执行：space-4 refresh 与两个保存回调、space-6 getDashboard 的无身份调用维持现状。此标记表示对应实现已交付；此前因缺身份重复撤回的结论被所有者决定替代。PM 源码契约结论与尚缺 A 类运行证据分别见批量表；真人读取及例外外写入口仍严格 owner-only，不扩大例外，不重新请求同一批准。
 - [ ] `AUDIT-03 / P0` 健康源码及文档不得包含真实健康序列、个人基线、workout UUID、设备 ID 或真实初始快照。（2026-10-14 PM 复核至 `205f544`：health DATA-PLAN 恢复此前脱敏版本，仅保留新增同步机制说明；四组旧个人内容均不再命中，本次回灌隐私返工关闭。首次启动及 owner 运行证据仍待验，整项不勾选；见 L0.4。）
-- [ ] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。
-- [ ] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。
+- [完成] `AUDIT-04 / P1` 看房筛选为空时 `filtered[0] ?? report.listings[0]` 仍展示全局首选，hero 与空列表互相矛盾。（实现方交付 2026-10-17：同 `HH0.1` 交付，见 HH0 节交付注与 changes.md 同日条目；源码中该回退已删除。此标记仅表示已交付，PM 结论以评审记录为准。）
+- [完成] `AUDIT-05 / P1` 看房 running 状态没有 stale 判断；agent 未 callback 时刷新会永久不可用。（实现方交付 2026-10-17：同 `HH0.2` 交付，见 HH0 节交付注与 changes.md 同日条目。此标记仅表示已交付，PM 结论以评审记录为准。）
 - [ ] `AUDIT-06 / P1` 健康前端只用固定 60 秒等待，没有可查询的来源任务状态；过早完成和超时未完成都无法准确表达。
 - [ ] `AUDIT-07 / P1` 健康使用一个全局 `coverageIncomplete` 决定字段显示“还没同步完/当天没戴表”，不能真正做到按字段区分缺失原因。
 - [ ] `AUDIT-08 / P1` 训练重量/次数输入只在点击完成按钮时提交；编辑已完成组后直接离开可能丢失，且为了保存需要先取消完成。

@@ -161,7 +161,7 @@ export function App() {
     );
   }
 
-  const top = filtered[0] ?? report.listings[0];
+  const top = filtered[0];
   const topPayment = top ? monthlyPayment(top.price, downPayment, rate) : 0;
   const refreshStatus = reportQuery.data?.refresh.status ?? "idle";
 
@@ -203,7 +203,15 @@ export function App() {
               <small>每月 · {downPayment}% 首付 · {rate.toFixed(2)}%</small>
             </div>
           </section>
-        ) : null}
+        ) : (
+          <section className="hero hero-empty" aria-labelledby="top-pick-heading">
+            <div className="hero-copy">
+              <p className="hero-label">筛选结果</p>
+              <h2 id="top-pick-heading">这个筛选下没有房源</h2>
+              <p>当前筛选下没有满足条件的房源。可以降低最低面积门槛，或切回全部城市再看看。</p>
+            </div>
+          </section>
+        )}
 
         <section className="controls" aria-label="筛选与贷款假设">
           <div className="control-group cities">

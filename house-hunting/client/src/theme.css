@@ -151,6 +151,7 @@ footer { padding: 26px 0 8px; color: var(--dim); font-size: 11px; line-height: 1
   main { padding: 46px 28px 56px; }
   .report-intro { padding-bottom: 32px; }
   .hero { grid-template-columns: 1.45fr .85fr; padding: 34px; gap: 44px; }
+  .hero-empty { grid-template-columns: 1fr; }
   .hero-payment { border-top: 0; border-left: 1px solid #42695e; padding: 0 0 0 30px; }
   .controls { display: grid; grid-template-columns: 1fr 1.35fr; gap: 28px; align-items: end; }
   .finance-controls { margin-top: 0; }

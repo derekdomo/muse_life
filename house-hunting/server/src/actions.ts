@@ -180,6 +180,93 @@ const initialListings: Array<z.infer<typeof listingInputSchema>> = [
   },
 ];
 
+// Authorization (L0.2 + trusted platform channels). Write/trigger actions
+// admit exactly two kinds of caller, checked before any database write,
+// task spawn, or state change:
+//  1. The owner, identified by the runtime-verified viewer
+//     (ctx.viewer?.isOwner === true). Browser calls always carry a viewer,
+//     so a non-owner or anonymous browser call never qualifies.
+//  2. A platform-originated invocation with NO viewer, identified by the
+//     daemon-minted ctx.invocationId channel prefix. The invocation id is
+//     assigned by the runtime per ingress channel; it is not an action
+//     argument and cannot be set or forged by a client or by the page:
+//       - "space-action-…" — the daemon's direct action-invocation channel,
+//         which is how the scheduler's space_action execution invokes
+//         refreshReport for the weekly refresh.
+//       - "space-task-return-…" — a background task returning through its
+//         declared expectsAction contract. The daemon only mints this id
+//         after validating the call against the live task's expected return
+//         (missing/stale/mismatched returns are rejected before the action
+//         runs); this is how the research task calls ingestResearch.
+// Direct tool/agent calls arrive on the "artifact-action-tool-…" channel
+// and ordinary invocations carry other ids; neither is admitted here, so a
+// viewer-less direct call stays forbidden with zero writes.
+function isOwner(ctx: Ctx): boolean {
+  return ctx.viewer?.isOwner === true;
+}
+
+function isScheduledPlatformCall(ctx: Ctx): boolean {
+  return !ctx.viewer && ctx.invocationId.startsWith("space-action-");
+}
+
+function isTaskReturnCallback(ctx: Ctx): boolean {
+  return !ctx.viewer && ctx.invocationId.startsWith("space-task-return-");
+}
+
+// HH0.2 stale recovery, mirroring the weekly-finance pattern: a refresh
+// stuck in "running" for over 2 hours is treated as a dead refresh —
+// getReport presents it as a retryable error and refreshReport may start
+// over it instead of staying blocked forever. The stored row itself is
+// never rewritten by this mapping (updatedAt keeps its original value).
+export const staleRefreshThresholdMs = 2 * 60 * 60 * 1000;
+
+export function isStaleRunningState(
+  status: "idle" | "running" | "error" | null | undefined,
+  updatedAt: Date | null | undefined,
+  now: Date,
+): boolean {
+  if (status !== "running" || !updatedAt) return false;
+  return now.getTime() - updatedAt.getTime() > staleRefreshThresholdMs;
+}
+
+// Ingest decision for a research callback. While a refresh is running the
+// callback applies exactly as before. Once the refresh state has settled
+// (idle/error), the callback is a duplicate or a late return: a success
+// whose asOf is the same as or older than the latest stored report must
+// not insert a second copy, and a late failure must not flip a completed
+// refresh back to error — both are ignored with state left untouched.
+export function decideIngestCallback(input: {
+  refreshStatus: "idle" | "running" | "error" | null | undefined;
+  latestReportAsOf: string | null | undefined;
+  incomingSuccess: boolean;
+  incomingAsOf: string | null | undefined;
+}): "apply" | "ignore" {
+  if (input.refreshStatus === "running") return "apply";
+  if (!input.incomingSuccess) return "ignore";
+  if (input.latestReportAsOf != null && input.incomingAsOf != null) {
+    const incomingMs = Date.parse(input.incomingAsOf);
+    const latestMs = Date.parse(input.latestReportAsOf);
+    if (!Number.isNaN(incomingMs) && !Number.isNaN(latestMs) && incomingMs <= latestMs) {
+      return "ignore";
+    }
+  }
+  return "apply";
+}
+
+type RefreshStateRow = typeof schema.refreshState.$inferSelect;
+
+// The refresh block getReport returns: a stale "running" row is mapped to
+// a retryable error; taskId stays owner-only as before.
+function presentRefreshState(state: RefreshStateRow | undefined, owner: boolean) {
+  const stale = isStaleRunningState(state?.status, state?.updatedAt, new Date());
+  return {
+    status: stale ? ("error" as const) : (state?.status ?? "idle"),
+    taskId: owner ? (state?.taskId ?? null) : null,
+    message: stale ? "上次刷新未完成，可以重新刷新" : (state?.message ?? null),
+    updatedAt: state?.updatedAt?.toISOString() ?? null,
+  };
+}
+
 async function setRefreshState(ctx: Ctx, status: "idle" | "running" | "error", taskId: string | null, message: string | null) {
   const db = ctx.db<typeof schema>();
   const existing = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
@@ -195,6 +282,12 @@ export const Actions = {
     request: z.object({}),
     response: reportResponseSchema,
     async handler(ctx): Promise<z.infer<typeof reportResponseSchema>> {
+      // Read policy (confirmed for L0.2): the report itself stays publicly
+      // readable as currently designed — it contains only public listing
+      // data and published rate sources, no owner-private fields. The one
+      // internal identifier, the refresh taskId, is owner-private plumbing
+      // and is withheld from non-owner and anonymous readers.
+      const owner = isOwner(ctx);
       const db = ctx.db<typeof schema>();
       const reportRows = await db.select().from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
       const report = reportRows[0];
@@ -203,12 +296,7 @@ export const Actions = {
       if (!report) {
         return {
           report: null,
-          refresh: {
-            status: state?.status ?? "idle",
-            taskId: state?.taskId ?? null,
-            message: state?.message ?? null,
-            updatedAt: state?.updatedAt?.toISOString() ?? null,
-          },
+          refresh: presentRefreshState(state, owner),
         };
       }
       const rows = await db.select().from(schema.listings).where(eq(schema.listings.reportId, report.id)).orderBy(schema.listings.rank);
@@ -247,12 +335,7 @@ export const Actions = {
             caution: row.caution,
           })),
         },
-        refresh: {
-          status: state?.status ?? "idle",
-          taskId: state?.taskId ?? null,
-          message: state?.message ?? null,
-          updatedAt: state?.updatedAt?.toISOString() ?? null,
-        },
+        refresh: presentRefreshState(state, owner),
       };
     },
   }),
@@ -261,6 +344,7 @@ export const Actions = {
     request: z.object({}),
     response: z.object({ ok: z.boolean(), created: z.boolean() }),
     async handler(ctx) {
+      if (!isOwner(ctx)) return { ok: false, created: false };
       const db = ctx.db<typeof schema>();
       const existing = await db.select({ id: schema.reports.id }).from(schema.reports).limit(1);
       if (existing[0]) return { ok: true, created: false };
@@ -283,11 +367,21 @@ export const Actions = {
 
   refreshReport: defineAction({
     request: z.object({}),
-    response: z.object({ ok: z.boolean(), status: z.enum(["started", "already_running", "error"]), message: z.string() }),
+    response: z.object({ ok: z.boolean(), status: z.enum(["started", "already_running", "error", "forbidden"]), message: z.string() }),
     async handler(ctx) {
+      // Admit the owner, or the scheduler's platform invocation
+      // (space_action execution arrives viewer-less on the daemon's
+      // direct action channel). Any other caller is rejected before any
+      // state write or task spawn.
+      if (!isOwner(ctx) && !isScheduledPlatformCall(ctx)) {
+        return { ok: false, status: "forbidden" as const, message: "仅报告所有者可以刷新" };
+      }
       const db = ctx.db<typeof schema>();
       const stateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
-      if (stateRows[0]?.status === "running") {
+      // A stale "running" row is a dead refresh: fall through and start
+      // over it (the setRefreshState below overwrites the old row).
+      const currentState = stateRows[0];
+      if (currentState?.status === "running" && !isStaleRunningState(currentState.status, currentState.updatedAt, new Date())) {
         return { ok: true, status: "already_running" as const, message: "刷新已经在进行中" };
       }
       await setRefreshState(ctx, "running", null, "正在核对房源、街道环境、学校与利率");
@@ -322,6 +416,28 @@ export const Actions = {
     ]),
     response: z.object({ ok: z.boolean(), saved: z.number() }),
     async handler(ctx, args) {
+      // Ingest is a write path: reject before any state write or insert.
+      // Admit the owner, or the research task's platform return callback:
+      // a task spawned with expectsAction "ingestResearch" returns on the
+      // daemon-validated "space-task-return-…" channel with no viewer.
+      // Any other viewer-less or non-owner call is denied.
+      if (!isOwner(ctx) && !isTaskReturnCallback(ctx)) return { ok: false, saved: 0 };
+      // Idempotency: once the refresh state has settled, a duplicate
+      // success callback (asOf same as or older than the latest report)
+      // and a late failure callback are ignored — no new report is
+      // inserted and the settled refresh state is left untouched.
+      const db = ctx.db<typeof schema>();
+      const ingestStateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
+      const latestReportRows = await db.select({ asOf: schema.reports.asOf }).from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
+      const ingestDecision = decideIngestCallback({
+        refreshStatus: ingestStateRows[0]?.status,
+        latestReportAsOf: latestReportRows[0]?.asOf,
+        incomingSuccess: args.success,
+        incomingAsOf: args.success ? args.asOf : null,
+      });
+      if (ingestDecision === "ignore") {
+        return args.success ? { ok: true, saved: 0 } : { ok: false, saved: 0 };
+      }
       if (!args.success) {
         await setRefreshState(ctx, "error", null, args.error);
         ctx.invalidateQueries();
@@ -337,7 +453,6 @@ export const Actions = {
         ctx.invalidateQueries();
         return { ok: false, saved: 0 };
       }
-      const db = ctx.db<typeof schema>();
       const inserted = await db.insert(schema.reports).values({
         asOf: args.asOf,
         mortgageRate: args.mortgageRate,
