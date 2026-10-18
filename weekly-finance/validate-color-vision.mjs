@@ -51,7 +51,7 @@ check("savings rate carries glyph",
 
 // --- neutral amounts no longer borrow the negative channel ---
 check("monthly spend metric has no negative tone",
-  app.includes('<Metric label="月支出" value={<span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} note='));
+  app.includes('<Metric label="月支出" value={current.totalSpend == null ? "—" : <span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} note='));
 check("loans metric has no negative tone",
   app.includes('<Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} note='));
 check("distribution loans row is muted, not danger",

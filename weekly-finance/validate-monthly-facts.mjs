@@ -15,42 +15,33 @@ function check(name, cond) {
 }
 
 // --- extract the real server pipeline functions ---
+// F0.6: extraction now goes through the TypeScript transpiler's AST
+// (per-function source -> transpile) instead of string replacement,
+// so new type annotations in the cashflow pipeline cannot silently
+// break the harness.
+import ts from "typescript";
+const sourceFile = ts.createSourceFile("actions.ts", src, ts.ScriptTarget.ES2022, true);
 function extractFn(name) {
-  const start = src.indexOf(`function ${name}`);
-  if (start < 0) throw new Error(`function not found: ${name}`);
-  const end = src.indexOf("\n}\n", start) + 3;
-  return src.slice(start, end)
-    .replace("new Map<string, NormalizedMonth[]>()", "new Map()")
-    .replace("new Map<string, RawMonth>()", "new Map()")
-    .replace(': { investmentContribution: number; transfer: number }', "")
-    .replace(': "partial" | "complete" | "unknown"', "")
-    .replace(/: Dashboard\["months"\]\[number\]/g, "")
-    .replace(/: Dashboard\["months"\]/g, "")
-    .replace(/: Dashboard\["fire"\]/g, "")
-    .replace(/: MonthNormalization/g, "")
-    .replace(/: NormalizedMonth\[\]/g, "")
-    .replace(/: NormalizedMonth/g, "")
-    .replace(/: RawMonth\[\]/g, "")
-    .replace(/: RawMonth/g, "")
-    .replace(/: SourceEntry\[\]/g, "")
-    .replace(/: PlaidTransaction\[\]/g, "")
-    .replace(/: string\[\]/g, "")
-    .replace(/: TransactionCoverage/g, "")
-    .replace(/: string \| null/g, "")
-    .replace(/: number\[\]/g, "")
-    .replace(/: boolean/g, "")
-    .replace(/: string/g, "")
-    .replace(/: number/g, "");
+  for (const node of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
+      return ts.transpileModule(node.getText(sourceFile), {
+        compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+      }).outputText;
+    }
+  }
+  throw new Error(`function not found: ${name}`);
 }
 const NAMES = [
-  "isRealDateKey", "entriesSignature", "normalizeRawMonths", "contribution",
-  "monthEnd", "subtractDays", "amountMatches", "transactionSpendForMonth",
+  "isRealDateKey", "entriesSignature", "normalizeRawMonths", "resolveContribution",
+  "cashflowRoleForEntry", "snapshotCaliber", "isConsecutiveMonth",
+  "monthEnd", "amountMatches", "transactionSpendForMonth",
   "aggregateMonths", "average", "normalizedFireSpend", "validCompleteMonths",
-  "computeFire",
+  "computeFire", "recomputeInvestmentReturns", "computeInvestmentPerformance",
+  "normalizeStoredIntegrity", "normalizeFireMetrics",
 ];
 const bundle = NAMES.map(extractFn).join("\n");
 const api = new Function(`${bundle}; return { ${NAMES.join(", ")} };`)();
-const { isRealDateKey, normalizeRawMonths, aggregateMonths, computeFire } = api;
+const { isRealDateKey, normalizeRawMonths, aggregateMonths, computeFire, normalizeFireMetrics } = api;
 
 // --- fixtures (synthetic) ---
 const E = (financeSource, type, number) => ({ financeSource, type, number });
@@ -210,9 +201,12 @@ const partialCoverage = aggregateMonths(
 check("integrity: incomplete coverage flag does not prove completeness", partialCoverage[1].integrity === "unknown");
 
 // --- FIRE denominator: only valid complete months ---
+// F0.4: a legitimate complete fixture month carries all three
+// provenance flags true — the stamp alone no longer qualifies.
 const fm = (integrity, anomaly, contributionValue, fixed, flexible = 0) => ({
   integrity, flexibleSpendAnomaly: anomaly, contribution: contributionValue,
   fixedSpend: fixed, flexibleSpend: flexible,
+  spendProven: true, incomeProven: true, contributionProven: true,
 });
 const fireMonths = [
   fm("complete", false, 1000, 3000),
@@ -234,6 +228,101 @@ check("FIRE: no valid months -> no target, progress null (never 0-filled)",
 const fireMany = computeFire(Array.from({ length: 13 }, () => fm("complete", false, 100, 100)), 0);
 check("FIRE: trailing window caps at 12 valid complete months", fireMany.completeMonthsUsed === 12);
 
+// --- F0.4 legacy payload: "complete" stamp without provenance ---
+// An older writer stamped these months complete while all three
+// provenance flags are false (the old schema default). They must
+// neither enter the FIRE denominator nor keep the complete stamp
+// on the read path.
+const unproven = (overrides = {}) => ({
+  integrity: "complete", flexibleSpendAnomaly: false, contribution: 1000,
+  fixedSpend: 3000, flexibleSpend: 0,
+  spendProven: false, incomeProven: false, contributionProven: false,
+  ...overrides,
+});
+const fireUnproven = computeFire([
+  unproven(), unproven(), unproven(),
+], 750000);
+check("FIRE: legacy complete stamp with all flags false never enters the denominator",
+  fireUnproven.completeMonthsUsed === 0 && fireUnproven.target === 0 && fireUnproven.progress === null);
+const firePartiallyProven = computeFire([
+  unproven({ spendProven: true, incomeProven: true }),
+  unproven({ spendProven: true, contributionProven: true }),
+  unproven({ incomeProven: true, contributionProven: true }),
+], 750000);
+check("FIRE: complete stamp with any one flag missing is still not a valid month",
+  firePartiallyProven.completeMonthsUsed === 0);
+const flagless = { integrity: "complete", flexibleSpendAnomaly: false, contribution: 1000, fixedSpend: 3000, flexibleSpend: 0 };
+check("FIRE: complete stamp with flags absent entirely is not a valid month",
+  computeFire([flagless], 750000).completeMonthsUsed === 0);
+const fireMixedProvenance = computeFire([
+  unproven(),
+  fm("complete", false, 2000, 5000),
+], 750000);
+check("FIRE: proven and unproven complete stamps are separated (only proven counts)",
+  fireMixedProvenance.completeMonthsUsed === 1 && fireMixedProvenance.annualContribution === 24000);
+
+// --- read path: normalizeFireMetrics downgrades unproven stamps ---
+const storedMonth = (key, overrides = {}) => ({
+  key,
+  investment: 100000, deposits: 50000, loans: 0, netWorth: 150000,
+  income: 5000, fixedSpend: 3000, flexibleSpend: 2000,
+  flexibleSpendSource: "recorded", flexibleSpendAnomaly: false,
+  totalSpend: 5000, contribution: 1500, contributionSource: "standard",
+  investmentExternalAdjustment: 0, cashCreditNet: 0, entryMeta: [],
+  snapshotDate: key, supersededSnapshots: 0, anomalyReason: null,
+  cashflowDifference: null, cashflowNote: null,
+  investmentReturn: null, investmentNetFlow: null, investmentReturnReason: null,
+  integrity: "complete",
+  integrityBasis: "支出：月末快照＋交易全覆盖；收入：含收入条目；投入：含投入条目",
+  spendProven: false, incomeProven: false, contributionProven: false,
+  ...overrides,
+});
+const flagsAbsent = storedMonth("2026-07-31", { income: 6000, contribution: 2500 });
+delete flagsAbsent.spendProven;
+delete flagsAbsent.incomeProven;
+delete flagsAbsent.contributionProven;
+const legacyDashboard = {
+  months: [
+    storedMonth("2026-06-30"),
+    flagsAbsent,
+    storedMonth("2026-08-31", { spendProven: true, incomeProven: true }),
+    storedMonth("2026-09-30", {
+      spendProven: true, incomeProven: true, contributionProven: true,
+    }),
+    storedMonth("2026-10-31", { integrity: "partial", integrityBasis: "当月尚未结束，快照截至 2026-10-31" }),
+    storedMonth("2026-11-30", { integrity: "unknown", integrityBasis: "缺少支出依据" }),
+  ],
+  live: { netWorth: 750000 },
+};
+const readBack = normalizeFireMetrics(legacyDashboard);
+check("read path: complete stamp with all flags false downgrades to unknown",
+  readBack.months[0].integrity === "unknown");
+check("read path: downgrade basis names every missing basis and the 未提供 treatment",
+  (readBack.months[0].integrityBasis ?? "").includes("旧存档完整标记缺少支出依据、收入依据、投入依据")
+  && (readBack.months[0].integrityBasis ?? "").includes("按完整性未提供处理"));
+check("read path: complete stamp with flags absent entirely downgrades to unknown",
+  readBack.months[1].integrity === "unknown"
+  && (readBack.months[1].integrityBasis ?? "").includes("缺少支出依据、收入依据、投入依据"));
+check("read path: downgrade basis names only the bases actually missing",
+  readBack.months[2].integrity === "unknown"
+  && (readBack.months[2].integrityBasis ?? "").includes("缺少投入依据")
+  && !(readBack.months[2].integrityBasis ?? "").includes("支出依据")
+  && !(readBack.months[2].integrityBasis ?? "").includes("收入依据"));
+check("read path: fully proven complete month keeps its stamp and original basis",
+  readBack.months[3].integrity === "complete"
+  && (readBack.months[3].integrityBasis ?? "").includes("月末快照"));
+check("read path: partial and unknown months pass through unchanged",
+  readBack.months[4].integrity === "partial" && readBack.months[4].integrityBasis === "当月尚未结束，快照截至 2026-10-31"
+  && readBack.months[5].integrity === "unknown" && readBack.months[5].integrityBasis === "缺少支出依据");
+check("read path: downgrade preserves the month's numeric facts exactly",
+  readBack.months[0].income === 5000 && readBack.months[0].fixedSpend === 3000
+  && readBack.months[0].flexibleSpend === 2000 && readBack.months[0].contribution === 1500
+  && readBack.months[0].investment === 100000 && readBack.months[0].netWorth === 150000
+  && readBack.months[1].income === 6000 && readBack.months[1].contribution === 2500);
+check("read path: FIRE denominator counts only the fully proven complete month",
+  readBack.fire.completeMonthsUsed === 1 && readBack.fire.annualContribution === 18000
+  && readBack.fire.annualSpend === 60000);
+
 // --- wiring: ingest gate, shared selection, additive schema ---
 check("ingest normalizes before building", src.includes("const normalization = normalizeRawMonths(args.months);"));
 check("ingest gates on normalization failure", src.includes("if (!normalization.ok)"));
@@ -244,8 +333,13 @@ check("buildDashboard latestRaw is the normalized latest month", src.includes("c
 check("buildDashboard no longer re-sorts raw months for latestRaw", !src.includes("const latestRaw = [...rawMonths]"));
 check("aggregateMonths consumes the normalized selection", src.includes("function aggregateMonths(\n  normalizedMonths: NormalizedMonth[],"));
 check("FIRE computed by the shared computeFire in both paths",
-  src.includes("fire: computeFire(months, liveNetWorth)") && src.includes("fire: computeFire(months, dashboard.live.netWorth)"));
+  src.includes("fire: computeFire(months, liveNetWorth)") && src.includes("fire: computeFire(reconciled, dashboard.live.netWorth)"));
 check("old completeFireMonths selector is gone", !src.includes("function completeFireMonths"));
+check("FIRE guard: validCompleteMonths requires all three provenance flags, not the stamp alone",
+  src.includes("month.spendProven === true") && src.includes("month.incomeProven === true")
+  && src.includes("month.contributionProven === true"));
+check("read path: stored-integrity normalization runs inside normalizeFireMetrics",
+  src.includes("const month = normalizeStoredIntegrity(storedMonth);"));
 check("schema: integrity additive with honest unknown default",
   src.includes('integrity: z.enum(["partial", "complete", "unknown"]).default("unknown")'));
 check("schema: supersededSnapshots additive default 0",

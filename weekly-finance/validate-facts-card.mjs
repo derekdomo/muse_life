@@ -42,7 +42,7 @@ const balanceSourceSummary = loadHelper("balanceSourceSummary", [
 ]);
 const completeSpendBasis = loadHelper("completeSpendBasis", [
   ["months: Month[]", "months"],
-  [": { averageMonthlySpend: number | null; usedMonths: number; missingMonths: number }", ""],
+  [": { averageMonthlySpend: number | null; usedMonths: number; missingMonths: number; usedMonthKeys: string[] }", ""],
 ]);
 const integrityLabel = loadHelper("integrityLabel", [
   ['integrity: Month["integrity"]', "integrity"],
