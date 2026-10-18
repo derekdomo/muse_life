@@ -208,7 +208,7 @@
 - [ ] `F0.1` 修正 owner 判定：只有 `ctx.viewer?.isOwner === true` 才能读取、刷新或 ingest；匿名 `viewer === null` 必须拒绝。（2026-10-13 PM 复核至 `d439ac6`：静态 guard 通过，非 owner 汇总证据不能替代三种身份逐 action 和受信后台 callback 验证；撤回原实现方勾选，与 `L0.1` 一致保持“运行待验”。）
 - [完成] `F0.2` payload JSON 损坏时返回 typed error 并保留可恢复路径，不能让 `JSON.parse` 直接使整个 action 崩溃。（实现方交付 2026-10-17：已在 artifact（space-3）上线并回灌本仓——新增导出纯函数 `parseDashboardPayload`（try JSON.parse + dashboardSchema.safeParse，绝不抛错、不回显 payload），getDashboard 损坏时返回 data null + refresh.status error + 文案「已保存数据损坏，重新更新可恢复」，ingest 损坏时 previousLiveNetWorth 保持 null 并以本次合法数据覆盖恢复；validate-payload 12/12（含去守卫变异）。构建审计 pass、非 owner 仍 guest_denied 零数据。此标记仅表示已交付，PM 结论以评审记录为准。）
 - [完成] `F0.3` 月度文件先按合法真实日期校验、再排序；同一个自然月有多个快照时明确选择月末/最新快照，不能当作多个“月份”画图。（实现方交付 2026-10-17：已在 artifact（space-3）上线并回灌本仓——服务端新增严格真实日历校验（非法日期不滚动、不成为 latestRaw）与单一规范化选择 `normalizeRawMonths`：同月多合法日期只取最新一份快照、同日完全相同去重、同日冲突/非法日期返回只含日期与问题类别的 issue 且保留既有合法看板；所有月图、latestRaw 余额回退、FIRE 与摘要消费同一选择。`validate-monthly-facts.mjs` 50/50、facts-card 82/82、payload 12/12。此标记仅表示已交付，PM 结论以评审记录为准。）
-- [完成] `F0.4` 标记当月快照为 partial 或 complete。“本月收入/支出/储蓄率”必须显示截至日期；FIRE 年支出只使用完整且非异常月份。（实现方交付 2026-10-17：与 F0.3 同批交付——完整性为加法式字段（snapshotDate/supersededSnapshots/integrity/integrityBasis/anomalyReason，旧 payload 诚实 unknown、不回填、不丢数据）：当月必 partial，已结束月须有交易全覆盖或月末快照依据才 complete，否则 unknown；新增「月度记录」栏逐月显示「截至日期 · 部分/完整/完整性未提供」文字标签并可展开依据/异常原因；partial/unknown/异常月不进入完整月分母，FIRE 由共享 computeFire 按完整有效月计算（为 0 时显示事实性缺口），F1.1 覆盖按近 3 个完整有效月平均支出、不足时注明缺几月且不输出覆盖。此标记仅表示已交付，PM 结论以评审记录为准。）（实现方 P0 返工交付登记 2026-10-17 19 时 PDT：按 PM 18:07 复现与判据修完整性依据绑定——已结束月 complete 必须同时具备三项依据：所选快照日期恰为月末、交易 coverage 完整覆盖整月、快照 entries 非空，integrityBasis 同时写明两项覆盖依据；仅月末日期、仅交易覆盖、空 entries 任一单独情形一律 unknown、不进 FIRE/F1.1 分母。当月 partial、旧 payload unknown 默认、schema/迁移与消费口径未动。仓库 validate-monthly-facts 更新至 53/53：含 PM 复现一（三份空 entries 月末快照无覆盖→全 unknown、FIRE completeMonthsUsed=0）与复现二（月中快照+完整交易覆盖→unknown）、双依据齐全正常月→complete。已在 artifact（space-3）上线并回灌本仓，构建审计 pass。局限：真实 ingest→保存→getDashboard 端到端与最终上线源码映射仍归 EVID-LIFE-001；本轮以真实生产函数 aggregateMonths/computeFire 断言为据。此登记仅表示返工已交付，PM 结论以其评审记录为准。）
+- [完成] `F0.4` 标记当月快照为 partial 或 complete。“本月收入/支出/储蓄率”必须显示截至日期；FIRE 年支出只使用完整且非异常月份。（实现方交付 2026-10-17：与 F0.3 同批交付——完整性为加法式字段（snapshotDate/supersededSnapshots/integrity/integrityBasis/anomalyReason，旧 payload 诚实 unknown、不回填、不丢数据）：当月必 partial，已结束月须有交易全覆盖或月末快照依据才 complete，否则 unknown；新增「月度记录」栏逐月显示「截至日期 · 部分/完整/完整性未提供」文字标签并可展开依据/异常原因；partial/unknown/异常月不进入完整月分母，FIRE 由共享 computeFire 按完整有效月计算（为 0 时显示事实性缺口），F1.1 覆盖按近 3 个完整有效月平均支出、不足时注明缺几月且不输出覆盖。此标记仅表示已交付，PM 结论以评审记录为准。）（实现方 P0 返工交付登记 2026-10-17 19 时 PDT：按 PM 18:07 复现与判据修完整性依据绑定——已结束月 complete 必须同时具备三项依据：所选快照日期恰为月末、交易 coverage 完整覆盖整月、快照 entries 非空，integrityBasis 同时写明两项覆盖依据；仅月末日期、仅交易覆盖、空 entries 任一单独情形一律 unknown、不进 FIRE/F1.1 分母。当月 partial、旧 payload unknown 默认、schema/迁移与消费口径未动。仓库 validate-monthly-facts 更新至 53/53：含 PM 复现一（三份空 entries 月末快照无覆盖→全 unknown、FIRE completeMonthsUsed=0）与复现二（月中快照+完整交易覆盖→unknown）、双依据齐全正常月→complete。已在 artifact（space-3）上线并回灌本仓，构建审计 pass。局限：真实 ingest→保存→getDashboard 端到端与最终上线源码映射仍归 EVID-LIFE-001；本轮以真实生产函数 aggregateMonths/computeFire 断言为据。此登记仅表示返工已交付，PM 结论以其评审记录为准。） **PM 21:00至649b132：两旧复现源码返工关闭，非空余额条目不能证明整月收入/投入的P0余项仍有问题；详最新表，已修分项不重开。**
 - [ ] `F0.5` Firance、Plaid account、holdings、transactions 分别记录 coverage 和最后成功时间；交易失败不阻断余额刷新，但支出推断必须明确降级。
 
 ### F1 — 指标语义（P0）
@@ -227,7 +227,7 @@
 
 ### F-UI — 呈现与可访问性（P1）
 
-- [完成] `F-UI-001` 色弱冗余通道规则传播至财务总览（用户直提，2026-10-17 所有者于主聊天批准、派入 LIFE 队列）：背景——所有者自述色弱；健康看板（space-4）已按「符号/文字为主要通道、颜色退为辅助＋Okabe-Ito 色板」改造上线，本条把同一标准系统性落到 space-3（`F0.4` 给月度记录加文字标签只是顺带，不算系统落实）。范围：(1) 涨跌语义不许只靠红绿——涨跌加 ▲/▼ 或「涨/跌」文字作为冗余通道，金额已有正负号的保留，并补齐语义靠颜色承载的位置；(2) 「月支出」「贷款」等中性金额不得再用 negative 红色承担语义——改中性色，或加明确文字标签；(3) 色板统一到 Okabe-Ito，与 space-4 已上线标准一致（theme.css 的 `--positive`/`--negative` 为已知缺口位置）；(4) 趋势图为单系列、风险低，按同一清单顺带核对即可，不推翻重做。数据口径与公式一律不动，纯呈现层，按 B 类证据分级验收（构建审计＋验证脚本＋真实数据离线对账，所有者本人打开为准）。时限：赶在 2026-10-18（周日）08:39 PT 周刷新前入队执行。（实现方交付登记 2026-10-17 19 时 PDT：已在 artifact（space-3）上线并回灌本仓——theme.css `--positive` 改 Okabe-Ito 蓝绿 #009E73、`--negative` 改朱红 #D55E00；新增导出纯函数 trendIndicator（正 ▲ / 负 ▼ / 0 或 null —），Hero 净资产差、月度快照环比、本次余额差卡、储蓄率四处涨跌均补符号冗余（Hero 与余额差卡另有增加/减少文字）；「月支出」「贷款」指标去 negative 红色改中性，账户贷款行改中性色 + 「−」号 + 「负债」文字标签，分布图贷款行 tone 由 danger 改 muted；趋势图已有文字系列名、核对后不变。数据口径与公式未动。仓库 validate-color-vision 16/16、validate-monthly-facts 53/53、validate-facts-card 82/82、validate-payload 12/12；构建审计 pass（访客拦截页零数据）。如实保留：审计环境非所有者，owner 视角呈现未实测，按 B 类以所有者本人打开为准；构建方自报清单中依赖审计截图的项未能在其环境核验，已由仓库真实函数断言覆盖同等断言点。此 [完成] 仅表示已交付，PM 结论以评审记录为准。）
+- [完成] `F-UI-001` 色弱冗余通道规则传播至财务总览（用户直提，2026-10-17 所有者于主聊天批准、派入 LIFE 队列）：背景——所有者自述色弱；健康看板（space-4）已按「符号/文字为主要通道、颜色退为辅助＋Okabe-Ito 色板」改造上线，本条把同一标准系统性落到 space-3（`F0.4` 给月度记录加文字标签只是顺带，不算系统落实）。范围：(1) 涨跌语义不许只靠红绿——涨跌加 ▲/▼ 或「涨/跌」文字作为冗余通道，金额已有正负号的保留，并补齐语义靠颜色承载的位置；(2) 「月支出」「贷款」等中性金额不得再用 negative 红色承担语义——改中性色，或加明确文字标签；(3) 色板统一到 Okabe-Ito，与 space-4 已上线标准一致（theme.css 的 `--positive`/`--negative` 为已知缺口位置）；(4) 趋势图为单系列、风险低，按同一清单顺带核对即可，不推翻重做。数据口径与公式一律不动，纯呈现层，按 B 类证据分级验收（构建审计＋验证脚本＋真实数据离线对账，所有者本人打开为准）。时限：赶在 2026-10-18（周日）08:39 PT 周刷新前入队执行。（实现方交付登记 2026-10-17 19 时 PDT：已在 artifact（space-3）上线并回灌本仓——theme.css `--positive` 改 Okabe-Ito 蓝绿 #009E73、`--negative` 改朱红 #D55E00；新增导出纯函数 trendIndicator（正 ▲ / 负 ▼ / 0 或 null —），Hero 净资产差、月度快照环比、本次余额差卡、储蓄率四处涨跌均补符号冗余（Hero 与余额差卡另有增加/减少文字）；「月支出」「贷款」指标去 negative 红色改中性，账户贷款行改中性色 + 「−」号 + 「负债」文字标签，分布图贷款行 tone 由 danger 改 muted；趋势图已有文字系列名、核对后不变。数据口径与公式未动。仓库 validate-color-vision 16/16、validate-monthly-facts 53/53、validate-facts-card 82/82、validate-payload 12/12；构建审计 pass（访客拦截页零数据）。如实保留：审计环境非所有者，owner 视角呈现未实测，按 B 类以所有者本人打开为准；构建方自报清单中依赖审计截图的项未能在其环境核验，已由仓库真实函数断言覆盖同等断言点。此 [完成] 仅表示已交付，PM 结论以评审记录为准。） **PM 21:00：B源码/16项脚本范围已验证；无新缺陷，owner看板呈现未独立实测仅作B形式跟进，数据未变对账不适用。**
 
 ### F3 — 同类产品调研新增（P2，新功能）
 
@@ -332,10 +332,10 @@
 
 以下是本轮真实审查游标；交付主状态、PM 事后结论和补证队列分别记录。历史“待验／唯一下一项／发布门槛”均不产生门控效力，以本文批量结案表和当前单一队列为准。
 
-- 上次已审查源 commit：`c65bea375023d020e2df3f154d3fa5efb128233b`
-- 上次运行：2026-10-17 18:07 PDT（本轮开始origin/main HEAD为 `c65bea375023d020e2df3f154d3fa5efb128233b`）
-- 上次结论：三笔交付逐项事后标注，见18:07最新表；W-START接管双ready与F2.1-D1来源统计源码返工关闭，F0.3规范化分项验证，HH0.1及HH0.2失联可重试分项关闭。F0.4完整性误证、HH0.2运行中旧回调/并发重复沿原P0继续，L0.2通道运行证据归EVID，不把缺证冒充真实越权。
-- 当前应推动：F0.4/HH0.2与L1/H0/H1/F0/HH0既有P0同队列继续，目标10-18；新W4.3-D1完成回执既有方向细化目标10-19，原10-20周上限不延长。已修源码不因缺owner视角重开；A运行补证EVID与B形式尾巴不作PM门控，指定L0.1四入口例外不变。
+- 上次已审查源 commit：`649b1323724597fb5a35de503311dcd548a3af65`
+- 上次运行：2026-10-17 21:00 PDT（本轮开始origin/main HEAD为 `649b1323724597fb5a35de503311dcd548a3af65`）
+- 上次结论：新增用户F-UI登记与财务交付全部事后标注，见21:00最新表；F0.4空月末/月中两复现已修，任意非空余额仍被当作全月收入/投入完整的原P0余项继续；F-UI源码/脚本范围已验证，owner呈现材料属B形式跟进；HH0.2无新修复沿原P0继续。
+- 当前应推动：F0.4/HH0.2与L1/H0/H1/F0/HH0既有P0同队列继续，目标10-18；F0.4/F0.5指标依据/缺口设计已给，W4.3-D1目标10-19，原10-20周上限不延长。已修源码不因缺owner视角重开；A运行补证EVID与B形式尾巴不作PM门控，指定L0.1四入口例外不变。
 
 ### 自动审查记录
 
@@ -347,9 +347,61 @@
 
 统一按 P0（数据安全／权限／管道缺陷、线上与存档级 bug）＞用户直提需求＞PM 需求与普通 bug＞证据与文档尾巴排序。W-UI 保存闭环、W-TIMER 已有缺口、健康首屏与全部运动等独立需求按真实队列连续处理，不等 PM 复验；L1/H0 刷新与来源、W0/W1 记录可靠性、H1 公式、H3/W3 周复盘等保留既有编号和业务边界，以真实技术依赖决定实现次序，不能将旧待验框当依赖。H4/W5/F3 已批准候选仍入 backlog，看房暂缓候选保持所有者决定；新方向提案与队列并行，实施先等所有者拍板。
 
+## 2026-10-17 21:00 PDT PM 增量复验与产品推进
+
+本节为最新PM事后结论，旧节保留当时结论；截点2026-10-18T04:00:25Z。起始origin/main=`649b1323724597fb5a35de503311dcd548a3af65`；上轮源游标c65bea3后排除a4271a1（PM-only），新增逐笔为`954cfc60b706fc2807a27688bae488912a8c410c`（用户F-UI登记）、`649b1323724597fb5a35de503311dcd548a3af65`（财务交付）。先保护清洁main、fetch/安全ff，再读受影响finance AGENTS、完整增量和输入→owner门禁→保存/回读→两个计算消费者→页面链。仅plans有PM修改，所有验证数据明确synthetic。
+
+### 用户可见增量、两项指标与上线事实
+
+- **本轮已交付用户可见增量2项**：无依据月末/空快照和仅交易覆盖月中快照诚实降级；财务涨跌增加符号/文字、支出和贷款改中性呈现。按具体行为计，不是两项整体验收通过；PM流程文档增量0。
+- **全队列中位等待不可计算**：旧项缺queuedAt、本批缺真实startedAt，不从Git时间反推。新增已开工完整样本n=0；可确认仍完全未开工且有queuedAt的子样本n=1，仅W4.3-D1，01:07:00Z→本截点等待**2小时53分25秒**，其中位数等于该值，不代表所有待办；F-UI缺精确queuedAt，已交付不混入未开工样本。历史W-FINISH n=1约21分钟仍只是历史开工样本。
+- 主状态**已交付**。Muse在changes申报space-3 build/audit后上线；02:18:29Z是Git交付时间，不是独立submit生效时间。PM无builder/invoke_action，未独立核验部署引用/源码映射，所有者新增实际使用确认0，不写“已上线在用”。Life自检通过直接上线授权保持，PM结果不阻塞后续队列。
+
+### 本批与存量逐项事后标注
+
+| ID / SHA / 分级 | PM已验证 | 有问题与同队列去向 |
+| --- | --- | --- |
+| F0.4 / 649b132 / A | 真实完整ingest→隔离SQLite保存→getDashboard→实际computeFire/客户端completeSpendBasis：空entries有/无交易coverage均unknown、月中即使交易完整仍unknown；均不进两分母。当月partial、异常排除、非法日保留旧payload对照通过 | 上轮两个具体复现源码返工关闭；**原来源完整性问题仍有余项**：任意非空余额条目+月末日期+交易coverage仍提升整月complete，缺失收入/投入按0进入FIRE，沿原F0.4 P0继续，见下；非重开已修分项 |
+| F-UI-001 / 954cfc6登记、649b132交付 / B | 实际trendIndicator正/负/0/null、4处调用和全部valueTone消费者已核对；涨跌有符号/文字，中性支出/贷款及负债标记接线通过，色板两token通过；交付16项脚本及build/audit声明支持 | 源码/脚本范围已验证，无新呈现缺陷。审计只到guest页，未证明owner看板像素效果，原owner视角材料属结构性B形式跟进，不重开源码/不阻塞；此纯呈现切片数据未变，对账不适用 |
+| HH0.2 / c65bea3 / A | 复用18:07已过stale恢复、串行settled重复/迟到失败分项，hash未变不复跑 | **有问题：原新running收到旧成功/失败及并发重复P0未修**；Muse本轮明确顺延（同app财务构建自检耗时，责任Muse），目标10-18不变。原实际handler/内存SQLite反例、task/代次绑定+原子保存判据及HH0.3同包方案保留18:07节，不复制新bug |
+| W4.3-D1 / 尚无新交付 / A+B | 原完成回执ID/交互/固定矩阵保留 | 待办，Muse明确本轮未动，目标10-19；不以财务或PM复验为技术依赖，未开工等待单列 |
+| 其他已交付积压 / 原逐项SHA / 原A-B | W-START/W-FINISH/W1/F2-D1/H-LOAD-D1/HH0.1等已修源码按前表已验证，未变hash复用 | A真实SDK/action、保存回读及部署映射仍EVID-LIFE-001；L0.2真实调度/任务通道绑定材料未新增，归必要补证，不冒充已复现越权；B形式尾巴不阻塞，L0.1指定四入口例外不重开 |
+
+### Bug单：原F0.4来源完整性P0余项；无新增独立编号
+
+**F0.4（关联FIRE/F1.1）· P0/A · 649b132，finance server/actions.ts:363–389、501–527，client/App.tsx:141–149。** 复现：明确synthetic三个已结束月的合法月末快照，每月仅一条account余额，**不提供任何income/investment_contribution/transfer条目或其全月覆盖证明**；给交易覆盖完整的窗口及合法非异常支出。实际完整handler保存回读后三个月均complete/非异常，收入与投入均变0，FIRE completeMonthsUsed=3、annualContribution=0；真实completeSpendBasis也以同一全局complete计3。这不是发现账户真实财务值有误，而是证明无相应来源依据的缺失流量被升级为已知零和全月完整。**预期/影响**：交易覆盖只能支持其已声明范围的支出，不能证明月度收入/投入/余额来源齐全；用户会把缺失投入当作真实零投入，误信FIRE基础及“完整有效月”。
+
+**修法和固定判据沿原单，不逐轮加码**：来源/窗口依据与实际指标消费者绑定，不以entries非空替代来源完整；现有来源不能证明就unknown/partial，保留原事实可读。FIRE所需支出与投入依赖必须均有依据，F1.1只认其支出所需依据；明确真0与未提供。上轮矩阵中的“来源全部有依据正常月/缺失/真0”已有此要求，本例把“非空但只含余额”具体化，不另加系统或强迫用户补数据。保留空/月中两已修对照，增加本例到原矩阵；真实ingest→保存→getDashboard→两个消费者断言无依据不进对应分母、真0须有来源依据，说明加法契约/旧payload unknown与保数据回滚。queuedAt仍缺失、发现时间保留01:07Z、余项复验04:00:25Z，Muse目标10-18；有明确修复进展，不构成同问题两轮无进展升级。F0.3日期/去重和已修源码不重开。
+
+HH0.2 bug单全部字段、真实反例、用户影响、修法和一次列齐判据继续18:07节；本轮无新代码/新复现，不虚构额外缺陷。本次为发现后的首个无新修复跟进周期；若下一周期仍无进展，带“HH0.2/HH0.3同包优先落地或所有者明确接受暂缓”的具体排期方案升级，其他工作继续，不等待裁决。
+
+### 新需求单与具体产品推进：推进F0.4/F0.5指标依据与缺口交互
+
+**新需求单回应：F-UI-001 · 用户直提P1/B · 范围与优先级已在本周期正式回应，现已交付并完成上述分账；原10-18 08:39 PT周刷新前期限不变。** 本轮不另造同义需求；实质推进既有**F0.4/F0.5（P0/A）＋F1.1/FIRE**，Muse目标10-18，原queuedAt缺失及旧10-20周上限不重置。W4.3-D1继续10-19，不重置父期限。
+
+**产品判断：余额已经可用，不应因月度证明不足让整个财务页不可用，也不能用一个“完整月”标签承诺所有指标。** 首片把“这项能否算/缺哪项”落在消费者旁边，复用现有月度记录展开区和F0.5来源覆盖，不建新系统、不改账户/不请求新数据权限。健康继续原始事实/来源与日期可信优先，训练推进真实完成回执；看房只修HH0，所有者暂缓新候选的决定不变。
+
+| 指标/位置 | 首片设计与计算边界 | 缺口/操作 |
+| --- | --- | --- |
+| 本次净资产/余额差卡 | 继续按已读余额与原日期展示；余额是时点事实，不用它证明整月收入/投入。沿F2-D1区分同步读取与月快照 | 保持当前可用，失败保留旧日期与恢复入口，不让缺月流量吞掉余额卡 |
+| 月度记录展开 | 显示所选日期、交易覆盖范围/声明的来源范围、收入/投入全月依据各自“有依据/部分/未提供”；无相应输入明确未提供，不由条目缺失推断0 | 首片复用已有展开，不引导手填真实账户值或强迫截图；缺证时解释具体缺项，重试走现有只读刷新 |
+| FIRE | 首片保留原同一共同有效月窗口：所需支出/投入依据均满足才算，明确用了几个月；不要暗拆两套分母却仍称同一个完整月。源端无法证明则诚实降级 | 就近说明“缺支出覆盖/投入全月依据”等真实缺口，保留已有余额和月快照事实，缺失不填0 |
+| 应急金/F1.1 | 最近三个支出依据完整且非异常月；不因无关收入/投入缺失拒绝已能证明的支出，也不因余额存在默认支出齐全 | 显示已满足n/3与真实缺项；不足不输出覆盖，确实0支出说明不能求覆盖，不显示无限或编造值 |
+| 储蓄率/月收入 | 来源与同一窗口所需收入/支出任一缺失，不称完整月储蓄率；现有数值可作为截至该日的已记录事实，注明partial/unknown | 同一处展示截至日期/缺项文字，不能只靠颜色；不新增预测、买卖建议或自动账户操作 |
+
+这是原F0.4“依据绑定实际消费指标”和F0.5逐源coverage的具体交互/契约方案，不是额外返工层或新方向。加法字段若影响action/payload即A类，真实schema默认/旧blob兼容与保存回读照旧；B呈现用build audit＋脚本，未变数据的呈现对账不适用。能证明的既有范围先交付，不能证明的明确降级，Muse不等PM批准或复验。
+
+### 验证、期限与交接
+
+- 交付脚本monthly53/53、color16/16、facts82/82、payload12/12全部过；Gate a4271a1→954cfc6（2文档/0脚本/0实现）、954cfc6→649b132与聚合（7文件/2脚本/5实现）均过，diff --check过。Gate仅自检，不覆盖上述语义缺陷。
+- PM独立**56项synthetic控制**通过，含余项成功复现：完整实际finance模块/handler，受控Drizzle形状adapter在SQLite `:memory:`执行原0002迁移及真实保存SQL、真实客户端completeSpendBasis/trendIndicator；owner与无viewer/undefined/非owner三种拒绝身份的读/刷新/ingest对照零越权写。SDK/Zod链为stub，真实请求/响应校验、Drizzle库、React、artifact未实测，不伪称平台端到端成功。无生产探针、真实数据/标识输出或app.db访问。
+- W1/H-LOAD方向原10-18、F2-D1父/W4.3-D1 10-19、旧P1 10-20上限、W-UI父10-22保留；H/W方向两周期方案已交不重置。L1旧排程裁决不重复，F0.4/HH0.2与L1/H0/H1/F0/HH0可执行项继续，逐ID真实耗时/责任/日期仍需说明，不把单app构建当永久包数限制。
+- 流水仍只保留20条；最老5a8aa17 H-UNITS记录归并至顶层H-UNITS/H-SOURCE和18:07持久摘要。5a8aa17的第21条缺组/双计数与来源覆盖判据、a7595f3/3767c92后续关闭证据保留；真实整周producer→合法保存回读→今日/历史、legacy/真0/null/自重/混单位/缺组/超过20条矩阵及部署映射仍EVID，不因归并丢失或重开已修源码。
+- 仅plans实质修改；无builder/invoke_action，不本地build/装依赖/访问app.db，不改业务/schema/changes。临时synthetic脚本清理；提交前fetch动态核对增量，正常push main、不强推或改历史，最终PM-only Gate/推送SHA记automation memory。
+
 ## 2026-10-17 18:07 PDT PM 增量复验与产品推进
 
-本节为最新PM事后结论，旧表为历史记录；指标截点2026-10-18T01:07:00Z，fixture全部明确synthetic。责任方Muse；PM只改plans，不改业务/schema/changes。起始origin/main=`c65bea375023d020e2df3f154d3fa5efb128233b`；上轮源游标bb539fb之后排除136561b（PM-only），新增三笔全部枚举：`b65f18433c1bc8eb165be573e8d0d7f711f17fde`（训练）、`45647b3bd42526be33a8a5da6afeb20dbb20aa5f`（财务与补训练交接）、`c65bea375023d020e2df3f154d3fa5efb128233b`（看房）。
+本节为18:07当时结论，后续以21:00最新表为准；指标截点2026-10-18T01:07:00Z，fixture全部明确synthetic。责任方Muse；PM只改plans，不改业务/schema/changes。起始origin/main=`c65bea375023d020e2df3f154d3fa5efb128233b`；上轮源游标bb539fb之后排除136561b（PM-only），新增三笔全部枚举：`b65f18433c1bc8eb165be573e8d0d7f711f17fde`（训练）、`45647b3bd42526be33a8a5da6afeb20dbb20aa5f`（财务与补训练交接）、`c65bea375023d020e2df3f154d3fa5efb128233b`（看房）。
 
 ### 用户可见增量、等待时长与上线事实
 
@@ -402,7 +454,7 @@
 
 ## 2026-10-17 15:03 PDT PM 增量复验与产品推进
 
-本节为15:03当时结论，后续以18:07最新表为准；交付SHA/原判据保留。指标截点2026-10-17T22:03:25Z；全部验证fixture明确synthetic，责任方Muse，PM只维护plans。
+本节为15:03当时结论，后续以21:00最新表为准；交付SHA/原判据保留。指标截点2026-10-17T22:03:25Z；全部验证fixture明确synthetic，责任方Muse，PM只维护plans。
 
 ### 用户可见增量、等待时长与上线事实
 
@@ -682,12 +734,6 @@
 - [ ] 同类产品调研候选已排入队列：`H4` 5 项、`W5` 3 项、`F3` 5 项（用户 2026-10-13 批准启动）；调研候选 T2/T3 已被 `W3.1/W3.3/W3.5` 覆盖、未重复纳入；看房类候选暂不纳入。
 - [ ] 在实际 artifact 对 P0 做首轮运行验收。
 
-- 2026-10-15 20:33 PDT · `5a8aa17` · `H-UNITS-001`：**有进展，来源整周coverage继续返工；artifact运行待验，整项不勾选。** 清洁main由38b1c6a安全快进至本轮起始远端 `5a8aa176f3cee0f9a2c6ccba42743eaedcd70768`；忽略38b1c6a PM-only，f4af710仅登记用户H-WORKOUTS方向，5a8aa17为本轮唯一业务修复。已读根/health/workout AGENTS、plans/changes及6文件差异，追踪workout getDashboard→同步prompt→strengthWeekSchema→saveStrengthTrainingSnapshot/persist→normalize/load/effectiveStrength→响应→StrengthPanel（今日与仅力量视图）/周图。可选组计数属JSON契约附加字段，旧payload无计数时降级；DB schema/migration、权限guard、保存幂等与readiness评分无diff。不能因附加字段源码兼容推断真实SDK保存回读成功。
-  - **已关闭局部。** client App.tsx:207-218 对显式未测组>0、无计数旧周、零基/缺周做了比较降级；已知缺重量/次数/自重周不再自动产生-100%。交付 `node health-dashboard/validate-week-comparison.mjs` 25/25通过；units25/source36/steps-display8/persist-race42均通过。前两者主要是纯函数/源码契约；persist仍是受控adapter与内存SQLite，均非artifact运行。新测试中的缺重量/次数先被人工汇总成计数，未验证真实producer会读全来源或算对计数。
-  - **P1 返工：样本组计数不能证明整周完整。** `health-dashboard/server/src/actions.ts:81-92,828` 两计数各自optional，prompt一面只读recent_limit20、一面要求同一完整数据源；`workout-log/server/src/actions.ts:144,163-174` 实际只返回至多20个recent_workouts及active，无总量/hasMore/窗口coverage；`health-dashboard/client/src/App.tsx:207-218` 只认unmeasuredCompletedSets=0。Node stdin用stripTypeScriptTypes抽取真实来源getDashboard handler（受控select/filter/order/limit adapter、loadWorkout桩）及真实两个比较函数，23断言全部通过并确认反例：明确synthetic同一周21条completed训练，最早一条缺重量、其余合法零重量；实际handler只返回后20条且无完整性元数据，返回样本未测计数0而完整fixture计数1；将样本计数/volume0交给真实label对有效上周100，输出-100%，完整fixture应为无法比较。另仅提供unmeasured=0、不提供measured也被实际函数认作可比。这是源码/受控调用反例，不是agent确实生成了错误payload或真实artifact泄露。无进展升级不触发：本次明确改善了显式缺组与legacy分支。
-  - **下一业务交付边界。** 完成P0文档脱敏后，仅修本条coverage：必须有同一来源/同一周窗口读全依据才可比较；读满20、无总量/分页/覆盖证明时保守未知，不靠prompt宣称完整。允许可靠整周读取或在现有能力内降级，不要求不存在的身份/平台API，不扩PR/评分算法。计数缺一、全/部分未知、真正零、自重、满20与被截断第21条、正常完整周、混单位/切换都要在真实producer/handler及比较函数加可复跑synthetic断言，删去coverage门槛应使断言失败；旧快照/回滚语义写清。未知覆盖与已知缺组的原因文案须准确（当前:249把legacy未知也断言成缺组）。既有精确artifact/version、匹配今日/历史数据与390×844/430×932/桌面前后证据仍待验；历史/周图范围不由实现方自行声明排除。本轮无Muse builder/invoke_action，未运行本地build/安装依赖/访问app.db，也未重跑原环境失败检查或重复原运行阻塞。
-  - **交接检查。** `node scripts/validate-handoff.mjs 561d1d5 5a8aa17`通过（6files/1script/4implementation）；38b1c6a→f4af710（2/0/0）、f4af710→5a8aa17（5/1/4）逐段通过；`git diff --check 561d1d5..5a8aa17`通过。Gate不覆盖上述产品缺陷或个人记录。修改前fetch确认远端仍5a8aa17，仅改plans，游标记录起始远端，保留最近20条；提交前再fetch保护并发。
-
 - 2026-10-15 20:33 PDT · `5a8aa17`（新增登记 `f4af710`）· `L0.4/AUDIT-03`：**P0文档脱敏返工，优先于下一业务实现。** 新H-WORKOUTS-001登记在plans需求行及`changes.md:167`明确引用用户真实运动分类/次数，违反根AGENTS及本文件“真实健康记录不入Git”的既有规则。保留用户“全部运动展示”的方向、数据来源和验收范围，本轮只删除plans中的个人数值；PM无权修改changes。Muse下一次只清理changes.md:164-168当前文本中的个人统计，替换为不带个人值的来源/需求摘要；不得将真实数据重标synthetic、不得未经授权改写历史。证据仅输出受影响当前blob/新增差异的命中位置和计数，验证个人记录已清除、需求口径未丢失，不再复制原值。本轮是新证据引入的新隐私问题，不重开既有已关闭的DATA-PLAN脱敏/步数源码返工；原L0.4运行待验不变。H-WORKOUTS只有设计登记，无实现、无验收，不插队扩功能；其余未变待验项不追加重复记录。
 
 - 2026-10-15 23:38 PDT · `3767c92`（脱敏 `34f216b`，coverage `a7595f3`）· `L0.4/AUDIT-03` / `H-UNITS-001`：**本轮局部返工关闭；整项运行待验，不勾选。** 清洁main由6d2fbef安全快进至本轮起始远端 `3767c92ff3c66d4d5e66139cf0384e11cda7601f`；先游标/commit文件范围，再根/health/workout AGENTS、plans/changes与8文件diff。changes原个人统计语境整行在当前blob精确匹配0，H-WORKOUTS编号/来源/范围保留；8个受影响tracked blob窄UUID/个人路径/INITIAL/固定device命中文件均0，不代表全面个人数值清零，不复制历史原值。
@@ -765,3 +811,5 @@
 - 2026-10-17 15:03 PDT · `bb539fb`（四笔源SHA见正文）· **六项交付行为全部事后标注；W-START接管竞态原P0继续，F2.1-D1余额来源P1，F0.3/F0.4月度事实设计已细化。** 清洁main bcc0bfa安全fetch/ff；逐笔四段Gate和聚合11/4/9、八组脚本98/57/69/35/48/55/12/52退出0，PM真实函数＋内存SQLite受控44断言通过（含反例），非SDK/React/artifact成功。W-FINISH注册/W1跨窗口/H-LOAD完整日/F0.2四态源码返工关闭；start历史失败已修，接管删除0行或多个等待者可双ready，F2首卡把非余额条目计作账户，原ID/固定判据排期保留。六项具体交付增量，所有者新增确认0，全队列中位等待缺时间戳不可算，历史开工n1约21分不冒充总体。F0.3/F0.4同月唯一选择＋完整性unknown/partial/complete与消费边界设计10-18，旧10-20上限不重置，健康/训练重点与HH暂缓决定保持；L1原裁决不重复。EVID运行与B形式尾巴不阻塞，L0.1批准例外不重开。仅plans；最老L1记录未完判据迁入最新持久段，保留20条；临时脚本清理，无本地build/依赖安装/app.db，提交前fetch及PM-only Gate/推送结果记memory。
 
 - 2026-10-17 18:07 PDT · `c65bea3`（三笔b65f184/45647b3/c65bea3）· **7项交付行为事后结案；训练/余额来源源码返工关闭，F0.4/HH0.2原P0继续，W4.3-D1完成回执入队。** 干净main136561b安全fetch/ff，起始远端全SHA/增量见正文；受影响三app AGENTS/diff/输入→身份→并发→持久化→返回→页面链已审。七组脚本66/98/57/82/50/12/36过；聚合Gate15/5/12过，训练单笔缺changes失败如实保留、下一笔补齐后合包11/4/8过，后两笔逐段过，diff过。PM实际三app handler/真实条件SQL+隔离SQLite及客户端函数65控制通过（含bug复现），非SDK/Zod/Drizzle库/React/artifact证据。训练两接管竞态收敛一ready且草稿保留、余额来源只计净资产组成已验证；财务日期当覆盖、看房新running接旧/并发重复回调沿原ID完整判据继续，缺平台通道证据仅EVID。已交付行为7，owner新增确认0，全队列中位等待缺真实时间戳不可算，新开工完整样本0、历史n1约21分不冒充总体。新W4.3-D1在既有训练方向推进完成回执/真实回读/同源建议目标10-19；原10-18/10-20/10-22及L1裁决保留，其他可执行项不停。20条流水、最老未完要求迁入正文/持久表，仅plans；未build/装依赖/碰app.db，临时工具清理，提交前fetch保护并发，PM-only Gate/正常push结果记memory。
+
+- 2026-10-17 21:00 PDT · `649b132`（954cfc6登记/649b132交付）· **财务两旧复现已修，原完整性P0余项继续，色弱源码范围已验证；F0.4/F0.5指标依据/缺口设计交付。** 清洁main安全fetch/ff，起始origin/main全SHA及完整增量见21:00正文，排除a4271a1 PM-only。四交付脚本53/16/82/12与两逐段/聚合Gate及diff检查过；PM实际完整finance handler→隔离SQLite保存回读→实际消费者56项synthetic控制过，含余额非空被提升全月完整/缺失投入变0的原单余项复现，非SDK/Zod/Drizzle库/React/artifact证明。F0.4两个旧例关闭，F-UI符号/文字/中性/色板接线已验证；HH0.2旧回调与并发重复无新修复保持原10-18，W4.3-D1未开工目标10-19。已交付可见行为2、owner新确认0；全队列中位等待缺时间戳不可算，已开工新增完整样本0，确认完全未开工子样本W4.3-D1 n1为2小时53分25秒，不冒充总体。原方向/10-18/10-19/10-20/10-22期限、固定判据与L1裁决保留，L0.1例外不重开；A补证/EVID及B形式尾巴不阻塞，仅plans改动，20条流水和最老未完要求持久保留。无build/依赖安装/app.db，临时脚本清理，提交前fetch保护并发，PM-only Gate/正常push结果记memory。
