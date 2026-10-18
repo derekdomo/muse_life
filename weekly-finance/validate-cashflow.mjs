@@ -38,7 +38,7 @@ function extractFn(name) {
 const NAMES = [
   "isRealDateKey", "entriesSignature", "normalizeRawMonths", "resolveContribution",
   "cashflowRoleForEntry", "snapshotCaliber", "isConsecutiveMonth",
-  "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "nativeDateString", "nativeBool", "effectiveFlowPeriod", "amountMatches", "transactionSpendForMonth",
+  "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "effectiveFlowPeriod", "nativeDateString", "nativeBool", "amountMatches", "transactionSpendForMonth",
   "aggregateMonths", "average", "normalizedFireSpend", "validCompleteMonths",
   "computeFire", "normalizeStoredIntegrity", "normalizeFireMetrics",
   "recomputeInvestmentReturns", "computeInvestmentPerformance",
@@ -294,6 +294,41 @@ const rolesConsistent = dualBase(withAccountFields({ cashflowRole: "cash" }), wi
 check("dual-end sensitivity: consistent explicit roles restore the 400 estimate",
   rolesConsistent[1].flexibleSpend === 400);
 
+// --- F0.6 rework: balance dates bind EXACTLY, status is consumed ---
+// The endpoint rule is no longer "older month": the balance date
+// must equal the endpoint snapshot's own date. A YYYY-MM balance
+// date is the one equivalence (it denotes that month's last day).
+const endSameMonthOlder = dualBase(identity, withAccountFields({ balanceDate: "2026-09-15" }));
+check("exact-date: end balance dated 09-15 against a 09-30 snapshot -> null, reason names 期末 + account + date",
+  endSameMonthOlder[1].flexibleSpend === null
+  && (endSameMonthOlder[1].anomalyReason ?? "").includes("期末账户 bank_1234 沿用旧余额日期 2026-09-15"));
+const startFuture = dualBase(withAccountFields({ balanceDate: "2026-09-05" }), identity);
+check("exact-date: a FUTURE start balance date (09-05 vs the 08-31 snapshot) -> null, named as 沿用旧余额日期",
+  startFuture[1].flexibleSpend === null
+  && (startFuture[1].anomalyReason ?? "").includes("期初账户 bank_1234 沿用旧余额日期 2026-09-05"));
+const endInvalidDate = dualBase(identity, withAccountFields({ balanceDate: "2026-09-31" }));
+check("exact-date: an invalid balance date (09-31) at the end -> null, the recorded date is named",
+  endInvalidDate[1].flexibleSpend === null
+  && (endInvalidDate[1].anomalyReason ?? "").includes("期末账户 bank_1234 沿用旧余额日期 2026-09-31"));
+const startInvalidDate = dualBase(withAccountFields({ balanceDate: "2026-08-32" }), identity);
+check("exact-date: an invalid balance date at the start -> null too (both ends bound)",
+  startInvalidDate[1].flexibleSpend === null
+  && (startInvalidDate[1].anomalyReason ?? "").includes("期初账户 bank_1234 沿用旧余额日期 2026-08-32"));
+const monthFormDates = dualBase(withAccountFields({ balanceDate: "2026-08" }), withAccountFields({ balanceDate: "2026-09" }));
+check("exact-date sensitivity: YYYY-MM balance dates equal their month-end snapshots -> 400 restored",
+  monthFormDates[1].flexibleSpend === 400);
+const startCarriedStatus = dualBase(withAccountFields({ status: "carried_forward_unverified" }), identity);
+check("status: start status=carried_forward_unverified (no boolean) -> null, named 未核实 at 期初",
+  startCarriedStatus[1].flexibleSpend === null
+  && (startCarriedStatus[1].anomalyReason ?? "").includes("期初账户 bank_1234 标记为未核实"));
+const endUnverifiedStatus = dualBase(identity, withAccountFields({ status: "unverified" }));
+check("status: end status=unverified (no boolean) -> null, named 未核实 at 期末",
+  endUnverifiedStatus[1].flexibleSpend === null
+  && (endUnverifiedStatus[1].anomalyReason ?? "").includes("期末账户 bank_1234 标记为未核实"));
+const benignStatus = dualBase(withAccountFields({ status: "同步读取" }), withAccountFields({ status: "同步读取" }));
+check("status sensitivity: a non-unverified status string does not block the estimate",
+  benignStatus[1].flexibleSpend === 400);
+
 // --- snapshot caliber: YYYY-MM keys, first-day boundary ---
 const monthOnly = normalizeRawMonths([{ key: "2026-08", entries: [E("bank_1234", "account", 1000)] }]);
 check("caliber: YYYY-MM key normalizes to the month-end date",
@@ -404,55 +439,6 @@ check("dual-end wiring: both endpoints are issue-checked against their own snaps
 check("UI: estimate drawer reuses the dual-end presentation (start/end rows with dates + verification)",
   appSrc.includes("现金流反推双端核对") && appSrc.includes("期初 · {entry.financeSource}")
   && appSrc.includes("期末 · {entry.financeSource}") && appSrc.includes("verificationText(entry.verified)"));
-
-
-// --- F0.6 exact-date rework (PM 2026-10-18 09:08/09:10): an endpoint
-// balance date must EQUAL its snapshot date. "YYYY-MM" counts as
-// month-end; a same-month older day, a future day, an impossible
-// date, or a native unverified status at either end all degrade
-// the estimate to null — the balances stay facts. ---
-const exactPair = (augFields = {}, sepFields = {}) => agg([
-  { key: "2026-08-31", entries: [E("bank_1234", "account", 1000, augFields)] },
-  {
-    key: "2026-09-30",
-    entries: [
-      E("bank_1234", "account", 1200, sepFields),
-      E("salary", "income", 1000), E("rent", "fixed_spend", 300),
-      E("broker", "investment_contribution", 100),
-    ],
-  },
-]);
-check("exact-date: no balance dates -> estimate 400 (legacy caliber kept)",
-  exactPair()[1].flexibleSpend === 400);
-check("exact-date: both ends dated exactly at their snapshot dates -> 400",
-  exactPair({ balanceDate: "2026-08-31" }, { balanceDate: "2026-09-30" })[1].flexibleSpend === 400);
-check("exact-date: YYYY-MM balance dates count as month-end at both ends -> 400",
-  exactPair({ balanceDate: "2026-08" }, { balanceDate: "2026-09" })[1].flexibleSpend === 400);
-const startOlder = exactPair({ balanceDate: "2026-08-01" });
-check("exact-date: start same-month older day (08-01 vs 08-31) -> null, names 期初",
-  startOlder[1].flexibleSpend === null && (startOlder[1].anomalyReason ?? "").includes("期初")
-  && (startOlder[1].anomalyReason ?? "").includes("2026-08-01"));
-check("exact-date: start future day (09-01 on the August snapshot) -> null",
-  exactPair({ balanceDate: "2026-09-01" })[1].flexibleSpend === null);
-check("exact-date: end same-month older day (09-01) -> null, names 期末",
-  exactPair({}, { balanceDate: "2026-09-01" })[1].flexibleSpend === null
-  && (exactPair({}, { balanceDate: "2026-09-01" })[1].anomalyReason ?? "").includes("期末"));
-check("exact-date: end future day (10-01) -> null",
-  exactPair({}, { balanceDate: "2026-10-01" })[1].flexibleSpend === null);
-check("exact-date: end impossible date (09-31) -> null, reason names the endpoint + recorded date",
-  exactPair({}, { balanceDate: "2026-09-31" })[1].flexibleSpend === null
-  && (exactPair({}, { balanceDate: "2026-09-31" })[1].anomalyReason ?? "").includes("期末")
-  && (exactPair({}, { balanceDate: "2026-09-31" })[1].anomalyReason ?? "").includes("2026-09-31"));
-check("exact-date: native status unverified at the end -> null + 未核实",
-  exactPair({}, { status: "unverified" })[1].flexibleSpend === null
-  && (exactPair({}, { status: "unverified" })[1].anomalyReason ?? "").includes("未核实"));
-check("exact-date: native status carried_forward_unverified at the start -> null",
-  exactPair({ status: "carried_forward_unverified" })[1].flexibleSpend === null);
-check("exact-date: a balance date never rewrites the balance fact itself",
-  exactPair({ balanceDate: "2026-08-01" })[1].total === 1200 + 0 || exactPair({ balanceDate: "2026-08-01" })[0].total === 1000);
-check("prompt wiring: native investment keys stay verbatim in extra, status passed through",
-  src.includes("investment_flow_verified") && src.includes("不得改名或映射为 period_start/period_end/verified")
-  && src.includes("status 的值必须原样返回"));
 
 console.log(`validate-cashflow: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

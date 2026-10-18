@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import * as schema from "./schema";
 
 const financeTypeSchema = z.enum([
@@ -594,7 +594,14 @@ function entryUnverified(entry: {
 
 // The effective flow period of an entry: the generic period when
 // present, the Firance-native period filling its absence. Both
-// bounds must resolve for a period to exist at all.
+// bounds must resolve for a period to exist at all — and F1.6
+// period proof additionally requires a LEGAL, COMPLETE period:
+// both bounds real calendar dates (an illegal day such as 09-00
+// or 09-31 is rejected outright, never compared as text) and
+// start not after end. Period material that fails validation
+// proves nothing and resolves to null here; the reconciliation
+// gate distinguishes "no period material" from "invalid period
+// material" when it names the reason.
 function effectiveFlowPeriod(entry: {
   periodStart?: string | null;
   periodEnd?: string | null;
@@ -603,7 +610,10 @@ function effectiveFlowPeriod(entry: {
 }): { start: string; end: string } | null {
   const start = entry.periodStart ?? entry.nativePeriodStart ?? null;
   const end = entry.periodEnd ?? entry.nativePeriodEnd ?? null;
-  return start != null && end != null ? { start, end } : null;
+  if (start == null || end == null) return null;
+  if (!isRealDateKey(start) || !isRealDateKey(end)) return null;
+  if (start > end) return null;
+  return { start, end };
 }
 
 // Verbatim readers for the Firance-native keys a record carries
@@ -1045,10 +1055,12 @@ function aggregateMonths(
 //   borrowed from the ending one;
 // - the interval's flows are unknown (contribution missing, or the
 //   standard/alias pair conflicts);
-// - the flow entries carry periodStart/periodEnd but those periods
-//   do not together cover the whole actual interval between the
-//   two snapshot dates (legacy entries without period fields carry
-//   no period proof and are not gated by this rule).
+// - a flow record cannot prove a legal, complete period attributed
+//   to this interval (see the per-channel / per-source proof below):
+//   an illegal calendar date (e.g. 09-00), a start without an end, a
+//   period lying entirely outside the interval, or no period
+//   material at all each withhold the reconciled label — the
+//   recorded facts stay, the return and the net flow are null.
 // Negative returns and net withdrawals keep their signs; nothing is
 // clamped. Months whose preserved metadata cannot establish the
 // investment-account scope (pre-F0.6 stored payloads) degrade the
@@ -1068,18 +1080,20 @@ function aggregateMonths(
 //   must equal its own snapshot's actual date, with a YYYY-MM
 //   date normalized to that month's last day — a same-month older
 //   day, a future day or an invalid date degrades either endpoint;
-// - period coverage is judged PER CHANNEL: the cash channel
-//   (investment_contribution / transfer) and the non-bank direct
-//   channel (investment_external_adjustment) each prove their own
-//   coverage of (previous snapshot date, this snapshot date]; one
-//   channel's periods never substitute for the other's, a period
-//   reaching outside the interval makes its amount unattributable
-//   (the whole record is excluded, not clipped), and when any
-//   channel carries dated records — or a channel carries the
-//   native verification mark — an undated record in a channel
-//   degrades as 未提供期间. A channel with neither periods nor a
-//   native verification mark is a legacy archive channel and keeps
-//   the old caliber: readable, never re-labelled verified;
+// - period coverage is judged PER CHANNEL and PER SOURCE: the
+//   cash channel (investment_contribution / transfer) and the
+//   non-bank direct channel (investment_external_adjustment) each
+//   prove their own coverage of (previous snapshot date, this
+//   snapshot date]; one channel's periods never substitute for
+//   the other's, different sources' periods within a channel
+//   never splice into one proof, a period reaching outside the
+//   interval makes its amount unattributable (the whole record
+//   is excluded, not clipped), a period lying entirely outside
+//   the interval never mixes into this segment's net flow, and a
+//   channel whose records carry no complete legal period at all
+//   — partial (start without end), illegal dates, a verification
+//   mark without any period, or a pure legacy archive record
+//   with neither period nor mark — is never marked reconciled;
 // - when the flow proof fails for a month, its investmentNetFlow
 // is null too (not only the return): an unproven interval has no
 // proven net flow to display or to sum into the period figure.
@@ -1210,23 +1224,31 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
       }
     }
     if (!reason && flowsKnown) {
-      // F1.6 rework: flow-period coverage, judged PER CHANNEL.
-      // The cash channel (investment_contribution / legacy
-      // transfer) and the non-bank direct channel
-      // (investment_external_adjustment) are independent: each
-      // channel's effective periods must together cover the whole
-      // actual interval (previous snapshot date, current snapshot
-      // date] WITHOUT reaching outside it — a period that crosses
-      // the interval boundary makes its amount unattributable, so
-      // the record is excluded whole, never clipped into the
-      // interval. One channel's coverage never substitutes for
-      // the other's. A channel whose records carry no period at
-      // all degrades when any channel is dated, or when the
-      // channel itself carries any verification mark (generic
-      // verified, Firance-native flow verified, or an explicit
-      // status); a channel with neither is a legacy archive
-      // channel and keeps the pre-existing caliber (readable,
-      // never re-labelled verified).
+      // F1.6 period proof, judged PER CHANNEL and PER SOURCE.
+      // - Every flow record first proves a LEGAL, COMPLETE period
+      //   attributed to this segment (effectiveFlowPeriod: both
+      //   bounds present, both real calendar dates, start <= end).
+      //   A record with only a start, an illegal date (e.g. 09-00),
+      //   or no period material at all cannot prove attribution.
+      // - Coverage is judged per (channel, financeSource): one
+      //   source's own periods may join up to cover the interval,
+      //   but DIFFERENT sources' periods never splice together —
+      //   source A covering the first half and source B the second
+      //   half leaves the channel unproven, because no single
+      //   source's records are attributable to the whole interval.
+      // - A period lying ENTIRELY outside the interval means the
+      //   whole amount belongs to another segment: it is never
+      //   mixed into this segment's net flow — the interval
+      //   degrades with the exclusion named instead of silently
+      //   absorbing the amount. A period crossing the boundary
+      //   degrades the same way (whole record out, never clipped).
+      // - A channel whose records carry no complete period at all
+      //   cannot be marked reconciled: not a partial period, not a
+      //   verification mark without any period, and not a pure
+      //   legacy archive channel with neither period nor mark.
+      //   The recorded amounts stay readable as facts on the
+      //   month; only the reconciled return and net flow are
+      //   withheld (null), and the period card shows 待核对.
       const intervalStart = dayAfter(previous.key);
       const intervalEnd = month.key;
       const channels: Array<{ label: string; entries: MetaEntry[] }> = [
@@ -1239,60 +1261,60 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
           entries: flowMeta.filter((entry) => entry.type === "investment_external_adjustment"),
         },
       ];
-      const anyChannelDated = channels.some((channel) =>
-        channel.entries.some((entry) => effectiveFlowPeriod(entry) != null),
-      );
       for (const channel of channels) {
         if (reason) break;
         if (channel.entries.length === 0) continue;
-        const periods = channel.entries.flatMap((entry) => {
-          const period = effectiveFlowPeriod(entry);
-          return period ? [period] : [];
-        });
-        if (periods.length === 0) {
-          // A channel counts as marked when any record carries any
-          // verification mark — the generic verified flag, the
-          // Firance-native flow flag, or an explicit status. Only a
-          // channel with no period AND no mark at all is a pure
-          // legacy archive channel that keeps the old caliber.
-          const marked = channel.entries.some(
-            (entry) =>
-              entry.verified != null || entry.nativeFlowVerified != null || entry.status != null,
+        const bySource = new Map<string, MetaEntry[]>();
+        for (const entry of channel.entries) {
+          bySource.set(entry.financeSource, [...(bySource.get(entry.financeSource) ?? []), entry]);
+        }
+        for (const [sourceName, sourceEntries] of bySource) {
+          if (reason) break;
+          const periods = sourceEntries.flatMap((entry) => {
+            const period = effectiveFlowPeriod(entry);
+            return period ? [period] : [];
+          });
+          if (periods.length < sourceEntries.length) {
+            const defective = sourceEntries.find((entry) => effectiveFlowPeriod(entry) == null);
+            const hasMaterial = defective != null && (
+              defective.periodStart != null || defective.periodEnd != null ||
+              defective.nativePeriodStart != null || defective.nativePeriodEnd != null
+            );
+            reason = hasMaterial
+              ? `${channel.label}记录 ${sourceName} 的期间不完整或日期非法（仅有起始日、缺少结束日，或 09-00 一类非法日期均不作证明），无法证明归属本段，收益待核对`
+              : `本期${channel.label}记录未提供期间，无法证明覆盖 ${intervalStart} 至 ${intervalEnd} 整个区间，收益待核对`;
+            break;
+          }
+          const outside = periods.find(
+            (period) => period.end <= previous.key || period.start > intervalEnd,
           );
-          if (anyChannelDated || marked) {
-            reason = `本期${channel.label}记录未提供期间，无法证明覆盖 ${intervalStart} 至 ${intervalEnd} 整个区间，收益待核对`;
+          if (outside) {
+            reason = `${channel.label}记录 ${sourceName} 的期间 ${outside.start} 至 ${outside.end} 完全在本区间 ${intervalStart} 至 ${intervalEnd} 之外，整笔金额不计入本段净投入，收益待核对`;
+            break;
           }
-          continue;
-        }
-        if (periods.length < channel.entries.length) {
-          reason = `本期${channel.label}有 ${channel.entries.length - periods.length} 条投入记录未提供期间，无法证明覆盖 ${intervalStart} 至 ${intervalEnd} 整个区间，收益待核对`;
-          break;
-        }
-        const crossing = periods.find(
-          (period) =>
-            period.end > previous.key &&
-            period.start <= intervalEnd &&
-            (period.start <= previous.key || period.end > intervalEnd),
-        );
-        if (crossing) {
-          reason = `${channel.label}期间 ${crossing.start} 至 ${crossing.end} 跨出本区间 ${intervalStart} 至 ${intervalEnd}，金额无法归属，整笔不计，收益待核对`;
-          break;
-        }
-        const sortedPeriods = [...periods].sort((a, b) => a.start.localeCompare(b.start));
-        let coveredThrough: string | null = null;
-        for (const period of sortedPeriods) {
-          if (coveredThrough == null) {
-            if (period.start > intervalStart) break;
-            coveredThrough = period.end;
-          } else {
-            if (period.start > dayAfter(coveredThrough)) break;
-            if (period.end > coveredThrough) coveredThrough = period.end;
+          const crossing = periods.find(
+            (period) => period.start <= previous.key || period.end > intervalEnd,
+          );
+          if (crossing) {
+            reason = `${channel.label}期间 ${crossing.start} 至 ${crossing.end} 跨出本区间 ${intervalStart} 至 ${intervalEnd}，金额无法归属，整笔不计，收益待核对`;
+            break;
           }
-          if (coveredThrough >= intervalEnd) break;
-        }
-        if (coveredThrough == null || coveredThrough < intervalEnd) {
-          const coveredText = sortedPeriods.map((period) => `${period.start} 至 ${period.end}`).join("、");
-          reason = `投入期间仅覆盖 ${coveredText}，未覆盖本区间 ${intervalStart} 至 ${intervalEnd}，收益待核对`;
+          const sortedPeriods = [...periods].sort((a, b) => a.start.localeCompare(b.start));
+          let coveredThrough: string | null = null;
+          for (const period of sortedPeriods) {
+            if (coveredThrough == null) {
+              if (period.start > intervalStart) break;
+              coveredThrough = period.end;
+            } else {
+              if (period.start > dayAfter(coveredThrough)) break;
+              if (period.end > coveredThrough) coveredThrough = period.end;
+            }
+            if (coveredThrough >= intervalEnd) break;
+          }
+          if (coveredThrough == null || coveredThrough < intervalEnd) {
+            const coveredText = sortedPeriods.map((period) => `${period.start} 至 ${period.end}`).join("、");
+            reason = `${channel.label}来源 ${sourceName} 的投入期间仅覆盖 ${coveredText}，未覆盖本区间 ${intervalStart} 至 ${intervalEnd}（不同来源的期间不能拼接证明），收益待核对`;
+          }
         }
       }
     }
@@ -1513,26 +1535,55 @@ function summarizeAvailableCash(
 // F1.1 rework (legacy archives): account rows written by older
 // writers may lack verified / status / balanceDate even though
 // the latest month's preserved entryMeta still carries them.
-// Those fields are filled here from the latest month's entryMeta,
-// matched by financeSource — ONLY from explicit values the
-// archive actually preserved; a value the archive never kept
-// stays missing (null), never invented. That is what lets an old
-// archive whose entryMeta preserved verified=false or
-// status=carried_forward_unverified degrade available cash to
-// null (named unverified) on read, without any refresh.
+// Those fields are filled here from preserved entryMeta — ONLY
+// from explicit values the archive actually preserved; a value
+// the archive never kept stays missing (null), never invented.
+// That is what lets an old archive whose entryMeta preserved
+// verified=false or status=carried_forward_unverified degrade
+// available cash to null (named unverified) on read, without any
+// refresh.
+// F1.1 metadata association (PM 12:15): the fill is bound three
+// ways, all conservative:
+// - SAME SNAPSHOT: candidates come only from the entryMeta of
+//   the month whose key IS dashboard.sourceMonth — the snapshot
+//   the account rows were merged from. Another month's metadata
+//   never fills a row.
+// - SAME TYPE: candidates must be `account` entries (the
+//   cash-class balance entries). An income or investment entry
+//   that merely shares a financeSource name never lends its
+//   metadata to a cash account — a same-named income entry's
+//   verified=true must not paper over the cash entry's own
+//   explicit verified=false (which is preserved, and the cash
+//   stays out of the numerator).
+// - UNIQUE ASSOCIATION: duplicate account-type meta rows that
+//   agree on a value fill it; rows that conflict on a field
+//   leave that field missing rather than picking a winner.
+// The fill is read-path only: the stored payload is never
+// written back, so the blob stays byte-identical.
 function ensureAvailableCash(dashboard: Dashboard): Dashboard {
-  const latestMeta = dashboard.months.at(-1)?.entryMeta ?? [];
+  const snapshotMonth = dashboard.months.find((month) => month.key === dashboard.sourceMonth);
+  const snapshotMeta = snapshotMonth?.entryMeta ?? [];
   const filledAccounts = dashboard.accounts.map((account) => {
     if (account.type !== "account") return account;
     const role = account.cashflowRole
       ?? cashflowRoleForEntry({ financeSource: account.source, type: "account", number: account.value });
-    const candidates = latestMeta.filter((entry) => entry.financeSource === account.source);
+    const candidates = snapshotMeta.filter(
+      (entry) => entry.financeSource === account.source && entry.type === "account",
+    );
     const pick = <T,>(read: (entry: (typeof candidates)[number]) => T | null | undefined): T | null => {
+      let found: T | null = null;
       for (const entry of candidates) {
         const value = read(entry);
-        if (value != null) return value;
+        if (value == null) continue;
+        if (found == null) {
+          found = value;
+        } else if (found !== value) {
+          // Conflicting duplicate meta: ambiguous association —
+          // degrade conservatively, fill nothing for this field.
+          return null;
+        }
       }
-      return null;
+      return found;
     };
     return {
       ...account,
@@ -2020,13 +2071,121 @@ async function getState(ctx: Ctx) {
   return rows[0];
 }
 
-const staleRefreshThresholdMs = 2 * 60 * 60 * 1000;
+type FinanceStateRow = Awaited<ReturnType<typeof getState>>;
 
-function isStaleRunningState(state: Awaited<ReturnType<typeof getState>>): boolean {
-  return Boolean(
-    state?.status === "running" &&
-    Date.now() - state.updatedAt.getTime() > staleRefreshThresholdMs,
-  );
+export const staleRefreshThresholdMs = 2 * 60 * 60 * 1000;
+
+// F0.7 stale recovery: a refresh stuck in "running" for over 2
+// hours is a dead refresh — getDashboard presents it as a
+// retryable error and refreshFinanceData may start over it. The
+// stored row itself is never rewritten by this mapping.
+export function isStaleRunningState(
+  status: "idle" | "running" | "error" | null | undefined,
+  updatedAt: Date | null | undefined,
+  now: Date,
+): boolean {
+  if (status !== "running" || !updatedAt) return false;
+  return now.getTime() - updatedAt.getTime() > staleRefreshThresholdMs;
+}
+
+// F0.7: ingest decision for a refresh callback, under generation
+// binding. A callback may only settle the refresh generation it
+// belongs to:
+//  - A success whose asOf is the same as or older than the stored
+//    payload never saves, in ANY refresh state — saving it would
+//    make the visible data regress or duplicate the current one.
+//    (The handler passes the stored payload's asOf as
+//    latestPayloadAsOf.)
+//  - While a refresh is running, a success whose asOf predates the
+//    moment this refresh started (the state row's updatedAt at
+//    read time) provably belongs to a previous generation's task:
+//    it is ignored and the running state is left untouched.
+//  - A failure may only settle a still-running refresh; a late
+//    failure arriving after the state settled (idle/error/no row)
+//    is ignored — in particular it must never flip a settled
+//    success (idle) into error.
+// Semantics of "apply": for a running refresh, "apply" only means
+// the callback is ELIGIBLE to enter the handler's atomic claim
+// arbitration. The arbitration result — not this function —
+// decides whether the callback actually saves or settles, so two
+// concurrent callbacks of the same generation cannot both apply.
+export function decideIngestCallback(input: {
+  refreshStatus: "idle" | "running" | "error" | null | undefined;
+  refreshUpdatedAt: Date | string | null | undefined;
+  latestPayloadAsOf: string | null | undefined;
+  incomingSuccess: boolean;
+  incomingAsOf: string | null | undefined;
+}): "apply" | "ignore" {
+  const incomingMs = input.incomingAsOf != null ? Date.parse(input.incomingAsOf) : NaN;
+  const latestMs = input.latestPayloadAsOf != null ? Date.parse(input.latestPayloadAsOf) : NaN;
+  if (input.incomingSuccess) {
+    // No regression or duplicate save, whatever the refresh state.
+    if (!Number.isNaN(incomingMs) && !Number.isNaN(latestMs) && incomingMs <= latestMs) {
+      return "ignore";
+    }
+    if (input.refreshStatus === "running") {
+      // A result stamped before this refresh started is a previous
+      // generation's task returning late — ignore it, state
+      // untouched.
+      const startedMs =
+        input.refreshUpdatedAt instanceof Date
+          ? input.refreshUpdatedAt.getTime()
+          : input.refreshUpdatedAt != null
+            ? Date.parse(input.refreshUpdatedAt)
+            : NaN;
+      if (!Number.isNaN(incomingMs) && !Number.isNaN(startedMs) && incomingMs < startedMs) {
+        return "ignore";
+      }
+    }
+    return "apply";
+  }
+  // Failure: eligible to settle only while a refresh is still
+  // running (subject to winning the arbitration, per the note
+  // above); a failure arriving after the state settled is a late
+  // return and is ignored.
+  if (input.refreshStatus === "running") return "apply";
+  return "ignore";
+}
+
+// F0.7 generation gate. refreshFinanceData mints a generation id
+// when a refresh starts and stores it on the state row; the
+// retrieval task must echo it back verbatim in its
+// ingestFinanceData callback, success and failure alike. Finance
+// ingest has exactly one callback channel — the refresh task —
+// and it is always generation-bound:
+//  - While a refresh is running, a missing or mismatched
+//    generation means the callback belongs to an older (or
+//    foreign) task and is ignored without touching state — an old
+//    generation's failure callback carries no asOf to compare, so
+//    only the echoed generation keeps it from settling the new
+//    generation's running state.
+//  - Once a generation has settled (idle/error), it is spent: a
+//    callback can settle its own still-running generation exactly
+//    once, so a late or replayed return — same generation with a
+//    newer asOf, or a foreign generation — never saves or settles
+//    again.
+// Legacy state rows (generation null, written before this
+// contract) keep the previous decide-only behaviour, so old
+// payloads and pre-contract state stay compatible.
+export function decideGenerationGate(input: {
+  refreshStatus: "idle" | "running" | "error" | null | undefined;
+  storedGeneration: string | null | undefined;
+  incomingGeneration: string | null | undefined;
+}): "pass" | "ignore" {
+  if (input.storedGeneration == null) return "pass";
+  if (input.refreshStatus !== "running") return "ignore";
+  if (input.incomingGeneration == null) return "ignore";
+  return input.incomingGeneration === input.storedGeneration ? "pass" : "ignore";
+}
+
+function newGenerationId(): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `gen-${Date.now().toString(36)}-${rand}`;
+}
+
+function newClaimToken(): string {
+  const rand = Math.random().toString(36).slice(2, 12);
+  return `claim-${Date.now().toString(36)}-${rand}`;
 }
 
 async function writeState(
@@ -2037,6 +2196,9 @@ async function writeState(
     status: "idle" | "running" | "error";
     taskId?: string | null;
     message?: string | null;
+    generation?: string | null;
+    claimedGeneration?: string | null;
+    startedAt?: Date | null;
   },
 ) {
   const existing = await getState(ctx);
@@ -2049,12 +2211,50 @@ async function writeState(
     status: values.status,
     taskId: values.taskId ?? null,
     message: values.message ?? null,
+    generation: values.generation === undefined ? (existing?.generation ?? null) : values.generation,
+    claimedGeneration: values.claimedGeneration === undefined
+      ? (existing?.claimedGeneration ?? null)
+      : values.claimedGeneration,
+    startedAt: values.startedAt === undefined ? (existing?.startedAt ?? null) : values.startedAt,
     updatedAt: new Date(),
   };
   await ctx.db<typeof schema>()
     .insert(schema.financeState)
     .values(row)
     .onConflictDoUpdate({ target: schema.financeState.id, set: row });
+}
+
+// F0.7 spawn-tail CAS: refreshFinanceData's post-spawn writes may
+// only attach to the generation they started, and only while that
+// generation is still running and unsettled. The pre-fix tail
+// wrote unconditionally, so a spawn that returned late — after
+// its own generation's callback had already settled it, or after
+// a stale-aged restart had minted a new generation — resurrected
+// the settled state to "running" or overwrote the new generation.
+// One conditional UPDATE matching (id, this generation, still
+// "running"); zero matched rows means this spawn's outcome no
+// longer owns the state row and nothing is written. The patch
+// never touches payload / generation / claimedGeneration /
+// startedAt, so an in-flight ingest claim of the same generation
+// is undisturbed.
+async function casSpawnTailState(
+  ctx: Ctx,
+  generation: string,
+  patch: { status: "idle" | "running" | "error"; taskId: string | null; message: string | null },
+): Promise<boolean> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .update(schema.financeState)
+    .set({ status: patch.status, taskId: patch.taskId, message: patch.message, updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.financeState.id, 1),
+        eq(schema.financeState.generation, generation),
+        eq(schema.financeState.status, "running"),
+      ),
+    )
+    .returning({ id: schema.financeState.id });
+  return rows.length === 1;
 }
 
 export const Actions = {
@@ -2067,6 +2267,11 @@ export const Actions = {
         status: z.enum(["idle", "running", "error"]),
         message: z.string().nullable(),
         updatedAt: z.string().nullable(),
+        // F0.5/F0.7: when the current (or latest) refresh attempt
+        // started — a fact of its own, distinct from updatedAt
+        // (the last state-write instant). Null on legacy rows
+        // written before attempts were stamped.
+        startedAt: z.string().nullable(),
       }),
     }),
     async handler(ctx) {
@@ -2074,7 +2279,7 @@ export const Actions = {
         return {
           access: "guest_denied" as const,
           data: null,
-          refresh: { status: "idle" as const, message: "财务数据仅所有者可查看", updatedAt: null },
+          refresh: { status: "idle" as const, message: "财务数据仅所有者可查看", updatedAt: null, startedAt: null },
         };
       }
       const state = await getState(ctx);
@@ -2088,7 +2293,7 @@ export const Actions = {
           payloadCorrupted = true;
         }
       }
-      const staleRunning = isStaleRunningState(state);
+      const staleRunning = isStaleRunningState(state?.status, state?.updatedAt, new Date());
       return {
         access: "owner" as const,
         data,
@@ -2098,6 +2303,7 @@ export const Actions = {
             ? "已保存数据损坏，重新更新可恢复"
             : staleRunning ? "上次更新未完成，可以重新更新" : (state?.message ?? null),
           updatedAt: state?.updatedAt?.toISOString() ?? null,
+          startedAt: state?.startedAt?.toISOString() ?? null,
         },
       };
     },
@@ -2111,30 +2317,97 @@ export const Actions = {
         return { ok: false, status: "forbidden", message: "财务数据仅所有者可更新" };
       }
       const state = await getState(ctx);
-      if (state?.status === "running" && !isStaleRunningState(state)) {
+      if (state?.status === "running" && !isStaleRunningState(state.status, state.updatedAt, new Date())) {
         return { ok: true, status: "already_running", message: "每周更新正在进行中" };
       }
-      await writeState(ctx, { status: "running", message: "正在同步 Firance 与 Plaid" });
+      // F0.7 generation contract: mint this refresh's generation id
+      // BEFORE spawning the task and store it on the state row, with
+      // the attempt's start instant stamped separately from
+      // updatedAt. The task is instructed to echo the generation
+      // back verbatim in its ingestFinanceData callback;
+      // ingestFinanceData ignores callbacks whose generation is
+      // missing or belongs to another generation. Starting the new
+      // generation also clears any claim marker a previous
+      // generation's callback may have left, so a late winner of
+      // the old generation can no longer settle or save into this
+      // one.
+      const generation = newGenerationId();
+      await writeState(ctx, {
+        status: "running",
+        message: "正在同步 Firance 与 Plaid",
+        generation,
+        claimedGeneration: null,
+        startedAt: new Date(),
+      });
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
-        `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 先定位目标设备：用设备列表工具列出当前可访问的设备，按设备名找到用户的 Mac mini（设备名含 “Mac mini” 的那台），本次刷新只使用这个运行时解析出的设备 ID。若按设备名找不到 Mac mini，或有多台候选无法唯一确定，不要猜测、不要用任何预置或写死的 ID 兜底，立即以 success:false 回调 ingestFinanceData 并在 error 中明确说明未能按设备名定位 Mac mini。在定位到的 Mac mini 上，先在运行时解析当前登录用户的主目录（home directory），再据此构造 Firance 数据目录为 <home>/Library/Application Support/Firance/FinanceData/（即 ~/Library/Application Support/Firance/FinanceData/）；不得使用任何写死的用户名或绝对用户路径。若无法解析主目录，不要猜测路径，立即以 success:false 回调 ingestFinanceData 并在 error 中说明无法解析主目录。然后用文件列表工具列出该目录，再读取全部文件名符合 YYYY-MM-DD 或 YYYY-MM 的无扩展名文件，月份键必须原样返回文件名、不要自行补成某一天（服务端会把 YYYY-MM 归一为该月月末估值）。每条记录是一组 key/value 行，至少含 finance_source、type、number；现行 Firance 记录还可能带 cashflow_role、balance_date、status、period_start、period_end、verified 等扩展行，且每条记录的行数不固定，必须按 key 解析、不得假定恰好三行或固定顺序。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income、flexible_spend、cashflow_adjustment、investment_external_adjustment 且 number 为有限数字的记录；扩展行按原 key 映射返回：cashflow_role→cashflowRole（cash/credit/debt/non_cash）、balance_date→balanceDate、status→status、period_start→periodStart、period_end→periodEnd、verified→verified，其余未知扩展 key 原样放入该记录的 extra 对象（值按数字/布尔/字符串原样保留）。其中 investment_period_start、investment_period_end、investment_flow_verified 是 Firance 原生 key：必须以原 key 原样放入该记录的 extra，不得改名或映射为 period_start/period_end/verified，也不得与通用 periodStart/periodEnd/verified 合并或互相覆盖（两套字段并存时以各自原值返回）；status 的值必须原样返回，不得改写、翻译或归一化。原始文件只读，不得回写，不得为历史记录补造核实标记。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后逐条返回，不要预先截断为 Top 10（服务端会保留全量规范化集合）：每条返回 ticker/name/value（取 institution_value）/currency/institution，其中 currency 为该持仓的 iso_currency_code（确实无法确定时返回 null，不得默认填 USD）、institution 为持仓所在机构名称；institution_value 缺失时 value 返回 null，负值原样返回，不得丢弃、不得取绝对值；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number,可选 cashflowRole/balanceDate/status/periodStart/periodEnd/verified/extra}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value,currency,institution}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。不要发送聊天消息。`,
+        `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 先定位目标设备：用设备列表工具列出当前可访问的设备，按设备名找到用户的 Mac mini（设备名含 “Mac mini” 的那台），本次刷新只使用这个运行时解析出的设备 ID。若按设备名找不到 Mac mini，或有多台候选无法唯一确定，不要猜测、不要用任何预置或写死的 ID 兜底，立即以 success:false 回调 ingestFinanceData 并在 error 中明确说明未能按设备名定位 Mac mini。在定位到的 Mac mini 上，先在运行时解析当前登录用户的主目录（home directory），再据此构造 Firance 数据目录为 <home>/Library/Application Support/Firance/FinanceData/（即 ~/Library/Application Support/Firance/FinanceData/）；不得使用任何写死的用户名或绝对用户路径。若无法解析主目录，不要猜测路径，立即以 success:false 回调 ingestFinanceData 并在 error 中说明无法解析主目录。然后用文件列表工具列出该目录，再读取全部文件名符合 YYYY-MM-DD 或 YYYY-MM 的无扩展名文件，月份键必须原样返回文件名、不要自行补成某一天（服务端会把 YYYY-MM 归一为该月月末估值）。每条记录是一组 key/value 行，至少含 finance_source、type、number；现行 Firance 记录还可能带 cashflow_role、balance_date、status、period_start、period_end、verified 等扩展行，且每条记录的行数不固定，必须按 key 解析、不得假定恰好三行或固定顺序。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income、flexible_spend、cashflow_adjustment、investment_external_adjustment 且 number 为有限数字的记录；扩展行按原 key 映射返回：cashflow_role→cashflowRole（cash/credit/debt/non_cash）、balance_date→balanceDate、status→status、period_start→periodStart、period_end→periodEnd、verified→verified，其余未知扩展 key 原样放入该记录的 extra 对象（值按数字/布尔/字符串原样保留）。其中 investment_period_start、investment_period_end、investment_flow_verified 是 Firance 原生 key：必须以原 key 原样放入该记录的 extra，不得改名或映射为 period_start/period_end/verified，也不得与通用 periodStart/periodEnd/verified 合并或互相覆盖（两套字段并存时以各自原值返回）；status 的值必须原样返回，不得改写、翻译或归一化。原始文件只读，不得回写，不得为历史记录补造核实标记。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后逐条返回，不要预先截断为 Top 10（服务端会保留全量规范化集合）：每条返回 ticker/name/value（取 institution_value）/currency/institution，其中 currency 为该持仓的 iso_currency_code（确实无法确定时返回 null，不得默认填 USD）、institution 为持仓所在机构名称；institution_value 缺失时 value 返回 null，负值原样返回，不得丢弃、不得取绝对值；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number,可选 cashflowRole/balanceDate/status/periodStart/periodEnd/verified/extra}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value,currency,institution}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。回传 ingestFinanceData 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略，且不会改变刷新状态）。不要发送聊天消息。`,
         { expectsAction: "ingestFinanceData", dedupeKey: "weekly-firance-finance-refresh" },
       );
       if (!task.ok) {
-        await writeState(ctx, { status: "error", message: "本次更新失败，显示上次数据" });
+        // Spawn-tail CAS: settle to error only if this generation
+        // is still the running one; a late spawn failure must not
+        // error a generation that already settled or a newer
+        // generation.
+        const settled = await casSpawnTailState(ctx, generation, {
+          status: "error",
+          taskId: null,
+          message: "本次更新失败，显示上次数据",
+        });
         ctx.invalidateQueries();
-        return { ok: false, status: "error", message: "刷新任务未能启动" };
+        if (settled) {
+          return { ok: false, status: "error", message: "刷新任务未能启动" };
+        }
+        const nowState = await getState(ctx);
+        if (nowState?.status === "running") {
+          return { ok: true, status: "already_running", message: "每周更新正在进行中" };
+        }
+        if (nowState?.status === "idle") {
+          return { ok: true, status: "started", message: "更新已完成" };
+        }
+        return { ok: false, status: "error", message: nowState?.message ?? "刷新任务未能启动" };
       }
-      await writeState(ctx, { status: "running", taskId: task.taskId, message: "正在同步 Firance 与 Plaid" });
-      return { ok: true, status: "started", message: "更新已开始" };
+      // Spawn-tail CAS: record the task id only on this
+      // generation's still-running row. If the callback already
+      // settled this generation (or a new generation replaced it)
+      // while spawnTask was in flight, the state row belongs to
+      // that outcome now — leave it exactly as it is and answer
+      // from the actual state.
+      const attached = await casSpawnTailState(ctx, generation, {
+        status: "running",
+        taskId: task.taskId,
+        message: "正在同步 Firance 与 Plaid",
+      });
+      if (attached) {
+        return { ok: true, status: "started", message: "更新已开始" };
+      }
+      const nowState = await getState(ctx);
+      ctx.invalidateQueries();
+      if (nowState?.status === "running") {
+        return { ok: true, status: "already_running", message: "每周更新正在进行中" };
+      }
+      if (nowState?.status === "idle") {
+        return { ok: true, status: "started", message: "更新已完成" };
+      }
+      return { ok: false, status: "error", message: nowState?.message ?? "本次更新失败，显示上次数据" };
     },
   }),
 
   ingestFinanceData: defineAction({
     request: z.discriminatedUnion("success", [
-      z.object({ success: z.literal(false), error: z.string().min(1).max(500) }),
+      z.object({
+        success: z.literal(false),
+        error: z.string().min(1).max(500),
+        // F0.7 generation contract: the refresh generation this
+        // callback belongs to, echoed verbatim from the task
+        // prompt. Optional in the schema for legacy callers;
+        // callbacks that omit or mismatch it are ignored by the
+        // gate whenever a generation is stored.
+        generation: z.string().min(1).max(128).optional(),
+      }),
       z.object({
         success: z.literal(true),
+        generation: z.string().min(1).max(128).optional(),
         asOf: z.string().min(10).max(80),
         months: z.array(rawMonthSchema).min(1).max(240),
         plaidAccounts: z.array(plaidAccountSchema).max(100),
@@ -2145,9 +2418,172 @@ export const Actions = {
     ]),
     response: ingestResponse,
     async handler(ctx, args): Promise<z.infer<typeof ingestResponse>> {
+      // Finance stays strictly owner: the identity check is
+      // unchanged and no viewer-less channel is admitted here.
       if (!isOwner(ctx)) return { ok: false, savedMonths: 0, issue: null };
+      // Generation binding + idempotency (F0.7), in order:
+      //  1. Generation gate: a callback arriving while a refresh
+      //     runs must echo the stored generation; a missing or
+      //     mismatched generation is an old generation's late
+      //     return (its failure callbacks carry no asOf, so
+      //     decideIngestCallback alone cannot tell them apart) —
+      //     ignore, state untouched. A callback arriving after its
+      //     generation has settled is likewise ignored: a
+      //     generation settles exactly once.
+      //  2. decideIngestCallback filters provably stale callbacks
+      //     against the stored payload: a success no newer than
+      //     it, a success stamped before this refresh started, any
+      //     late failure after the state settled.
+      //  3. Atomic claim arbitration: the callback stamps its own
+      //     claim token into claimed_generation with a conditional
+      //     UPDATE that matches only while the row is exactly what
+      //     this call read (id, status, updatedAt, generation) AND
+      //     still unclaimed. Exactly one callback per generation
+      //     can hold the claim. A loser re-reads once: if the
+      //     generation is already claimed, or the gate/decision no
+      //     longer passes, it is ignored with savedMonths=0 — there
+      //     is no "still applicable, proceed directly" path around
+      //     the claim.
+      //  4. The claim holder settles with a single CAS conditioned
+      //     on its claim token and the claimed generation (plus
+      //     the still-running status for a running generation):
+      //     the payload write and the settle are the SAME write,
+      //     so a callback whose generation was superseded mid-save
+      //     matches zero rows and changes nothing — the payload is
+      //     never half-replaced and the new generation's state is
+      //     never settled by an old winner.
+      const db = ctx.db<typeof schema>();
+      const incomingGeneration = args.generation ?? null;
+      const readIngestInputs = async () => {
+        const state = await getState(ctx);
+        let latestPayloadAsOf: string | null = null;
+        let previousLiveNetWorth: number | null = null;
+        if (state?.payload) {
+          const prior = parseDashboardPayload(state.payload);
+          if (prior.ok) {
+            latestPayloadAsOf = prior.data.asOf;
+            previousLiveNetWorth = prior.data.live.netWorth;
+          }
+        }
+        return { state, latestPayloadAsOf, previousLiveNetWorth };
+      };
+      const gateFor = (state: FinanceStateRow) =>
+        decideGenerationGate({
+          refreshStatus: state?.status,
+          storedGeneration: state?.generation ?? null,
+          incomingGeneration,
+        });
+      const decideFor = (state: FinanceStateRow, latestPayloadAsOf: string | null) =>
+        decideIngestCallback({
+          refreshStatus: state?.status,
+          refreshUpdatedAt: state?.updatedAt ?? null,
+          latestPayloadAsOf,
+          incomingSuccess: args.success,
+          incomingAsOf: args.success ? args.asOf : null,
+        });
+      const ignoredResult = (): z.infer<typeof ingestResponse> =>
+        ({ ok: args.success, savedMonths: 0, issue: null });
+
+      const firstRead = await readIngestInputs();
+      if (gateFor(firstRead.state) === "ignore" || decideFor(firstRead.state, firstRead.latestPayloadAsOf) === "ignore") {
+        return ignoredResult();
+      }
+      // The claim token this call would stamp if it wins
+      // arbitration; null while unclaimed (no state row: the
+      // pre-contract path, where no generation exists to
+      // arbitrate).
+      let claimToken: string | null = null;
+      let claimSnapshot: FinanceStateRow;
+      const tryClaim = async (snapshot: NonNullable<FinanceStateRow>): Promise<boolean> => {
+        const token = newClaimToken();
+        const claimRows = await db
+          .update(schema.financeState)
+          .set({ claimedGeneration: token, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.financeState.id, 1),
+              eq(schema.financeState.status, snapshot.status),
+              eq(schema.financeState.updatedAt, snapshot.updatedAt),
+              snapshot.generation == null
+                ? isNull(schema.financeState.generation)
+                : eq(schema.financeState.generation, snapshot.generation),
+              isNull(schema.financeState.claimedGeneration),
+            ),
+          )
+          .returning({ id: schema.financeState.id });
+        if (claimRows.length !== 1) return false;
+        claimToken = token;
+        claimSnapshot = snapshot;
+        return true;
+      };
+      if (firstRead.state) {
+        const won = await tryClaim(firstRead.state);
+        if (!won) {
+          // Lost the claim: the row changed under us — a
+          // concurrent callback claimed this generation, or a new
+          // generation started. Re-read once and re-check the gate
+          // and decision; an already-claimed generation is a hard
+          // stop, never a proceed-anyway.
+          const secondRead = await readIngestInputs();
+          if (
+            gateFor(secondRead.state) === "ignore" ||
+            decideFor(secondRead.state, secondRead.latestPayloadAsOf) === "ignore"
+          ) {
+            return ignoredResult();
+          }
+          if (!secondRead.state) return ignoredResult();
+          if (secondRead.state.claimedGeneration != null) return ignoredResult();
+          const wonRetry = await tryClaim(secondRead.state);
+          if (!wonRetry) return ignoredResult();
+        }
+      }
+      // Claim-bound settle: the ONLY way a claimed callback may
+      // change the refresh state or replace the payload. One
+      // conditional UPDATE that must still see this call's claim
+      // token and the claimed generation (and, for a running
+      // generation, the unsettled running status).
+      const settleClaimed = async (values: {
+        payload?: string | null;
+        previousLiveNetWorth?: number | null;
+        status: "idle" | "error";
+        message: string | null;
+      }): Promise<boolean> => {
+        if (claimToken == null || !claimSnapshot) {
+          await writeState(ctx, { ...values });
+          return true;
+        }
+        const rows = await db
+          .update(schema.financeState)
+          .set({
+            ...(values.payload !== undefined ? { payload: values.payload } : {}),
+            ...(values.previousLiveNetWorth !== undefined
+              ? { previousLiveNetWorth: values.previousLiveNetWorth }
+              : {}),
+            status: values.status,
+            taskId: null,
+            message: values.message,
+            claimedGeneration: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.financeState.id, 1),
+              eq(schema.financeState.claimedGeneration, claimToken),
+              claimSnapshot.generation == null
+                ? isNull(schema.financeState.generation)
+                : eq(schema.financeState.generation, claimSnapshot.generation),
+              ...(claimSnapshot.status === "running" ? [eq(schema.financeState.status, "running")] : []),
+            ),
+          )
+          .returning({ id: schema.financeState.id });
+        return rows.length === 1;
+      };
       if (!args.success) {
-        await writeState(ctx, { status: "error", message: "本次更新失败，显示上次数据" });
+        // Failure settle is claim-bound: if this call's claim was
+        // superseded (a new generation started), settleClaimed
+        // matches zero rows and the new generation's running state
+        // is left exactly as it is.
+        await settleClaimed({ status: "error", message: "本次更新失败，显示上次数据" });
         ctx.invalidateQueries();
         return { ok: false, savedMonths: 0, issue: null };
       }
@@ -2157,18 +2593,12 @@ export const Actions = {
       // problem category, never the submitted values.
       const normalization = normalizeRawMonths(args.months);
       if (!normalization.ok) {
-        await writeState(ctx, {
+        await settleClaimed({
           status: "error",
           message: `本次更新未保存：${normalization.issue}。已保留上次成功数据，修正后可重新更新。`,
         });
         ctx.invalidateQueries();
         return { ok: false, savedMonths: 0, issue: normalization.issue };
-      }
-      const state = await getState(ctx);
-      let previousLiveNetWorth: number | null = null;
-      if (state?.payload) {
-        const prior = parseDashboardPayload(state.payload);
-        if (prior.ok) previousLiveNetWorth = prior.data.live.netWorth;
       }
       const dashboard = buildDashboard(
         args.asOf,
@@ -2177,20 +2607,27 @@ export const Actions = {
         args.holdings,
         args.plaidTransactions,
         args.transactionCoverage,
-        previousLiveNetWorth,
+        firstRead.previousLiveNetWorth,
       );
       if (!dashboard) {
-        await writeState(ctx, { status: "error", message: "本次更新没有可用的月度数据，显示上次数据" });
+        await settleClaimed({ status: "error", message: "本次更新没有可用的月度数据，显示上次数据" });
         ctx.invalidateQueries();
         return { ok: false, savedMonths: 0, issue: null };
       }
-      await writeState(ctx, {
+      const published = await settleClaimed({
         payload: JSON.stringify(dashboard),
-        previousLiveNetWorth,
+        previousLiveNetWorth: firstRead.previousLiveNetWorth,
         status: "idle",
         message: "更新完成",
       });
       ctx.invalidateQueries();
+      if (!published) {
+        // Superseded while saving: the settle matched zero rows,
+        // so nothing was written — the stored payload keeps the
+        // newer generation's data and this callback reports an
+        // honest savedMonths=0.
+        return { ok: true, savedMonths: 0, issue: null };
+      }
       return { ok: true, savedMonths: dashboard.months.length, issue: null };
     },
   }),

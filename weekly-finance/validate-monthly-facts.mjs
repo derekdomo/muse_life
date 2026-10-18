@@ -34,7 +34,7 @@ function extractFn(name) {
 const NAMES = [
   "isRealDateKey", "entriesSignature", "normalizeRawMonths", "resolveContribution",
   "cashflowRoleForEntry", "snapshotCaliber", "isConsecutiveMonth",
-  "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "nativeDateString", "nativeBool", "effectiveFlowPeriod", "amountMatches", "transactionSpendForMonth",
+  "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "effectiveFlowPeriod", "nativeDateString", "nativeBool", "amountMatches", "transactionSpendForMonth",
   "aggregateMonths", "average", "normalizedFireSpend", "validCompleteMonths",
   "computeFire", "recomputeInvestmentReturns", "computeInvestmentPerformance",
   "normalizeStoredIntegrity", "normalizeFireMetrics",
