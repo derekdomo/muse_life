@@ -102,6 +102,33 @@ main {
 .refresh-button:disabled, .empty-state button:disabled { cursor: wait; opacity: .55; }
 .refresh-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
+.refresh-band {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+.refresh-band__row { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.refresh-band__status { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-weight: 720; }
+.refresh-band__note { margin: 8px 0 0; }
+.refresh-band__facts { margin-top: 8px; }
+.refresh-band__facts p { margin: 2px 0; }
+.refresh-band__facts strong, .refresh-band__ledger-rows strong { color: var(--text); }
+.refresh-band__ledger { margin-top: 8px; }
+.refresh-band__ledger summary {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  color: var(--text);
+  font-weight: 650;
+  cursor: pointer;
+}
+.refresh-band__ledger-rows p { margin: 4px 0; }
+
 .hero {
   min-height: 274px;
   padding: 28px 22px 20px;

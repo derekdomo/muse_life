@@ -135,6 +135,145 @@ export function balanceSourceSummary(accounts: Array<{ type: string; live: boole
   return `${liveCount} 个余额账户为同步读取值，${snapshotCount} 个余额账户沿用月度快照值`;
 }
 
+// F0.5/F0.7: the read-only refresh status band. Status and meaning
+// never ride on color alone (the user is color-weak): every state
+// carries a symbol AND a text label, on an Okabe-Ito-safe neutral
+// presentation. The band states facts only: the last successful
+// data date (the stored payload's asOf), when the current/latest
+// attempt started (startedAt), when the state row was last
+// written (updatedAt — a state-write instant, never called a
+// heartbeat or a data date), and the next available action. A
+// background task that finished without a legal ingest save is
+// never labelled "数据已更新": while running, the band says the
+// page still shows the last successful data.
+export function refreshStatusSymbol(status: RefreshStatus): string {
+  if (status === "running") return "↻";
+  if (status === "error") return "▲";
+  return "✓";
+}
+
+export function refreshStatusText(status: RefreshStatus, hasData: boolean): string {
+  if (status === "running") return "正在更新";
+  if (status === "error") return hasData ? "更新未成功，显示上次成功数据" : "更新未成功，暂无可用数据";
+  return hasData ? "已同步" : "等待首次同步";
+}
+
+export function nextRefreshActionText(status: RefreshStatus, hasData: boolean): string {
+  if (status === "running") return "等待本次更新完成（完成前不要重复启动）";
+  if (status === "error") return hasData ? "可点「立即更新」重试，旧数据保留" : "可点「立即更新」重试";
+  return hasData ? "可点「立即更新」手动同步" : "可点「立即更新」进行首次同步";
+}
+
+// F0.5/F0.7: month-availability facts, derived from the REAL
+// stored months and their integrity metadata — never inferred
+// from the refresh asOf. "上一完整月" is the last full calendar
+// month before the viewer's current month; "当月" is by
+// definition still in progress; earlier months whose integrity
+// was never established are named as 历史未核实.
+export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ label: string; text: string }> {
+  if (months.length === 0) {
+    return [{ label: "月份可用性", text: "尚无月度记录" }];
+  }
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const monthOf = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+  const currentMonth = monthOf(now);
+  const previousMonth = monthOf(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  const byMonth = new Map<string, Month>();
+  for (const month of months) byMonth.set(month.key.slice(0, 7), month);
+  const facts: Array<{ label: string; text: string }> = [];
+  const prev = byMonth.get(previousMonth);
+  if (!prev) {
+    facts.push({ label: "上一完整月", text: `${previousMonth} 缺失：没有该月快照` });
+  } else if (prev.integrity === "complete") {
+    facts.push({ label: "上一完整月", text: `${previousMonth} 已齐备（完整性：完整）` });
+  } else if (prev.integrity === "partial") {
+    facts.push({ label: "上一完整月", text: `${previousMonth} 未核实：完整性为部分（${prev.integrityBasis ?? "依据未提供"}）` });
+  } else {
+    facts.push({ label: "上一完整月", text: `${previousMonth} 未核实：完整性未提供（${prev.integrityBasis ?? "依据未提供"}）` });
+  }
+  const current = byMonth.get(currentMonth);
+  facts.push({
+    label: "当月",
+    text: current
+      ? `${currentMonth} 仅进行中：快照截至 ${current.snapshotDate || current.key}，月份尚未结束`
+      : `${currentMonth} 尚无快照（进行中月份未取得）`,
+  });
+  const unverifiedHistory = months.filter(
+    (month) => month.key.slice(0, 7) < previousMonth && month.integrity !== "complete",
+  );
+  facts.push({
+    label: "历史月份",
+    text: unverifiedHistory.length > 0
+      ? `${unverifiedHistory.length} 个历史月份未核实（完整性未提供或部分）：${unverifiedHistory.map((month) => month.key.slice(0, 7)).join("、")}`
+      : "较早历史月份完整性均已核实",
+  });
+  return facts;
+}
+
+// F0.5: the four-row source ledger the status band expands into
+// （本地月度记录 / 银行余额 / 交易 / 持仓）. Each row states its
+// source data date, the range actually obtained, and this
+// attempt's result. Stages the platform does not report are
+// written as 未知 — no fabricated percentages, no invented task
+// completion. The save result is shared because all four sources
+// land through the one legal ingest write; transaction coverage
+// is only ever stated through the per-month spend provenance the
+// months themselves carry.
+export function sourceLedgerRows(
+  data: Dashboard | null,
+  refresh: { status: RefreshStatus },
+): Array<{ source: string; dataDate: string; range: string; result: string }> {
+  const attemptResult = refresh.status === "running"
+    ? "本次更新进行中，尚未落盘保存"
+    : refresh.status === "error"
+      ? "本次未成功，未写入新数据，保留上次成功数据"
+      : "已落盘保存（当前显示即已保存范围）";
+  if (!data) {
+    return [
+      { source: "本地月度记录", dataDate: "未知", range: "未取得", result: attemptResult },
+      { source: "银行余额", dataDate: "未知", range: "未取得", result: attemptResult },
+      { source: "交易", dataDate: "未知", range: "未取得", result: "未知（平台未提供逐源结果）" },
+      { source: "持仓", dataDate: "未知", range: "未取得", result: attemptResult },
+    ];
+  }
+  const first = data.months[0];
+  const last = data.months.at(-1);
+  const asOfDate = new Date(data.asOf);
+  const asOfText = Number.isNaN(asOfDate.getTime()) ? "未知" : dateLabel.format(asOfDate);
+  const provenMonths = data.months.filter((month) => month.spendProven).map((month) => month.key.slice(0, 7));
+  const balanceAccounts = data.accounts.filter((account) => account.type === "account" || account.type === "investment");
+  return [
+    {
+      source: "本地月度记录",
+      dataDate: data.sourceMonth,
+      range: first && last ? `${first.key} 至 ${last.key} · 共 ${data.months.length} 份月度快照` : "未取得",
+      result: attemptResult,
+    },
+    {
+      source: "银行余额",
+      dataDate: asOfText,
+      range: balanceSourceSummary(data.accounts),
+      result: balanceAccounts.length > 0 ? attemptResult : "未提供",
+    },
+    {
+      source: "交易",
+      dataDate: "未知",
+      range: provenMonths.length > 0
+        ? `支出依据齐全的月份：${provenMonths.join("、")}（逐月依据见月度记录）`
+        : "无月份具备完整交易覆盖依据",
+      result: "未知（平台未提供逐源结果）",
+    },
+    {
+      source: "持仓",
+      dataDate: asOfText,
+      range: data.holdingsComplete
+        ? `全部持仓 ${data.holdingsAll.length} 只${data.holdingsTotal != null ? ` · 分母 ${currency.format(data.holdingsTotal)}` : ""}`
+        : "仅 Top 10 摘要（旧缓存，长尾未保存）",
+      result: data.holdings.length > 0 || data.holdingsComplete ? attemptResult : "未提供",
+    },
+  ];
+}
+
 // F1.1 / F0.5: average monthly spend over the most recent 3 months
 // whose spend basis is proven (spendProven) and which are not
 // anomalous. F1.1 depends only on spend, so missing income or
@@ -464,6 +603,23 @@ function nextDateText(key: string): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+// F1.6 period proof (client mirror): a strict real-calendar-date
+// check for period bounds shown on the card. An illegal day such
+// as 09-00 or 09-31 is rejected outright — the same verdict the
+// server gate applies — never compared as text.
+export function isRealDateText(value: string): boolean {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(0, 0, 0, 0);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
 // F1.6 rework: the effective period of an entry — the generic
 // period when present, the Firance-native period filling its
 // absence (generic ?? native). One resolver shared by the
@@ -509,6 +665,11 @@ export function flowPeriodCoverageLabel(
 ): string {
   const { start, end } = effectivePeriodOf(entry);
   if (!start || !end) return "未提供期间";
+  // F1.6 period proof: period material that is not a legal,
+  // complete period (illegal calendar dates such as 09-00, or a
+  // start after its end) is not proof — the same verdict the
+  // server gate reaches, shown as text on the card.
+  if (!isRealDateText(start) || !isRealDateText(end) || start > end) return "期间不完整或日期非法，不作证明";
   if (!startKey || !endKey) return "期间已提供，所属区间未定";
   if (end <= startKey || start > endKey) return "不在本区间内";
   const intervalStart = nextDateText(startKey);
@@ -1293,6 +1454,69 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
   );
 }
 
+// F0.5/F0.7: the read-only refresh status band, shown right after
+// the access check. It never writes anything: retrying stays on
+// the existing 「立即更新」 button, and a retry never clears the
+// old cards — the dashboard below keeps rendering the last
+// successful payload until a legal ingest save replaces it.
+function RefreshStatusBand({
+  data,
+  refresh,
+  message,
+}: {
+  data: Dashboard | null;
+  refresh: { status: RefreshStatus; updatedAt: string | null; startedAt: string | null };
+  message: string | null;
+}) {
+  const hasData = data != null;
+  const formatInstant = (value: string | null, dateOnly: boolean): string => {
+    if (!value) return "未提供";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "未提供";
+    return dateOnly ? dateLabel.format(date) : timestampLabel.format(date);
+  };
+  const facts = data ? monthAvailabilityFacts(data.months, new Date()) : [];
+  const ledger = sourceLedgerRows(data, refresh);
+  return (
+    <section className="refresh-band" aria-label="刷新状态与数据可用性">
+      <div className="refresh-band__row">
+        <span className="refresh-band__status">
+          <span aria-hidden="true">{refreshStatusSymbol(refresh.status)}</span>
+          {refreshStatusText(refresh.status, hasData)}
+        </span>
+        <span>最后成功数据日期：{hasData ? formatInstant(data.asOf, true) : "尚无成功数据"}</span>
+        <span>{refresh.status === "running" ? "本次尝试开始" : "最近一次尝试开始"}：{formatInstant(refresh.startedAt, false)}</span>
+        <span>状态写入时刻：{formatInstant(refresh.updatedAt, false)}</span>
+        <span>下一可用操作：{nextRefreshActionText(refresh.status, hasData)}</span>
+      </div>
+      {refresh.status === "running" ? (
+        <p className="refresh-band__note">{hasData ? "正在更新，当前显示上次成功数据；合法落盘保存后才会替换。" : "正在更新，尚无成功数据可显示。"}</p>
+      ) : null}
+      {message ? <p className="refresh-band__note">{message}</p> : null}
+      {facts.length > 0 ? (
+        <div className="refresh-band__facts">
+          {facts.map((fact) => (
+            <p key={fact.label}><strong>{fact.label}：</strong>{fact.text}</p>
+          ))}
+        </div>
+      ) : null}
+      <details className="refresh-band__ledger">
+        <summary aria-label="来源台账（本地月度记录、银行余额、交易、持仓）">来源台账</summary>
+        <div className="refresh-band__ledger-rows">
+          {ledger.map((row) => (
+            <p key={row.source}>
+              <strong>{row.source}</strong>
+              {" · "}来源数据日期：{row.dataDate}
+              {" · "}已取得范围：{row.range}
+              {" · "}本次结果：{row.result}
+            </p>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
+
 export function App() {
   const queryClient = useQueryClient();
   const dashboard = useQuery({
@@ -1326,6 +1550,14 @@ export function App() {
               {isRefreshing ? "更新中" : "立即更新"}
             </button>
           </div>
+        ) : null}
+
+        {!guestDenied && response ? (
+          <RefreshStatusBand
+            data={response.data}
+            refresh={response.refresh}
+            message={visibleMessage}
+          />
         ) : null}
 
         {dashboard.isPending ? (

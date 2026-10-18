@@ -235,6 +235,56 @@ const H = (ticker, name, value, extra = {}) => ({ ticker, name, value, currency:
     repaired.holdings.length === 1 && repaired.holdings[0].ticker === "AAA" && repaired.cashPosition === 700);
   check("ancient: surviving share and concentration still untouched",
     repaired.holdings[0].share === 0.25 && repaired.concentrationTop3 === 0.5);
+  // F2.3 rework: an archive written BEFORE the ingest-time
+  // conflict check can still carry a stored cash row whose ticker
+  // declares USD while its currency field says CAD. The read path
+  // moves it to unclassified with the conflict named and rebuilds
+  // the cash total from the rows that remain.
+  const storedConflict = {
+    holdings: [{ ticker: "AAA", name: "Aaa", value: 500, share: 0.25 }],
+    holdingsAll: [],
+    holdingsCash: [
+      { ticker: "CUR:USD", name: "U.S. Dollar", value: 700, currency: "CAD" },
+      { ticker: "CUR:USD", name: "U.S. Dollar", value: 300, currency: "USD" },
+      { ticker: "CUR:EUR", name: "Euro", value: 200, currency: "EUR" },
+    ],
+    holdingsUnclassified: [],
+    cashPosition: 1200,
+    concentrationTop3: 0.5,
+  };
+  const repairedConflict = ensureHoldingsConsistency(storedConflict);
+  check("read-path conflict: the CUR:USD + CAD row moves to unclassified with 现金币种冲突 named",
+    repairedConflict.holdingsUnclassified.length === 1
+    && repairedConflict.holdingsUnclassified[0].ticker === "CUR:USD"
+    && repairedConflict.holdingsUnclassified[0].value === 700
+    && repairedConflict.holdingsUnclassified[0].currency === "CAD"
+    && repairedConflict.holdingsUnclassified[0].reason.includes("现金币种冲突"));
+  check("read-path conflict: retained cash rows stay listed; cash total rebuilt from them (USD 300 only)",
+    repairedConflict.holdingsCash.length === 2 && repairedConflict.cashPosition === 300);
+  check("read-path conflict: stored shares and concentration still untouched",
+    repairedConflict.holdings[0].share === 0.25 && repairedConflict.concentrationTop3 === 0.5);
+  const allConflict = {
+    holdings: [], holdingsAll: [],
+    holdingsCash: [{ ticker: "CUR:USD", name: "U.S. Dollar", value: 700, currency: "CAD" }],
+    holdingsUnclassified: [],
+    cashPosition: 700,
+    concentrationTop3: 0,
+  };
+  const repairedAll = ensureHoldingsConsistency(allConflict);
+  check("read-path conflict: no surviving USD cash row -> cash total null, never the conflicted amount",
+    repairedAll.cashPosition === null && repairedAll.holdingsCash.length === 0
+    && repairedAll.holdingsUnclassified.length === 1);
+  const storedConsistent = {
+    holdings: [], holdingsAll: [],
+    holdingsCash: [{ ticker: "CUR:USD", name: "U.S. Dollar", value: 700, currency: "USD" }],
+    holdingsUnclassified: [],
+    cashPosition: 700,
+    concentrationTop3: 0,
+  };
+  const untouched = ensureHoldingsConsistency(storedConsistent);
+  check("read-path consistent: a consistent stored cash row is left exactly as stored",
+    untouched.cashPosition === 700 && untouched.holdingsCash.length === 1
+    && untouched.holdingsUnclassified.length === 0);
 }
 
 // --- 8. client search: filtering never moves the denominator ---
@@ -285,38 +335,6 @@ check("UI: holdings detail never added to account balances",
   appSrc.includes("持仓明细与投资账户余额是两个口径，不叠加"));
 check("P2/B: the institutions array length is worded as 机构， never as an account count",
   !appSrc.includes("个账户持有") && appSrc.includes("家机构持有") && appSrc.includes("机构：{row.institutions[0]}"));
-
-
-// --- 7b. F2.3 legacy-blob rework (PM 2026-10-18 09:10): a stored
-// payload whose cash row conflicts (CUR:USD ticker, CAD field)
-// is repaired on READ — moved to unclassified, cash total
-// recomputed from the surviving rows — without waiting for a
-// refresh and without touching shares or concentration. ---
-{
-  const oldBlob = {
-    holdings: [], holdingsAll: [],
-    holdingsCash: [{ ticker: "CUR:USD", name: "U.S. Dollar", value: 100, currency: "CAD" }],
-    holdingsUnclassified: [], cashPosition: 100, concentrationTop3: 0,
-  };
-  const out = ensureHoldingsConsistency(oldBlob);
-  check("legacy blob: conflicting stored cash row leaves the cash total on read",
-    out.cashPosition === null && out.holdingsCash.length === 0
-    && out.holdingsUnclassified.length === 1
-    && (out.holdingsUnclassified[0].reason ?? "").includes("币种冲突")
-    && out.holdingsUnclassified[0].value === 100);
-  const mixedBlob = {
-    holdings: [], holdingsAll: [],
-    holdingsCash: [
-      { ticker: "CUR:USD", name: "U.S. Dollar", value: 50, currency: "USD" },
-      { ticker: "CUR:USD", name: "U.S. Dollar", value: 100, currency: "CAD" },
-    ],
-    holdingsUnclassified: [], cashPosition: 150, concentrationTop3: 0,
-  };
-  const mixedOut = ensureHoldingsConsistency(mixedBlob);
-  check("legacy blob: surviving USD cash row keeps its total (50), conflict isolated",
-    mixedOut.cashPosition === 50 && mixedOut.holdingsCash.length === 1
-    && mixedOut.holdingsUnclassified.length === 1);
-}
 
 console.log(`validate-holdings: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

@@ -50,7 +50,7 @@ const excludedDecl = src.slice(src.indexOf("const excludedLiveSources"), src.ind
 const SERVER_NAMES = [
   "displayLabel", "isRealDateKey", "entriesSignature", "normalizeRawMonths",
   "resolveContribution", "cashflowRoleForEntry", "snapshotCaliber",
-  "isConsecutiveMonth", "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "nativeDateString", "nativeBool", "effectiveFlowPeriod", "amountMatches", "transactionSpendForMonth",
+  "isConsecutiveMonth", "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "effectiveFlowPeriod", "nativeDateString", "nativeBool", "amountMatches", "transactionSpendForMonth",
   "aggregateMonths", "recomputeInvestmentReturns", "computeInvestmentPerformance",
   "average", "normalizedFireSpend", "validCompleteMonths", "computeFire",
   "normalizeFireMetrics", "sourceCanUseLive", "normalizedLiveValue",
@@ -152,6 +152,19 @@ check("units/dates: YYYY-MM snapshot normalizes to month-end; a balance date at 
 const monthOnlyOlder = build([{ key: "2026-09", entries: [E("bank_1234", "account", 7000, { balanceDate: "2026-09-01" })] }]);
 check("units/dates (rework): YYYY-MM snapshot + same-month older balance date is stale, not fresh",
   monthOnlyOlder.live.availableCash === null && (monthOnlyOlder.live.availableCashStale ?? []).join() === "bank_1234");
+// F1.1 rework (exact-date binding): staleness is exact equality
+// with the snapshot date — a FUTURE balance date is a gap too, an
+// invalid calendar date never equals the snapshot date, and a
+// YYYY-MM balance date is equivalent to that month's last day.
+const futureDated = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-10-05" })]);
+check("stale (exact): a future balance_date (10-05 vs snapshot 09-30) is a named gap",
+  futureDated.live.availableCash === null && (futureDated.live.availableCashStale ?? []).join() === "bank_1234");
+const invalidDated = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-09-31" })]);
+check("stale (exact): an invalid balance_date (09-31) never equals the snapshot date",
+  invalidDated.live.availableCash === null && (invalidDated.live.availableCashStale ?? []).join() === "bank_1234");
+const monthDated = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-09" })]);
+check("fresh (exact): a YYYY-MM balance_date equals the month-end snapshot date",
+  monthDated.live.availableCash === 10000 && (monthDated.live.availableCashStale ?? []).length === 0);
 
 // --- F1.1 rework: explicitly unverified cash never enters coverage ---
 const unverifiedCashDash = latestEntries([
@@ -176,6 +189,19 @@ check("verified: verified=true cash counts normally and the state is carried on 
 const legacyCashDash = latestEntries([E("bank_1234", "account", 10000)]);
 check("legacy: no verification state provided -> row carries null, legacy caliber still counts the cash",
   legacyCashDash.live.availableCash === 10000 && rowOf(legacyCashDash, "bank_1234").verified === null);
+// F1.1 rework (native status): a raw status of
+// carried_forward_unverified / unverified marks the cash
+// unverified even with no boolean flag stored.
+const statusUnverifiedDash = latestEntries([E("bank_1234", "account", 10000, { status: "carried_forward_unverified" })]);
+check("unverified (status): carried_forward_unverified cash -> amount null, named unverified (not stale)",
+  statusUnverifiedDash.live.availableCash === null
+  && (statusUnverifiedDash.live.availableCashUnverified ?? []).join() === "bank_1234"
+  && (statusUnverifiedDash.live.availableCashStale ?? []).length === 0
+  && rowOf(statusUnverifiedDash, "bank_1234").status === "carried_forward_unverified");
+const statusUnverified2 = latestEntries([E("bank_1234", "account", 10000, { status: "unverified" })]);
+check("unverified (status): status unverified cash -> amount null, named unverified",
+  statusUnverified2.live.availableCash === null
+  && (statusUnverified2.live.availableCashUnverified ?? []).join() === "bank_1234");
 
 // --- legacy read path: re-derived from preserved rows, never stored 0 ---
 const legacy = {
@@ -198,6 +224,134 @@ check("legacy: read path re-derives the classified numerator from names + balanc
   rederived.live.availableCash === 4000 && rederived.live.availableCashAccountCount === 1
   && rederived.accounts.find((a) => a.source === "fidelity_hsa_1234").availableCash === false
   && rederived.accounts.find((a) => a.source === "fidelity_hsa_1234").value === 9000);
+
+// --- F1.1 rework: legacy rows filled from the latest month's entryMeta ---
+// An old writer stored account rows WITHOUT verified / status /
+// balanceDate, but the latest month's entryMeta preserved them.
+// The read path fills only those explicit preserved values, so
+// the archive degrades WITHOUT a refresh; values the archive
+// never kept stay missing.
+const metaMonth = (meta) => ({
+  key: "2026-09-30", entryMeta: meta,
+});
+const bareRow = { source: "bank_1234", label: "Bank 1234", type: "account", value: 4000, live: false, institution: null, mask: null };
+const legacyBase = (months, accounts) => ({
+  asOf: AS_OF,
+  sourceMonth: "2026-09-30",
+  months,
+  live: { netWorth: 0, investment: 0, saving: 0, deposits: 0, loans: 0, weeklyDelta: null, availableCash: 12345, availableCashStale: [], availableCashAccountCount: 0 },
+  holdings: [],
+  investmentPerformance: { startKey: null, endKey: null, startBalance: null, endBalance: null, netFlow: null, returnAmount: null, reason: null, monthsCovered: 0 },
+  cashPosition: null,
+  concentrationTop3: 0,
+  accounts,
+  fire: { annualContribution: 0, annualSpend: 0, target: 0, progress: null, gap: 0, completeMonthsUsed: 0 },
+});
+const fillVerified = ensureAvailableCash(legacyBase(
+  [metaMonth([{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false }])],
+  [{ ...bareRow }],
+));
+check("legacy fill: entryMeta verified=false fills the bare row -> cash null, named unverified, row shows the filled flag",
+  fillVerified.live.availableCash === null
+  && (fillVerified.live.availableCashUnverified ?? []).join() === "bank_1234"
+  && fillVerified.accounts[0].verified === false);
+const fillStatus = ensureAvailableCash(legacyBase(
+  [metaMonth([{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: "carried_forward_unverified", periodStart: null, periodEnd: null, verified: null }])],
+  [{ ...bareRow }],
+));
+check("legacy fill: entryMeta status=carried_forward_unverified fills the bare row -> cash null, named unverified",
+  fillStatus.live.availableCash === null
+  && (fillStatus.live.availableCashUnverified ?? []).join() === "bank_1234"
+  && fillStatus.accounts[0].status === "carried_forward_unverified");
+const fillStale = ensureAvailableCash(legacyBase(
+  [metaMonth([{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-15", status: null, periodStart: null, periodEnd: null, verified: null }])],
+  [{ ...bareRow }],
+));
+check("legacy fill: entryMeta balanceDate fills the bare row -> same-month older date is stale on read",
+  fillStale.live.availableCash === null
+  && (fillStale.live.availableCashStale ?? []).join() === "bank_1234"
+  && fillStale.accounts[0].balanceDate === "2026-09-15");
+const fillMissing = ensureAvailableCash(legacyBase(
+  [metaMonth([{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: null }])],
+  [{ ...bareRow }],
+));
+check("legacy fill: values the archive never kept stay missing (cash still counts, fields stay null)",
+  fillMissing.live.availableCash === 4000
+  && fillMissing.accounts[0].verified === null && fillMissing.accounts[0].status === null
+  && fillMissing.accounts[0].balanceDate === null);
+const fillNoOverwrite = ensureAvailableCash(legacyBase(
+  [metaMonth([{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-08-31", status: null, periodStart: null, periodEnd: null, verified: false }])],
+  [{ ...bareRow, verified: true, balanceDate: "2026-09-30" }],
+));
+check("legacy fill: a row's own explicit values are never overwritten by entryMeta",
+  fillNoOverwrite.live.availableCash === 4000
+  && fillNoOverwrite.accounts[0].verified === true && fillNoOverwrite.accounts[0].balanceDate === "2026-09-30");
+
+// --- F1.1 metadata association: same snapshot, same type, unique ---
+// The PM counterexample: the latest snapshot's entryMeta carries
+// an INCOME entry named bank_1234 with verified=true AND the cash
+// ACCOUNT entry bank_1234 with verified=false. The income entry's
+// mark must never fill the cash row: the account entry's own
+// explicit verified=false governs, the cash stays out of the
+// numerator, named unverified.
+const crossTypeMeta = ensureAvailableCash(legacyBase(
+  [metaMonth([
+    { financeSource: "bank_1234", type: "income", cashflowRole: null, balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: true },
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false },
+  ])],
+  [{ ...bareRow }],
+));
+check("association: same-named income verified=true never fills the cash account; its own verified=false is preserved",
+  crossTypeMeta.accounts[0].verified === false
+  && crossTypeMeta.live.availableCash === null
+  && (crossTypeMeta.live.availableCashUnverified ?? []).join() === "bank_1234");
+const crossTypeOnly = ensureAvailableCash(legacyBase(
+  [metaMonth([
+    { financeSource: "bank_1234", type: "income", cashflowRole: null, balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false },
+    { financeSource: "bank_1234", type: "investment", cashflowRole: null, balanceDate: null, status: "carried_forward_unverified", periodStart: null, periodEnd: null, verified: null },
+  ])],
+  [{ ...bareRow }],
+));
+check("association: with ONLY income/investment meta for the name, nothing fills (no cross-type lending at all)",
+  crossTypeOnly.accounts[0].verified === null && crossTypeOnly.accounts[0].status === null
+  && crossTypeOnly.live.availableCash === 4000);
+const dupAgree = ensureAvailableCash(legacyBase(
+  [metaMonth([
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false },
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false },
+  ])],
+  [{ ...bareRow }],
+));
+check("association: duplicate account meta that AGREES fills the field (verified=false -> cash null, named)",
+  dupAgree.accounts[0].verified === false && dupAgree.live.availableCash === null
+  && (dupAgree.live.availableCashUnverified ?? []).join() === "bank_1234");
+const dupConflict = ensureAvailableCash(legacyBase(
+  [metaMonth([
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: true },
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-08-31", status: null, periodStart: null, periodEnd: null, verified: false },
+  ])],
+  [{ ...bareRow }],
+));
+check("association: CONFLICTING duplicate account meta fills nothing (ambiguous -> conservative, fields stay missing)",
+  dupConflict.accounts[0].verified === null && dupConflict.accounts[0].balanceDate === null
+  && dupConflict.live.availableCash === 4000);
+const otherSnapshot = ensureAvailableCash(legacyBase(
+  [
+    { key: "2026-08-31", entryMeta: [{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false }] },
+    metaMonth([]),
+  ],
+  [{ ...bareRow }],
+));
+check("association: meta from a DIFFERENT snapshot month never fills (same-snapshot binding)",
+  otherSnapshot.accounts[0].verified === null && otherSnapshot.live.availableCash === 4000);
+const blobInput = legacyBase(
+  [metaMonth([{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false }])],
+  [{ ...bareRow }],
+);
+const blobBefore = JSON.stringify(blobInput);
+ensureAvailableCash(blobInput);
+check("association: the read-path fill never writes back — the stored blob object is byte-identical",
+  JSON.stringify(blobInput) === blobBefore && blobInput.accounts[0].verified === undefined);
 
 // --- denominator: unchanged 3-valid-complete-month rule, months named ---
 const cm = (key, spend, extra = {}) => ({
@@ -295,49 +449,23 @@ check("client: stale banner agrees with the trial result (excluded stale account
 check("server: verification state is carried from entries to account rows (additive, legacy null)",
   src.includes('verified: entry.type === "account" ? entry.verified ?? null : null')
   && src.includes("verified: z.boolean().nullable().default(null)"));
+check("server: raw status is carried from entries to account rows and consumed as unverified",
+  src.includes('status: entry.type === "account" ? entry.status ?? null : null')
+  && src.includes('status === "carried_forward_unverified"')
+  && src.includes("status: z.string().nullable().default(null)"));
+check("server: legacy read path fills bare rows from the SAME snapshot's entryMeta, same type (account) only",
+  src.includes("month.key === dashboard.sourceMonth") && src.includes("entry.financeSource === account.source && entry.type === \"account\""));
 check("server: unverified cash is named in the live summary and withheld like stale cash",
   src.includes("availableCashUnverified: summary.unverifiedSources")
   && src.includes("availableCashUnverified: availableCashSummary.unverifiedSources")
-  && src.includes("entryUnverified(account)"));
-check("server: staleness compares the exact normalized balanceDate to the snapshot date (no month-prefix compare)",
+  && extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("entryUnverified(account)"));
+check("server: staleness compares the balanceDate EXACTLY to the snapshot date via normalizeBalanceDate (future dates are gaps too; no month-prefix compare)",
   extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("normalizeBalanceDate(account.balanceDate) !== sourceMonth")
+  && !extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("account.balanceDate < sourceMonth")
   && !extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("slice(0, 7)"));
 check("client: panel shows verification as text per row and names unverified cash both ways",
   appSrc.includes("verificationText(account.verified ?? null)") && appSrc.includes("现金账户未核实")
   && appSrc.includes("未核实现金账户") && appSrc.includes("核实状态未提供"));
-
-
-// --- F1.1 legacy-blob rework (PM 2026-10-18 09:10): an old
-// writer's payload whose ACCOUNT ROWS lost verified=false still
-// degrades on read when the same snapshot's preserved entryMeta
-// carries the mark; native status strings count as unverified;
-// a future balance date is a gap like an older one. ---
-const legacyUnverified = {
-  ...legacy,
-  months: [{
-    key: "2026-09-30",
-    entryMeta: [
-      { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: false },
-    ],
-  }],
-  accounts: [
-    { source: "bank_1234", label: "Bank 1234", type: "account", value: 4000, live: false, institution: null, mask: null },
-  ],
-};
-const legacyUnverifiedRead = ensureAvailableCash(legacyUnverified);
-check("legacy blob: entryMeta verified=false reaches the row on read -> amount null, source named unverified",
-  legacyUnverifiedRead.live.availableCash === null
-  && (legacyUnverifiedRead.live.availableCashUnverified ?? []).join() === "bank_1234"
-  && legacyUnverifiedRead.accounts.find((a) => a.source === "bank_1234").verified === false
-  && legacyUnverifiedRead.accounts.find((a) => a.source === "bank_1234").value === 4000);
-const statusCash = latestEntries([E("bank_1234", "account", 10000, { status: "carried_forward_unverified" })]);
-check("native status: carried_forward_unverified cash -> null + named unverified (not stale)",
-  statusCash.live.availableCash === null
-  && (statusCash.live.availableCashUnverified ?? []).join() === "bank_1234"
-  && (statusCash.live.availableCashStale ?? []).length === 0);
-const futureDated = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-10-01" })]);
-check("exact-date: a future balance date (10-01 vs snapshot 09-30) is a named stale gap",
-  futureDated.live.availableCash === null && (futureDated.live.availableCashStale ?? []).join() === "bank_1234");
 
 console.log(`validate-available-cash: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

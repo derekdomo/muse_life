@@ -15,6 +15,13 @@
       "when": 1789918993247,
       "tag": "0002_finance_dashboard_state",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792356125952,
+      "tag": "0003_refresh_generation_binding",
+      "breakpoints": true
     }
   ]
 }

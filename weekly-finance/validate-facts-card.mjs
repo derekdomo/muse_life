@@ -105,7 +105,8 @@ check("mutation: null-as-zero would fake 持平, real view does not", nullAsZero
 
 // --- server wiring: one delta source, honest prior handling ---
 check("server: weeklyDelta derived from previousLiveNetWorth", serverSrc.includes("weeklyDelta: previousLiveNetWorth == null ? null : liveNetWorth - previousLiveNetWorth"));
-check("server: prior read through parseDashboardPayload (corrupt prior -> null delta)", serverSrc.includes("if (prior.ok) previousLiveNetWorth = prior.data.live.netWorth"));
+check("server: prior read through parseDashboardPayload (corrupt prior -> null delta)",
+  serverSrc.includes("latestPayloadAsOf = prior.data.asOf") && serverSrc.includes("previousLiveNetWorth = prior.data.live.netWorth"));
 check("server: two consecutive legal syncs chain the prior", (serverSrc.match(/previousLiveNetWorth/g) ?? []).length >= 4);
 
 // --- F2.1-D1 wiring: card and hero share the same view of the same field ---
@@ -202,6 +203,107 @@ check("monthly detail shows integrity basis / anomaly reason", appSrc.includes("
 check("FIRE gap state gated on completeMonthsUsed", appSrc.includes("data.fire.completeMonthsUsed === 0"));
 check("FIRE trajectory (F1.6 rework): points use the month's investment balance, never net worth",
   appSrc.includes("(month.investment / target) * 100") && !appSrc.includes("(month.total / target)"));
+
+// --- F0.5/F0.7: refresh status band + month availability + source ledger ---
+// Behaviour runs against the REAL client helpers (AST-extracted,
+// transpiled); wiring assertions run against the real source text.
+const { default: ts } = await import("typescript");
+function extractClientFns(names) {
+  const clientFile = ts.createSourceFile("App.tsx", appSrc, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const found = new Map();
+  for (const node of clientFile.statements) {
+    if (ts.isFunctionDeclaration(node) && node.name && names.includes(node.name.text)) {
+      found.set(node.name.text, ts.transpileModule(node.getText(clientFile), {
+        compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.Preserve },
+      }).outputText);
+    }
+  }
+  for (const name of names) if (!found.has(name)) throw new Error(`client function not found: ${name}`);
+  return names.map((name) => found.get(name)).join("\n");
+}
+const BAND_NAMES = ["refreshStatusSymbol", "refreshStatusText", "nextRefreshActionText", "monthAvailabilityFacts", "sourceLedgerRows", "balanceSourceSummary"];
+const bandApi = new Function(
+  `const exports = {};\nconst currency = { format: (v) => "$" + v };\nconst dateLabel = { format: (d) => d.toISOString().slice(0, 10) };\n${extractClientFns(BAND_NAMES)}; return { ${BAND_NAMES.join(", ")} };`,
+)();
+const { refreshStatusSymbol, refreshStatusText, nextRefreshActionText, monthAvailabilityFacts, sourceLedgerRows } = bandApi;
+check("band: status carries a symbol AND text per state (never color alone)",
+  refreshStatusSymbol("running") === "↻" && refreshStatusText("running", true) === "正在更新"
+  && refreshStatusSymbol("error") === "▲" && refreshStatusText("error", true).includes("上次成功数据")
+  && refreshStatusSymbol("idle") === "✓" && refreshStatusText("idle", true) === "已同步"
+  && refreshStatusText("error", false).includes("暂无可用数据") && refreshStatusText("idle", false) === "等待首次同步");
+check("band: next action is state-bound (running waits, error retries with old data kept)",
+  nextRefreshActionText("running", true).includes("不要重复启动")
+  && nextRefreshActionText("error", true).includes("重试") && nextRefreshActionText("error", true).includes("旧数据保留")
+  && nextRefreshActionText("idle", true).includes("立即更新"));
+const bandMonth = (key, integrity, extra = {}) => ({
+  key, snapshotDate: key, integrity, integrityBasis: null, spendProven: false, ...extra,
+});
+const NOW = new Date(2026, 9, 18); // 2026-10-18 local
+const factsUnverified = monthAvailabilityFacts([
+  bandMonth("2026-08-31", "unknown"), bandMonth("2026-09-30", "unknown"),
+], NOW);
+check("band facts: previous complete month present but unverified reads 未核实 (not inferred complete from asOf)",
+  factsUnverified[0].label === "上一完整月" && factsUnverified[0].text.includes("2026-09") && factsUnverified[0].text.includes("未核实"));
+check("band facts: current month without a snapshot is stated as not yet obtained",
+  factsUnverified[1].label === "当月" && factsUnverified[1].text.includes("尚无快照"));
+check("band facts: unverified history months are named with their month keys",
+  factsUnverified[2].label === "历史月份" && factsUnverified[2].text.includes("未核实") && factsUnverified[2].text.includes("2026-08"));
+const factsMissing = monthAvailabilityFacts([bandMonth("2026-10-15", "partial")], NOW);
+check("band facts: a missing previous complete month reads 缺失； the in-progress current month shows its as-of date",
+  factsMissing[0].text.includes("缺失") && factsMissing[1].text.includes("仅进行中") && factsMissing[1].text.includes("2026-10-15"));
+const factsComplete = monthAvailabilityFacts([
+  bandMonth("2026-08-31", "complete"), bandMonth("2026-09-30", "complete"), bandMonth("2026-10-15", "partial"),
+], NOW);
+check("band facts: a proven previous month reads 已齐备 and verified history is stated as such",
+  factsComplete[0].text.includes("已齐备") && factsComplete[2].text.includes("均已核实"));
+check("band facts: no months at all is an honest single fact",
+  monthAvailabilityFacts([], NOW).length === 1 && monthAvailabilityFacts([], NOW)[0].text.includes("尚无月度记录"));
+const ledgerData = {
+  asOf: "2026-10-17T12:00:00-07:00",
+  sourceMonth: "2026-09-30",
+  months: [bandMonth("2026-08-31", "unknown"), bandMonth("2026-09-30", "unknown", { spendProven: true })],
+  accounts: [
+    { type: "account", live: true }, { type: "income", live: false },
+  ],
+  holdings: [{ ticker: "VOO" }],
+  holdingsAll: [],
+  holdingsTotal: null,
+  holdingsComplete: false,
+};
+const ledgerRunning = sourceLedgerRows(ledgerData, { status: "running" });
+check("ledger: four rows in the F0.5 order （本地月度记录 / 银行余额 / 交易 / 持仓）",
+  ledgerRunning.map((row) => row.source).join(",") === "本地月度记录,银行余额,交易,持仓");
+check("ledger: monthly row states the snapshot date and the obtained range",
+  ledgerRunning[0].dataDate === "2026-09-30" && ledgerRunning[0].range.includes("2026-08-31 至 2026-09-30") && ledgerRunning[0].range.includes("共 2 份"));
+check("ledger: while running, results say 尚未落盘 — never 数据已更新",
+  ledgerRunning.every((row) => row.result.includes("尚未落盘") || row.result.includes("未知"))
+  && !ledgerRunning.some((row) => row.result.includes("已更新")));
+check("ledger: balance range counts balance rows only (the income row is not coverage)",
+  ledgerRunning[1].range.includes("全部 1 个余额账户为同步读取值"));
+check("ledger: transactions carry no platform timestamp — data date and result are 未知， range cites per-month spend provenance",
+  ledgerRunning[2].dataDate === "未知" && ledgerRunning[2].result.includes("未知") && ledgerRunning[2].range.includes("2026-09"));
+check("ledger: a legacy holdings cache states Top-10-only honestly",
+  ledgerRunning[3].range.includes("仅 Top 10 摘要"));
+const ledgerError = sourceLedgerRows(ledgerData, { status: "error" });
+check("ledger: a failed attempt writes nothing and keeps the old data (result text)",
+  ledgerError[0].result.includes("未写入新数据") && ledgerError[0].result.includes("保留上次成功数据"));
+const ledgerIdle = sourceLedgerRows(ledgerData, { status: "idle" });
+check("ledger: an idle (saved) state states the saved range as the displayed range",
+  ledgerIdle[0].result.includes("已落盘保存"));
+const ledgerEmpty = sourceLedgerRows(null, { status: "idle" });
+check("ledger: no data -> every source date is 未知 and range 未取得 (nothing fabricated)",
+  ledgerEmpty.every((row) => row.dataDate === "未知" && row.range === "未取得"));
+check("band wiring: rendered only after the access check, fed the sanitized message",
+  appSrc.includes("!guestDenied && response") && appSrc.includes("<RefreshStatusBand") && appSrc.includes("message={visibleMessage}"));
+check("band wiring: the running copy is explicit （正在更新，当前显示上次成功数据）",
+  appSrc.includes("正在更新，当前显示上次成功数据"));
+check("band wiring: updatedAt is labelled 状态写入时刻， never a heartbeat or data date",
+  appSrc.includes("状态写入时刻") && !appSrc.includes("心跳"));
+check("band wiring: last-success date and attempt start are separate fields",
+  appSrc.includes("最后成功数据日期") && appSrc.includes("本次尝试开始") && appSrc.includes("最近一次尝试开始")
+  && appSrc.includes("formatInstant(refresh.startedAt, false)"));
+check("band wiring: server stamps and returns the attempt start (startedAt), distinct from updatedAt",
+  serverSrc.includes("startedAt: new Date()") && serverSrc.includes("startedAt: state?.startedAt?.toISOString() ?? null"));
 
 console.log(`validate-facts-card: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
