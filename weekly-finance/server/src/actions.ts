@@ -76,6 +76,12 @@ const monthSchema = z.object({
   integrity: z.enum(["partial", "complete", "unknown"]).default("unknown"),
   integrityBasis: z.string().nullable().default(null),
   anomalyReason: z.string().nullable().default(null),
+  // F0.4/F0.5 additive per-metric provenance flags. Defaults keep
+  // pre-existing stored payloads readable: missing flags read as
+  // false (未提供), never backfilled as proven.
+  spendProven: z.boolean().default(false),
+  incomeProven: z.boolean().default(false),
+  contributionProven: z.boolean().default(false),
 });
 
 const holdingSchema = z.object({
@@ -352,32 +358,44 @@ function aggregateMonths(
       ? (shouldHaveTransactionCoverage || rawFlexibleSpend < 0)
       : rawFlexibleSpend < 0;
     // F0.4 integrity: the asOf month is always partial. A finished month
-    // is complete only when ALL bases hold at once — the chosen
-    // snapshot date is the month's last day, transaction coverage fully
-    // covers the month, and the snapshot has entries. A date alone
-    // proves nothing about coverage, and transaction coverage alone
-    // only proves transaction spend; neither suffices by itself.
-    // Anything missing stays unknown; it is never backfilled as
-    // complete.
+    // earns three separate provenance flags, each additive and never
+    // inferred from absence:
+    // - spendProven: the chosen snapshot date is the month's last day
+    //   AND transaction coverage fully covers the month.
+    // - incomeProven: spendProven holds AND the snapshot carries at
+    //   least one income entry. Income exists only in the Firance
+    //   snapshot; no income entry means 未提供, never a proven 0.
+    // - contributionProven: spendProven holds AND the snapshot carries
+    //   at least one investment_contribution or transfer entry.
+    // A month is complete only when all three hold at once (which
+    // subsumes the old month-end + full-coverage + non-empty test:
+    // the entry conditions imply non-empty entries). Anything missing
+    // stays unknown; it is never backfilled as complete.
     const source = sorted[index];
     const monthKey = month.key.slice(0, 7);
     const asOfMonth = asOf.slice(0, 7);
+    const monthEntries = source?.entries ?? [];
+    const monthEndSnapshot = Boolean(end && month.key === end);
+    const spendProven = monthKey < asOfMonth && monthEndSnapshot && fullTransactionCoverage;
+    const incomeProven = spendProven && monthEntries.some((entry) => entry.type === "income");
+    const contributionProven = spendProven && monthEntries.some(
+      (entry) => entry.type === "investment_contribution" || entry.type === "transfer",
+    );
     let integrity: "partial" | "complete" | "unknown";
     let integrityBasis: string | null = null;
     if (monthKey >= asOfMonth) {
       integrity = "partial";
       integrityBasis = `当月尚未结束，快照截至 ${month.key}`;
-    } else if (
-      end &&
-      month.key === end &&
-      fullTransactionCoverage &&
-      coverage &&
-      (source?.entries.length ?? 0) > 0
-    ) {
+    } else if (spendProven && incomeProven && contributionProven) {
       integrity = "complete";
-      integrityBasis = `月末快照 ${month.key} + 交易覆盖 ${coverage.start} 至 ${coverage.end} 完整覆盖本月`;
+      integrityBasis = "支出：月末快照＋交易全覆盖；收入：含收入条目；投入：含投入条目";
     } else {
       integrity = "unknown";
+      const missing: string[] = [];
+      if (!spendProven) missing.push("支出依据");
+      if (!incomeProven) missing.push("收入依据");
+      if (!contributionProven) missing.push("投入依据");
+      integrityBasis = `缺少${missing.join("、")}`;
     }
     return {
       ...month,
@@ -390,6 +408,9 @@ function aggregateMonths(
       supersededSnapshots: source?.supersededSnapshots ?? 0,
       integrity,
       integrityBasis,
+      spendProven,
+      incomeProven,
+      contributionProven,
       anomalyReason: !flexibleSpendAnomaly
         ? null
         : rawFlexibleSpend < 0

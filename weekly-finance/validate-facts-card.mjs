@@ -159,18 +159,29 @@ const oldSummary = (accounts) => {
 };
 check("mutation: unfiltered counting changes the bug-case result", oldSummary(bugCase) !== "1/1" && balanceSourceSummary(bugCase).startsWith("全部 1 个"));
 
-// --- F1.1 / F0.4: complete-month spend basis ---
-const cm = (integrity, anomaly, fixedSpend, flexibleSpend = 0) => ({
-  integrity, flexibleSpendAnomaly: anomaly, fixedSpend, flexibleSpend,
+// --- F1.1 / F0.4: spend-proven month basis (per-metric provenance) ---
+// F1.1 consumes ONLY the spend basis: a month counts when spendProven is
+// true and it is not anomalous — regardless of income/contribution
+// provenance or the joint integrity label.
+const cm = (integrity, anomaly, fixedSpend, flexibleSpend = 0, spendProven = integrity === "complete") => ({
+  integrity, flexibleSpendAnomaly: anomaly, fixedSpend, flexibleSpend, spendProven,
 });
 const basis3 = completeSpendBasis([cm("complete", false, 3000), cm("complete", false, 3600), cm("complete", false, 4200)]);
-check("F1.1: 3 complete months average", basis3.usedMonths === 3 && basis3.missingMonths === 0 && basis3.averageMonthlySpend === 3600);
+check("F1.1: 3 spend-proven months average", basis3.usedMonths === 3 && basis3.missingMonths === 0 && basis3.averageMonthlySpend === 3600);
 const basisMixed = completeSpendBasis([
   cm("complete", false, 3000), cm("complete", true, 9000), cm("unknown", false, 9000),
   cm("partial", false, 9000), cm("complete", false, 5000),
 ]);
-check("F1.1: anomaly/unknown/partial excluded from the denominator", basisMixed.usedMonths === 2 && basisMixed.missingMonths === 1);
+check("F1.1: anomaly/unproven excluded from the denominator", basisMixed.usedMonths === 2 && basisMixed.missingMonths === 1);
 check("F1.1: average uses valid months only", basisMixed.averageMonthlySpend === 4000);
+const basisSpendOnly = completeSpendBasis([
+  cm("unknown", false, 2000, 0, true), cm("unknown", false, 4000, 0, true), cm("unknown", false, 6000, 0, true),
+]);
+check("F1.1: spend-proven month counts even when income/contribution unproven (integrity unknown)",
+  basisSpendOnly.usedMonths === 3 && basisSpendOnly.averageMonthlySpend === 4000);
+const basisCompleteNoSpend = completeSpendBasis([cm("complete", false, 9000, 0, false)]);
+check("F1.1: integrity complete without spendProven does not count",
+  basisCompleteNoSpend.usedMonths === 0 && basisCompleteNoSpend.averageMonthlySpend === null);
 const basisNone = completeSpendBasis([cm("unknown", false, 3000), cm("partial", false, 3000)]);
 check("F1.1: no valid months -> average null, never 0-filled", basisNone.averageMonthlySpend === null && basisNone.usedMonths === 0 && basisNone.missingMonths === 3);
 const basisMany = completeSpendBasis([1000, 2000, 3000, 4000, 5000].map((v) => cm("complete", false, v)));

@@ -135,11 +135,13 @@ export function balanceSourceSummary(accounts: Array<{ type: string; live: boole
   return `${liveCount} 个余额账户为同步读取值，${snapshotCount} 个余额账户沿用月度快照值`;
 }
 
-// F1.1 / F0.4: average monthly spend over the most recent 3 valid
-// complete months (integrity complete and not anomalous). Missing
-// months are reported as a count, never filled with 0.
+// F1.1 / F0.5: average monthly spend over the most recent 3 months
+// whose spend basis is proven (spendProven) and which are not
+// anomalous. F1.1 depends only on spend, so missing income or
+// contribution provenance must not reject a month here. Months
+// without proven spend are reported as a count, never filled with 0.
 export function completeSpendBasis(months: Month[]): { averageMonthlySpend: number | null; usedMonths: number; missingMonths: number } {
-  const valid = months.filter((month) => month.integrity === "complete" && !month.flexibleSpendAnomaly);
+  const valid = months.filter((month) => month.spendProven === true && !month.flexibleSpendAnomaly);
   const used = valid.slice(-3);
   const averageMonthlySpend = used.length > 0
     ? used.reduce((sum, month) => sum + Math.max(0, month.fixedSpend + Math.max(0, month.flexibleSpend)), 0) / used.length
@@ -307,10 +309,11 @@ function MonthlyRecords({ months }: { months: Month[] }) {
             <div className="month-record__detail">
               <p>所用快照：{snapshotDate}{month.supersededSnapshots > 0 ? `（同月另有 ${month.supersededSnapshots} 份较早快照已被替代）` : "（同月仅此一份快照）"}</p>
               <p>完整性：{integrityLabel(month.integrity)}{month.integrityBasis ? ` · ${month.integrityBasis}` : " · 无完整覆盖依据"}</p>
+              <p>指标依据：支出 {month.spendProven ? "有依据" : "未提供"} · 收入 {month.incomeProven ? "有依据" : "未提供"} · 投入 {month.contributionProven ? "有依据" : "未提供"}</p>
               {month.flexibleSpendAnomaly ? (
                 <p>数据异常：{month.anomalyReason ?? "灵活支出未能核实"}（保留在月度记录中，不进入图表与 FIRE 计算）</p>
               ) : null}
-              <p>收入 {currency.format(month.income)} · 支出 {currency.format(month.totalSpend)} · 投入 {currency.format(month.contribution)}</p>
+              <p>收入 {month.incomeProven ? currency.format(month.income) : "未提供"} · 支出 {currency.format(month.totalSpend)} · 投入 {month.contributionProven ? currency.format(month.contribution) : "未提供"}</p>
             </div>
           </details>
         );
@@ -480,6 +483,11 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
   const monthDelta = previous ? current.total - previous.total : null;
   const deltaView = weeklyDeltaView(data.live.weeklyDelta, data.live.netWorth);
   const savingsRate = current.income > 0 ? (current.income - current.totalSpend) / current.income : null;
+  // F0.5: when the latest month lacks income or spend provenance, the
+  // rate is a recorded value only, not a complete-month savings rate.
+  const savingsRateNote = current.incomeProven && current.spendProven
+    ? "（收入 − 支出）÷ 收入"
+    : "（收入 − 支出）÷ 收入；已记录值，收入/支出依据未齐，非完整月储蓄率";
   // F1.1: emergency coverage divides deposits by the average spend of
   // the last 3 valid complete months only. With fewer than 3, no
   // coverage figure is produced — the gap is stated, never 0-filled.
@@ -532,7 +540,7 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
       <section className="metric-grid" aria-label="本月关键指标">
         <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />
         <Metric label="月支出" value={<span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} note={`固定 ${compactCurrency.format(current.fixedSpend)}`} />
-        <Metric label="储蓄率" value={savingsRate == null ? "—" : <>{trendIndicator(savingsRate)} {percent.format(savingsRate)}</>} tone={valueTone(savingsRate)} note="（收入 − 支出）÷ 收入" />
+        <Metric label="储蓄率" value={savingsRate == null ? "—" : <>{trendIndicator(savingsRate)} {percent.format(savingsRate)}</>} tone={valueTone(savingsRate)} note={savingsRateNote} />
         <Metric label="应急金覆盖" value={emergencyMonths == null ? "—" : `${number.format(emergencyMonths)} 个月`} note={emergencyNote} />
         <Metric label="投资" value={<span title={currency.format(data.live.investment)}>{compactCurrency.format(data.live.investment)}</span>} note="已融合实时余额" />
         <Metric label="存款" value={<span title={currency.format(data.live.deposits ?? 0)}>{compactCurrency.format(data.live.deposits ?? 0)}</span>} note="现金与银行账户" />

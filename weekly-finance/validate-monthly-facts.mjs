@@ -34,6 +34,7 @@ function extractFn(name) {
     .replace(/: RawMonth/g, "")
     .replace(/: SourceEntry\[\]/g, "")
     .replace(/: PlaidTransaction\[\]/g, "")
+    .replace(/: string\[\]/g, "")
     .replace(/: TransactionCoverage/g, "")
     .replace(/: string \| null/g, "")
     .replace(/: number\[\]/g, "")
@@ -124,9 +125,9 @@ check("aggregate: exactly one point per month", months.length === 3 && months.ma
 check("aggregate: snapshotDate is the chosen snapshot date", months[1].snapshotDate === "2026-09-15");
 check("integrity: current month is always partial", months[2].integrity === "partial");
 check("integrity: month-end snapshot alone is NOT complete (date proves no coverage)",
-  months[0].integrity === "unknown" && months[0].integrityBasis === null);
+  months[0].integrity === "unknown" && (months[0].integrityBasis ?? "").includes("缺少支出依据"));
 check("integrity: finished month without coverage basis is unknown, not auto-complete",
-  months[1].integrity === "unknown" && months[1].integrityBasis === null);
+  months[1].integrity === "unknown" && months[1].spendProven === false);
 const covered = aggregateMonths(
   normalizeRawMonths([snap("2026-08-31", 800), snap("2026-09-15", 900)]).months,
   [],
@@ -134,17 +135,56 @@ const covered = aggregateMonths(
   AS_OF,
 );
 check("integrity: full transaction coverage alone is NOT complete for a mid-month snapshot",
-  covered[1].integrity === "unknown" && covered[1].integrityBasis === null);
+  covered[1].integrity === "unknown" && covered[1].spendProven === false);
 const coveredMonthEnd = aggregateMonths(
   normalizeRawMonths([snap("2026-08-31", 800), snap("2026-09-30", 900)]).months,
   [],
   { start: "2026-09-01", end: "2026-09-30", complete: true },
   AS_OF,
 );
-check("integrity: month-end snapshot + full transaction coverage + entries is complete",
-  coveredMonthEnd[1].integrity === "complete"
-  && (coveredMonthEnd[1].integrityBasis ?? "").includes("月末快照")
-  && (coveredMonthEnd[1].integrityBasis ?? "").includes("交易覆盖"));
+check("integrity: month-end + coverage + income but NO contribution entry is NOT complete",
+  coveredMonthEnd[1].integrity === "unknown"
+  && coveredMonthEnd[1].spendProven === true
+  && coveredMonthEnd[1].incomeProven === true
+  && coveredMonthEnd[1].contributionProven === false
+  && (coveredMonthEnd[1].integrityBasis ?? "").includes("缺少投入依据"));
+const fullMonth = aggregateMonths(
+  normalizeRawMonths([
+    snap("2026-08-31", 800),
+    snap("2026-09-30", 900, [E("broker", "investment_contribution", 1500)]),
+  ]).months,
+  [],
+  { start: "2026-09-01", end: "2026-09-30", complete: true },
+  AS_OF,
+);
+check("integrity: month-end + full coverage + income + contribution entries is complete",
+  fullMonth[1].integrity === "complete"
+  && fullMonth[1].spendProven === true && fullMonth[1].incomeProven === true && fullMonth[1].contributionProven === true
+  && (fullMonth[1].integrityBasis ?? "").includes("月末快照")
+  && (fullMonth[1].integrityBasis ?? "").includes("含收入条目")
+  && (fullMonth[1].integrityBasis ?? "").includes("含投入条目"));
+// PM 21:00 repro: balance-only snapshots (a single account entry, no
+// income / contribution entries at all) at month-end WITH full
+// transaction coverage must not be promoted to complete — missing flows
+// are 未提供, never proven zeros entering FIRE as contribution 0.
+const balanceOnly = aggregateMonths(
+  normalizeRawMonths([
+    { key: "2026-06-30", entries: [E("bank_1234", "account", 5000)] },
+    { key: "2026-07-31", entries: [E("bank_1234", "account", 6000)] },
+    { key: "2026-08-31", entries: [E("bank_1234", "account", 7000)] },
+    snap("2026-10-05", 950),
+  ]).months,
+  [],
+  { start: "2026-06-01", end: "2026-08-31", complete: true },
+  AS_OF,
+);
+check("integrity (PM 21:00 repro): balance-only month-end months stay unknown",
+  balanceOnly.slice(0, 3).every((m) => m.integrity === "unknown"));
+check("provenance (PM 21:00 repro): spend proven, income/contribution unproven for balance-only months",
+  balanceOnly.slice(0, 3).every((m) => m.spendProven === true && m.incomeProven === false && m.contributionProven === false));
+const balanceOnlyFire = computeFire(balanceOnly.slice(0, 3), 750000);
+check("FIRE (PM 21:00 repro): balance-only months never enter the denominator as 0 contribution",
+  balanceOnlyFire.completeMonthsUsed === 0 && balanceOnlyFire.annualContribution === 0 && balanceOnlyFire.target === 0);
 const emptyMonths = aggregateMonths(
   normalizeRawMonths([
     { key: "2026-06-30", entries: [] },
