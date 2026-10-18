@@ -613,3 +613,14 @@
 - 状态（如实）：构建在本轮结束时仍在运行，期间已向构建方追加收尾指令（逐项验证结果、未完成项须明示）；本轮未取得构建交付/审计结果，故四项均不勾选、不回灌仓库代码、不冒称已交付。构建交付后下一轮：独立复跑仓库 validate 套件（含新增反例断言）、逐文件回灌、补交付登记。
 - 面板：本轮经 artifact.inspect 独立核对「Life 进度」（slug life）——仍为截至 2026-10-18 11 时、git main @ 4e5dae6 的旧快照，无 L0-FIN-001、无 12:15 评审内容；本轮面板刷新顺延至构建交付后与最新状态一并更新，避免面板先于交付写状态。
 - 本轮已交付：`L0-FIN-001`（见上条，commit 0642d44）。本轮用户可见增量：0（构建未交付）。队列中位等待：缺 queuedAt/startedAt，不可计算。
+
+## 2026-10-18（muse-life-plans-sync 13:13 轮次交付：space-3 四项合并构建完成）
+
+- 交付（构建方证据＋同步轮次独立实查）：space-3 合并构建完成、构建审计 verdict pass、fix_before_attesting 为空。本轮结束前构建仍在运行、交付回执随后到达，故交付登记在本条补齐，四项如下。
+- (1) `F0.7` bug 单 3 / P0/A 刷新回调代次与 CAS：schema 新增 generation/claimedGeneration/startedAt 三列＋迁移 drizzle/0003（仅加列、旧行兼容）；代次于 spawn 前生成，提示词要求成功/失败回调都带 generation；两条 spawn 尾部均走「本代次＋仍 running」条件更新；claim/settle 与代次绑定。新增 validate-refresh-chain 52/52（回调早于 spawn 的成功/失败、跨代晚到、旧/重复/未来 asOf、迟到失败、同代并发唯一落盘、真实成功/失败/stale 重试、旧行无代次结算、owner/guest/匿名矩阵），validate-payload 47/47（含突变敏感性与接线断言）。
+- (2) `F1.6` bug 单 1 / P0/A：同渠道跨来源不可拼接证明、区间外整笔排除、非法日期（09-00/09-31/起止颠倒）真实日历拒绝、仅 periodStart 与纯旧无期间记录不核对（收益/netFlow null、事实保留），客户端标签与服务端同判。validate-investment-performance 100/100，原正常对照（5000/RSU 2000/0/提现/负收益/双渠道全覆盖等）全保持。
+- (3) 沿 `F1.1` bug 单 2 / P1/A：ensureAvailableCash 补齐须同快照＋同类型 account＋唯一关联；income 的 verified=true 不串给同名现金（false 保留、可用现金 null 点名），重复一致可补/冲突不补/异快照不采用，只读不回写（blob 字节 identical）。validate-available-cash 77/77。
+- (4) `F0.5/F0.7` 状态带：权限后只读状态带（最后成功数据日期、当前尝试起始 startedAt、状态与下一操作、运行中逐字「正在更新，当前显示上次成功数据」、updatedAt 标注「状态写入时刻」且无「心跳」表述）、月份可用性事实、四行来源台账（未知如实、未落盘不标已更新）。validate-facts-card 107/107。其余套件：cashflow 79/79、monthly-facts 73/73、holdings 66/66、color-vision 16/16；全套 9 组合计 617 条 synthetic 断言全过，typecheck 通过。全部验证仅 synthetic，未读/写真实财务数据。
+- 同步轮次独立验证（artifact 通道只读实查）：构建后 getDashboard 正常返回，refresh 对象已含新字段 startedAt（旧行 null、兼容），status 仍为 stale error、asOf/sourceMonth 未变——新代码生效且未伪造数据更新。F0.7 主状态保持进行中：真实刷新成功、上一完整月逐笔对账仍未达成，刷新任务无回调根因未证，不冒称关闭。
+- 已知限制（如实）：本轮运行通道对 artifact 源码文件的直接读取/拷贝受限，仓库源码回灌未在本轮执行——仓库 weekly-finance 代码仍为上一交付版本，与线上的差异文件清单按构建方交付说明为：server/src/schema.ts、drizzle/0003_refresh_generation_binding.sql（新）、server/src/actions.ts、client/src/App.tsx、client/src/theme.css、validate-refresh-chain.ts（新）、validate-payload.mjs、validate-investment-performance.mjs、validate-available-cash.mjs、validate-facts-card.mjs、DATA-PLAN.md；回灌顺延下一轮以允许的通道完成并逐文件核对。审计浏览器无所有者身份，状态带所有者视角截图未获（接线断言＋本次 owner 上下文 invoke 为替代证据），最终以所有者本人打开为准；真实端到端仍归 EVID-LIFE-001。回滚：线上经 builder 回退上一构建；仓库本条仅文档登记、revert 即撤销登记。
+- 本轮用户可见增量：4 组（刷新结算安全、投资期间证明收紧、旧存档现金核实关联、刷新状态带与来源台账）。队列中位等待：缺 queuedAt/startedAt，不可计算。
