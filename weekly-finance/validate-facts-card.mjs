@@ -200,6 +200,8 @@ check("monthly row shows 截至 date + integrity label", appSrc.includes("截至
 check("monthly detail shows superseded count", appSrc.includes("month.supersededSnapshots"));
 check("monthly detail shows integrity basis / anomaly reason", appSrc.includes("month.integrityBasis") && appSrc.includes("month.anomalyReason"));
 check("FIRE gap state gated on completeMonthsUsed", appSrc.includes("data.fire.completeMonthsUsed === 0"));
+check("FIRE trajectory (F1.6 rework): points use the month's investment balance, never net worth",
+  appSrc.includes("(month.investment / target) * 100") && !appSrc.includes("(month.total / target)"));
 
 console.log(`validate-facts-card: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

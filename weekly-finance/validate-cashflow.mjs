@@ -248,6 +248,52 @@ const noIncome = agg([
 check("incomplete: missing income entry -> null （收支不齐）",
   noIncome[1].flexibleSpend === null && (noIncome[1].anomalyReason ?? "").includes("缺少收入记录"));
 
+// --- F0.6 rework: dual-end binding (start snapshot bound too) ---
+// Every defect below leaves the END snapshot exactly as in the
+// passing fixed case; only the START endpoint (or the per-source
+// role consistency between the ends) is broken. The old code
+// checked the ending balance date only and returned 400 for all
+// of them.
+const dualBase = (mutateAug, mutateSep) => agg(
+  cashPair(1000, 1200, [E("broker", "investment_contribution", 100)])
+    .map((m, i) => (i === 0 ? mutateAug(m) : mutateSep(m))),
+);
+const withAccountFields = (fields) => (m) => ({
+  ...m,
+  entries: m.entries.map((e) => (e.type === "account" ? { ...e, ...fields } : e)),
+});
+const identity = (m) => m;
+const startStale = dualBase(withAccountFields({ balanceDate: "2026-07-31" }), identity);
+check("dual-end: start balance carried over from an older date -> null, reason names 期初 + the date",
+  startStale[1].flexibleSpend === null && (startStale[1].anomalyReason ?? "").includes("期初账户 bank_1234 沿用旧余额日期 2026-07-31"));
+check("dual-end: balances stay recorded as facts when the estimate is disqualified",
+  startStale[1].cashCreditNet === 1200 && startStale[0].cashCreditNet === 1000 && startStale[1].flexibleSpendSource === "missing");
+const startUnverified = dualBase(withAccountFields({ verified: false }), identity);
+check("dual-end: start verified=false -> null (the file month never proves the start)",
+  startUnverified[1].flexibleSpend === null && (startUnverified[1].anomalyReason ?? "").includes("期初账户 bank_1234 标记为未核实"));
+const endUnverified = dualBase(identity, withAccountFields({ verified: false }));
+check("dual-end: end verified=false -> null, reason names 期末",
+  endUnverified[1].flexibleSpend === null && (endUnverified[1].anomalyReason ?? "").includes("期末账户 bank_1234 标记为未核实"));
+const endStaleDated = dualBase(identity, withAccountFields({ balanceDate: "2026-08-31" }));
+check("dual-end: end stale keeps the repaired behaviour (null + named end account/date)",
+  endStaleDated[1].flexibleSpend === null && (endStaleDated[1].anomalyReason ?? "").includes("期末账户 bank_1234 沿用旧余额日期 2026-08-31"));
+const roleChanged = dualBase(withAccountFields({ cashflowRole: "cash" }), withAccountFields({ cashflowRole: "credit" }));
+check("dual-end: same source, role cash -> credit -> null (source+role inconsistent)",
+  roleChanged[1].flexibleSpend === null && (roleChanged[1].anomalyReason ?? "").includes("分类在期间内变化")
+  && (roleChanged[1].anomalyReason ?? "").includes("bank_1234") && (roleChanged[1].anomalyReason ?? "").includes("不一致"));
+// sensitivity pairs: repairing ONLY the start defect (or keeping
+// the roles consistent) restores the original 400 estimate — the
+// new gates, not some other fixture property, do the blocking.
+const startRepaired = dualBase(withAccountFields({ balanceDate: "2026-08-31" }), identity);
+check("dual-end sensitivity: fresh start balance date restores the 400 estimate",
+  startRepaired[1].flexibleSpend === 400);
+const startVerified = dualBase(withAccountFields({ verified: true }), withAccountFields({ verified: true }));
+check("dual-end sensitivity: verified=true at both ends restores the 400 estimate",
+  startVerified[1].flexibleSpend === 400);
+const rolesConsistent = dualBase(withAccountFields({ cashflowRole: "cash" }), withAccountFields({ cashflowRole: "cash" }));
+check("dual-end sensitivity: consistent explicit roles restore the 400 estimate",
+  rolesConsistent[1].flexibleSpend === 400);
+
 // --- snapshot caliber: YYYY-MM keys, first-day boundary ---
 const monthOnly = normalizeRawMonths([{ key: "2026-08", entries: [E("bank_1234", "account", 1000)] }]);
 check("caliber: YYYY-MM key normalizes to the month-end date",
@@ -351,6 +397,13 @@ check("UI: missing spend renders as — / 待核对， never a formatted 0",
   appSrc.includes('current.totalSpend == null ? "—"') && appSrc.includes("灵活支出待核对"));
 check("UI: chart keeps missing months as null breakpoints (no 0 fill)",
   appSrc.includes("month.totalSpend == null ? null : month.income - month.totalSpend"));
+check("dual-end wiring: both endpoints are issue-checked against their own snapshot",
+  extractFn("aggregateMonths").includes('endpointIssues(previousSource.entries, startRoles, previousSource.key, "期初")')
+  && extractFn("aggregateMonths").includes('endpointIssues(monthEntries, endRoles, month.key, "期末")')
+  && extractFn("aggregateMonths").includes("source+role 不一致"));
+check("UI: estimate drawer reuses the dual-end presentation (start/end rows with dates + verification)",
+  appSrc.includes("现金流反推双端核对") && appSrc.includes("期初 · {entry.financeSource}")
+  && appSrc.includes("期末 · {entry.financeSource}") && appSrc.includes("verificationText(entry.verified)"));
 
 console.log(`validate-cashflow: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

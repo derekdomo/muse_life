@@ -182,6 +182,9 @@ main {
 .fact-card__note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
 .fact-card__stale { margin: 8px 0 0; color: var(--negative); font-size: 11px; font-weight: 700; line-height: 1.5; }
 .fact-card__source { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--border); color: var(--dim); font-size: 10px; line-height: 1.55; }
+.fact-card__details { margin-top: 10px; }
+.fact-card__details summary { min-height: 32px; display: flex; align-items: center; color: var(--text); font-size: 11px; font-weight: 720; cursor: pointer; }
+.fact-card__details .month-record__meta-list { margin-top: 4px; }
 .cash-scope-list { display: grid; margin-top: 8px; }
 .cash-scope-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; min-height: 54px; border-top: 1px solid var(--border); }
 .cash-scope-row > div { min-width: 0; display: grid; gap: 3px; }

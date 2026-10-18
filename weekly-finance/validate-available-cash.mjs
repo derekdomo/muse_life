@@ -136,12 +136,46 @@ const stale = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "20
 check("stale: balance_date older than the source month -> null + the source is named",
   stale.live.availableCash === null && (stale.live.availableCashStale ?? []).join() === "bank_1234"
   && stale.live.availableCashAccountCount === 1);
-const fresh = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-09-15" })]);
-check("fresh: a same-month balance_date is not stale (dates compared by month)",
+// F1.1 rework (PM criterion change): staleness is judged on the
+// REAL balanceDate against the snapshot date — not a month-prefix
+// comparison and never the refresh asOf. A same-month but older
+// balance date is a real gap and is named as one.
+const sameMonthOlder = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-09-15" })]);
+check("stale (rework): same-month older balance_date (09-15 vs snapshot 09-30) is a named gap",
+  sameMonthOlder.live.availableCash === null && (sameMonthOlder.live.availableCashStale ?? []).join() === "bank_1234");
+const fresh = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "2026-09-30" })]);
+check("fresh: a balance_date equal to the snapshot date is not stale (real dates compared)",
   fresh.live.availableCash === 10000 && (fresh.live.availableCashStale ?? []).length === 0);
-const monthOnlyKey = build([{ key: "2026-09", entries: [E("bank_1234", "account", 7000, { balanceDate: "2026-09-01" })] }]);
-check("units/dates: YYYY-MM snapshot normalizes to month-end and a same-month balance date stays fresh",
+const monthOnlyKey = build([{ key: "2026-09", entries: [E("bank_1234", "account", 7000, { balanceDate: "2026-09-30" })] }]);
+check("units/dates: YYYY-MM snapshot normalizes to month-end; a balance date at month-end stays fresh",
   monthOnlyKey.sourceMonth === "2026-09-30" && monthOnlyKey.live.availableCash === 7000);
+const monthOnlyOlder = build([{ key: "2026-09", entries: [E("bank_1234", "account", 7000, { balanceDate: "2026-09-01" })] }]);
+check("units/dates (rework): YYYY-MM snapshot + same-month older balance date is stale, not fresh",
+  monthOnlyOlder.live.availableCash === null && (monthOnlyOlder.live.availableCashStale ?? []).join() === "bank_1234");
+
+// --- F1.1 rework: explicitly unverified cash never enters coverage ---
+const unverifiedCashDash = latestEntries([
+  E("bank_1234", "account", 10000, { verified: false }),
+  E("fidelity_hsa_1234", "account", 5000),
+]);
+check("unverified: verified=false cash -> amount null, source named in availableCashUnverified (not stale)",
+  unverifiedCashDash.live.availableCash === null
+  && (unverifiedCashDash.live.availableCashUnverified ?? []).join() === "bank_1234"
+  && (unverifiedCashDash.live.availableCashStale ?? []).length === 0
+  && unverifiedCashDash.live.availableCashAccountCount === 1);
+check("unverified: the balance stays a recorded fact — row value, deposits and net worth unrewritten",
+  rowOf(unverifiedCashDash, "bank_1234").value === 10000
+  && rowOf(unverifiedCashDash, "bank_1234").verified === false
+  && unverifiedCashDash.live.deposits === 15000
+  && unverifiedCashDash.live.netWorth === 15000);
+const verifiedCashDash = latestEntries([E("bank_1234", "account", 10000, { verified: true })]);
+check("verified: verified=true cash counts normally and the state is carried on the row",
+  verifiedCashDash.live.availableCash === 10000
+  && rowOf(verifiedCashDash, "bank_1234").verified === true
+  && (verifiedCashDash.live.availableCashUnverified ?? []).length === 0);
+const legacyCashDash = latestEntries([E("bank_1234", "account", 10000)]);
+check("legacy: no verification state provided -> row carries null, legacy caliber still counts the cash",
+  legacyCashDash.live.availableCash === 10000 && rowOf(legacyCashDash, "bank_1234").verified === null);
 
 // --- legacy read path: re-derived from preserved rows, never stored 0 ---
 const legacy = {
@@ -208,6 +242,26 @@ check("coverage: stale cash -> null with the stale source named",
 const covStaleExcluded = emergencyCoverage(accounts, null, ["cash_a"], new Set(["cash_a"]), goodBasis);
 check("coverage: trialling away the stale account re-sums the fresh remainder (2000 / 2000 = 1)",
   covStaleExcluded.months === 1 && covStaleExcluded.cashAmount === 2000);
+// --- client: unverified cash blocks coverage until trialled away ---
+const ACCTV = (source, value, verified) => ({ source, type: "account", value, availableCash: true, verified });
+const unverifiedAccounts = [ACCTV("cash_a", 10000, false), ACCTV("cash_b", 2000, true), ACCT("hsa_x", 5000, false)];
+const covUnverified = emergencyCoverage(unverifiedAccounts, null, [], new Set(), goodBasis);
+check("coverage: unverified cash in scope -> null, reason names it as 未核实 (not a generic shortage)",
+  covUnverified.months === null && covUnverified.cashAmount === null
+  && (covUnverified.reason ?? "").includes("未核实") && (covUnverified.reason ?? "").includes("cash_a"));
+const covUnverifiedExcluded = emergencyCoverage(unverifiedAccounts, null, [], new Set(["cash_a"]), goodBasis);
+check("coverage: excluding the unverified account in the page trial restores a normal figure (2000 / 2000 = 1)",
+  covUnverifiedExcluded.months === 1 && covUnverifiedExcluded.cashAmount === 2000);
+const covAllExcluded = emergencyCoverage(unverifiedAccounts, null, [], new Set(["cash_a", "cash_b"]), goodBasis);
+check("coverage: excluding every cash account (incl. unverified) yields no figure",
+  covAllExcluded.months === null && (covAllExcluded.reason ?? "").includes("排除全部"));
+const legacyAccounts = [
+  { source: "cash_old", type: "account", value: 4000, availableCash: true, verified: null },
+  ACCTV("cash_new", 2000, true),
+];
+const covLegacy = emergencyCoverage(legacyAccounts, 6000, [], new Set(), goodBasis);
+check("coverage: legacy unknown verification state keeps the legacy caliber (6000 / 2000 = 3)",
+  covLegacy.months === 3 && covLegacy.cashAmount === 6000);
 const covShortBasis = emergencyCoverage(accounts, 12000, [], new Set(), { averageMonthlySpend: 2000, usedMonths: 2, missingMonths: 1 });
 check("coverage: fewer than 3 valid months -> no figure, cash amount still reported as a fact",
   covShortBasis.months === null && covShortBasis.cashAmount === 12000 && (covShortBasis.reason ?? "").includes("完整有效月不足"));
@@ -238,6 +292,19 @@ check("client: deposits metric replaced by the available-cash metric",
   appSrc.includes('<Metric label="可动用现金"') && appSrc.includes('label: "可动用现金（仅现金账户）"'));
 check("client: stale banner agrees with the trial result (excluded stale accounts are not claimed to block coverage)",
   appSrc.includes("activeStale") && appSrc.includes("已在本页试算中排除，未计入试算金额"));
+check("server: verification state is carried from entries to account rows (additive, legacy null)",
+  src.includes('verified: entry.type === "account" ? entry.verified ?? null : null')
+  && src.includes("verified: z.boolean().nullable().default(null)"));
+check("server: unverified cash is named in the live summary and withheld like stale cash",
+  src.includes("availableCashUnverified: summary.unverifiedSources")
+  && src.includes("availableCashUnverified: availableCashSummary.unverifiedSources")
+  && src.includes("account.verified === false"));
+check("server: staleness compares the real balanceDate to the snapshot date (no month-prefix compare)",
+  extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("account.balanceDate < sourceMonth")
+  && !extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("slice(0, 7)"));
+check("client: panel shows verification as text per row and names unverified cash both ways",
+  appSrc.includes("verificationText(account.verified ?? null)") && appSrc.includes("现金账户未核实")
+  && appSrc.includes("未核实现金账户") && appSrc.includes("核实状态未提供"));
 
 console.log(`validate-available-cash: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

@@ -569,3 +569,15 @@
 - 已知限制：真实 owner 旧存档（实际保存的旧 payload 升级后直接打开）的端到端证据与最终部署源码映射仍归 EVID-LIFE-001；未向生产库写探针。回滚：revert 本次提交恢复仓库侧旧逻辑，线上回退需另经 builder 并保留 published 语义无关（本条无 schema 变更，回退后旧存档 complete 月将再次进入 FIRE 分母，即修复前已知缺陷）。
 - 顺延说明（逐条）：`W4.3-D1` 源码回灌补证（目标 10-19）本轮未动——space-6 线上与仓库差异仍需逐项对账专轮，目标日不变；`HH0.4/HH0.5`、`F0.5` 本体与其余 backlog 未在本轮处理，按队列后续推进。
 - 本轮用户可见增量：5 项（财务四项回灌登记使其交付可核对，代码已在线上生效；F0.4 旧存档打开即按依据诚实降级、FIRE/月度记录/应急金口径一致）。队列中位等待：缺 queuedAt/startedAt，不可计算（如实标注）。
+
+## 2026-10-18 · 财务四项 PM 06:12 返工（F0.6 双端绑定 / F1.6 期间覆盖+FIRE 投资本金 / 沿 F1.1 未核实现金 / 沿 F2.3 现金币种冲突）＋期间核对卡
+
+- 基线 `c5cf74c` → PM 新评审 `4029c34`：HH0.2/HH0.3 三边界与 F0.4 旧 blob 源码关闭（无实现方动作）；财务四项沿原 ID 余项入队（F0.6 P0 目标 10-18、F1.6 P0 目标 10-19、沿 F1.1 P1 目标 10-20、沿 F2.3 P1 目标 10-21），另有沿 F1.6/F0.5 期间核对卡新需求（既有方向、可直接入队）。本轮同 app 合并为一次 builder 构建、一次交付。
+- F0.6（space-3）：现金流反推资格新增双端绑定——期初/期末各自真实 balanceDate、任一端 verified===false 即不合格、同名账户 source+role 一致性；不合格保留余额事实、flexibleSpend=null、cashflowNote 点名具体缺口。原实录优先/分类排除矩阵不变。
+- F1.6（space-3）：期间收益校验双端日期/核实 + 投入与非银行投入 period 对实际区间的完整覆盖（不再仅相邻月+条目存在）；不成立段收益 null+就近原因、累计中断不填 0；computeFire 改以 live.investment 为本金，与收益卡同一投资边界，净资产事实卡不变。期间核对卡同批落地：收益卡首行真实起讫+已核对/待核对、第二层三项事实、展开复用 entryMeta 逐行呈双端日期/核实与投入期间覆盖、部分记录投入标「部分记录、未参与收益」；F0.6 估算抽屉复用同一双端缺口呈现；只读、不回写源历史。
+- 沿 F1.1（space-3）：entryMeta 的 verified/balanceDate 透传 accounts summary（新增 availableCashUnverified）与 live 可动用现金及本页试算；明确未核实现金只作事实显示、不计覆盖分子、覆盖 null+原因；日期用真实 balanceDate，同月较旧亦提示；排除未核实项后试算恢复；余额数值不改写。
+- 沿 F2.3（space-3）：现金 ticker 币种与显式 currency 矛盾列待核对、不计美元合计、不换汇；缺 currency 按 ticker 可证明性分别处理；P2/B 机构计数措辞改称机构。
+- 验证证据（全部 synthetic）：artifact 最终构建源码上同步轮次独立复跑——validate-cashflow **71/71**（原 60）、validate-monthly-facts **73/73**（原 71）、validate-investment-performance **55/55**（原 35）、validate-available-cash **59/59**（原 45）、validate-holdings **61/61**（原 51）、validate-facts-card **85/85**（原 84）、validate-payload 12/12、validate-color-vision 16/16；覆盖 PM 四 bug 单全部固定判据与反例。构建审计 pass（audits/2026-10-18T14-26-17Z，ok:true、移动端无溢出）。回灌 9 文件与线上逐字一致（cmp 全 IDENTICAL）。
+- 已知限制：审计沙箱访客视角，handler 端到端保存回读与 owner 视图未实测，仍归 EVID-LIFE-001；四项新判据的真实数据确认点为后续合法刷新，不冒称已验证。无 schema/migration 变更（加法字段）。回滚：revert 本次提交恢复仓库侧旧逻辑；线上回退需另经 builder（回退后四项 PM 复现缺陷将再现）。
+- 修改文件：`weekly-finance/server/src/actions.ts`、`weekly-finance/client/src/App.tsx`、`weekly-finance/client/src/theme.css`、验证脚本 6 份（cashflow/monthly-facts/investment-performance/available-cash/holdings/facts-card）、`plans.md`（四条返工交付登记）、`changes.md`。未提交 app.db/.env/任何真实数据。
+- 顺延说明：`W4.3-D1` 源码回灌补证（目标 10-19）与 `F0.5` 本体、HH0.4/HH0.5 等 backlog 本轮未动，按队列后续推进；本轮吞吐为同 app 五个工作包（四返工+核对卡）一次构建交付。队列中位等待：缺 queuedAt/startedAt，不可计算（如实标注）。

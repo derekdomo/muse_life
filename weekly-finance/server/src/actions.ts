@@ -233,6 +233,12 @@ const accountSchema = z.object({
   cashflowRole: cashflowRoleSchema.nullable().default(null),
   balanceDate: z.string().nullable().default(null),
   availableCash: z.boolean().default(false),
+  // F1.1 rework additive: the entry's explicit verification state,
+  // carried from the latest snapshot's entryMeta so unverified cash
+  // can be excluded from coverage without hiding the recorded
+  // balance. Legacy rows carry null (核实状态未提供) and keep the
+  // legacy degradation caliber — never backfilled as verified.
+  verified: z.boolean().nullable().default(null),
 });
 
 const dashboardSchema = z.object({
@@ -259,6 +265,11 @@ const dashboardSchema = z.object({
     // account rows (ensureAvailableCash), never from a stored 0.
     availableCash: z.number().nullable().default(null),
     availableCashStale: z.array(z.string()).default([]),
+    // F1.1 rework additive: cash sources withheld from the numerator
+    // because their entries are explicitly marked unverified
+    // (verified === false). Named so the UI can state the gap next
+    // to the coverage figure instead of a generic shortage.
+    availableCashUnverified: z.array(z.string()).default([]),
     availableCashAccountCount: z.number().int().nonnegative().default(0),
   }),
   holdings: z.array(holdingSchema),
@@ -730,27 +741,66 @@ function aggregateMonths(
       if (!flow.hasFixed) issues.push("缺少固定支出记录");
       if (resolved.source === "missing") issues.push("缺少投资投入记录（标准字段与旧 transfer 均无）");
       if (previousSource && previousFlow) {
-        const cashCreditSources = (entries: SourceEntry[]) =>
-          entries
-            .filter((entry) => entry.type === "account")
-            .filter((entry) => {
-              const role = cashflowRoleForEntry(entry);
-              return role === "cash" || role === "credit";
-            })
-            .map((entry) => entry.financeSource)
-            .sort()
-            .join("\n");
-        if (cashCreditSources(monthEntries) !== cashCreditSources(previousSource.entries)) {
+        // F0.6 rework: the back-calculation is bound at BOTH ends.
+        // Eligibility requires, for the start （期初） and the end
+        // （期末） snapshot alike:
+        // - the same cash/credit sources with the SAME resolved
+        //   role per source (a source whose role changed, e.g.
+        //   cash -> credit, breaks the single caliber even when
+        //   the source set itself is unchanged);
+        // - each participating account's real balanceDate fresh
+        //   for its own snapshot month (a carried-over date at
+        //   either end disqualifies — the file month alone never
+        //   proves the other end);
+        // - no participating account explicitly marked unverified
+        //   (verified === false) at either end.
+        // Every failure names the endpoint, the account and the
+        // gap; the balances themselves stay recorded as facts.
+        const roleZh = (role: "cash" | "credit") => (role === "cash" ? "现金" : "信用卡");
+        const cashCreditBySource = (entries: SourceEntry[]) => {
+          const map = new Map<string, "cash" | "credit">();
+          for (const entry of entries) {
+            if (entry.type !== "account") continue;
+            const role = cashflowRoleForEntry(entry);
+            if (role === "cash" || role === "credit") map.set(entry.financeSource, role);
+          }
+          return map;
+        };
+        const startRoles = cashCreditBySource(previousSource.entries);
+        const endRoles = cashCreditBySource(monthEntries);
+        const startNames = [...startRoles.keys()].sort().join("\n");
+        const endNames = [...endRoles.keys()].sort().join("\n");
+        if (startNames !== endNames) {
           issues.push("现金/信用卡账户范围变化（新增、改名或消失），无法同口径反推");
+        } else {
+          const roleChanged = [...startRoles.entries()]
+            .filter(([source, role]) => endRoles.get(source) !== role)
+            .map(([source, role]) => `${source}（期初 ${roleZh(role)} → 期末 ${roleZh(endRoles.get(source) ?? role)}）`);
+          if (roleChanged.length > 0) {
+            issues.push(`现金/信用卡账户分类在期间内变化：${roleChanged.join("、")}，source+role 不一致，无法同口径反推`);
+          }
         }
+        const endpointIssues = (
+          entries: SourceEntry[],
+          roles: Map<string, "cash" | "credit">,
+          snapshotKey: string,
+          label: "期初" | "期末",
+        ): string[] => {
+          const found: string[] = [];
+          for (const entry of entries) {
+            if (entry.type !== "account" || !roles.has(entry.financeSource)) continue;
+            if (entry.verified === false) {
+              found.push(`${label}账户 ${entry.financeSource} 标记为未核实`);
+            }
+            if (entry.balanceDate && entry.balanceDate.slice(0, 7) < snapshotKey.slice(0, 7)) {
+              found.push(`${label}账户 ${entry.financeSource} 沿用旧余额日期 ${entry.balanceDate}，${label === "期初" ? "上期" : "本月"}未更新`);
+            }
+          }
+          return found;
+        };
+        issues.push(...endpointIssues(previousSource.entries, startRoles, previousSource.key, "期初"));
+        issues.push(...endpointIssues(monthEntries, endRoles, month.key, "期末"));
       }
-      const staleBalance = monthEntries.some((entry) => {
-        if (entry.type !== "account" || !entry.balanceDate) return false;
-        const role = cashflowRoleForEntry(entry);
-        if (role !== "cash" && role !== "credit") return false;
-        return entry.balanceDate.slice(0, 7) < month.key.slice(0, 7);
-      });
-      if (staleBalance) issues.push("有现金/信用卡账户沿用旧余额日期，本月未更新");
       if (issues.length > 0) {
         missingReason = issues.join("；");
       } else if (previousFlow) {
@@ -882,9 +932,16 @@ function aggregateMonths(
 // - the investment-account scope changed between the two snapshots
 //   (an account added, renamed or removed);
 // - a balance or flow entry is explicitly marked unverified, or an
-//   investment balance is carried over from an older balance date;
+//   investment balance is carried over from an older balance date —
+//   checked at BOTH endpoints: the starting balance is bound by
+//   its own snapshot's verification state and balance date, not
+//   borrowed from the ending one;
 // - the interval's flows are unknown (contribution missing, or the
-//   standard/alias pair conflicts).
+//   standard/alias pair conflicts);
+// - the flow entries carry periodStart/periodEnd but those periods
+//   do not together cover the whole actual interval between the
+//   two snapshot dates (legacy entries without period fields carry
+//   no period proof and are not gated by this rule).
 // Negative returns and net withdrawals keep their signs; nothing is
 // clamped. Months whose preserved metadata cannot establish the
 // investment-account scope (pre-F0.6 stored payloads) degrade the
@@ -930,11 +987,32 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
     if (!reason && scopeOf(month) !== scopeOf(previous)) {
       reason = "投资账户范围与上期不一致（账户新增、改名或消失），收益待核对";
     }
+    // F1.6 rework: BOTH balance endpoints are bound. The starting
+    // balance (previous snapshot) must itself be verified and
+    // fresh for its own month — an unverified or carried-over
+    // starting balance invalidates the interval exactly like a
+    // bad ending one, and the reason names the failing endpoint.
+    const previousMeta = previous.entryMeta ?? [];
+    if (!reason) {
+      const startUnverified = previousMeta.some(
+        (entry) => entry.type === "investment" && entry.verified === false,
+      );
+      if (startUnverified) reason = "期初投资余额标记为未核实，收益待核对";
+    }
     if (!reason) {
       const unverified = meta.some(
         (entry) => flowTypes.has(entry.type) && entry.verified === false,
       );
-      if (unverified) reason = "本期投资余额或投入标记为未核实，收益待核对";
+      if (unverified) reason = "期末投资余额或投入标记为未核实，收益待核对";
+    }
+    if (!reason) {
+      const startStale = previousMeta.some(
+        (entry) =>
+          entry.type === "investment" &&
+          entry.balanceDate != null &&
+          entry.balanceDate.slice(0, 7) < previous.key.slice(0, 7),
+      );
+      if (startStale) reason = "期初投资账户沿用旧余额日期，期初余额未更新，收益待核对";
     }
     if (!reason) {
       const stale = meta.some(
@@ -944,6 +1022,59 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
           entry.balanceDate.slice(0, 7) < month.key.slice(0, 7),
       );
       if (stale) reason = "有投资账户沿用旧余额日期，本期余额未更新，收益待核对";
+    }
+    if (!reason && flowsKnown) {
+      // F1.6 rework: flow-period coverage. When the interval's
+      // flow entries (cash contribution / legacy alias / non-bank
+      // direct investment) carry periodStart/periodEnd, those
+      // periods must TOGETHER cover the whole actual interval
+      // (previous snapshot date, current snapshot date] — an entry
+      // existing next to an adjacent month is not coverage, a
+      // period covering only an earlier month is not coverage,
+      // and a dated interval whose flows are dated for only part
+      // of it is not coverage. Entries without any period fields
+      // at all are legacy records: they carry no period proof to
+      // check and stay on the pre-existing caliber (readable,
+      // never re-labelled verified).
+      const flowMeta = meta.filter(
+        (entry) =>
+          entry.type === "investment_contribution" ||
+          entry.type === "transfer" ||
+          entry.type === "investment_external_adjustment",
+      );
+      const periods: Array<{ start: string; end: string }> = [];
+      for (const entry of flowMeta) {
+        if (entry.periodStart != null && entry.periodEnd != null) {
+          periods.push({ start: entry.periodStart, end: entry.periodEnd });
+        }
+      }
+      if (periods.length > 0) {
+        const dayAfter = (key: string): string => {
+          const date = new Date(`${key}T00:00:00Z`);
+          date.setUTCDate(date.getUTCDate() + 1);
+          return date.toISOString().slice(0, 10);
+        };
+        const intervalStart = dayAfter(previous.key);
+        const intervalEnd = month.key;
+        const sortedPeriods = [...periods].sort((a, b) => a.start.localeCompare(b.start));
+        let coveredThrough: string | null = null;
+        for (const period of sortedPeriods) {
+          if (coveredThrough == null) {
+            if (period.start > intervalStart) break;
+            coveredThrough = period.end;
+          } else {
+            if (period.start > dayAfter(coveredThrough)) break;
+            if (period.end > coveredThrough) coveredThrough = period.end;
+          }
+          if (coveredThrough >= intervalEnd) break;
+        }
+        if (flowMeta.length > periods.length) {
+          reason = `本期有 ${flowMeta.length - periods.length} 条投入记录未提供期间（periodStart/periodEnd），无法证明覆盖 ${intervalStart} 至 ${intervalEnd} 整个区间，收益待核对`;
+        } else if (coveredThrough == null || coveredThrough < intervalEnd) {
+          const coveredText = sortedPeriods.map((period) => `${period.start} 至 ${period.end}`).join("、");
+          reason = `投入期间仅覆盖 ${coveredText}，未覆盖本区间 ${intervalStart} 至 ${intervalEnd}，收益待核对`;
+        }
+      }
     }
     if (!reason && month.contributionSource === "conflict") {
       reason = "投入标准字段与旧 transfer 别名冲突，期间净投入待核对";
@@ -1064,6 +1195,10 @@ function mergeLatestEntries(entries: SourceEntry[], plaidAccounts: PlaidAccount[
       cashflowRole: role,
       balanceDate: entry.balanceDate ?? null,
       availableCash: role === "cash",
+      // F1.1 rework: the entry's verification state travels with
+      // the row (null = not provided, the legacy state). The value
+      // above is never rewritten by it.
+      verified: entry.type === "account" ? entry.verified ?? null : null,
     };
   });
 }
@@ -1076,16 +1211,29 @@ function mergeLatestEntries(entries: SourceEntry[], plaidAccounts: PlaidAccount[
 //   balance — a positive balance alone never qualifies;
 // - no cash row at all -> amount null （缺失）, never 0;
 // - a cash row whose explicit balanceDate predates the source
-//   month is stale （沿用旧余额） -> amount null and the source is
-//   named in staleSources, so no coverage is fabricated from old
-//   cash. A row without an explicit balance date is dated by its
-//   snapshot (sourceMonth), exactly as the monthly records show;
+//   snapshot date is stale （沿用旧余额） -> amount null and the
+//   source is named in staleSources, so no coverage is fabricated
+//   from old cash. The comparison uses the REAL balanceDate
+//   against the snapshot date — not a month-prefix comparison and
+//   never the refresh asOf: a same-month but older balance date
+//   is a real gap and is named as one (the freshness cutoff is
+//   the source contract itself: the balance must be dated by its
+//   snapshot). A row without an explicit balance date is dated by
+//   its snapshot (sourceMonth), exactly as the monthly records
+//   show;
+// - F1.1 rework: a cash row explicitly marked unverified
+//   (verified === false) never enters the numerator either. Its
+//   balance stays a recorded fact on the row, but the amount is
+//   null and the source is named in unverifiedSources, so no
+//   coverage is claimed on unverified cash. A null verification
+//   state (legacy / not provided) keeps the legacy caliber — the
+//   row still counts and is labelled 核实状态未提供 by the UI;
 // - otherwise the amount is the plain sum of the cash rows'
 //   original balances (a true 0 stays a real 0).
 function summarizeAvailableCash(
   accounts: Dashboard["accounts"],
   sourceMonth: string,
-): { amount: number | null; staleSources: string[]; accountCount: number } {
+): { amount: number | null; staleSources: string[]; unverifiedSources: string[]; accountCount: number } {
   const cashAccounts = accounts.filter((account) => {
     if (account.type !== "account") return false;
     const role = account.cashflowRole
@@ -1093,18 +1241,21 @@ function summarizeAvailableCash(
     return role === "cash";
   });
   if (cashAccounts.length === 0) {
-    return { amount: null, staleSources: [], accountCount: 0 };
+    return { amount: null, staleSources: [], unverifiedSources: [], accountCount: 0 };
   }
-  const sourceMonthKey = sourceMonth.slice(0, 7);
   const staleSources = cashAccounts
-    .filter((account) => account.balanceDate != null && account.balanceDate.slice(0, 7) < sourceMonthKey)
+    .filter((account) => account.balanceDate != null && account.balanceDate < sourceMonth)
     .map((account) => account.source);
-  if (staleSources.length > 0) {
-    return { amount: null, staleSources, accountCount: cashAccounts.length };
+  const unverifiedSources = cashAccounts
+    .filter((account) => account.verified === false)
+    .map((account) => account.source);
+  if (staleSources.length > 0 || unverifiedSources.length > 0) {
+    return { amount: null, staleSources, unverifiedSources, accountCount: cashAccounts.length };
   }
   return {
     amount: cashAccounts.reduce((sum, account) => sum + account.value, 0),
     staleSources: [],
+    unverifiedSources: [],
     accountCount: cashAccounts.length,
   };
 }
@@ -1129,6 +1280,7 @@ function ensureAvailableCash(dashboard: Dashboard): Dashboard {
       ...dashboard.live,
       availableCash: summary.amount,
       availableCashStale: summary.staleSources,
+      availableCashUnverified: summary.unverifiedSources,
       availableCashAccountCount: summary.accountCount,
     },
   };
@@ -1194,21 +1346,42 @@ function normalizeHoldings(inputs: HoldingInput[]): {
     const value = item.value;
     const currency = currencyOf(item);
     if (ticker.startsWith("CUR:")) {
-      const cashCurrency = currency ?? (ticker.slice(4) || null);
+      // F2.3 rework: a cash row carries TWO currency claims — the
+      // currency declared by its ticker (CUR:USD) and the explicit
+      // currency field. When both are present and they CONFLICT,
+      // the row is preserved as 待核对 with the conflict named: it
+      // never enters the USD cash total and is never silently
+      // converted at an implied rate. When only one claim exists
+      // it governs; when neither exists the currency is
+      // unprovable and the row is 待核对 as well.
+      const declaredCurrency = ticker.slice(4).trim().toUpperCase() || null;
+      const name = cleanSecurityName(item.name, ticker);
+      if (currency != null && declaredCurrency != null && currency !== declaredCurrency) {
+        unclassified.push({
+          ticker, name, value, currency,
+          reason: `现金币种冲突：代码声明 ${declaredCurrency}，币种字段为 ${currency}，待核对，未计入现金合计`,
+        });
+        continue;
+      }
+      const cashCurrency = currency ?? declaredCurrency;
       if (value == null || !Number.isFinite(value)) {
-        unclassified.push({ ticker, name: cleanSecurityName(item.name, ticker), value: null, currency: cashCurrency, reason: "现金市值缺失，未计入" });
+        unclassified.push({ ticker, name, value: null, currency: cashCurrency, reason: "现金市值缺失，未计入" });
       } else if (value < 0) {
-        unclassified.push({ ticker, name: cleanSecurityName(item.name, ticker), value, currency: cashCurrency, reason: "现金头寸为负，未计入" });
-      } else if (value > 0) {
-        const key = `${ticker}|${cashCurrency ?? ""}`;
+        unclassified.push({ ticker, name, value, currency: cashCurrency, reason: "现金头寸为负，未计入" });
+      } else if (value === 0) {
+        unclassified.push({ ticker, name, value, currency: cashCurrency, reason: "现金市值为 0，未计入现金合计" });
+      } else if (cashCurrency == null) {
+        unclassified.push({ ticker, name, value, currency: null, reason: "现金币种无法确认（代码未声明、币种字段未提供），待核对，未计入现金合计" });
+      } else {
+        const key = `${ticker}|${cashCurrency}`;
         const current = cashByKey.get(key);
         cashByKey.set(key, {
           ticker,
-          name: current?.name || cleanSecurityName(item.name, ticker),
+          name: current?.name || name,
           value: (current?.value ?? 0) + value,
           currency: cashCurrency,
         });
-        if (ticker === "CUR:USD") usdCash += value;
+        if (cashCurrency === "USD") usdCash += value;
       }
       continue;
     }
@@ -1330,18 +1503,28 @@ function normalizedFireSpend(month: Dashboard["months"][number]): number {
   return Math.max(0, month.fixedSpend + Math.max(0, month.flexibleSpend ?? 0));
 }
 
-function computeFire(months: Dashboard["months"], netWorth: number): Dashboard["fire"] {
+// F1.6 rework: FIRE progress is measured on the INVESTMENT
+// principal — the investment-account balance over the same
+// account boundary as the period-return reconciliation — never on
+// net worth. Deposits, HSA / bond balances and liabilities move
+// net worth (and the net-worth fact card keeps its own unchanged
+// definition), but they are not invested principal and must not
+// move FIRE progress. The second argument is that investment
+// principal: the live investment balance on the ingest path, the
+// stored dashboard's live.investment on the read path.
+function computeFire(months: Dashboard["months"], investmentPrincipal: number): Dashboard["fire"] {
   const used = validCompleteMonths(months).slice(-12);
+  const principal = Number.isFinite(investmentPrincipal) ? investmentPrincipal : 0;
   const annualContribution = average(used.map((month) => month.contribution)) * 12;
   const annualSpend = average(used.map(normalizedFireSpend)) * 12;
   const target = annualSpend > 0 ? annualSpend / 0.04 : 0;
-  const progress = target > 0 ? netWorth / target : null;
+  const progress = target > 0 ? principal / target : null;
   return {
     annualContribution,
     annualSpend,
     target,
     progress,
-    gap: Math.max(0, target - netWorth),
+    gap: Math.max(0, target - principal),
     completeMonthsUsed: used.length,
   };
 }
@@ -1387,7 +1570,7 @@ function normalizeFireMetrics(dashboard: Dashboard): Dashboard {
     ...dashboard,
     months: reconciled,
     investmentPerformance: computeInvestmentPerformance(reconciled),
-    fire: computeFire(reconciled, dashboard.live.netWorth),
+    fire: computeFire(reconciled, dashboard.live.investment),
   };
 }
 
@@ -1436,6 +1619,7 @@ function buildDashboard(
       weeklyDelta: previousLiveNetWorth == null ? null : liveNetWorth - previousLiveNetWorth,
       availableCash: availableCashSummary.amount,
       availableCashStale: availableCashSummary.staleSources,
+      availableCashUnverified: availableCashSummary.unverifiedSources,
       availableCashAccountCount: availableCashSummary.accountCount,
     },
     holdings: normalized.holdings,
@@ -1455,7 +1639,7 @@ function buildDashboard(
       if (a.type !== b.type) return a.type.localeCompare(b.type);
       return Math.abs(b.value) - Math.abs(a.value);
     }),
-    fire: computeFire(months, liveNetWorth),
+    fire: computeFire(months, liveInvestment),
   };
 }
 

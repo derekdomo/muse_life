@@ -40,10 +40,15 @@ const NAMES = [
   "aggregateMonths", "average", "normalizedFireSpend", "validCompleteMonths",
   "computeFire", "normalizeStoredIntegrity", "normalizeFireMetrics",
   "recomputeInvestmentReturns", "computeInvestmentPerformance",
+  "displayLabel", "sourceCanUseLive", "normalizedLiveValue", "findPlaidAccount",
+  "mergeLatestEntries", "cleanSecurityName", "normalizeHoldings",
+  "summarizeAvailableCash", "ensureAvailableCash", "buildDashboard",
 ];
+// the one module-level constant the extracted server functions read
+const excludedDecl = src.slice(src.indexOf("const excludedLiveSources"), src.indexOf("]);", src.indexOf("const excludedLiveSources")) + 3);
 const bundle = NAMES.map(extractFn).join("\n");
-const api = new Function(`${bundle}; return { ${NAMES.join(", ")} };`)();
-const { normalizeRawMonths, aggregateMonths, computeInvestmentPerformance, normalizeFireMetrics } = api;
+const api = new Function(`${excludedDecl}\n${bundle}; return { ${NAMES.join(", ")} };`)();
+const { normalizeRawMonths, aggregateMonths, computeInvestmentPerformance, normalizeFireMetrics, buildDashboard } = api;
 
 // --- fixtures (synthetic) ---
 const E = (financeSource, type, number, extraFields = {}) => ({ financeSource, type, number, ...extraFields });
@@ -97,6 +102,13 @@ const withdrawal = agg([
 ]);
 check("withdrawal: negative flow preserved, return 103000-100000-(-4000)=7000",
   withdrawal[1].investmentNetFlow === -4000 && withdrawal[1].investmentReturn === 7000);
+const trueZeroReturn = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 110000, [E("broker_1234", "investment_contribution", 10000)]),
+]);
+check("true zero: balance growth exactly equal to flows is a real 0 return, not missing",
+  trueZeroReturn[1].investmentReturn === 0 && trueZeroReturn[1].investmentReturnReason === null
+  && computeInvestmentPerformance(trueZeroReturn).returnAmount === 0);
 const negativeReturn = agg([
   invSnap("2026-08-31", 100000),
   invSnap("2026-09-30", 90000, [E("broker_1234", "investment_contribution", 0)]),
@@ -265,6 +277,145 @@ check("compat: pre-metadata payload degrades to null + 范围记录 reason (lega
   scopeUnknownRead.months[1].investmentReturn === null
   && (scopeUnknownRead.months[1].investmentReturnReason ?? "").includes("范围记录"));
 
+// --- F1.6 rework PM counterexamples: the START endpoint is bound ---
+// Same balances/flows as the passing fixed case (would-be return
+// 5000); only the starting snapshot is defective. The old code
+// checked the ending month only and still produced 5000.
+const startUnverified = agg([
+  invSnap("2026-08-31", 100000, [], "broker_1234", { verified: false }),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000)]),
+]);
+check("PM counterexample: start balance unverified -> null (not 5000), reason names 期初 + 未核实",
+  startUnverified[1].investmentReturn === null
+  && (startUnverified[1].investmentReturnReason ?? "").includes("期初")
+  && (startUnverified[1].investmentReturnReason ?? "").includes("未核实"));
+check("PM counterexample: blocked start also nulls the period figure, balances stay facts",
+  computeInvestmentPerformance(startUnverified).returnAmount === null
+  && computeInvestmentPerformance(startUnverified).startBalance === 100000);
+const startStaleEarly = agg([
+  invSnap("2026-08-31", 100000, [], "broker_1234", { balanceDate: "2026-07-31" }),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000)]),
+]);
+check("PM counterexample: start balance date a month early -> null (not 5000), reason names 期初 + 沿用旧余额日期",
+  startStaleEarly[1].investmentReturn === null
+  && (startStaleEarly[1].investmentReturnReason ?? "").includes("期初")
+  && (startStaleEarly[1].investmentReturnReason ?? "").includes("沿用旧余额日期"));
+// sensitivity pair: repairing ONLY the start endpoint restores 5000
+const startRepaired = agg([
+  invSnap("2026-08-31", 100000, [], "broker_1234", { balanceDate: "2026-08-31", verified: true }),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000)]),
+]);
+check("sensitivity: fresh + verified start endpoint restores the 5000 return",
+  startRepaired[1].investmentReturn === 5000);
+
+// --- F1.6 rework PM counterexamples: flow-period coverage ---
+const periodPrevMonthOnly = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-08-01", periodEnd: "2026-08-31" }),
+  ]),
+]);
+check("PM counterexample: flow period covers only the previous month -> null (not 5000)",
+  periodPrevMonthOnly[1].investmentReturn === null
+  && (periodPrevMonthOnly[1].investmentReturnReason ?? "").includes("未覆盖本区间")
+  && (periodPrevMonthOnly[1].investmentReturnReason ?? "").includes("2026-09-01 至 2026-09-30"));
+const twoMonthSpanPartial = agg([
+  invSnap("2026-08-15", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-09-01", periodEnd: "2026-09-30" }),
+  ]),
+]);
+check("PM counterexample: actual interval spans two months, flows dated for one -> null (not 5000)",
+  twoMonthSpanPartial[1].investmentReturn === null
+  && (twoMonthSpanPartial[1].investmentReturnReason ?? "").includes("未覆盖本区间 2026-08-16 至 2026-09-30"));
+const periodCovered = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-09-01", periodEnd: "2026-09-30" }),
+  ]),
+]);
+check("coverage: flow period covering the whole interval reconciles (5000)",
+  periodCovered[1].investmentReturn === 5000);
+const periodSplit = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 5000, { periodStart: "2026-09-01", periodEnd: "2026-09-15" }),
+    E("broker_1234", "investment_contribution", 5000, { periodStart: "2026-09-16", periodEnd: "2026-09-30" }),
+  ]),
+]);
+check("coverage: two flow periods that together cover the interval reconcile (5000)",
+  periodSplit[1].investmentReturn === 5000 && periodSplit[1].investmentNetFlow === 10000);
+const periodPartialRecord = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 6000, { periodStart: "2026-09-01", periodEnd: "2026-09-30" }),
+    E("employer_rsu", "investment_external_adjustment", 4000),
+  ]),
+]);
+check("coverage: one undated flow record beside a dated one -> null （部分记录无法证明覆盖）",
+  periodPartialRecord[1].investmentReturn === null
+  && (periodPartialRecord[1].investmentReturnReason ?? "").includes("未提供期间"));
+const periodRsuCovered = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-09-01", periodEnd: "2026-09-30" }),
+    E("employer_rsu", "investment_external_adjustment", 3000, { periodStart: "2026-09-01", periodEnd: "2026-09-30" }),
+  ]),
+]);
+check("coverage: dated RSU flow counts as flow, return stays 2000",
+  periodRsuCovered[1].investmentReturn === 2000 && periodRsuCovered[1].investmentNetFlow === 13000);
+
+// --- F1.6 rework: FIRE principal is the investment balance ---
+// End-to-end through buildDashboard: two complete months; the
+// FIRE target comes from the Sep complete month (annual spend
+// (300 fixed + 600 flexible) * 12 = 10800 -> target 270000) and
+// the principal must be the live investment balance (110000),
+// never net worth.
+function fireBuild(extraSepEntries, holdings = []) {
+  const normalized = normalizeRawMonths([
+    {
+      key: "2026-08-31",
+      entries: [
+        E("bank_1234", "account", 10000), E("broker_1234", "investment", 100000),
+        E("salary", "income", 5000), E("rent", "fixed_spend", 300),
+        E("broker_1234", "investment_contribution", 1000),
+      ],
+    },
+    {
+      key: "2026-09-30",
+      entries: [
+        E("bank_1234", "account", 10000), E("broker_1234", "investment", 110000),
+        E("salary", "income", 5000), E("rent", "fixed_spend", 300),
+        E("broker_1234", "investment_contribution", 1000),
+        ...extraSepEntries,
+      ],
+    },
+  ]);
+  if (!normalized.ok) throw new Error(`fixture failed to normalize: ${normalized.issue}`);
+  return buildDashboard(
+    AS_OF, normalized.months, [], holdings,
+    [{ date: "2026-09-10", amount: 900, name: "store", pending: false, internalTransfer: false, transferLike: false }],
+    { start: "2026-08-01", end: "2026-09-30", complete: true },
+    null,
+  );
+}
+const fireBase = fireBuild([]);
+check("FIRE principal: progress uses the investment balance (110000 / 270000)",
+  fireBase.fire.target === 270000 && Math.abs(fireBase.fire.progress - 110000 / 270000) < 1e-12
+  && fireBase.fire.gap === 270000 - 110000 && fireBase.live.netWorth === 120000);
+const fireWithHsa = fireBuild([E("fidelity_hsa_1234", "account", 50000)]);
+check("PM counterexample: adding an HSA balance moves net worth (+50000) but NOT FIRE progress",
+  fireWithHsa.live.netWorth === 170000 && fireWithHsa.fire.progress === fireBase.fire.progress
+  && fireWithHsa.fire.gap === fireBase.fire.gap);
+const fireWithLiability = fireBuild([E("mortgage_9999", "account", -80000)]);
+check("FIRE principal: adding a liability moves net worth but NOT FIRE progress",
+  fireWithLiability.live.netWorth === 40000 && fireWithLiability.fire.progress === fireBase.fire.progress);
+const fireWithHoldings = fireBuild([], [{ ticker: "VOO", name: "Vanguard S&P 500 ETF", value: 999999, currency: "USD", institution: "Fidelity" }]);
+check("FIRE principal: holdings detail changes neither FIRE progress nor the period return",
+  fireWithHoldings.fire.progress === fireBase.fire.progress
+  && fireWithHoldings.investmentPerformance.returnAmount === fireBase.investmentPerformance.returnAmount
+  && fireBase.investmentPerformance.returnAmount === 9000);
+
 // --- wiring: schema, derivation boundary and UI ---
 check("schema: month carries additive net-flow + reason fields with legacy defaults",
   src.includes("investmentNetFlow: z.number().nullable().default(null)")
@@ -286,6 +437,22 @@ check("UI: balance-difference fact card keeps its own non-return wording",
 check("UI: monthly record shows the return label, value/reason and net-flow breakdown",
   appSrc.includes("investmentReturnLabel(month)") && appSrc.includes("month.investmentReturnReason")
   && appSrc.includes("month.investmentNetFlow") && appSrc.includes("非银行直接投入"));
+check("FIRE wiring: both paths pass the investment principal, never net worth",
+  src.includes("fire: computeFire(months, liveInvestment)")
+  && src.includes("fire: computeFire(reconciled, dashboard.live.investment)")
+  && !src.includes("computeFire(months, liveNetWorth)")
+  && !src.includes("computeFire(reconciled, dashboard.live.netWorth)"));
+check("UI: period card first line shows the real interval + 已核对/待核对 status as text",
+  appSrc.includes('${reconciled ? "已核对" : "待核对"}') && appSrc.includes("${perf.startKey} → ${perf.endKey}"));
+check("UI: unreconcilable period return renders — with the specific reason nearby (no generic 数据不足）",
+  appSrc.includes('<strong className="fact-card__none">—</strong>') && appSrc.includes("待核对：{perf.reason}")
+  && !appSrc.includes("数据不足"));
+check("UI: card expansion reuses entryMeta per row (endpoints, flow periods, coverage verdict)",
+  appSrc.includes("期间核对明细（双端余额与投入期间）") && appSrc.includes("flowPeriodCoverageLabel(entry, perf.startKey, perf.endKey)")
+  && appSrc.includes("覆盖卡片区间") && appSrc.includes("部分记录，未参与收益核对")
+  && appSrc.includes("verificationText(entry.verified)"));
+check("UI: established intervals stay readable when the period total is blocked",
+  appSrc.includes("已成立区间的月度收益仍可在上方「月度记录」中查看") && appSrc.includes("区间 {month.key}"));
 
 console.log(`validate-investment-performance: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

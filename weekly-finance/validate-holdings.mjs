@@ -137,6 +137,48 @@ const H = (ticker, name, value, extra = {}) => ({ ticker, name, value, currency:
     !r.holdings.some((row) => byTicker.has(row.ticker)) && !r.allHoldings.some((row) => byTicker.has(row.ticker)));
 }
 
+// --- 4b. F2.3 rework: cash currency conflicts ---
+{
+  const conflict = normalizeHoldings([H("CUR:USD", "U.S. Dollar", 700, { currency: "CAD" })]);
+  check("cash conflict: ticker declares USD, field says CAD -> 待核对， original record kept",
+    conflict.unclassifiedHoldings.length === 1 && conflict.unclassifiedHoldings[0].value === 700
+    && conflict.unclassifiedHoldings[0].currency === "CAD");
+  check("cash conflict: reason names the conflict and both currencies",
+    conflict.unclassifiedHoldings[0].reason.includes("币种冲突")
+    && conflict.unclassifiedHoldings[0].reason.includes("USD") && conflict.unclassifiedHoldings[0].reason.includes("CAD"));
+  check("cash conflict: not in the USD cash total, not listed as cash, no implied conversion",
+    conflict.cashPosition === null && conflict.cashHoldings.length === 0 && conflict.holdingsTotal === null);
+  const consistentUsd = normalizeHoldings([H("CUR:USD", "U.S. Dollar", 700, { currency: "USD" })]);
+  check("cash consistent: USD ticker + USD field sums into the USD total",
+    consistentUsd.cashPosition === 700 && consistentUsd.cashHoldings.length === 1
+    && consistentUsd.unclassifiedHoldings.length === 0);
+  const consistentEur = normalizeHoldings([H("CUR:EUR", "Euro", 800, { currency: "EUR" })]);
+  check("cash consistent: EUR ticker + EUR field listed as EUR, never in the USD total",
+    consistentEur.cashHoldings.length === 1 && consistentEur.cashHoldings[0].currency === "EUR"
+    && consistentEur.cashPosition === null);
+  const provable = normalizeHoldings([H("CUR:USD", "U.S. Dollar", 650, { currency: null })]);
+  check("cash missing field: ticker proves the currency -> counted as USD cash",
+    provable.cashPosition === 650 && provable.cashHoldings[0].currency === "USD");
+  const unprovable = normalizeHoldings([H("CUR:", "Cash", 500, { currency: null })]);
+  check("cash unprovable: no declared currency and no field -> 待核对 with its own reason",
+    unprovable.unclassifiedHoldings.length === 1 && unprovable.unclassifiedHoldings[0].reason.includes("无法确认")
+    && unprovable.cashPosition === null);
+  const zeroCash = normalizeHoldings([H("CUR:USD", "U.S. Dollar", 0)]);
+  check("cash zero: a 0 cash row is preserved as 待核对， not silently dropped or summed",
+    zeroCash.unclassifiedHoldings.length === 1 && zeroCash.unclassifiedHoldings[0].reason.includes("市值为 0")
+    && zeroCash.cashPosition === null);
+  const crossInstitution = normalizeHoldings([
+    H("CUR:USD", "U.S. Dollar", 400, { currency: "USD", institution: "Fidelity" }),
+    H("CUR:USD", "U.S. Dollar", 900, { currency: "CAD", institution: "Robinhood" }),
+    H("CUR:USD", "U.S. Dollar", 600, { currency: null, institution: "Robinhood" }),
+  ]);
+  check("cash cross-institution: only the consistent rows sum (400 + 600), the conflict stays 待核对",
+    crossInstitution.cashPosition === 1000 && crossInstitution.cashHoldings.length === 1
+    && crossInstitution.cashHoldings[0].value === 1000
+    && crossInstitution.unclassifiedHoldings.length === 1
+    && crossInstitution.unclassifiedHoldings[0].value === 900);
+}
+
 // --- 5. empty and cash-only inputs ---
 {
   const empty = normalizeHoldings([]);
@@ -241,6 +283,8 @@ check("UI: legacy cache states the long tail is unrecoverable, no Top-10 recompu
   appSrc.includes("不可恢复") && appSrc.includes("不以 Top 10 重算"));
 check("UI: holdings detail never added to account balances",
   appSrc.includes("持仓明细与投资账户余额是两个口径，不叠加"));
+check("P2/B: the institutions array length is worded as 机构， never as an account count",
+  !appSrc.includes("个账户持有") && appSrc.includes("家机构持有") && appSrc.includes("机构：{row.institutions[0]}"));
 
 console.log(`validate-holdings: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

@@ -292,7 +292,7 @@ const legacyDashboard = {
     storedMonth("2026-10-31", { integrity: "partial", integrityBasis: "当月尚未结束，快照截至 2026-10-31" }),
     storedMonth("2026-11-30", { integrity: "unknown", integrityBasis: "缺少支出依据" }),
   ],
-  live: { netWorth: 750000 },
+  live: { netWorth: 750000, investment: 375000 },
 };
 const readBack = normalizeFireMetrics(legacyDashboard);
 check("read path: complete stamp with all flags false downgrades to unknown",
@@ -322,6 +322,12 @@ check("read path: downgrade preserves the month's numeric facts exactly",
 check("read path: FIRE denominator counts only the fully proven complete month",
   readBack.fire.completeMonthsUsed === 1 && readBack.fire.annualContribution === 18000
   && readBack.fire.annualSpend === 60000);
+check("read path (F1.6 rework): FIRE progress uses live.investment as principal (375000 / 1500000 = 0.25), not net worth",
+  readBack.fire.progress === 0.25 && readBack.fire.gap === 1125000);
+const readBackNetWorthMoved = normalizeFireMetrics({ ...legacyDashboard, live: { netWorth: 999999, investment: 375000 } });
+check("read path (F1.6 rework): moving net worth alone never moves FIRE progress",
+  readBackNetWorthMoved.fire.progress === readBack.fire.progress
+  && readBackNetWorthMoved.fire.gap === readBack.fire.gap);
 
 // --- wiring: ingest gate, shared selection, additive schema ---
 check("ingest normalizes before building", src.includes("const normalization = normalizeRawMonths(args.months);"));
@@ -332,8 +338,8 @@ check("ingest failure branch returns issue:null", src.includes('return { ok: fal
 check("buildDashboard latestRaw is the normalized latest month", src.includes("const latestRaw = normalizedMonths.at(-1);"));
 check("buildDashboard no longer re-sorts raw months for latestRaw", !src.includes("const latestRaw = [...rawMonths]"));
 check("aggregateMonths consumes the normalized selection", src.includes("function aggregateMonths(\n  normalizedMonths: NormalizedMonth[],"));
-check("FIRE computed by the shared computeFire in both paths",
-  src.includes("fire: computeFire(months, liveNetWorth)") && src.includes("fire: computeFire(reconciled, dashboard.live.netWorth)"));
+check("FIRE computed by the shared computeFire in both paths (F1.6 rework: investment principal, not net worth)",
+  src.includes("fire: computeFire(months, liveInvestment)") && src.includes("fire: computeFire(reconciled, dashboard.live.investment)"));
 check("old completeFireMonths selector is gone", !src.includes("function completeFireMonths"));
 check("FIRE guard: validCompleteMonths requires all three provenance flags, not the stamp alone",
   src.includes("month.spendProven === true") && src.includes("month.incomeProven === true")
