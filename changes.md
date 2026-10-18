@@ -476,3 +476,9 @@
 - 验证证据：构建审计 verdict pass、fix_before_attesting 为空、无 console 错误、手机端无横向溢出；审计探针实测 HH0.1（切 Santa Clara 后 hero 为该城市 filtered[0]；面积门槛拉满至筛选为空后 hero 为空态、结果区 0 套＋原 no-results）。仓库新增 `house-hunting/validate-house-refresh.mjs` **36/36**：从 actions.ts 抽取真实 `isStaleRunningState`/`decideIngestCallback` 跑边界（恰 2 小时不 stale、2h+1ms stale、idle/error/null 不 stale）与决策矩阵（running 全 apply、settled 同/旧 asOf ignore、新 asOf apply、迟到失败 ignore、无最新报告 apply、不可解析 asOf 不静默丢弃），HH0.1/L0.2 接线断言（top 无回退、空态 hero 无链接/月供、presentRefreshState 双路径、ingest 决策位于插入之前、owner/通道校验三处），并实际执行 stale 比较反转变异且结果翻转。实现方另以非 owner 上下文 invoke 线上 getReport：正常返回当前报告与 refresh idle，taskId 为 null（公开读与 L0.2 读路径符合预期）；本轮未向线上写入任何数据（app.db 不入仓）。
 - 局限（如实记录）：(1) stale/幂等路径无法在审计浏览器内端到端触发（需伪造 2 小时前 running 行或任务回调通道），证据为纯函数实测＋源码评审＋构建方 16 项同函数单测，非调度实测；(2) L0.2 的 `space-action-`/`space-task-return-` 通道前缀契约来自构建方对运行时通道的说明，未经一次真实周调度＋研究回传端到端验证——若契约有误，周刷新 ingest 会被拒、状态停在 running，由 HH0.2 stale 恢复在 2 小时后兜底可重试，请 PM 在下一次真实周刷新后核对状态是否回到 idle；(3) 精确 artifact version 平台未提供，以本提交回灌源码为准（回灌前逐文件 diff 仅 App.tsx/theme.css/actions.ts 三文件有差异，已全量拷贝）。回滚：revert 本提交并回滚 artifact 至上一构建；无数据迁移，回滚后恢复旧 hero 回退与旧刷新行为，不丢已存报告。
 - 修改文件：`house-hunting/client/src/App.tsx`、`house-hunting/client/src/theme.css`、`house-hunting/server/src/actions.ts`、`house-hunting/validate-house-refresh.mjs`（新增）、`plans.md`、`changes.md`。不在本次范围：HH0.3 原子保存、HH0.4 状态核验时间、HH0.5 rubric 分项分、HH1、F0.5/F1.x 其余、H/W 其余队列——按统一队列后续轮次继续，本轮单 app 构建＋自检耗时为顺延原因（责任方 Muse，2026-10-17）。
+
+## 2026-10-17（登记：F-UI-001 色弱冗余通道规则传播至财务总览，space-3，用户直提）
+
+- 来源：所有者 2026-10-17 于主聊天批准、经主聊天派入 LIFE 队列；由 finance dash side chat 登记进 plans.md 新增 `F-UI` 节。本条仅为立项登记，未动任何代码。
+- 内容：所有者自述色弱，健康看板（space-4）已按「符号/文字为主要通道、颜色退为辅助＋Okabe-Ito 色板」改造上线；本条把同一标准系统性落到 space-3——涨跌加 ▲/▼ 或「涨/跌」文字冗余通道、中性金额（月支出/贷款）不再用 negative 红色承担语义、色板统一 Okabe-Ito（theme.css `--positive`/`--negative` 为已知缺口）、趋势图按同一清单顺带核对。数据口径与公式不动，纯呈现层，B 类证据分级。
+- 状态：已入队待执行，时限 2026-10-18（周日）08:39 PT 周刷新前。
