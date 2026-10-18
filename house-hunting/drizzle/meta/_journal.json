@@ -15,6 +15,13 @@
       "when": 1789845006891,
       "tag": "0002_create_property_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792311734858,
+      "tag": "0003_refresh_generation_claim_and_publish_pointer",
+      "breakpoints": true
     }
   ]
 }

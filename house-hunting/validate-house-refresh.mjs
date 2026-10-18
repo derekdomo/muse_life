@@ -1,13 +1,17 @@
-// HH0.1 / HH0.2 (+AUDIT-04/05, L0.2 wiring) validation.
+// HH0.1 / HH0.2 / HH0.3 (+AUDIT-04/05, L0.2 wiring) validation.
 // Behaviour runs against the REAL pure functions extracted from
 // server/src/actions.ts (types stripped with node:module); wiring
 // assertions run against the real client/server source text.
 // All fixtures are synthetic. Pure Node, no deps.
-import { readFileSync } from "node:fs";
+// (Real-handler concurrency/atomicity behaviour against an isolated
+// in-memory SQLite lives in validate-house-ingest.ts, run with Bun.)
+import { readFileSync, readdirSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 
 const serverSrc = readFileSync(new URL("./server/src/actions.ts", import.meta.url), "utf8");
 const clientSrc = readFileSync(new URL("./client/src/App.tsx", import.meta.url), "utf8");
+const migrationFile = readdirSync(new URL("./drizzle/", import.meta.url)).find((f) => f.startsWith("0003_"));
+const migrationSql = migrationFile ? readFileSync(new URL(`./drizzle/${migrationFile}`, import.meta.url), "utf8") : "";
 
 let passed = 0, failed = 0;
 function check(name, cond) {
@@ -22,13 +26,13 @@ function extractFn(name) {
   if (end < 3) throw new Error(`function end not found: ${name}`);
   return serverSrc.slice(start, end).replace(/^export /, "");
 }
-const NAMES = ["isStaleRunningState", "decideIngestCallback"];
+const NAMES = ["isStaleRunningState", "decideIngestCallback", "decideGenerationGate"];
 const bundle = NAMES.map((n) => stripTypeScriptTypes(extractFn(n))).join("\n");
 const thresholdMatch = serverSrc.match(/export const staleRefreshThresholdMs = ([0-9 *]+);/);
 if (!thresholdMatch) throw new Error("staleRefreshThresholdMs not found");
 const staleRefreshThresholdMs = eval(thresholdMatch[1]);
 const api = new Function(`const staleRefreshThresholdMs = ${staleRefreshThresholdMs}; ${bundle}; return { ${NAMES.join(", ")} };`)();
-const { isStaleRunningState, decideIngestCallback } = api;
+const { isStaleRunningState, decideIngestCallback, decideGenerationGate } = api;
 
 // --- HH0.2 stale threshold & predicate ---
 check("threshold is 2h", staleRefreshThresholdMs === 2 * 60 * 60 * 1000);
@@ -69,22 +73,72 @@ check("settled + no latest report + success applies", D({ refreshStatus: "idle",
 check("settled + unparseable asOf applies (no silent drop)", D({ refreshStatus: "idle", incomingAsOf: "not-a-date" }) === "apply");
 check("no state row + failure ignored (settled semantics)", D({ refreshStatus: null, incomingSuccess: false, incomingAsOf: null }) === "ignore");
 
+// --- HH0.2 generation gate (PM generation contract) ---
+// Task-channel callbacks bind to the running generation by identity,
+// not by date: an old generation's failure callback carries no asOf,
+// so only the echoed generation can keep it from settling the new run.
+const G = (over) => decideGenerationGate({ fromTaskChannel: true, refreshStatus: "running", storedGeneration: "gen-A", incomingGeneration: "gen-A", ...over });
+check("gate: task + running + matching generation passes", G({}) === "pass");
+check("gate: task + running + missing generation ignored (old failure callback shape)", G({ incomingGeneration: null }) === "ignore");
+check("gate: task + running + undefined generation ignored", G({ incomingGeneration: undefined }) === "ignore");
+check("gate: task + running + other generation ignored", G({ incomingGeneration: "gen-OLD" }) === "ignore");
+check("gate: task + running + legacy row (stored null) passes with no generation", G({ storedGeneration: null, incomingGeneration: null }) === "pass");
+check("gate: task + running + legacy row (stored null) passes with any generation", G({ storedGeneration: null, incomingGeneration: "gen-X" }) === "pass");
+check("gate: task + settled idle not gated (decide rules apply)", G({ refreshStatus: "idle", incomingGeneration: null }) === "pass");
+check("gate: task + settled error not gated", G({ refreshStatus: "error", incomingGeneration: "gen-OLD" }) === "pass");
+check("gate: task + no state row not gated", G({ refreshStatus: null, incomingGeneration: null }) === "pass");
+check("gate: owner channel never gated", G({ fromTaskChannel: false, incomingGeneration: null }) === "pass");
+check("gate: owner channel mismatched generation passes (claim still arbitrates)", G({ fromTaskChannel: false, incomingGeneration: "gen-OLD" }) === "pass");
+
 // --- HH0.2 wiring: getReport maps stale, refreshReport restarts, ingest ignores ---
 check("getReport uses presentRefreshState in both paths", (serverSrc.match(/presentRefreshState\(state, owner\)/g) ?? []).length === 2);
 check("presentRefreshState maps stale to retryable error message", serverSrc.includes("上次刷新未完成，可以重新刷新") && serverSrc.includes('stale ? ("error" as const)'));
 check("refreshReport only blocks on non-stale running", serverSrc.includes('currentState?.status === "running" && !isStaleRunningState('));
 check("ingest consults decideIngestCallback before any insert", (() => { const sec = serverSrc.slice(serverSrc.indexOf("ingestResearch: defineAction")); return sec.indexOf("decideIngestCallback({") > -1 && sec.indexOf("decideIngestCallback({") < sec.indexOf("db.insert(schema.reports)"); })());
-check("ingest ignore returns saved 0 without state write in branch", serverSrc.includes('if (decideFor(firstRead.state, firstRead.latestAsOf) === "ignore")') && serverSrc.includes("return ignoredResult();"));
-check("ingest arbitration: conditional claim on status+updatedAt with returning",
-  serverSrc.includes("eq(schema.refreshState.status, firstRead.state.status)")
-  && serverSrc.includes("eq(schema.refreshState.updatedAt, firstRead.state.updatedAt)")
-  && serverSrc.includes(".returning({ id: schema.refreshState.id })")
-  && serverSrc.includes("claimed = claimRows.length === 1"));
-check("ingest arbitration: loser re-reads and re-decides exactly once",
+check("ingest ignore returns saved 0 without state write in branch", serverSrc.includes('if (gateFor(firstRead.state) === "ignore" || decideFor(firstRead.state, firstRead.latestAsOf) === "ignore")') && serverSrc.includes("return ignoredResult();"));
+check("ingest arbitration: claim stamps a re-read-visible token, conditional on snapshot + unclaimed",
+  serverSrc.includes("claimedGeneration: token")
+  && serverSrc.includes("eq(schema.refreshState.status, snapshot.status)")
+  && serverSrc.includes("eq(schema.refreshState.updatedAt, snapshot.updatedAt)")
+  && serverSrc.includes("isNull(schema.refreshState.claimedGeneration)")
+  && serverSrc.includes(".returning({ id: schema.refreshState.id })"));
+check("ingest arbitration: loser re-reads once and an already-claimed generation is a hard stop",
   serverSrc.includes("const secondRead = await readIngestInputs();")
-  && serverSrc.includes('if (decideFor(secondRead.state, secondRead.latestAsOf) === "ignore")'));
+  && serverSrc.includes("if (secondRead.state.claimedGeneration != null) return ignoredResult();"));
+check("ingest arbitration: no proceed-without-claiming bypass remains",
+  !serverSrc.includes("proceed without claiming")
+  && !serverSrc.includes("claimed = claimRows.length === 1"));
+check("ingest arbitration: settle/publish CAS is bound to the claim token and generation",
+  serverSrc.includes("eq(schema.refreshState.claimedGeneration, claimToken)")
+  && serverSrc.includes('...(claimSnapshot.status === "running" ? [eq(schema.refreshState.status, "running")] : [])'));
+check("HH0.2 wiring: refreshReport mints and stores the generation before spawning",
+  (() => { const sec = serverSrc.slice(serverSrc.indexOf("refreshReport: defineAction"), serverSrc.indexOf("ingestResearch: defineAction")); const mint = sec.indexOf("const generation = newGenerationId();"); const spawn = sec.indexOf("ctx.agent.spawnTask"); return mint > -1 && spawn > -1 && mint < spawn && sec.includes("claimedGeneration: null"); })());
+check("HH0.2 wiring: spawn prompt requires echoing the generation verbatim",
+  serverSrc.includes("generation 字段，值固定为 ${generation}") && serverSrc.includes("成功与失败两种回传都必须带"));
+check("HH0.2 wiring: ingest schema accepts optional generation on success and failure",
+  (serverSrc.match(/generation: z\.string\(\)\.min\(1\)\.max\(128\)\.optional\(\)/g) ?? []).length === 2);
+check("HH0.2 wiring: generation gate is consulted before any claim attempt",
+  (() => { const sec = serverSrc.slice(serverSrc.indexOf("ingestResearch: defineAction")); const gate = sec.indexOf("gateFor(firstRead.state)"); const claim = sec.indexOf("await tryClaim(firstRead.state)"); return gate > -1 && claim > -1 && gate < claim; })());
 check("HH0.3: duplicate URL/address rejected before insert, previous report kept",
   (() => { const sec = serverSrc.slice(serverSrc.indexOf("ingestResearch: defineAction")); const dup = sec.indexOf("刷新结果存在重复房源，保留上一期报告"); const ins = sec.indexOf("db.insert(schema.reports)"); return dup > -1 && ins > -1 && dup < ins && sec.includes("seenUrls") && sec.includes("seenAddresses"); })());
+check("HH0.3 wiring: candidate written unpublished, publish flips the flag after the pointer CAS",
+  (() => { const sec = serverSrc.slice(serverSrc.indexOf("ingestResearch: defineAction")); const cand = sec.indexOf("published: 0,"); const flip = sec.indexOf("db.update(schema.reports).set({ published: 1 })"); return cand > -1 && flip > -1 && cand < flip && sec.includes("const published = await settleClaimed("); })());
+check("HH0.3 wiring: getReport reads only the published report via the pointer helper",
+  serverSrc.includes("const report = await loadPublishedReport(ctx);")
+  && serverSrc.includes("stateRows[0]?.publishedReportId")
+  && serverSrc.includes("eq(schema.reports.published, 1)"));
+check("HH0.3 wiring: publish pointer switches in the same settle write",
+  serverSrc.includes("...(publishedReportId != null ? { publishedReportId } : {})"));
+check("HH0.3 wiring: initializeReport publishes its snapshot and points at it",
+  serverSrc.includes("published: 1,") && serverSrc.includes("{ publishedReportId: report.id }"));
+check("HH0.3 migration: additive columns + backfill of the latest pre-existing report",
+  migrationSql.includes("ALTER TABLE refresh_state ADD COLUMN generation TEXT")
+  && migrationSql.includes("ALTER TABLE refresh_state ADD COLUMN claimed_generation TEXT")
+  && migrationSql.includes("ALTER TABLE refresh_state ADD COLUMN published_report_id INTEGER")
+  && migrationSql.includes("ALTER TABLE reports ADD COLUMN published INTEGER NOT NULL DEFAULT 0")
+  && migrationSql.includes("UPDATE reports SET published = 1 WHERE id = (SELECT MAX(id) FROM reports)")
+  && migrationSql.includes("UPDATE refresh_state SET published_report_id = (SELECT MAX(id) FROM reports)")
+  && !migrationSql.includes("DROP TABLE") && !migrationSql.includes("DELETE FROM"));
 
 // --- L0.2 wiring (builder-delivered alongside HH0.2) ---
 check("refreshReport admits owner or scheduled platform call only", serverSrc.includes("if (!isOwner(ctx) && !isScheduledPlatformCall(ctx))"));
@@ -104,6 +158,10 @@ check("results no-results empty state retained", clientSrc.includes("这个筛�
 const mutated = bundle.replace("now.getTime() - updatedAt.getTime() > staleRefreshThresholdMs", "now.getTime() - updatedAt.getTime() < staleRefreshThresholdMs");
 const mApi = new Function(`const staleRefreshThresholdMs = ${staleRefreshThresholdMs}; ${mutated}; return { isStaleRunningState };`)();
 check("mutation: inverted stale comparison flips 3h case", mApi.isStaleRunningState("running", ago(3 * 60 * 60 * 1000), now) === false);
+const gateMutated = bundle.replace('input.incomingGeneration === input.storedGeneration ? "pass" : "ignore"', 'input.incomingGeneration === input.storedGeneration ? "ignore" : "pass"');
+const gApi = new Function(`const staleRefreshThresholdMs = ${staleRefreshThresholdMs}; ${gateMutated}; return { decideGenerationGate };`)();
+check("mutation: inverted gate equality flips the matching-generation case",
+  gApi.decideGenerationGate({ fromTaskChannel: true, refreshStatus: "running", storedGeneration: "gen-A", incomingGeneration: "gen-A" }) === "ignore");
 
 console.log(`validate-house-refresh: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

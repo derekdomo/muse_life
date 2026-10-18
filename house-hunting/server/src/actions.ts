@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import * as schema from "./schema";
 
 const citySchema = z.enum(["Santa Clara", "Sunnyvale", "Cupertino"]);
@@ -232,9 +232,11 @@ export function isStaleRunningState(
 // Ingest decision for a research callback, with generation binding
 // (HH0.2). A callback may only settle the refresh generation it belongs
 // to:
-//  - A success whose asOf is the same as or older than the latest stored
-//    report never inserts, in ANY refresh state — inserting it would make
-//    the visible report regress or duplicate the current one.
+//  - A success whose asOf is the same as or older than the latest
+//    published report never inserts, in ANY refresh state — inserting
+//    it would make the visible report regress or duplicate the current
+//    one. (The handler passes the published report's asOf as
+//    latestReportAsOf.)
 //  - While a refresh is running, a success whose asOf predates the moment
 //    this refresh started (refreshUpdatedAt) provably belongs to the
 //    previous generation's task: it is ignored and the running state is
@@ -283,6 +285,42 @@ export function decideIngestCallback(input: {
   return "ignore";
 }
 
+// Generation gate (HH0.2, PM generation contract). refreshReport mints
+// a generation id when a refresh starts and stores it on refresh_state;
+// the research task must echo it back in its ingestResearch callback,
+// success and failure alike. A callback arriving on the task-return
+// channel while a refresh is running is bound to that generation: a
+// missing or mismatched generation means the callback belongs to an
+// older (or foreign) task and must be ignored without touching state —
+// the pre-contract defect was an old generation's failure callback,
+// which carries no asOf to compare, settling the new generation's
+// running state. Legacy state rows (generation null, written before
+// this contract) keep the previous decide-only behaviour, and callbacks
+// on any other channel are not gated here (the claim arbitration below
+// still binds them).
+export function decideGenerationGate(input: {
+  fromTaskChannel: boolean;
+  refreshStatus: "idle" | "running" | "error" | null | undefined;
+  storedGeneration: string | null | undefined;
+  incomingGeneration: string | null | undefined;
+}): "pass" | "ignore" {
+  if (!input.fromTaskChannel) return "pass";
+  if (input.refreshStatus !== "running") return "pass";
+  if (input.storedGeneration == null) return "pass";
+  if (input.incomingGeneration == null) return "ignore";
+  return input.incomingGeneration === input.storedGeneration ? "pass" : "ignore";
+}
+
+function newGenerationId(): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `gen-${Date.now().toString(36)}-${rand}`;
+}
+
+function newClaimToken(): string {
+  const rand = Math.random().toString(36).slice(2, 12);
+  return `claim-${Date.now().toString(36)}-${rand}`;
+}
+
 type RefreshStateRow = typeof schema.refreshState.$inferSelect;
 
 // The refresh block getReport returns: a stale "running" row is mapped to
@@ -297,14 +335,48 @@ function presentRefreshState(state: RefreshStateRow | undefined, owner: boolean)
   };
 }
 
-async function setRefreshState(ctx: Ctx, status: "idle" | "running" | "error", taskId: string | null, message: string | null) {
+async function setRefreshState(
+  ctx: Ctx,
+  status: "idle" | "running" | "error",
+  taskId: string | null,
+  message: string | null,
+  extra?: { generation?: string | null; claimedGeneration?: string | null; publishedReportId?: number | null },
+) {
   const db = ctx.db<typeof schema>();
   const existing = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
   if (existing[0]) {
-    await db.update(schema.refreshState).set({ status, taskId, message, updatedAt: new Date() }).where(eq(schema.refreshState.id, 1));
+    await db
+      .update(schema.refreshState)
+      .set({ status, taskId, message, updatedAt: new Date(), ...(extra ?? {}) })
+      .where(eq(schema.refreshState.id, 1));
   } else {
-    await db.insert(schema.refreshState).values({ id: 1, status, taskId, message, updatedAt: new Date() });
+    await db.insert(schema.refreshState).values({ id: 1, status, taskId, message, updatedAt: new Date(), ...(extra ?? {}) });
   }
+}
+
+type ReportRow = typeof schema.reports.$inferSelect;
+
+// HH0.3: the visible report is the one the publish pointer names. The
+// pointer is authoritative; the published flag (backfilled by the
+// migration for pre-pointer data) and finally the newest report are
+// fallbacks for rows written before the pointer existed.
+async function loadPublishedReport(ctx: Ctx): Promise<ReportRow | undefined> {
+  const db = ctx.db<typeof schema>();
+  const stateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
+  const pointer = stateRows[0]?.publishedReportId ?? null;
+  if (pointer != null) {
+    const byPointer = await db.select().from(schema.reports).where(eq(schema.reports.id, pointer)).limit(1);
+    if (byPointer[0]) return byPointer[0];
+  }
+  const flagged = await db
+    .select()
+    .from(schema.reports)
+    .where(eq(schema.reports.published, 1))
+    .orderBy(desc(schema.reports.id))
+    .limit(1);
+  if (flagged[0]) return flagged[0];
+  const latest = await db.select().from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
+  return latest[0];
 }
 
 export const Actions = {
@@ -319,8 +391,9 @@ export const Actions = {
       // and is withheld from non-owner and anonymous readers.
       const owner = isOwner(ctx);
       const db = ctx.db<typeof schema>();
-      const reportRows = await db.select().from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
-      const report = reportRows[0];
+      // HH0.3: only the published report is visible; an in-progress
+      // candidate (written but not yet pointer-switched) never shows.
+      const report = await loadPublishedReport(ctx);
       const stateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
       const state = stateRows[0];
       if (!report) {
@@ -379,6 +452,7 @@ export const Actions = {
       const existing = await db.select({ id: schema.reports.id }).from(schema.reports).limit(1);
       if (existing[0]) return { ok: true, created: false };
       const inserted = await db.insert(schema.reports).values({
+        published: 1,
         asOf: "2026-09-19T12:00:00-07:00",
         mortgageRate: 7.13,
         rateLabel: "30 年固定 jumbo 参考利率",
@@ -389,7 +463,7 @@ export const Actions = {
       const report = inserted[0];
       if (!report) return { ok: false, created: false };
       await db.insert(schema.listings).values(initialListings.map((item) => ({ ...item, reportId: report.id })));
-      await setRefreshState(ctx, "idle", null, "已载入 9 月 19 日快照");
+      await setRefreshState(ctx, "idle", null, "已载入 9 月 19 日快照", { publishedReportId: report.id });
       ctx.invalidateQueries();
       return { ok: true, created: true };
     },
@@ -414,10 +488,22 @@ export const Actions = {
       if (currentState?.status === "running" && !isStaleRunningState(currentState.status, currentState.updatedAt, new Date())) {
         return { ok: true, status: "already_running" as const, message: "刷新已经在进行中" };
       }
-      await setRefreshState(ctx, "running", null, "正在核对房源、街道环境、学校与利率");
+      // HH0.2 generation contract: mint this refresh's generation id
+      // BEFORE spawning the task and store it on the state row. The
+      // task is instructed to echo it back verbatim in its callback;
+      // ingestResearch ignores task-channel callbacks whose generation
+      // is missing or belongs to another generation. Starting the new
+      // generation also clears any claim marker a previous generation's
+      // callback may have left, so a late winner of the old generation
+      // can no longer settle or publish into this one.
+      const generation = newGenerationId();
+      await setRefreshState(ctx, "running", null, "正在核对房源、街道环境、学校与利率", {
+        generation,
+        claimedGeneration: null,
+      });
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
-        `为一个南湾每周看房报告做一次完整刷新。研究当前在售的 Santa Clara、Sunnyvale、Cupertino 独栋住宅，预算 $2,000,000–$3,000,000，至少 3 卧。核心排序维度：性价比、安静住宅环境（排除紧邻高速或主要干道）、房龄/翻新状态、室内面积、学校质量或靠谱私校距离。必须打开并核对每个保留房源的真实页面和地图/道路背景，优先 Redfin，保持每个公开 URL 原样。给出 8–15 套有理由的短名单并排序，不能编造缺失字段；已 pending/contingent 可保留但必须标注。另查找有日期的当前 30 年 jumbo 固定按揭利率（若无 jumbo，才使用 30 年固定全国平均，并写清标签和来源 URL）。为每套写简洁中文 schoolSummary、environmentSummary、conditionSummary、verdict、caution。asOf 使用带时区 ISO 时间。若研究无法完成，回传失败状态与中文错误说明。`,
+        `为一个南湾每周看房报告做一次完整刷新。研究当前在售的 Santa Clara、Sunnyvale、Cupertino 独栋住宅，预算 $2,000,000–$3,000,000，至少 3 卧。核心排序维度：性价比、安静住宅环境（排除紧邻高速或主要干道）、房龄/翻新状态、室内面积、学校质量或靠谱私校距离。必须打开并核对每个保留房源的真实页面和地图/道路背景，优先 Redfin，保持每个公开 URL 原样。给出 8–15 套有理由的短名单并排序，不能编造缺失字段；已 pending/contingent 可保留但必须标注。另查找有日期的当前 30 年 jumbo 固定按揭利率（若无 jumbo，才使用 30 年固定全国平均，并写清标签和来源 URL）。为每套写简洁中文 schoolSummary、environmentSummary、conditionSummary、verdict、caution。asOf 使用带时区 ISO 时间。若研究无法完成，回传失败状态与中文错误说明。回传 ingestResearch 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略）。`,
         { expectsAction: "ingestResearch", dedupeKey: "weekly-south-bay-home-report" },
       );
       if (!task.ok) {
@@ -425,16 +511,27 @@ export const Actions = {
         ctx.invalidateQueries();
         return { ok: false, status: "error" as const, message: "刷新任务未能启动" };
       }
-      await setRefreshState(ctx, "running", task.taskId, "正在核对房源、街道环境、学校与利率");
+      await setRefreshState(ctx, "running", task.taskId, "正在核对房源、街道环境、学校与利率", {
+        generation,
+      });
       return { ok: true, status: "started" as const, message: "已开始刷新，完成后会自动更新" };
     },
   }),
 
   ingestResearch: defineAction({
     request: z.discriminatedUnion("success", [
-      z.object({ success: z.literal(false), error: z.string().min(1).max(500) }),
+      z.object({
+        success: z.literal(false),
+        error: z.string().min(1).max(500),
+        // HH0.2 generation contract: the refresh generation this
+        // callback belongs to, echoed verbatim from the task prompt.
+        // Optional in the schema for legacy callers; task-channel
+        // callbacks that omit or mismatch it are ignored by the gate.
+        generation: z.string().min(1).max(128).optional(),
+      }),
       z.object({
         success: z.literal(true),
+        generation: z.string().min(1).max(128).optional(),
         asOf: z.string().min(10),
         mortgageRate: z.number().min(0.1).max(20),
         rateLabel: z.string().min(2).max(120),
@@ -452,24 +549,49 @@ export const Actions = {
       // daemon-validated "space-task-return-…" channel with no viewer.
       // Any other viewer-less or non-owner call is denied.
       if (!isOwner(ctx) && !isTaskReturnCallback(ctx)) return { ok: false, saved: 0 };
-      // Generation binding + idempotency (HH0.2): decideIngestCallback
-      // first filters out provably stale callbacks — a success no newer
-      // than the stored report, a success stamped before this refresh
-      // started, and any late failure after the state settled. A callback
-      // that passes must then win an atomic generation arbitration before
-      // it may insert a report or settle the state: a conditional UPDATE
-      // on refresh_state that bumps only updatedAt and matches only while
-      // status and updatedAt are exactly what this call just read.
-      // Exactly one concurrent callback can claim a given generation; the
-      // loser (0 rows claimed) re-reads state and the latest report and
-      // re-decides once — if still applicable it proceeds directly, with
-      // no second claim, so arbitration cannot livelock.
+      // Generation binding + idempotency (HH0.2) and whole-issue atomic
+      // visibility (HH0.3), in order:
+      //  1. Generation gate: a task-channel callback arriving while a
+      //     refresh runs must echo the stored generation; a missing or
+      //     mismatched generation is an old generation's late return
+      //     (its failure callbacks carry no asOf, so decideIngestCallback
+      //     alone cannot tell them apart) — ignore, state untouched.
+      //  2. decideIngestCallback filters provably stale callbacks
+      //     against the published report: a success no newer than it, a
+      //     success stamped before this refresh started, any late
+      //     failure after the state settled.
+      //  3. Atomic claim arbitration: the callback stamps its own claim
+      //     token into claimed_generation with a conditional UPDATE that
+      //     matches only while the row is exactly what this call read
+      //     (id, status, updatedAt, generation) AND still unclaimed.
+      //     Exactly one callback per generation can hold the claim. A
+      //     loser re-reads once: if the generation is already claimed,
+      //     or the gate/decision no longer passes, it is ignored with
+      //     saved=0 — there is no "still applicable, proceed directly"
+      //     path around the claim.
+      //  4. The claim holder writes the new report as an invisible
+      //     candidate (published=0, all listings), then publishes with a
+      //     single CAS on refresh_state — conditioned on its claim
+      //     token, the generation, and status still "running" — that
+      //     switches published_report_id and settles the state in the
+      //     same write. Settling to error uses the same claim-bound CAS,
+      //     so a loser or an old generation can neither publish nor
+      //     settle the current generation.
       const db = ctx.db<typeof schema>();
+      const fromTaskChannel = isTaskReturnCallback(ctx);
+      const incomingGeneration = args.generation ?? null;
       const readIngestInputs = async () => {
         const stateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
-        const latestRows = await db.select({ asOf: schema.reports.asOf }).from(schema.reports).orderBy(desc(schema.reports.id)).limit(1);
-        return { state: stateRows[0], latestAsOf: latestRows[0]?.asOf ?? null };
+        const published = await loadPublishedReport(ctx);
+        return { state: stateRows[0], latestAsOf: published?.asOf ?? null };
       };
+      const gateFor = (state: RefreshStateRow | undefined) =>
+        decideGenerationGate({
+          fromTaskChannel,
+          refreshStatus: state?.status,
+          storedGeneration: state?.generation ?? null,
+          incomingGeneration,
+        });
       const decideFor = (state: RefreshStateRow | undefined, latestAsOf: string | null) =>
         decideIngestCallback({
           refreshStatus: state?.status,
@@ -481,36 +603,104 @@ export const Actions = {
       const ignoredResult = () => (args.success ? { ok: true, saved: 0 } : { ok: false, saved: 0 });
 
       const firstRead = await readIngestInputs();
-      if (decideFor(firstRead.state, firstRead.latestAsOf) === "ignore") {
+      if (gateFor(firstRead.state) === "ignore" || decideFor(firstRead.state, firstRead.latestAsOf) === "ignore") {
         return ignoredResult();
       }
-      let claimed = false;
-      if (firstRead.state) {
+      // The claim token this call would stamp if it wins arbitration;
+      // null while unclaimed (no state row: the pre-contract path, where
+      // no generation exists to arbitrate).
+      let claimToken: string | null = null;
+      let claimSnapshot: RefreshStateRow | undefined;
+      const tryClaim = async (snapshot: RefreshStateRow): Promise<boolean> => {
+        const token = newClaimToken();
         const claimRows = await db
           .update(schema.refreshState)
-          .set({ updatedAt: new Date() })
+          .set({ claimedGeneration: token, updatedAt: new Date() })
           .where(
             and(
               eq(schema.refreshState.id, 1),
-              eq(schema.refreshState.status, firstRead.state.status),
-              eq(schema.refreshState.updatedAt, firstRead.state.updatedAt),
+              eq(schema.refreshState.status, snapshot.status),
+              eq(schema.refreshState.updatedAt, snapshot.updatedAt),
+              snapshot.generation == null
+                ? isNull(schema.refreshState.generation)
+                : eq(schema.refreshState.generation, snapshot.generation),
+              isNull(schema.refreshState.claimedGeneration),
             ),
           )
           .returning({ id: schema.refreshState.id });
-        claimed = claimRows.length === 1;
-      }
-      if (!claimed) {
-        // Lost the claim (or there was no state row to claim): the state
-        // changed under us — re-read and re-decide exactly once.
-        const secondRead = await readIngestInputs();
-        if (decideFor(secondRead.state, secondRead.latestAsOf) === "ignore") {
-          return ignoredResult();
+        if (claimRows.length !== 1) return false;
+        claimToken = token;
+        claimSnapshot = snapshot;
+        return true;
+      };
+      if (firstRead.state) {
+        const won = await tryClaim(firstRead.state);
+        if (!won) {
+          // Lost the claim: the row changed under us — a concurrent
+          // callback claimed this generation, or a new generation
+          // started. Re-read once and re-check the gate and decision;
+          // an already-claimed generation is a hard stop, never a
+          // proceed-anyway.
+          const secondRead = await readIngestInputs();
+          if (
+            gateFor(secondRead.state) === "ignore" ||
+            decideFor(secondRead.state, secondRead.latestAsOf) === "ignore"
+          ) {
+            return ignoredResult();
+          }
+          if (!secondRead.state) return ignoredResult();
+          if (secondRead.state.claimedGeneration != null) return ignoredResult();
+          const wonRetry = await tryClaim(secondRead.state);
+          if (!wonRetry) return ignoredResult();
         }
-        // Still applicable after the re-read: proceed without claiming
-        // again (single retry only).
       }
+      // Claim-bound settle: the ONLY way a claimed callback may change
+      // the refresh state. One conditional UPDATE that must still see
+      // this call's claim token, the claimed generation, and (for a
+      // running generation) the unsettled running status — so the
+      // publish-pointer switch and the settle are the same write, and a
+      // callback whose generation was superseded mid-save matches zero
+      // rows and changes nothing.
+      const settleClaimed = async (
+        status: "idle" | "error",
+        message: string | null,
+        publishedReportId?: number,
+      ): Promise<boolean> => {
+        if (claimToken == null || !claimSnapshot) {
+          await setRefreshState(ctx, status, null, message, {
+            ...(publishedReportId != null ? { publishedReportId } : {}),
+          });
+          return true;
+        }
+        const rows = await db
+          .update(schema.refreshState)
+          .set({
+            status,
+            taskId: null,
+            message,
+            claimedGeneration: null,
+            updatedAt: new Date(),
+            ...(publishedReportId != null ? { publishedReportId } : {}),
+          })
+          .where(
+            and(
+              eq(schema.refreshState.id, 1),
+              eq(schema.refreshState.claimedGeneration, claimToken),
+              claimSnapshot.generation == null
+                ? isNull(schema.refreshState.generation)
+                : eq(schema.refreshState.generation, claimSnapshot.generation),
+              ...(claimSnapshot.status === "running" ? [eq(schema.refreshState.status, "running")] : []),
+            ),
+          )
+          .returning({ id: schema.refreshState.id });
+        return rows.length === 1;
+      };
       if (!args.success) {
-        await setRefreshState(ctx, "error", null, args.error);
+        // Failure settle is claim-bound: if this call's claim was
+        // superseded (a new generation started), settleClaimed matches
+        // zero rows and the new generation's running state is left
+        // exactly as it is.
+        await settleClaimed("error", args.error);
         ctx.invalidateQueries();
         return { ok: false, saved: 0 };
       }
@@ -520,7 +710,7 @@ export const Actions = {
         .sort((a, b) => a.rank - b.rank)
         .slice(0, 20);
       if (clean.length < 3) {
-        await setRefreshState(ctx, "error", null, "刷新结果不足 3 套已核实房源，保留上一期报告");
+        await settleClaimed("error", "刷新结果不足 3 套已核实房源，保留上一期报告");
         ctx.invalidateQueries();
         return { ok: false, saved: 0 };
       }
@@ -541,25 +731,51 @@ export const Actions = {
         seenAddresses.add(addressKey);
       }
       if (hasDuplicate) {
-        await setRefreshState(ctx, "error", null, "刷新结果存在重复房源，保留上一期报告");
+        await settleClaimed("error", "刷新结果存在重复房源，保留上一期报告");
         ctx.invalidateQueries();
         return { ok: false, saved: 0 };
       }
-      const inserted = await db.insert(schema.reports).values({
-        asOf: args.asOf,
-        mortgageRate: args.mortgageRate,
-        rateLabel: args.rateLabel,
-        rateSource: args.rateSource,
-        rateUrl: args.rateUrl,
-        summary: args.summary,
-      }).returning({ id: schema.reports.id });
-      const report = inserted[0];
-      if (!report) {
-        await setRefreshState(ctx, "error", null, "报告保存失败，保留上一期报告");
+      // HH0.3 candidate write: the report and ALL its listings are
+      // written as an invisible candidate (published=0, pointer still
+      // on the previous issue). getReport keeps returning the previous
+      // published report — with its original date — until the publish
+      // CAS below switches the pointer in the same write that settles
+      // the state. A failure anywhere in this block leaves at most an
+      // invisible candidate behind; the state settles to error and the
+      // refresh can be retried.
+      let candidateId: number | null = null;
+      try {
+        const inserted = await db.insert(schema.reports).values({
+          published: 0,
+          asOf: args.asOf,
+          mortgageRate: args.mortgageRate,
+          rateLabel: args.rateLabel,
+          rateSource: args.rateSource,
+          rateUrl: args.rateUrl,
+          summary: args.summary,
+        }).returning({ id: schema.reports.id });
+        const report = inserted[0];
+        if (!report) {
+          await settleClaimed("error", "报告保存失败，保留上一期报告");
+          return { ok: false, saved: 0 };
+        }
+        candidateId = report.id;
+        await db.insert(schema.listings).values(clean.map((item, index) => ({ ...item, rank: index + 1, reportId: report.id })));
+      } catch {
+        await settleClaimed("error", "报告保存失败，保留上一期报告");
+        ctx.invalidateQueries();
         return { ok: false, saved: 0 };
       }
-      await db.insert(schema.listings).values(clean.map((item, index) => ({ ...item, rank: index + 1, reportId: report.id })));
-      await setRefreshState(ctx, "idle", null, `已更新 ${clean.length} 套房源`);
+      // Publish: one claim/generation/status-conditioned CAS switches
+      // the pointer and settles to idle atomically. If it matches zero
+      // rows, this generation was superseded while saving — the
+      // candidate stays invisible, the new generation's state is not
+      // settled, and this callback reports saved=0.
+      const published = await settleClaimed("idle", `已更新 ${clean.length} 套房源`, candidateId);
+      if (!published) {
+        return { ok: true, saved: 0 };
+      }
+      await db.update(schema.reports).set({ published: 1 }).where(eq(schema.reports.id, candidateId));
       ctx.invalidateQueries();
       return { ok: true, saved: clean.length };
     },
