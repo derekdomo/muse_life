@@ -38,7 +38,7 @@ function extractFn(name) {
 const NAMES = [
   "isRealDateKey", "entriesSignature", "normalizeRawMonths", "resolveContribution",
   "cashflowRoleForEntry", "snapshotCaliber", "isConsecutiveMonth",
-  "monthEnd", "amountMatches", "transactionSpendForMonth",
+  "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "nativeDateString", "nativeBool", "effectiveFlowPeriod", "amountMatches", "transactionSpendForMonth",
   "aggregateMonths", "average", "normalizedFireSpend", "validCompleteMonths",
   "computeFire", "normalizeStoredIntegrity", "normalizeFireMetrics",
   "recomputeInvestmentReturns", "computeInvestmentPerformance",
@@ -404,6 +404,55 @@ check("dual-end wiring: both endpoints are issue-checked against their own snaps
 check("UI: estimate drawer reuses the dual-end presentation (start/end rows with dates + verification)",
   appSrc.includes("现金流反推双端核对") && appSrc.includes("期初 · {entry.financeSource}")
   && appSrc.includes("期末 · {entry.financeSource}") && appSrc.includes("verificationText(entry.verified)"));
+
+
+// --- F0.6 exact-date rework (PM 2026-10-18 09:08/09:10): an endpoint
+// balance date must EQUAL its snapshot date. "YYYY-MM" counts as
+// month-end; a same-month older day, a future day, an impossible
+// date, or a native unverified status at either end all degrade
+// the estimate to null — the balances stay facts. ---
+const exactPair = (augFields = {}, sepFields = {}) => agg([
+  { key: "2026-08-31", entries: [E("bank_1234", "account", 1000, augFields)] },
+  {
+    key: "2026-09-30",
+    entries: [
+      E("bank_1234", "account", 1200, sepFields),
+      E("salary", "income", 1000), E("rent", "fixed_spend", 300),
+      E("broker", "investment_contribution", 100),
+    ],
+  },
+]);
+check("exact-date: no balance dates -> estimate 400 (legacy caliber kept)",
+  exactPair()[1].flexibleSpend === 400);
+check("exact-date: both ends dated exactly at their snapshot dates -> 400",
+  exactPair({ balanceDate: "2026-08-31" }, { balanceDate: "2026-09-30" })[1].flexibleSpend === 400);
+check("exact-date: YYYY-MM balance dates count as month-end at both ends -> 400",
+  exactPair({ balanceDate: "2026-08" }, { balanceDate: "2026-09" })[1].flexibleSpend === 400);
+const startOlder = exactPair({ balanceDate: "2026-08-01" });
+check("exact-date: start same-month older day (08-01 vs 08-31) -> null, names 期初",
+  startOlder[1].flexibleSpend === null && (startOlder[1].anomalyReason ?? "").includes("期初")
+  && (startOlder[1].anomalyReason ?? "").includes("2026-08-01"));
+check("exact-date: start future day (09-01 on the August snapshot) -> null",
+  exactPair({ balanceDate: "2026-09-01" })[1].flexibleSpend === null);
+check("exact-date: end same-month older day (09-01) -> null, names 期末",
+  exactPair({}, { balanceDate: "2026-09-01" })[1].flexibleSpend === null
+  && (exactPair({}, { balanceDate: "2026-09-01" })[1].anomalyReason ?? "").includes("期末"));
+check("exact-date: end future day (10-01) -> null",
+  exactPair({}, { balanceDate: "2026-10-01" })[1].flexibleSpend === null);
+check("exact-date: end impossible date (09-31) -> null, reason names the endpoint + recorded date",
+  exactPair({}, { balanceDate: "2026-09-31" })[1].flexibleSpend === null
+  && (exactPair({}, { balanceDate: "2026-09-31" })[1].anomalyReason ?? "").includes("期末")
+  && (exactPair({}, { balanceDate: "2026-09-31" })[1].anomalyReason ?? "").includes("2026-09-31"));
+check("exact-date: native status unverified at the end -> null + 未核实",
+  exactPair({}, { status: "unverified" })[1].flexibleSpend === null
+  && (exactPair({}, { status: "unverified" })[1].anomalyReason ?? "").includes("未核实"));
+check("exact-date: native status carried_forward_unverified at the start -> null",
+  exactPair({ status: "carried_forward_unverified" })[1].flexibleSpend === null);
+check("exact-date: a balance date never rewrites the balance fact itself",
+  exactPair({ balanceDate: "2026-08-01" })[1].total === 1200 + 0 || exactPair({ balanceDate: "2026-08-01" })[0].total === 1000);
+check("prompt wiring: native investment keys stay verbatim in extra, status passed through",
+  src.includes("investment_flow_verified") && src.includes("不得改名或映射为 period_start/period_end/verified")
+  && src.includes("status 的值必须原样返回"));
 
 console.log(`validate-cashflow: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

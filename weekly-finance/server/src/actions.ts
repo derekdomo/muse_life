@@ -100,6 +100,15 @@ const entryMetaSchema = z.object({
   periodStart: z.string().nullable().default(null),
   periodEnd: z.string().nullable().default(null),
   verified: z.boolean().nullable().default(null),
+  // F1.6 rework additive: the Firance-native investment keys
+  // (investment_period_start / investment_period_end /
+  // investment_flow_verified), promoted verbatim from the record's
+  // extra at ingest. They coexist with the generic period /
+  // verified fields above and never overwrite them; defaults keep
+  // pre-existing stored payloads readable (native fields absent).
+  nativePeriodStart: z.string().nullable().default(null),
+  nativePeriodEnd: z.string().nullable().default(null),
+  nativeFlowVerified: z.boolean().nullable().default(null),
 });
 
 const monthSchema = z.object({
@@ -239,6 +248,12 @@ const accountSchema = z.object({
   // balance. Legacy rows carry null (核实状态未提供) and keep the
   // legacy degradation caliber — never backfilled as verified.
   verified: z.boolean().nullable().default(null),
+  // F1.1 rework additive (native status): the entry's raw Firance
+  // status string, carried with the row so the read path can treat
+  // status values such as carried_forward_unverified as unverified
+  // even when no boolean verified flag was stored. Null default
+  // keeps legacy rows readable (status not provided).
+  status: z.string().nullable().default(null),
 });
 
 const dashboardSchema = z.object({
@@ -541,6 +556,75 @@ function monthEnd(monthKey: string): string {
   return new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
 }
 
+// F0.6/F1.6 rework shared helpers — the single implementation of
+// the exact-date and native-verification rules every gate below
+// (cashflow endpoints, investment reconciliation, available cash)
+// consumes. A balance date is comparable to a snapshot date only
+// in normalized form: a YYYY-MM date denotes that month's last
+// day; a real calendar date stands as itself; anything else
+// (e.g. 09-31) is invalid and normalizes to null, which never
+// equals a snapshot date.
+function normalizeBalanceDate(balanceDate: string | null | undefined): string | null {
+  if (balanceDate == null) return null;
+  if (/^\d{4}-\d{2}$/.test(balanceDate)) return monthEnd(balanceDate) || null;
+  return isRealDateKey(balanceDate) ? balanceDate : null;
+}
+
+// The raw Firance status strings that mark a record unverified,
+// consumed verbatim — never translated or re-derived.
+function isUnverifiedStatus(status: string | null | undefined): boolean {
+  return status === "unverified" || status === "carried_forward_unverified";
+}
+
+// One unverified verdict for any entry-shaped record (source
+// entry, preserved entryMeta row, or merged account row): the
+// generic boolean flag, the Firance-native flow verification, or
+// the raw status string — any one of them marks the record.
+function entryUnverified(entry: {
+  verified?: boolean | null;
+  status?: string | null;
+  nativeFlowVerified?: boolean | null;
+}): boolean {
+  return (
+    entry.verified === false ||
+    entry.nativeFlowVerified === false ||
+    isUnverifiedStatus(entry.status)
+  );
+}
+
+// The effective flow period of an entry: the generic period when
+// present, the Firance-native period filling its absence. Both
+// bounds must resolve for a period to exist at all.
+function effectiveFlowPeriod(entry: {
+  periodStart?: string | null;
+  periodEnd?: string | null;
+  nativePeriodStart?: string | null;
+  nativePeriodEnd?: string | null;
+}): { start: string; end: string } | null {
+  const start = entry.periodStart ?? entry.nativePeriodStart ?? null;
+  const end = entry.periodEnd ?? entry.nativePeriodEnd ?? null;
+  return start != null && end != null ? { start, end } : null;
+}
+
+// Verbatim readers for the Firance-native keys a record carries
+// in its extra: a value is promoted only when it already has the
+// right type — never coerced, never defaulted, never renamed.
+function nativeDateString(
+  extra: Record<string, string | number | boolean | null> | undefined,
+  key: string,
+): string | null {
+  const value = extra?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+function nativeBool(
+  extra: Record<string, string | number | boolean | null> | undefined,
+  key: string,
+): boolean | null {
+  const value = extra?.[key];
+  return typeof value === "boolean" ? value : null;
+}
+
 function amountMatches(amount: number, candidate: number): boolean {
   return Math.abs(Math.abs(amount) - Math.abs(candidate)) <= Math.max(2, Math.abs(candidate) * 0.01);
 }
@@ -789,10 +873,24 @@ function aggregateMonths(
           const found: string[] = [];
           for (const entry of entries) {
             if (entry.type !== "account" || !roles.has(entry.financeSource)) continue;
-            if (entry.verified === false) {
+            // F0.6 rework: "unverified" is consumed from BOTH the
+            // boolean flag and the raw Firance status string —
+            // an entry whose status reads unverified /
+            // carried_forward_unverified is unverified even when
+            // no boolean was stored alongside it (entryUnverified
+            // is the shared verdict).
+            if (entryUnverified(entry)) {
               found.push(`${label}账户 ${entry.financeSource} 标记为未核实`);
             }
-            if (entry.balanceDate && entry.balanceDate.slice(0, 7) < snapshotKey.slice(0, 7)) {
+            // F0.6 rework: the balance date must EQUAL this
+            // endpoint's own snapshot date exactly. A YYYY-MM
+            // balance date normalizes to that month's last day
+            // (equivalent to a month-end snapshot); a same-month
+            // older day, a future day, or an invalid calendar
+            // date (e.g. 09-31) all disqualify the endpoint, and
+            // the reason names the endpoint, the account and the
+            // recorded date.
+            if (entry.balanceDate != null && normalizeBalanceDate(entry.balanceDate) !== snapshotKey) {
               found.push(`${label}账户 ${entry.financeSource} 沿用旧余额日期 ${entry.balanceDate}，${label === "期初" ? "上期" : "本月"}未更新`);
             }
           }
@@ -890,6 +988,15 @@ function aggregateMonths(
         periodStart: entry.periodStart ?? null,
         periodEnd: entry.periodEnd ?? null,
         verified: entry.verified ?? null,
+        // F1.6 rework: the Firance-native investment keys are
+        // promoted VERBATIM from the record's extra into their own
+        // fields. They coexist with the generic period / verified
+        // fields above — neither side overwrites the other, so a
+        // disagreement between them stays visible as a conflict
+        // for the return gate instead of being merged away here.
+        nativePeriodStart: nativeDateString(entry.extra, "investment_period_start"),
+        nativePeriodEnd: nativeDateString(entry.extra, "investment_period_end"),
+        nativeFlowVerified: nativeBool(entry.extra, "investment_flow_verified"),
       })),
       totalSpend: flexibleSpend == null ? null : month.fixedSpend + flexibleSpend,
       investmentReturn: null,
@@ -946,8 +1053,49 @@ function aggregateMonths(
 // clamped. Months whose preserved metadata cannot establish the
 // investment-account scope (pre-F0.6 stored payloads) degrade the
 // same way instead of trusting the legacy un-gated figure.
+// F1.6 rework (native fields + per-channel binding):
+// - the effective period of a flow entry is its generic period,
+//   falling back to the Firance-native period
+//   (investment_period_start/end) when the generic one is absent;
+//   when both are present and disagree, the interval degrades as
+//   a period conflict, named on the entry;
+// - the Firance-native flow verification
+//   (investment_flow_verified) gates like the generic flag: false
+//   is unverified, and a contradiction with the generic verified
+//   flag is a conflict; a balance endpoint whose raw status reads
+//   carried_forward_unverified is unverified as well;
+// - balance dates bind EXACTLY (the F0.6 rule): a balance date
+//   must equal its own snapshot's actual date, with a YYYY-MM
+//   date normalized to that month's last day — a same-month older
+//   day, a future day or an invalid date degrades either endpoint;
+// - period coverage is judged PER CHANNEL: the cash channel
+//   (investment_contribution / transfer) and the non-bank direct
+//   channel (investment_external_adjustment) each prove their own
+//   coverage of (previous snapshot date, this snapshot date]; one
+//   channel's periods never substitute for the other's, a period
+//   reaching outside the interval makes its amount unattributable
+//   (the whole record is excluded, not clipped), and when any
+//   channel carries dated records — or a channel carries the
+//   native verification mark — an undated record in a channel
+//   degrades as 未提供期间. A channel with neither periods nor a
+//   native verification mark is a legacy archive channel and keeps
+//   the old caliber: readable, never re-labelled verified;
+// - when the flow proof fails for a month, its investmentNetFlow
+// is null too (not only the return): an unproven interval has no
+// proven net flow to display or to sum into the period figure.
 function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["months"] {
   const flowTypes = new Set(["investment", "investment_contribution", "transfer", "investment_external_adjustment"]);
+  type MetaEntry = Dashboard["months"][number]["entryMeta"][number];
+  // The exact-date and unverified verdicts come from the shared
+  // module-level helpers (normalizeBalanceDate / entryUnverified /
+  // effectiveFlowPeriod), so the ingest path and the read path
+  // apply one implementation; only the interval arithmetic is
+  // local to this gate.
+  const dayAfter = (key: string): string => {
+    const date = new Date(`${key}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + 1);
+    return date.toISOString().slice(0, 10);
+  };
   return months.map((month, index) => {
     // Defensive reads: a stored row missing the F0.6/F1.6 fields
     // (undefined entryMeta / contributionSource) means its flows
@@ -992,16 +1140,33 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
     // fresh for its own month — an unverified or carried-over
     // starting balance invalidates the interval exactly like a
     // bad ending one, and the reason names the failing endpoint.
+    // "Unverified" consumes the boolean flag AND the raw status
+    // string (unverified / carried_forward_unverified) at either
+    // endpoint; the ending check also consumes the Firance-native
+    // flow verification, and a generic/native verification pair
+    // that contradicts itself is a conflict, named as such.
     const previousMeta = previous.entryMeta ?? [];
     if (!reason) {
       const startUnverified = previousMeta.some(
-        (entry) => entry.type === "investment" && entry.verified === false,
+        (entry) => entry.type === "investment" && entryUnverified(entry),
       );
       if (startUnverified) reason = "期初投资余额标记为未核实，收益待核对";
     }
     if (!reason) {
+      const conflict = meta.find(
+        (entry) =>
+          flowTypes.has(entry.type) &&
+          entry.verified != null &&
+          entry.nativeFlowVerified != null &&
+          entry.verified !== entry.nativeFlowVerified,
+      );
+      if (conflict) {
+        reason = `投入记录 ${conflict.financeSource} 的通用核实标记与 Firance 原生核实标记（investment_flow_verified）矛盾，核实状态冲突，收益待核对`;
+      }
+    }
+    if (!reason) {
       const unverified = meta.some(
-        (entry) => flowTypes.has(entry.type) && entry.verified === false,
+        (entry) => flowTypes.has(entry.type) && entryUnverified(entry),
       );
       if (unverified) reason = "期末投资余额或投入标记为未核实，收益待核对";
     }
@@ -1010,7 +1175,7 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
         (entry) =>
           entry.type === "investment" &&
           entry.balanceDate != null &&
-          entry.balanceDate.slice(0, 7) < previous.key.slice(0, 7),
+          normalizeBalanceDate(entry.balanceDate) !== previous.key,
       );
       if (startStale) reason = "期初投资账户沿用旧余额日期，期初余额未更新，收益待核对";
     }
@@ -1019,43 +1184,100 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
         (entry) =>
           entry.type === "investment" &&
           entry.balanceDate != null &&
-          entry.balanceDate.slice(0, 7) < month.key.slice(0, 7),
+          normalizeBalanceDate(entry.balanceDate) !== month.key,
       );
       if (stale) reason = "有投资账户沿用旧余额日期，本期余额未更新，收益待核对";
     }
-    if (!reason && flowsKnown) {
-      // F1.6 rework: flow-period coverage. When the interval's
-      // flow entries (cash contribution / legacy alias / non-bank
-      // direct investment) carry periodStart/periodEnd, those
-      // periods must TOGETHER cover the whole actual interval
-      // (previous snapshot date, current snapshot date] — an entry
-      // existing next to an adjacent month is not coverage, a
-      // period covering only an earlier month is not coverage,
-      // and a dated interval whose flows are dated for only part
-      // of it is not coverage. Entries without any period fields
-      // at all are legacy records: they carry no period proof to
-      // check and stay on the pre-existing caliber (readable,
-      // never re-labelled verified).
-      const flowMeta = meta.filter(
+    const flowMeta = meta.filter(
+      (entry) =>
+        entry.type === "investment_contribution" ||
+        entry.type === "transfer" ||
+        entry.type === "investment_external_adjustment",
+    );
+    if (!reason) {
+      // Generic period vs Firance-native period: the generic one
+      // governs when present, the native one fills its absence —
+      // but when both are present and they disagree, neither can
+      // be trusted for this entry and the interval degrades with
+      // the conflict named.
+      const periodConflict = flowMeta.find(
         (entry) =>
-          entry.type === "investment_contribution" ||
-          entry.type === "transfer" ||
-          entry.type === "investment_external_adjustment",
+          (entry.periodStart != null && entry.nativePeriodStart != null && entry.periodStart !== entry.nativePeriodStart) ||
+          (entry.periodEnd != null && entry.nativePeriodEnd != null && entry.periodEnd !== entry.nativePeriodEnd),
       );
-      const periods: Array<{ start: string; end: string }> = [];
-      for (const entry of flowMeta) {
-        if (entry.periodStart != null && entry.periodEnd != null) {
-          periods.push({ start: entry.periodStart, end: entry.periodEnd });
-        }
+      if (periodConflict) {
+        reason = `投入记录 ${periodConflict.financeSource} 的通用期间与 Firance 原生期间（investment_period_start/end）不一致，期间冲突，收益待核对`;
       }
-      if (periods.length > 0) {
-        const dayAfter = (key: string): string => {
-          const date = new Date(`${key}T00:00:00Z`);
-          date.setUTCDate(date.getUTCDate() + 1);
-          return date.toISOString().slice(0, 10);
-        };
-        const intervalStart = dayAfter(previous.key);
-        const intervalEnd = month.key;
+    }
+    if (!reason && flowsKnown) {
+      // F1.6 rework: flow-period coverage, judged PER CHANNEL.
+      // The cash channel (investment_contribution / legacy
+      // transfer) and the non-bank direct channel
+      // (investment_external_adjustment) are independent: each
+      // channel's effective periods must together cover the whole
+      // actual interval (previous snapshot date, current snapshot
+      // date] WITHOUT reaching outside it — a period that crosses
+      // the interval boundary makes its amount unattributable, so
+      // the record is excluded whole, never clipped into the
+      // interval. One channel's coverage never substitutes for
+      // the other's. A channel whose records carry no period at
+      // all degrades when any channel is dated, or when the
+      // channel itself carries any verification mark (generic
+      // verified, Firance-native flow verified, or an explicit
+      // status); a channel with neither is a legacy archive
+      // channel and keeps the pre-existing caliber (readable,
+      // never re-labelled verified).
+      const intervalStart = dayAfter(previous.key);
+      const intervalEnd = month.key;
+      const channels: Array<{ label: string; entries: MetaEntry[] }> = [
+        {
+          label: "现金投入",
+          entries: flowMeta.filter((entry) => entry.type === "investment_contribution" || entry.type === "transfer"),
+        },
+        {
+          label: "非银行直接投入",
+          entries: flowMeta.filter((entry) => entry.type === "investment_external_adjustment"),
+        },
+      ];
+      const anyChannelDated = channels.some((channel) =>
+        channel.entries.some((entry) => effectiveFlowPeriod(entry) != null),
+      );
+      for (const channel of channels) {
+        if (reason) break;
+        if (channel.entries.length === 0) continue;
+        const periods = channel.entries.flatMap((entry) => {
+          const period = effectiveFlowPeriod(entry);
+          return period ? [period] : [];
+        });
+        if (periods.length === 0) {
+          // A channel counts as marked when any record carries any
+          // verification mark — the generic verified flag, the
+          // Firance-native flow flag, or an explicit status. Only a
+          // channel with no period AND no mark at all is a pure
+          // legacy archive channel that keeps the old caliber.
+          const marked = channel.entries.some(
+            (entry) =>
+              entry.verified != null || entry.nativeFlowVerified != null || entry.status != null,
+          );
+          if (anyChannelDated || marked) {
+            reason = `本期${channel.label}记录未提供期间，无法证明覆盖 ${intervalStart} 至 ${intervalEnd} 整个区间，收益待核对`;
+          }
+          continue;
+        }
+        if (periods.length < channel.entries.length) {
+          reason = `本期${channel.label}有 ${channel.entries.length - periods.length} 条投入记录未提供期间，无法证明覆盖 ${intervalStart} 至 ${intervalEnd} 整个区间，收益待核对`;
+          break;
+        }
+        const crossing = periods.find(
+          (period) =>
+            period.end > previous.key &&
+            period.start <= intervalEnd &&
+            (period.start <= previous.key || period.end > intervalEnd),
+        );
+        if (crossing) {
+          reason = `${channel.label}期间 ${crossing.start} 至 ${crossing.end} 跨出本区间 ${intervalStart} 至 ${intervalEnd}，金额无法归属，整笔不计，收益待核对`;
+          break;
+        }
         const sortedPeriods = [...periods].sort((a, b) => a.start.localeCompare(b.start));
         let coveredThrough: string | null = null;
         for (const period of sortedPeriods) {
@@ -1068,9 +1290,7 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
           }
           if (coveredThrough >= intervalEnd) break;
         }
-        if (flowMeta.length > periods.length) {
-          reason = `本期有 ${flowMeta.length - periods.length} 条投入记录未提供期间（periodStart/periodEnd），无法证明覆盖 ${intervalStart} 至 ${intervalEnd} 整个区间，收益待核对`;
-        } else if (coveredThrough == null || coveredThrough < intervalEnd) {
+        if (coveredThrough == null || coveredThrough < intervalEnd) {
           const coveredText = sortedPeriods.map((period) => `${period.start} 至 ${period.end}`).join("、");
           reason = `投入期间仅覆盖 ${coveredText}，未覆盖本区间 ${intervalStart} 至 ${intervalEnd}，收益待核对`;
         }
@@ -1082,12 +1302,23 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
     if (!reason && !flowsKnown) {
       reason = "缺少投资投入记录，期间外部净投入未知";
     }
-    if (reason || netFlow == null) {
+    if (reason) {
+      // F1.6 rework (e): a month whose flow proof failed has no
+      // proven net flow either — investmentNetFlow is null, not
+      // merely an unusable return next to a summed flow figure.
       return {
         ...month,
-        investmentNetFlow: netFlow,
+        investmentNetFlow: null,
         investmentReturn: null,
-        investmentReturnReason: reason ?? "期间外部净投入未知",
+        investmentReturnReason: reason,
+      };
+    }
+    if (netFlow == null) {
+      return {
+        ...month,
+        investmentNetFlow: null,
+        investmentReturn: null,
+        investmentReturnReason: "期间外部净投入未知",
       };
     }
     return {
@@ -1104,8 +1335,12 @@ function recomputeInvestmentReturns(months: Dashboard["months"]): Dashboard["mon
 // single blocked interval (gap, scope change, unverified, stale,
 // unknown flows) nulls the period return with that interval's
 // reason, and accumulation never bridges a gap with a fabricated 0.
-// Start/end balances and the summed known net flow remain visible
-// as facts either way.
+// F1.6 rework (e): an unproven interval also nulls the period net
+// flow itself — the card shows 未知 for the whole period rather
+// than presenting a partial sum as the period's net flow; the
+// established intervals' monthly returns and recorded amounts
+// stay readable per month. Start/end balances remain visible as
+// facts either way.
 function computeInvestmentPerformance(months: Dashboard["months"]): Dashboard["investmentPerformance"] {
   const first = months[0];
   const last = months.at(-1);
@@ -1132,7 +1367,7 @@ function computeInvestmentPerformance(months: Dashboard["months"]): Dashboard["i
     return {
       startKey: first.key, endKey: last.key,
       startBalance: first.investment, endBalance: last.investment,
-      netFlow, returnAmount: null,
+      netFlow: null, returnAmount: null,
       reason: blocked
         ? `${blocked.key.slice(0, 7)}：${blocked.investmentReturnReason ?? "该区间收益待核对"}`
         : "期间外部净投入未知",
@@ -1199,6 +1434,10 @@ function mergeLatestEntries(entries: SourceEntry[], plaidAccounts: PlaidAccount[
       // the row (null = not provided, the legacy state). The value
       // above is never rewritten by it.
       verified: entry.type === "account" ? entry.verified ?? null : null,
+      // F1.1 rework: the entry's raw Firance status travels with
+      // the row too, so a carried_forward_unverified balance is
+      // recognisable as unverified on every read path.
+      status: entry.type === "account" ? entry.status ?? null : null,
     };
   });
 }
@@ -1210,24 +1449,29 @@ function mergeLatestEntries(entries: SourceEntry[], plaidAccounts: PlaidAccount[
 //   retirement), credit and debt rows are excluded whatever their
 //   balance — a positive balance alone never qualifies;
 // - no cash row at all -> amount null （缺失）, never 0;
-// - a cash row whose explicit balanceDate predates the source
-//   snapshot date is stale （沿用旧余额） -> amount null and the
-//   source is named in staleSources, so no coverage is fabricated
-//   from old cash. The comparison uses the REAL balanceDate
-//   against the snapshot date — not a month-prefix comparison and
-//   never the refresh asOf: a same-month but older balance date
-//   is a real gap and is named as one (the freshness cutoff is
-//   the source contract itself: the balance must be dated by its
-//   snapshot). A row without an explicit balance date is dated by
-//   its snapshot (sourceMonth), exactly as the monthly records
-//   show;
-// - F1.1 rework: a cash row explicitly marked unverified
-//   (verified === false) never enters the numerator either. Its
-//   balance stays a recorded fact on the row, but the amount is
-//   null and the source is named in unverifiedSources, so no
-//   coverage is claimed on unverified cash. A null verification
-//   state (legacy / not provided) keeps the legacy caliber — the
-//   row still counts and is labelled 核实状态未提供 by the UI;
+// - a cash row whose explicit balanceDate is not EXACTLY the
+//   source snapshot date is stale （沿用旧余额） -> amount null and
+//   the source is named in staleSources, so no coverage is
+//   fabricated from old cash. The comparison uses the REAL
+//   balanceDate against the snapshot date — not a month-prefix
+//   comparison and never the refresh asOf: a same-month but older
+//   balance date is a real gap and is named as one, and a FUTURE
+//   balance date is a gap too (the freshness cutoff is the source
+//   contract itself: the balance must be dated by its snapshot).
+//   A YYYY-MM balance date normalizes to that month's last day
+//   before comparing, matching the F0.6 endpoint rule; an invalid
+//   calendar date never equals the snapshot date. A row without
+//   an explicit balance date is dated by its snapshot
+//   (sourceMonth), exactly as the monthly records show;
+// - F1.1 rework: a cash row explicitly marked unverified never
+//   enters the numerator either — verified === false, or a raw
+//   status of unverified / carried_forward_unverified (the
+//   native strings are consumed as-is). Its balance stays a
+//   recorded fact on the row, but the amount is null and the
+//   source is named in unverifiedSources, so no coverage is
+//   claimed on unverified cash. A null verification state
+//   (legacy / not provided) keeps the legacy caliber — the row
+//   still counts and is labelled 核实状态未提供 by the UI;
 // - otherwise the amount is the plain sum of the cash rows'
 //   original balances (a true 0 stays a real 0).
 function summarizeAvailableCash(
@@ -1244,10 +1488,10 @@ function summarizeAvailableCash(
     return { amount: null, staleSources: [], unverifiedSources: [], accountCount: 0 };
   }
   const staleSources = cashAccounts
-    .filter((account) => account.balanceDate != null && account.balanceDate < sourceMonth)
+    .filter((account) => account.balanceDate != null && normalizeBalanceDate(account.balanceDate) !== sourceMonth)
     .map((account) => account.source);
   const unverifiedSources = cashAccounts
-    .filter((account) => account.verified === false)
+    .filter((account) => entryUnverified(account))
     .map((account) => account.source);
   if (staleSources.length > 0 || unverifiedSources.length > 0) {
     return { amount: null, staleSources, unverifiedSources, accountCount: cashAccounts.length };
@@ -1266,16 +1510,43 @@ function summarizeAvailableCash(
 // get the same classified numerator as a fresh ingest — derived
 // from their preserved balances and names, never backfilled into
 // storage and never taken from the broader `deposits` fact.
+// F1.1 rework (legacy archives): account rows written by older
+// writers may lack verified / status / balanceDate even though
+// the latest month's preserved entryMeta still carries them.
+// Those fields are filled here from the latest month's entryMeta,
+// matched by financeSource — ONLY from explicit values the
+// archive actually preserved; a value the archive never kept
+// stays missing (null), never invented. That is what lets an old
+// archive whose entryMeta preserved verified=false or
+// status=carried_forward_unverified degrade available cash to
+// null (named unverified) on read, without any refresh.
 function ensureAvailableCash(dashboard: Dashboard): Dashboard {
-  const summary = summarizeAvailableCash(dashboard.accounts, dashboard.sourceMonth);
+  const latestMeta = dashboard.months.at(-1)?.entryMeta ?? [];
+  const filledAccounts = dashboard.accounts.map((account) => {
+    if (account.type !== "account") return account;
+    const role = account.cashflowRole
+      ?? cashflowRoleForEntry({ financeSource: account.source, type: "account", number: account.value });
+    const candidates = latestMeta.filter((entry) => entry.financeSource === account.source);
+    const pick = <T,>(read: (entry: (typeof candidates)[number]) => T | null | undefined): T | null => {
+      for (const entry of candidates) {
+        const value = read(entry);
+        if (value != null) return value;
+      }
+      return null;
+    };
+    return {
+      ...account,
+      cashflowRole: role,
+      availableCash: role === "cash",
+      verified: account.verified ?? pick((entry) => entry.verified),
+      status: account.status ?? pick((entry) => entry.status),
+      balanceDate: account.balanceDate ?? pick((entry) => entry.balanceDate),
+    };
+  });
+  const summary = summarizeAvailableCash(filledAccounts, dashboard.sourceMonth);
   return {
     ...dashboard,
-    accounts: dashboard.accounts.map((account) => {
-      if (account.type !== "account") return account;
-      const role = account.cashflowRole
-        ?? cashflowRoleForEntry({ financeSource: account.source, type: "account", number: account.value });
-      return { ...account, cashflowRole: role, availableCash: role === "cash" };
-    }),
+    accounts: filledAccounts,
     live: {
       ...dashboard.live,
       availableCash: summary.amount,
@@ -1654,21 +1925,72 @@ function buildDashboard(
 // separately listed cash (its value was never part of the stored
 // shares' denominator for payloads written by normalizeHoldings,
 // and for older ones the stored figures remain the best record —
-// still never a Top-10-only recomputation).
+// still never a Top-10-only recomputation). One more legacy
+// repair (F2.3 rework): a stored cash row whose declared currency
+// conflicts with its currency field is moved to the unclassified
+// list with the conflict named, and the cash total is rebuilt
+// from the cash rows that remain.
 function ensureHoldingsConsistency(dashboard: Dashboard): Dashboard {
-  let cashPosition = dashboard.cashPosition ?? 0;
+  let foldedCash = 0;
   const separate = <T extends { ticker: string; name: string; value: number }>(rows: T[]): T[] =>
     rows
       .filter((row) => {
         if (row.ticker.toUpperCase() !== "CUR:USD") return true;
-        cashPosition += row.value;
+        foldedCash += row.value;
         return false;
       })
       .map((row) => ({ ...row, name: cleanSecurityName(row.name, row.ticker) }));
+  const holdings = separate(dashboard.holdings);
+  const holdingsAll = separate(dashboard.holdingsAll);
+  let cashPosition = (dashboard.cashPosition ?? 0) + foldedCash;
+  let holdingsCash = dashboard.holdingsCash;
+  let holdingsUnclassified = dashboard.holdingsUnclassified;
+  // F2.3 rework (legacy read path): an archive written before the
+  // ingest-time conflict check can still carry a stored cash row
+  // whose ticker declares one currency (CUR:USD) while its
+  // currency field says another (CAD). Such a row is moved to the
+  // unclassified list here with the conflict named, and the USD
+  // cash total is rebuilt from the cash rows that remain (null
+  // when no USD cash row survives). Archives without a stored
+  // cash list keep the CUR:USD folding behaviour above exactly;
+  // the stored figures for real holdings are never recomputed.
+  if (Array.isArray(dashboard.holdingsCash)) {
+    const declaredOf = (ticker: string): string | null => {
+      const upper = ticker.toUpperCase();
+      return upper.startsWith("CUR:") ? upper.slice(4).trim().toUpperCase() || null : null;
+    };
+    const retained: Dashboard["holdingsCash"] = [];
+    const conflicts: Dashboard["holdingsUnclassified"] = [];
+    for (const row of dashboard.holdingsCash) {
+      const declared = declaredOf(row.ticker);
+      const field = row.currency?.trim().toUpperCase() || null;
+      if (declared != null && field != null && declared !== field) {
+        conflicts.push({
+          ticker: row.ticker,
+          name: row.name,
+          value: row.value,
+          currency: row.currency,
+          reason: `现金币种冲突：代码声明 ${declared}，币种字段为 ${field}，待核对，未计入现金合计`,
+        });
+      } else {
+        retained.push(row);
+      }
+    }
+    if (conflicts.length > 0) {
+      holdingsCash = retained;
+      holdingsUnclassified = [...(dashboard.holdingsUnclassified ?? []), ...conflicts];
+      const retainedUsd = retained
+        .filter((row) => (row.currency?.trim().toUpperCase() || declaredOf(row.ticker)) === "USD")
+        .reduce((sum, row) => sum + row.value, 0);
+      cashPosition = retainedUsd + foldedCash;
+    }
+  }
   return {
     ...dashboard,
-    holdings: separate(dashboard.holdings),
-    holdingsAll: separate(dashboard.holdingsAll),
+    holdings,
+    holdingsAll,
+    holdingsCash,
+    holdingsUnclassified,
     cashPosition: cashPosition > 0 ? cashPosition : null,
   };
 }
@@ -1795,7 +2117,7 @@ export const Actions = {
       await writeState(ctx, { status: "running", message: "正在同步 Firance 与 Plaid" });
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
-        `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 先定位目标设备：用设备列表工具列出当前可访问的设备，按设备名找到用户的 Mac mini（设备名含 “Mac mini” 的那台），本次刷新只使用这个运行时解析出的设备 ID。若按设备名找不到 Mac mini，或有多台候选无法唯一确定，不要猜测、不要用任何预置或写死的 ID 兜底，立即以 success:false 回调 ingestFinanceData 并在 error 中明确说明未能按设备名定位 Mac mini。在定位到的 Mac mini 上，先在运行时解析当前登录用户的主目录（home directory），再据此构造 Firance 数据目录为 <home>/Library/Application Support/Firance/FinanceData/（即 ~/Library/Application Support/Firance/FinanceData/）；不得使用任何写死的用户名或绝对用户路径。若无法解析主目录，不要猜测路径，立即以 success:false 回调 ingestFinanceData 并在 error 中说明无法解析主目录。然后用文件列表工具列出该目录，再读取全部文件名符合 YYYY-MM-DD 或 YYYY-MM 的无扩展名文件，月份键必须原样返回文件名、不要自行补成某一天（服务端会把 YYYY-MM 归一为该月月末估值）。每条记录是一组 key/value 行，至少含 finance_source、type、number；现行 Firance 记录还可能带 cashflow_role、balance_date、status、period_start、period_end、verified 等扩展行，且每条记录的行数不固定，必须按 key 解析、不得假定恰好三行或固定顺序。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income、flexible_spend、cashflow_adjustment、investment_external_adjustment 且 number 为有限数字的记录；扩展行按原 key 映射返回：cashflow_role→cashflowRole（cash/credit/debt/non_cash）、balance_date→balanceDate、status→status、period_start→periodStart、period_end→periodEnd、verified→verified，其余未知扩展 key 原样放入该记录的 extra 对象（值按数字/布尔/字符串原样保留）。原始文件只读，不得回写，不得为历史记录补造核实标记。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后逐条返回，不要预先截断为 Top 10（服务端会保留全量规范化集合）：每条返回 ticker/name/value（取 institution_value）/currency/institution，其中 currency 为该持仓的 iso_currency_code（确实无法确定时返回 null，不得默认填 USD）、institution 为持仓所在机构名称；institution_value 缺失时 value 返回 null，负值原样返回，不得丢弃、不得取绝对值；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number,可选 cashflowRole/balanceDate/status/periodStart/periodEnd/verified/extra}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value,currency,institution}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。不要发送聊天消息。`,
+        `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 先定位目标设备：用设备列表工具列出当前可访问的设备，按设备名找到用户的 Mac mini（设备名含 “Mac mini” 的那台），本次刷新只使用这个运行时解析出的设备 ID。若按设备名找不到 Mac mini，或有多台候选无法唯一确定，不要猜测、不要用任何预置或写死的 ID 兜底，立即以 success:false 回调 ingestFinanceData 并在 error 中明确说明未能按设备名定位 Mac mini。在定位到的 Mac mini 上，先在运行时解析当前登录用户的主目录（home directory），再据此构造 Firance 数据目录为 <home>/Library/Application Support/Firance/FinanceData/（即 ~/Library/Application Support/Firance/FinanceData/）；不得使用任何写死的用户名或绝对用户路径。若无法解析主目录，不要猜测路径，立即以 success:false 回调 ingestFinanceData 并在 error 中说明无法解析主目录。然后用文件列表工具列出该目录，再读取全部文件名符合 YYYY-MM-DD 或 YYYY-MM 的无扩展名文件，月份键必须原样返回文件名、不要自行补成某一天（服务端会把 YYYY-MM 归一为该月月末估值）。每条记录是一组 key/value 行，至少含 finance_source、type、number；现行 Firance 记录还可能带 cashflow_role、balance_date、status、period_start、period_end、verified 等扩展行，且每条记录的行数不固定，必须按 key 解析、不得假定恰好三行或固定顺序。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income、flexible_spend、cashflow_adjustment、investment_external_adjustment 且 number 为有限数字的记录；扩展行按原 key 映射返回：cashflow_role→cashflowRole（cash/credit/debt/non_cash）、balance_date→balanceDate、status→status、period_start→periodStart、period_end→periodEnd、verified→verified，其余未知扩展 key 原样放入该记录的 extra 对象（值按数字/布尔/字符串原样保留）。其中 investment_period_start、investment_period_end、investment_flow_verified 是 Firance 原生 key：必须以原 key 原样放入该记录的 extra，不得改名或映射为 period_start/period_end/verified，也不得与通用 periodStart/periodEnd/verified 合并或互相覆盖（两套字段并存时以各自原值返回）；status 的值必须原样返回，不得改写、翻译或归一化。原始文件只读，不得回写，不得为历史记录补造核实标记。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后逐条返回，不要预先截断为 Top 10（服务端会保留全量规范化集合）：每条返回 ticker/name/value（取 institution_value）/currency/institution，其中 currency 为该持仓的 iso_currency_code（确实无法确定时返回 null，不得默认填 USD）、institution 为持仓所在机构名称；institution_value 缺失时 value 返回 null，负值原样返回，不得丢弃、不得取绝对值；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number,可选 cashflowRole/balanceDate/status/periodStart/periodEnd/verified/extra}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value,currency,institution}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。不要发送聊天消息。`,
         { expectsAction: "ingestFinanceData", dedupeKey: "weekly-firance-finance-refresh" },
       );
       if (!task.ok) {

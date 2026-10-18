@@ -36,7 +36,7 @@ function extractFn(name) {
 const NAMES = [
   "isRealDateKey", "entriesSignature", "normalizeRawMonths", "resolveContribution",
   "cashflowRoleForEntry", "snapshotCaliber", "isConsecutiveMonth",
-  "monthEnd", "amountMatches", "transactionSpendForMonth",
+  "monthEnd", "normalizeBalanceDate", "isUnverifiedStatus", "entryUnverified", "nativeDateString", "nativeBool", "effectiveFlowPeriod", "amountMatches", "transactionSpendForMonth",
   "aggregateMonths", "average", "normalizedFireSpend", "validCompleteMonths",
   "computeFire", "normalizeStoredIntegrity", "normalizeFireMetrics",
   "recomputeInvestmentReturns", "computeInvestmentPerformance",
@@ -158,9 +158,9 @@ check("unverified: flow marked 未核实 -> return null + reason",
   && (unverifiedFlow[1].investmentReturnReason ?? "").includes("未核实"));
 const verifiedOk = agg([
   invSnap("2026-08-31", 100000, [], "broker_1234", { verified: true }),
-  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000, { verified: true })], "broker_1234", { verified: true }),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000, { verified: true, periodStart: "2026-09-01", periodEnd: "2026-09-30" })], "broker_1234", { verified: true }),
 ]);
-check("verified: explicitly verified entries reconcile normally (5000)",
+check("verified: explicitly verified entries with a covering period reconcile normally (5000)",
   verifiedOk[1].investmentReturn === 5000);
 const staleBalance = agg([
   invSnap("2026-08-31", 100000),
@@ -447,12 +447,100 @@ check("UI: period card first line shows the real interval + 已核对/待核对 
 check("UI: unreconcilable period return renders — with the specific reason nearby (no generic 数据不足）",
   appSrc.includes('<strong className="fact-card__none">—</strong>') && appSrc.includes("待核对：{perf.reason}")
   && !appSrc.includes("数据不足"));
-check("UI: card expansion reuses entryMeta per row (endpoints, flow periods, coverage verdict)",
-  appSrc.includes("期间核对明细（双端余额与投入期间）") && appSrc.includes("flowPeriodCoverageLabel(entry, perf.startKey, perf.endKey)")
-  && appSrc.includes("覆盖卡片区间") && appSrc.includes("部分记录，未参与收益核对")
-  && appSrc.includes("verificationText(entry.verified)"));
+check("UI: card expansion reuses entryMeta per row (endpoints, flow periods, per-segment coverage verdict)",
+  appSrc.includes("期间核对明细（双端余额与投入期间）") && appSrc.includes("flowPeriodCoverageLabel(entry, previousMonth?.key ?? null, month.key)")
+  && appSrc.includes("覆盖本区间") && appSrc.includes("未提供期间") && appSrc.includes("跨出本区间，金额无法归属")
+  && appSrc.includes("verificationText(entry.verified)") && appSrc.includes("effectivePeriodText(entry)"));
 check("UI: established intervals stay readable when the period total is blocked",
   appSrc.includes("已成立区间的月度收益仍可在上方「月度记录」中查看") && appSrc.includes("区间 {month.key}"));
+
+
+// --- F1.6 native-field + per-channel rework (PM 2026-10-18
+// 09:08/09:10): the CURRENT Firance native investment fields are
+// consumed, endpoints match exact dates, amounts bind to their
+// own channel + interval, and a flow-blocked month reports no
+// proven net flow. ---
+const nativeFalse = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000, { extra: { investment_flow_verified: false } })]),
+]);
+check("native: extra.investment_flow_verified=false alone -> return null AND net flow null",
+  nativeFalse[1].investmentReturn === null && nativeFalse[1].investmentNetFlow === null
+  && (nativeFalse[1].investmentReturnReason ?? "").includes("未核实"));
+const nativeHalfPeriod = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000, { extra: { investment_period_start: "2026-09-01", investment_period_end: "2026-09-15" } })]),
+]);
+check("native: native period covering only half the interval -> null",
+  nativeHalfPeriod[1].investmentReturn === null && nativeHalfPeriod[1].investmentNetFlow === null);
+const nativeFullPeriod = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000, { extra: { investment_period_start: "2026-09-01", investment_period_end: "2026-09-30", investment_flow_verified: true } })]),
+]);
+check("native: native full period + native verified reconciles (5000), fields promoted to entryMeta",
+  nativeFullPeriod[1].investmentReturn === 5000
+  && nativeFullPeriod[1].entryMeta.find((m) => m.type === "investment_contribution")?.nativePeriodStart === "2026-09-01"
+  && nativeFullPeriod[1].entryMeta.find((m) => m.type === "investment_contribution")?.nativeFlowVerified === true);
+const nativeConflict = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-09-01", periodEnd: "2026-09-30", extra: { investment_period_start: "2026-09-01", investment_period_end: "2026-09-15" } })]),
+]);
+check("native: generic vs native period conflict -> null, no silent priority",
+  nativeConflict[1].investmentReturn === null && nativeConflict[1].investmentNetFlow === null
+  && (nativeConflict[1].investmentReturnReason ?? "").includes("不一致"));
+const carriedBalance = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000)], "broker_1234", { status: "carried_forward_unverified" }),
+]);
+check("native: balance status carried_forward_unverified -> null",
+  carriedBalance[1].investmentReturn === null
+  && (carriedBalance[1].investmentReturnReason ?? "").includes("未核实"));
+const sameMonthOldEnd = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000)], "broker_1234", { balanceDate: "2026-09-01" }),
+]);
+check("exact-date: end balance dated 09-01 for a 09-30 snapshot -> null + 沿用旧余额日期",
+  sameMonthOldEnd[1].investmentReturn === null
+  && (sameMonthOldEnd[1].investmentReturnReason ?? "").includes("沿用旧余额日期"));
+const splicedChannels = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-09-01", periodEnd: "2026-09-15" }),
+    E("employer_rsu", "investment_external_adjustment", 0, { periodStart: "2026-09-16", periodEnd: "2026-09-30" }),
+  ]),
+]);
+check("channels: another channel's second-half coverage never proves the cash channel -> null",
+  splicedChannels[1].investmentReturn === null && splicedChannels[1].investmentNetFlow === null);
+const bothChannelsFull = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 118000, [
+    E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-09-01", periodEnd: "2026-09-30" }),
+    E("employer_rsu", "investment_external_adjustment", 3000, { periodStart: "2026-09-01", periodEnd: "2026-09-30" }),
+  ]),
+]);
+check("channels: each channel covering its own interval reconciles (118000-100000-13000=5000)",
+  bothChannelsFull[1].investmentReturn === 5000 && bothChannelsFull[1].investmentNetFlow === 13000);
+const supersetPeriod = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [
+    E("broker_1234", "investment_contribution", 10000, { periodStart: "2026-08-01", periodEnd: "2026-09-30" }),
+  ]),
+]);
+check("attribution: a period spanning beyond the interval cannot attribute its amount -> null + 跨出本区间",
+  supersetPeriod[1].investmentReturn === null && supersetPeriod[1].investmentNetFlow === null
+  && (supersetPeriod[1].investmentReturnReason ?? "").includes("跨出本区间"));
+const verifiedNoPeriod = agg([
+  invSnap("2026-08-31", 100000),
+  invSnap("2026-09-30", 115000, [E("broker_1234", "investment_contribution", 10000, { verified: true })]),
+]);
+check("attribution: verified=true but no period at all -> null (not silently reconciled)",
+  verifiedNoPeriod[1].investmentReturn === null && verifiedNoPeriod[1].investmentNetFlow === null
+  && (verifiedNoPeriod[1].investmentReturnReason ?? "").includes("未提供期间"));
+check("period card: a blocked interval nulls the WHOLE-period net flow too (candidates stay monthly)",
+  computeInvestmentPerformance(periodPrevMonthOnly).returnAmount === null
+  && computeInvestmentPerformance(periodPrevMonthOnly).netFlow === null);
+check("flow-blocked month: partial-record month reports investmentNetFlow null",
+  periodPartialRecord[1].investmentNetFlow === null);
 
 console.log(`validate-investment-performance: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

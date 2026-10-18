@@ -184,7 +184,7 @@ export function verificationText(verified: boolean | null | undefined): string {
 }
 
 export function emergencyCoverage(
-  accounts: Array<{ source: string; type: string; value: number; availableCash?: boolean; verified?: boolean | null }>,
+  accounts: Array<{ source: string; type: string; value: number; availableCash?: boolean; verified?: boolean | null; status?: string | null }>,
   serverAvailableCash: number | null,
   staleSources: string[],
   excludedSources: ReadonlySet<string>,
@@ -198,14 +198,21 @@ export function emergencyCoverage(
   if (selected.length === 0) {
     return { months: null, cashAmount: null, selectedCount: 0, reason: "本页试算已排除全部现金账户，未输出覆盖" };
   }
-  // F1.1 rework: explicitly unverified cash (verified === false)
-  // never enters the coverage numerator. Its balance remains a
-  // recorded fact on the account row, but while it is in scope no
-  // coverage is produced and the reason names it; excluding it in
-  // this page's trial restores a normal trial figure from the
-  // remaining verified/legacy cash. A null verification state
-  // (legacy, not provided) keeps the legacy caliber.
-  const unverifiedSelected = selected.filter((account) => account.verified === false);
+  // F1.1 rework: explicitly unverified cash never enters the
+  // coverage numerator — verified === false, or the raw Firance
+  // status reading unverified / carried_forward_unverified. Its
+  // balance remains a recorded fact on the account row, but while
+  // it is in scope no coverage is produced and the reason names
+  // it; excluding it in this page's trial restores a normal trial
+  // figure from the remaining verified/legacy cash. A null
+  // verification state (legacy, not provided) keeps the legacy
+  // caliber.
+  const unverifiedSelected = selected.filter(
+    (account) =>
+      account.verified === false ||
+      account.status === "unverified" ||
+      account.status === "carried_forward_unverified",
+  );
   if (unverifiedSelected.length > 0) {
     return { months: null, cashAmount: null, selectedCount: selected.length, reason: `现金账户未核实（${unverifiedSelected.map((account) => account.source).join("、")} 标记为未核实），金额只作已记录事实，未计入可动用现金，未输出覆盖` };
   }
@@ -457,20 +464,57 @@ function nextDateText(key: string): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-// F1.6 rework: whether one flow entry's recorded period covers
-// the card's whole interval (startKey, endKey]. Text is the
-// primary channel — the verdict is a sentence, not a color.
+// F1.6 rework: the effective period of an entry — the generic
+// period when present, the Firance-native period filling its
+// absence (generic ?? native). One resolver shared by the
+// coverage verdict, the card's flow rows and the monthly
+// records, so every surface shows and judges the same period.
+export function effectivePeriodOf(entry: {
+  periodStart: string | null;
+  periodEnd: string | null;
+  nativePeriodStart?: string | null;
+  nativePeriodEnd?: string | null;
+}): { start: string | null; end: string | null } {
+  return {
+    start: entry.periodStart ?? entry.nativePeriodStart ?? null,
+    end: entry.periodEnd ?? entry.nativePeriodEnd ?? null,
+  };
+}
+
+export function effectivePeriodText(entry: {
+  periodStart: string | null;
+  periodEnd: string | null;
+  nativePeriodStart?: string | null;
+  nativePeriodEnd?: string | null;
+}): string {
+  const period = effectivePeriodOf(entry);
+  return `${period.start ?? "—"} 至 ${period.end ?? "—"}`;
+}
+
+// F1.6 rework: the coverage verdict for one flow entry is judged
+// against the interval that entry itself belongs to — (the
+// previous snapshot date, its own snapshot date] — never against
+// the whole card range. The period shown and judged is the
+// EFFECTIVE period: the generic period when present, otherwise
+// the Firance-native period. A period reaching outside its
+// interval is labelled 跨出本区间 (its amount cannot be
+// attributed to the interval), one falling short is 仅覆盖部分,
+// one outside entirely is 不在本区间内， and a record without a
+// period is 未提供期间. Text is the primary channel — the verdict
+// is a sentence, not a color.
 export function flowPeriodCoverageLabel(
-  entry: { periodStart: string | null; periodEnd: string | null },
+  entry: { periodStart: string | null; periodEnd: string | null; nativePeriodStart?: string | null; nativePeriodEnd?: string | null },
   startKey: string | null,
   endKey: string | null,
 ): string {
-  if (!entry.periodStart || !entry.periodEnd) return "未提供期间 · 部分记录，未参与收益核对";
-  if (!startKey || !endKey) return "期间已提供，卡片区间未定";
+  const { start, end } = effectivePeriodOf(entry);
+  if (!start || !end) return "未提供期间";
+  if (!startKey || !endKey) return "期间已提供，所属区间未定";
+  if (end <= startKey || start > endKey) return "不在本区间内";
   const intervalStart = nextDateText(startKey);
-  if (entry.periodStart <= intervalStart && entry.periodEnd >= endKey) return "覆盖卡片区间";
-  if (entry.periodEnd < intervalStart || entry.periodStart > endKey) return "期间不在卡片区间内，未参与收益";
-  return "仅覆盖卡片区间的部分期间，未完整覆盖";
+  if (start <= startKey || end > endKey) return "跨出本区间，金额无法归属";
+  if (start > intervalStart || end < endKey) return "仅覆盖部分";
+  return "覆盖本区间";
 }
 
 function MonthlyRecords({ months }: { months: Month[] }) {
@@ -536,14 +580,20 @@ function MonthlyRecords({ months }: { months: Month[] }) {
               <p>收入 {month.incomeProven ? currency.format(month.income) : "未提供"} · 支出 {month.totalSpend == null ? "未提供" : currency.format(month.totalSpend)} · 投入 {month.contributionProven ? currency.format(month.contribution) : "未提供"}</p>
               {balanceMeta.length > 0 ? (
                 <div className="month-record__meta-list">
-                  {balanceMeta.map((entry) => (
-                    <p key={`${entry.type}-${entry.financeSource}`}>
-                      {entry.financeSource} · {cashflowRoleLabel(entry.cashflowRole)} · 余额日期 {entry.balanceDate ?? snapshotDate}
-                      {entry.status ? ` · 状态 ${entry.status}` : ""}
-                      {entry.verified != null ? ` · ${entry.verified ? "已核实" : "未核实"}` : ""}
-                      {entry.periodStart || entry.periodEnd ? ` · 期间 ${entry.periodStart ?? "—"} 至 ${entry.periodEnd ?? "—"}` : ""}
-                    </p>
-                  ))}
+                  {balanceMeta.map((entry) => {
+                    // F1.6 rework: the period shown is the EFFECTIVE
+                    // period — generic first, the Firance-native
+                    // period when the generic one is absent.
+                    const period = effectivePeriodOf(entry);
+                    return (
+                      <p key={`${entry.type}-${entry.financeSource}`}>
+                        {entry.financeSource} · {cashflowRoleLabel(entry.cashflowRole)} · 余额日期 {entry.balanceDate ?? snapshotDate}
+                        {entry.status ? ` · 状态 ${entry.status}` : ""}
+                        {entry.verified != null ? ` · ${entry.verified ? "已核实" : "未核实"}` : ""}
+                        {period.start || period.end ? ` · 期间 ${effectivePeriodText(entry)}${entry.periodStart == null && entry.nativePeriodStart != null ? "（原生期间）" : ""}` : ""}
+                      </p>
+                    );
+                  })}
                 </div>
               ) : null}
             </div>
@@ -570,10 +620,15 @@ function InvestmentPerformanceCard({ data }: { data: Dashboard }) {
     : perf.returnAmount > 0 ? "收益" : perf.returnAmount < 0 ? "亏损" : "持平";
   // F1.6 rework: the expansion reuses the months' preserved
   // entryMeta — endpoint balance rows for the first/last month,
-  // and every flow row with its recorded period, verification
-  // state and coverage verdict against the card interval. It is
-  // read-only reconciliation display: nothing is written back to
-  // the source history and no new source system is introduced.
+  // then ONE ROW PER REAL INTERVAL (each adjacent snapshot pair):
+  // its recorded cash / non-bank amounts, the net flow that
+  // interval can actually be reconciled with (— while unproven),
+  // and its return or its 待核对 reason. Every flow record is
+  // listed under its own interval with its effective period
+  // (generic ?? native), its native verification state as text,
+  // and a coverage verdict judged against ITS interval only. It
+  // is read-only reconciliation display: nothing is written back
+  // to the source history and no new source system is introduced.
   const startMonth = data.months.find((month) => month.key === perf.startKey) ?? data.months[0];
   const endMonth = data.months.find((month) => month.key === perf.endKey) ?? data.months.at(-1);
   const startIndex = startMonth ? data.months.indexOf(startMonth) : -1;
@@ -589,17 +644,39 @@ function InvestmentPerformanceCard({ data }: { data: Dashboard }) {
           {label} · {entry.financeSource} · 投资 · 余额日期 {entry.balanceDate ?? `未提供（按快照 ${month?.key ?? "—"}）`} · {verificationText(entry.verified)}
         </p>
       ));
-  const flowRows = periodMonths.flatMap((month) =>
-    (month.entryMeta ?? [])
+  const intervalRows = periodMonths.slice(1).map((month, offset) => {
+    const previousMonth = periodMonths[offset];
+    return (
+      <p key={`interval-${month.key}`}>
+        区间 {month.key}：{previousMonth ? `${previousMonth.key} → ${month.key} · ` : ""}
+        现金投入已记录 {month.contributionSource === "missing" ? "未提供" : currency.format(month.contribution)}
+        {" · "}非银行直接投入已记录 {currency.format(month.investmentExternalAdjustment)}
+        {" · "}本段可用于核对的净投入 {month.investmentNetFlow == null ? "—" : currency.format(month.investmentNetFlow)}
+        {" · "}{month.investmentReturn == null
+          ? `待核对：${month.investmentReturnReason ?? "该区间收益待核对"}`
+          : `本段收益 ${investmentReturnLabel(month)} ${signedCurrency(month.investmentReturn)}`}
+      </p>
+    );
+  });
+  const flowRows = periodMonths.slice(1).flatMap((month, offset) => {
+    const previousMonth = periodMonths[offset];
+    return (month.entryMeta ?? [])
       .filter((entry) => entry.type === "investment_contribution" || entry.type === "transfer" || entry.type === "investment_external_adjustment")
-      .map((entry, entryIndex) => (
-        <p key={`flow-${month.key}-${entry.financeSource}-${entryIndex}`}>
-          投入 · {entry.financeSource} · {entry.type === "investment_external_adjustment" ? "非银行直接投入" : entry.type === "transfer" ? "旧 transfer 别名" : "现金投入"}
-          {" · "}期间 {entry.periodStart ?? "—"} 至 {entry.periodEnd ?? "—"} · {verificationText(entry.verified)}
-          {" · "}{flowPeriodCoverageLabel(entry, perf.startKey, perf.endKey)}
-        </p>
-      )),
-  );
+      .map((entry, entryIndex) => {
+        const hasNativePeriod = entry.nativePeriodStart != null || entry.nativePeriodEnd != null;
+        return (
+          <p key={`flow-${month.key}-${entry.financeSource}-${entryIndex}`}>
+            投入 · {entry.financeSource} · {entry.type === "investment_external_adjustment" ? "非银行直接投入" : entry.type === "transfer" ? "旧 transfer 别名" : "现金投入"}
+            {" · "}期间 {effectivePeriodText(entry)}
+            {entry.periodStart == null && hasNativePeriod ? "（原生期间）" : ""}
+            {entry.periodStart != null && hasNativePeriod ? ` · 原生期间 ${entry.nativePeriodStart ?? "—"} 至 ${entry.nativePeriodEnd ?? "—"}` : ""}
+            {" · "}{verificationText(entry.verified)}
+            {" · "}原生核实状态：{entry.nativeFlowVerified === true ? "已核实" : entry.nativeFlowVerified === false ? "未核实" : "未提供"}
+            {" · "}{flowPeriodCoverageLabel(entry, previousMonth?.key ?? null, month.key)}
+          </p>
+        );
+      });
+  });
   return (
     <section className="fact-card" aria-label="投资收益核对（整个期间）">
       <div className="fact-card__heading">
@@ -620,7 +697,7 @@ function InvestmentPerformanceCard({ data }: { data: Dashboard }) {
       <p className="fact-card__note">
         期初投资余额 {perf.startBalance == null ? "未提供" : currency.format(perf.startBalance)}
         {" · "}期末投资余额 {perf.endBalance == null ? "未提供" : currency.format(perf.endBalance)}
-        {" · "}整个期间外部净投入 {perf.netFlow == null ? "未知" : currency.format(perf.netFlow)}
+        {" · "}整个期间外部净投入 {perf.netFlow == null ? "未知（任一区间未核实时不给整个期间合计，各区间已记录金额见下方明细）" : currency.format(perf.netFlow)}
         （现金净转入 + 非银行直接投入如 RSU、雇主缴款；提现为负）
       </p>
       {perf.reason ? <p className="fact-card__note">待核对：{perf.reason}。任一区间未核实时不累计整个期间收益，也不跨缺口补 0；已成立区间的月度收益仍可在上方「月度记录」中查看。</p> : null}
@@ -629,12 +706,8 @@ function InvestmentPerformanceCard({ data }: { data: Dashboard }) {
         <div className="month-record__meta-list">
           {endpointRows(startMonth, "期初")}
           {endpointRows(endMonth, "期末")}
+          {intervalRows}
           {flowRows}
-          {periodMonths.slice(1).map((month) => (
-            <p key={`interval-${month.key}`}>
-              区间 {month.key}：{month.investmentReturn == null ? `— · ${month.investmentReturnReason ?? "待核对"}` : `${investmentReturnLabel(month)} ${signedCurrency(month.investmentReturn)}`}
-            </p>
-          ))}
         </div>
       </details>
       <p className="fact-card__source">收益只按全部投资账户余额核对：持仓明细不替代账户余额；上方「本次余额差」是净资产（含存贷款）之差，不是投资收益。FIRE 达标进度同样以投资余额为本金，与本卡同一投资账户边界。</p>
@@ -824,7 +897,13 @@ function AvailableCashPanel({
   // blocks coverage and is named as blocking; once excluded in
   // this page's trial it is reported as excluded, and the default
   // caliber still never counts its amount.
-  const unverifiedCash = balanceAccounts.filter((account) => account.availableCash === true && account.verified === false);
+  const unverifiedCash = balanceAccounts.filter(
+    (account) =>
+      account.availableCash === true &&
+      (account.verified === false ||
+        account.status === "unverified" ||
+        account.status === "carried_forward_unverified"),
+  );
   const activeUnverified = unverifiedCash.filter((account) => !excludedSources.has(account.source));
   const excludedUnverified = unverifiedCash.filter((account) => excludedSources.has(account.source));
   const trialActive = excludedSources.size > 0;
@@ -864,6 +943,7 @@ function AvailableCashPanel({
                   {accountCashRoleLabel(account.cashflowRole ?? null)}
                   {" · "}余额日期 {account.balanceDate ?? data.sourceMonth}
                   {" · "}{verificationText(account.verified ?? null)}
+                  {account.status ? ` · 状态 ${account.status}` : ""}
                   {" · "}{account.live ? "同步读取" : "月度快照"}
                 </span>
               </div>
