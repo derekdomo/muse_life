@@ -86,6 +86,21 @@ the experience layer instead of pretending the stores merged:
   (latest 14 days), so a day's steps, sleep, resting HR/HRV, and strength
   sessions/volume read as one record. Rendered on both 今日 (last 7 days)
   and 历史 (full 14 days).
+- **Workout visibility fix (2026-10-16)**: the stored snapshot already
+  carried every HealthKit workout (11 sessions incl. 6 swimming in the
+  captured snapshot), but swimming was effectively invisible: the 今日 tab
+  showed only a 7-day count line, the dedicated 游泳记录 section sat below
+  the full workouts list in 历史, the 全部运动记录 rows rendered the raw
+  English `workout_type` codes ("swimming"/"cycling"/"elliptical"), and
+  the unified timeline merged no HealthKit workouts at all, so a swim day
+  read as "no workout". Fixes: `unifiedTimeline` days now also carry
+  `workoutSessions`, `workoutTypes`, and `swimMeters` from
+  `historyWorkouts` and both timeline renderings show them; the 今日 tab
+  gains a 最近运动记录 section (latest 5 sessions, Chinese type labels,
+  plus a 近30天游泳 N 次 count); workout types render through a Chinese
+  label map everywhere (unknown types keep their raw value); and
+  游泳记录 now sits above 全部运动记录 in 历史. No data, schema-storage,
+  or sync changes — the records were already stored correctly.
 - **One-tap diagnostics (`getSyncDiagnostics`, owner-only)**: a
   deterministic, agent-free check of snapshot presence, per-source
   freshness, the latest strength workout, unified overlap, and recent
@@ -138,6 +153,26 @@ one source missing or corrupt can no longer swallow the other:
 - Permissions are unchanged: `getDashboard` and `getSyncDiagnostics` keep
   the strict owner gate; non-owners still get `forbidden: true` with zero
   data. No schema or migration changes.
+
+## Load score definition (adopted 2026-10-17, user decision 「按学术来」)
+Research: `~/workspace/research_notes/whoop-garmin-strain-definition-20261017-1808/report.md` (read 2026-10-17; all sources via web index, none verified live — figures should be re-checked against the live pages before being treated as final).
+
+- **WHOOP Strain and Garmin/Firstbeat Training Load cannot be copied**: WHOOP states "the complete proprietary formula and weighting of each input are not published" (https://www.whoop.com/us/en/thelocker/how-does-whoop-strain-work-101/); Garmin's load is a Firstbeat EPOC prediction whose neural-network weights are likewise unpublished (https://www.garmin.com/en-GB/garmin-technology/running-science/physiological-measurements/training-load). Only their published bands/concepts are reusable.
+- **Adopted formula — Banister TRIMP (1991), fully published**: per workout session, ΔHR = (average HR − resting HR) / (HRmax − resting HR); TRIMP = duration (min) × ΔHR × 0.64·e^(1.92·ΔHR) (men's constants; constants as printed in https://pmc.ncbi.nlm.nih.gov/articles/PMC6162408/ and https://www.veohtu.com/trimp.html). The prefactor form is used, not the simplified prefactor-less variant; secondary sources disagree on the women's prefactor (0.64 vs 0.86) — unresolved in the report and irrelevant here (men's constants), but the adopted convention is recorded in code.
+- **Display**: daily TRIMP (sum over the data date's sessions) is shown raw in the ring detail; the 0–21 number is a saturating presentation map, 21 × (1 − e^(−TRIMP/150)), banded by WHOOP's published ranges (Light 0–9 / Moderate 10–13 / High 14–17 / All Out 18–21). k = 150 is a starting calibration for a recreationally trained adult, not a constant of nature (report §5); the score is labelled TRIMP and never presented as WHOOP's or Garmin's official score. Sanity anchors from the report: a 1 h run at ΔHR ≈ 0.69 → TRIMP ≈ 100 → ≈10.2 (WHOOP's published 1 h running reference ≈ 12 — same band); a marathon-scale day (TRIMP ≈ 300) → ≈18.2, All Out.
+- **Inputs**: per-session duration + average HR (already in `historyWorkouts`), the data date's resting HR (already in `historyDaily`), and HRmax = the maximum daily `hr_max_bpm` observed in the stored window. The refresh task's daily query therefore now includes `hr_max_bpm`, mapped to the new optional `historyDaily.hrMax` (null when absent — never an average or estimate). Verified 2026-10-17 via `health-cli query metrics --provider healthkit --list-fields` (field exists) and a live 30-day query (values present on most days; observed max 155 bpm on 2026-10-03; 2026-10-16/17 flagged not-yet-synced by the source itself).
+- **Honesty rules**: a session missing duration or average HR is excluded from the sum and counted in the ring detail ("另 N 次缺心率/时长未计入"), never treated as zero; with no scorable input (resting HR missing, HRmax not yet synced, or every session unscorable) no score is shown — the slot falls back to the day's recorded activity facts with the reason stated. Only workout sessions count; non-workout daily activity is outside this definition and the detail says so on workout-free days. The score is computed client-side as a pure derivation over the stored snapshot (like `sevenDayFacts`); no server formula, readiness component, or stored data changes.
+
+## Five-value routine contract (L1-ROUTINE-001, 2026-10-18)
+- 训练记录 (space-6) added two home routines to its plan, so the strength pipeline now carries five routine values: `push`, `pull`, `legs`, `home_posture`, `home_snowboard`. The server's `strengthWorkoutSchema` enum matches all five; values are stored and read back verbatim — a home routine is never remapped onto a gym routine and never dropped, and every consumer (routine labels, weeklyTrend counts/volume, H-LOAD weekLoad session counts and same-day HK-strength ambiguity, the unified timeline, readiness's 本周力量 volume) counts the new routines exactly like the original three.
+- Display labels match 训练记录's own wording: `home_posture` → 「在家 A · 体态」, `home_snowboard` → 「在家 B · 单板」.
+- `STRENGTH_SYNC_PROMPT` states the five-value contract explicitly: preserve each workout's routine verbatim, never rewrite a home routine as push/pull/legs, never filter a workout out because of its routine.
+- Boundary: snapshots carrying only the original three values still parse unchanged. An unknown future routine value fails schema validation, so the incoming snapshot is rejected whole and the previously stored snapshot is kept (the existing version/CAS persist path) — a partial write can never pose as a complete sync.
+
+## Readiness score archive (H-LOAD-001, owner-approved 2026-10-18)
+- New additive table `readiness_history` (migration 0006), one row per readiness date. `calculateReadiness` itself is unchanged and still computes only the current readiness date; `getDashboard` — the only place readiness is computed, so this covers manual opens and refresh-driven reads alike — archives each computed result by date upsert: `{date, score, components (JSON), confidence, snapshotVersion}` where `snapshotVersion` is the health snapshot's payload `updatedAt` (the read-start version the score was computed from). Recomputing the same date overwrites that date's row; no duplicate rows.
+- The 首屏 readiness near-7-day trend reads ONLY this archive: an archived date shows the score that was computed on that date; a date with no archive row (or an archived 数据不足 null score) stays a gap rendered "—" with the existing explanation （历史未提供、不复制今日值）. The archive accumulates forward from launch day only — old dates are never backfilled and never recomputed after the fact, because a later recomputation would not equal the score actually shown then.
+- An archive write failure never blocks the `getDashboard` response (read/display first); it is recorded in the sync ledger as a `failed` entry whose note carries no health values. A trend read failure likewise degrades to seven gaps.
 
 ## Rejected approaches
 - **Tried**: treating the current day’s partial row as today’s daily result.

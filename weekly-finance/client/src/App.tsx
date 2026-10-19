@@ -224,13 +224,20 @@ export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ labe
 // snapshot generation / last-success time (the band labels it
 // as such) — it is never a per-source data date. The bank row's
 // date is the balanceDate evidence the account rows themselves
-// retain: one shared date is stated as-is, differing dates are
-// stated as a range AND named inconsistent, and a legacy blob
-// with no balanceDate evidence reads 未知 — never inferred
-// from asOf. Holdings carry no per-source date evidence at all,
-// so their date is 未知 too. With no data at all, no row may
-// claim a save: every result reads 未取得 / 尚无成功快照，
-// whatever the refresh state.
+// retain, ALWAYS stated with its date coverage （日期已知 x/y):
+// a known date describes only the accounts that carry date
+// evidence — it is never generalised to the whole balance.
+// Only when every bank account row has date evidence and they
+// all share one date may a single date stand with its full
+// coverage; differing known dates are stated as a range AND
+// named inconsistent; accounts without evidence (null, absent
+// on a legacy blob, or nulled by a metadata conflict) are
+// counted and named as 日期未知 — never filled from asOf or
+// the snapshot month. Coverage is text, never colour alone.
+// Holdings carry no per-source date evidence at all, so their
+// date is 未知 too. With no data at all, no row may claim a
+// save: every result reads 未取得 / 尚无成功快照， whatever
+// the refresh state.
 export function sourceLedgerRows(
   data: Dashboard | null,
   refresh: { status: RefreshStatus },
@@ -258,19 +265,31 @@ export function sourceLedgerRows(
   const provenMonths = data.months.filter((month) => month.spendProven).map((month) => month.key.slice(0, 7));
   const balanceAccounts = data.accounts.filter((account) => account.type === "account" || account.type === "investment");
   // Bank balance date evidence, from the account rows only: the
-  // balance entries are the type "account" rows. No evidence ->
-  // 未知； one date -> that date; several -> the span, named
-  // inconsistent rather than silently collapsed to one day.
+  // balance entries are the type "account" rows. EVERY bank row
+  // counts toward the coverage denominator — rows whose
+  // balanceDate is null/absent (legacy blob, or a field nulled
+  // because its metadata conflicted) stay in the count as
+  // date-unknown; they are never filtered out, which is what
+  // used to let one dated row speak for the whole source.
+  const bankRows = data.accounts.filter((account) => account.type === "account");
+  const bankDatedRows = bankRows.filter((account) => account.balanceDate != null);
   const bankBalanceDates = [...new Set(
-    data.accounts
-      .filter((account) => account.type === "account" && account.balanceDate != null)
-      .map((account) => account.balanceDate as string),
+    bankDatedRows.map((account) => account.balanceDate as string),
   )].sort();
-  const bankDataDate = bankBalanceDates.length === 0
+  const bankUnknownCount = bankRows.length - bankDatedRows.length;
+  const bankCoverage = `日期已知 ${bankDatedRows.length}/${bankRows.length}`;
+  const bankUnknownNote = `其余 ${bankUnknownCount} 个账户日期未知`;
+  const bankDataDate = bankRows.length === 0
     ? "未知"
-    : bankBalanceDates.length === 1
-      ? bankBalanceDates[0]!
-      : `${bankBalanceDates[0]} 至 ${bankBalanceDates[bankBalanceDates.length - 1]}（各账户余额日期不一致）`;
+    : bankDatedRows.length === 0
+      ? `未知（${bankCoverage}；${bankUnknownNote}）`
+      : bankBalanceDates.length === 1
+        ? bankUnknownCount === 0
+          ? `${bankBalanceDates[0]}（${bankCoverage}）`
+          : `${bankBalanceDates[0]}（${bankCoverage}；${bankUnknownNote}）`
+        : bankUnknownCount === 0
+          ? `${bankBalanceDates[0]} 至 ${bankBalanceDates[bankBalanceDates.length - 1]}（各账户余额日期不一致；${bankCoverage}）`
+          : `${bankBalanceDates[0]} 至 ${bankBalanceDates[bankBalanceDates.length - 1]}（各账户余额日期不一致；${bankCoverage}；${bankUnknownNote}）`;
   return [
     {
       source: "本地月度记录",
@@ -789,7 +808,7 @@ function MonthlyRecords({ months }: { months: Month[] }) {
                     const period = effectivePeriodOf(entry);
                     return (
                       <p key={`${entry.type}-${entry.financeSource}`}>
-                        {entry.financeSource} · {cashflowRoleLabel(entry.cashflowRole)} · 余额日期 {entry.balanceDate ?? snapshotDate}
+                        {entry.financeSource} · {cashflowRoleLabel(entry.cashflowRole)} · 余额日期 {entry.balanceDate ?? "未知"}
                         {entry.status ? ` · 状态 ${entry.status}` : ""}
                         {entry.verified != null ? ` · ${entry.verified ? "已核实" : "未核实"}` : ""}
                         {period.start || period.end ? ` · 期间 ${effectivePeriodText(entry)}${entry.periodStart == null && entry.nativePeriodStart != null ? "（原生期间）" : ""}` : ""}
@@ -1159,7 +1178,7 @@ function AvailableCashPanel({
                 <strong>{account.label}</strong>
                 <span>
                   {accountCashRoleLabel(account.cashflowRole ?? null)}
-                  {" · "}余额日期 {account.balanceDate ?? data.sourceMonth}
+                  {" · "}余额日期 {account.balanceDate ?? "未知"}
                   {" · "}{verificationText(account.verified ?? null)}
                   {account.metadataConflict ? " · 元数据冲突待核对" : ""}
                   {account.status ? ` · 状态 ${account.status}` : ""}

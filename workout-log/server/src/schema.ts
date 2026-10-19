@@ -70,6 +70,18 @@ export const planDailyItems = sqliteTable("plan_daily_items", {
   sortOrder: integer("sort_order").notNull(),
 });
 
+// Plan bookkeeping markers (W-PLAN-SAFE-001, migration 0005). The
+// 'seeded' row is the ONLY signal that the default plan seed has
+// completed: it is written in the same atomic batch as the seed rows
+// themselves (and backfilled by the migration for databases that
+// already held a plan). Plan code never infers "not initialized" from
+// the plan tables being empty, so a saved plan can never be
+// overwritten by the default template.
+export const planMeta = sqliteTable("plan_meta", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
+
 // Per-day completion of one daily micro-routine item. date_key is the
 // America/Los_Angeles calendar date (YYYY-MM-DD). Purely informational:
 // it never gates starting or finishing a workout.

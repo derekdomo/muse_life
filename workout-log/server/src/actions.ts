@@ -232,47 +232,60 @@ const updatePlanResponse = z.object({
   error: z.string().nullable(),
 });
 
-// Idempotent plan seed: fills any empty plan table from the defaults
-// above. Runs before plan reads and before startWorkout builds a
-// session, so a database that predates the plan tables (or a partial
-// write) always ends up with a complete plan.
+// W-PLAN-SAFE-001: the plan_meta marker is the only "seeded" signal.
+// A saved plan whose tables were later emptied still carries the
+// marker, so it is never re-seeded over; getPlan / startWorkout never
+// infer initialization from a plan table being empty.
+const PLAN_META_SEEDED_KEY = "seeded";
+
+// Atomic, idempotent plan seed. The marker decides: when it exists
+// this is a no-op. Otherwise the default rows for all three plan
+// tables AND the marker land in ONE db.batch — the platform db handle
+// exposes no transaction method (see @hatch/space-sdk's SpaceDb type),
+// and batch is its atomic multi-statement write: every statement
+// commits or none does, so a failed or interrupted seed leaves no
+// partial plan and no marker, and the next open simply retries.
+// Concurrent first opens are arbitrated by the unique constraints —
+// plan_exercises (routine, exercise_key) from migration 0005,
+// plan_schedule (day_index) and plan_daily_items (item_key) from
+// 0004, plan_meta (key) — with onConflictDoNothing: whichever batch
+// lands first writes each row, the other skips it, and both end up
+// looking at exactly one copy of the template.
 async function ensurePlanSeeded(ctx: Ctx): Promise<void> {
   const db = ctx.db<typeof schema>();
-  const exerciseRows = await db.select({ id: schema.planExercises.id }).from(schema.planExercises).limit(1);
-  if (exerciseRows.length === 0) {
-    const values = ROUTINE_KEYS.flatMap((routine) =>
-      DEFAULT_PLAN_TEMPLATES[routine].map((exercise, index) => ({
-        routine,
-        sortOrder: index,
-        exerciseKey: exercise.key,
-        exerciseName: exercise.name,
-        sets: exercise.sets,
-        targetReps: exercise.target,
-      })),
-    );
-    await db.insert(schema.planExercises).values(values);
-  }
-  const scheduleRows = await db.select({ id: schema.planSchedule.id }).from(schema.planSchedule).limit(1);
-  if (scheduleRows.length === 0) {
-    await db.insert(schema.planSchedule).values(
-      DEFAULT_PLAN_SCHEDULE.map((entry) => ({
-        dayIndex: entry.day_index,
-        routineCode: entry.routine_code,
-        note: entry.note,
-      })),
-    );
-  }
-  const dailyRows = await db.select({ id: schema.planDailyItems.id }).from(schema.planDailyItems).limit(1);
-  if (dailyRows.length === 0) {
-    await db.insert(schema.planDailyItems).values(
-      DEFAULT_DAILY_ITEMS.map((item, index) => ({
-        itemKey: item.key,
-        title: item.title,
-        detail: item.detail,
-        sortOrder: index,
-      })),
-    );
-  }
+  const marker = await db
+    .select({ key: schema.planMeta.key })
+    .from(schema.planMeta)
+    .where(eq(schema.planMeta.key, PLAN_META_SEEDED_KEY))
+    .limit(1);
+  if (marker.length > 0) return;
+  const exerciseValues = ROUTINE_KEYS.flatMap((routine) =>
+    DEFAULT_PLAN_TEMPLATES[routine].map((exercise, index) => ({
+      routine,
+      sortOrder: index,
+      exerciseKey: exercise.key,
+      exerciseName: exercise.name,
+      sets: exercise.sets,
+      targetReps: exercise.target,
+    })),
+  );
+  const scheduleValues = DEFAULT_PLAN_SCHEDULE.map((entry) => ({
+    dayIndex: entry.day_index,
+    routineCode: entry.routine_code,
+    note: entry.note,
+  }));
+  const dailyValues = DEFAULT_DAILY_ITEMS.map((item, index) => ({
+    itemKey: item.key,
+    title: item.title,
+    detail: item.detail,
+    sortOrder: index,
+  }));
+  await db.batch([
+    db.insert(schema.planExercises).values(exerciseValues).onConflictDoNothing(),
+    db.insert(schema.planSchedule).values(scheduleValues).onConflictDoNothing(),
+    db.insert(schema.planDailyItems).values(dailyValues).onConflictDoNothing(),
+    db.insert(schema.planMeta).values({ key: PLAN_META_SEEDED_KEY, value: "1" }).onConflictDoNothing(),
+  ]);
 }
 
 // The live templates: persisted rows in sort order, per routine. A
@@ -1616,39 +1629,60 @@ export const Actions = {
       const error = validatePlanInput(args);
       if (error) return { ok: false, forbidden: false, error };
       const db = ctx.db<typeof schema>();
-      // Full replace of the three plan tables from the validated
-      // draft. Daily completions key off item keys, which the editor
-      // keeps stable across renames, so history survives a save.
-      await db.delete(schema.planExercises);
-      await db.delete(schema.planSchedule);
-      await db.delete(schema.planDailyItems);
-      await db.insert(schema.planExercises).values(
-        args.routines.flatMap((entry) =>
-          entry.exercises.map((exercise, index) => ({
-            routine: entry.routine,
-            sortOrder: index,
-            exerciseKey: exercise.key,
-            exerciseName: exercise.name.trim(),
-            sets: exercise.sets,
-            targetReps: exercise.target.trim(),
-          })),
-        ),
-      );
-      await db.insert(schema.planSchedule).values(
-        args.schedule.map((entry) => ({
-          dayIndex: entry.day_index,
-          routineCode: entry.routine_code,
-          note: entry.note,
-        })),
-      );
-      await db.insert(schema.planDailyItems).values(
-        args.daily_items.map((item, index) => ({
-          itemKey: item.key,
-          title: item.title.trim(),
-          detail: item.detail,
-          sortOrder: index,
-        })),
-      );
+      // W-PLAN-SAFE-001: the full replace of the three plan tables is
+      // ONE db.batch — the platform db handle exposes no transaction
+      // method (see @hatch/space-sdk's SpaceDb type), and batch is
+      // its atomic multi-statement write: the deletes and inserts
+      // commit together or not at all, so any failure leaves the
+      // previous plan completely intact and a concurrent getPlan only
+      // ever reads the whole old plan or the whole new one. Two
+      // concurrent saves are two batches; they cannot interleave, so
+      // the stored plan is always exactly one of the submitted plans.
+      // Daily completions key off item keys, which the editor keeps
+      // stable across renames, so history survives a save — and this
+      // batch never touches workout or completion rows. The trailing
+      // plan_meta insert keeps the seeded marker present even if a
+      // save is somehow the first plan write a database ever sees.
+      try {
+        await db.batch([
+          db.delete(schema.planExercises),
+          db.delete(schema.planSchedule),
+          db.delete(schema.planDailyItems),
+          db.insert(schema.planExercises).values(
+            args.routines.flatMap((entry) =>
+              entry.exercises.map((exercise, index) => ({
+                routine: entry.routine,
+                sortOrder: index,
+                exerciseKey: exercise.key,
+                exerciseName: exercise.name.trim(),
+                sets: exercise.sets,
+                targetReps: exercise.target.trim(),
+              })),
+            ),
+          ),
+          db.insert(schema.planSchedule).values(
+            args.schedule.map((entry) => ({
+              dayIndex: entry.day_index,
+              routineCode: entry.routine_code,
+              note: entry.note,
+            })),
+          ),
+          db.insert(schema.planDailyItems).values(
+            args.daily_items.map((item, index) => ({
+              itemKey: item.key,
+              title: item.title.trim(),
+              detail: item.detail,
+              sortOrder: index,
+            })),
+          ),
+          db.insert(schema.planMeta).values({ key: PLAN_META_SEEDED_KEY, value: "1" }).onConflictDoNothing(),
+        ]);
+      } catch {
+        // The batch rolled back: the old plan is untouched. Report a
+        // retryable failure instead of throwing — the editor keeps
+        // its local draft and offers 保存计划 again.
+        return { ok: false, forbidden: false, error: "保存失败，原计划未改动，请重试" };
+      }
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, error: null };
     },
