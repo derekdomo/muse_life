@@ -379,10 +379,10 @@
 
 以下是本轮真实审查游标；交付主状态、PM 事后结论和补证队列分别记录。历史“待验／唯一下一项／发布门槛”均不产生门控效力，以本文批量结案表和当前单一队列为准。
 
-- 上次已审查源 commit：`cd624c69e71658c1d959fb10a395fb48fad1d4e5`（初始远端c958c3c；提交前并发回灌cd624c6已增量审查，独立运行边界及P0见21:20补录）
-- 上次运行：2026-10-18 21:20 PDT；本轮起始origin/main HEAD为 `c958c3c1d3edee490906c3e860596de1b881bb35`。
-- 上次结论：财务三原源码问题关闭、F0.5日期coverage P1余项入队；并发cd624c6训练回灌新增W-MIG-004/P0迁移外键级联丢组、W-PLAN-SAFE-001/P0计划非原子与初始化竞态、L1-ROUTINE-001/P0双app新routine契约不兼容。前两项synthetic迁移/真实函数已复现，后者源码契约已证实、未冒充真实回调。W4.3源码映射缺口已关闭，运行证据另账。
-- 当前应推动：Muse立即处理W-MIG-004/W-PLAN-SAFE-001/L1-ROUTINE-001三个P0，先保训练存档/计划与双app同步契约；F0.7按A只读定位、F0.5本体及其他独立项继续。W-PLAN-001用户已批准计划正式编号，非新方向审批。F0.5 P1日期coverage Muse10-19；H-LOAD映射已交、评分库未批不开工；W4.3运行补证及原10-19/20/21/22/L1期限不重置，EVID/B不门控，L0.1例外不重开。
+- 上次已审查源 commit：`c6cadac046f267ec8d608abd30e710b28f4348b0`（本轮全量枚举5笔新增源提交，逐项见最新评审）
+- 上次运行：2026-10-19 00:24 PDT；本轮起始origin/main HEAD为 `c6cadac046f267ec8d608abd30e710b28f4348b0`。
+- 上次结论：4组用户行为已交付逐项事后标注；0005保全/F0.5日期coverage/新routine源码不相容原问题关闭，计划失败回滚与双首开重复原复现关闭。W-PLAN-SAFE-001读取混版/晚到seed及旧重复键升级余项、H-ARCHIVE-SAFE-001存档旧版本覆盖/旧日写入、L0-TRAIN-DOC-001真实训练统计文档泄露入队；健康coverage与比较指标沿H-LOAD/H-SYNC原ID继续。缺证不冒充线上失败。
+- 当前应推动：Muse按P0先处理训练计划/升级、readiness存档与训练文档脱敏；F0.7按所有者A现有只读诊断继续、F0.5逐源台账与其余可执行项并行。W6.1/W6.2/H4.6用户直提P1正式回应及方案本轮已交，映射/规则稿10-19、首个共用闭环10-20；评分库5eb11bc已获批准，不再沿用历史“未批不开工”。原10-18/19/20/21/22与P1周上限/L1裁决不重置，EVID/B非门控，L0.1例外不重开。
 
 ### 自动审查记录
 
@@ -393,6 +393,62 @@
 ## 当前执行排序
 
 统一按 P0（数据安全／权限／管道缺陷、线上与存档级 bug）＞用户直提需求＞PM 需求与普通 bug＞证据与文档尾巴排序。W-UI 保存闭环、W-TIMER 已有缺口、健康首屏与全部运动等独立需求按真实队列连续处理，不等 PM 复验；L1/H0 刷新与来源、W0/W1 记录可靠性、H1 公式、H3/W3 周复盘等保留既有编号和业务边界，以真实技术依赖决定实现次序，不能将旧待验框当依赖。H4/W5/F3 已批准候选仍入 backlog，看房暂缓候选保持所有者决定；新方向提案与队列并行，实施先等所有者拍板。
+
+## 2026-10-19 00:24 PDT PM 增量复验与产品推进
+
+指标截点 **2026-10-19T07:24:36Z**。清洁main e473252，fetch后安全ff至起始origin/main **`c6cadac046f267ec8d608abd30e710b28f4348b0`**；旧源码游标cd624c6之后完整枚举：e473252为上轮PM-only，新增 **`5eb11bc8a3da483c0de08e5088795932d42a9b90`**（评分库存档批准/W6.1）、**`ff5e76cbc4c3879aa7f6dc254cd1a01defde55b7`**（W6.2/H4.6用户需求）、**`3fb6851ebec391b36b451ad316533e335b2ae96f`**（routine/存档交付记录和脚本）、**`018e2ef11a189dd417e5c1795fd6ac9cdccd9aff`**（三app修复/健康源码回灌）、**`c6cadac046f267ec8d608abd30e710b28f4348b0`**（迁移补证）。各笔范围/diff/changes与root/health/workout/finance AGENTS已读；独立追踪输入→owner/批准内部通道→并发→SQL/迁移→返回→页面，无未审增量。
+
+### 用户可见增量与两项指标
+
+- **本轮交付用户可见增量4组**：计划保存失败保旧、两个home routine原义进入健康、readiness存档趋势、财务日期coverage明确已知/未知。此为交付行为分组，不代表整项无缺陷；计划及存档仍有下列问题。0005预防性保全、旧健康源码回灌、文档/能力映射不另计增量。Muse申报space-6/4/3经builder上线，本PM无builder/invoke_action，独立新增线上生效确认0、所有者新增使用确认0；不称用户已看见。迁移“线上未丢失”仅构建方申报，不复制真实统计充证据。
+- **全队列中位等待不可计算**：缺各条queuedAt/真实startedAt；新增完整已开工样本n=0。上轮三个P0虽有精确入队时刻，交付/构建时刻不能代替实际开工；本轮新问题入队时刻为2026-10-19T07:24:36Z，其实际开工未知，不混入未开工样本、不把新增样本0解释为空积压。
+
+### 全批事后标注：保留ID、SHA、A/B及原判据
+
+| ID / 源SHA / 分级 | 已验证和关闭范围 | 有问题／同队列后续 |
+| --- | --- | --- |
+| W-MIG-004 / 018e2ef+c6cadac / A | 实际0005在FK ON/OFF下保留synthetic父子ID/内容、active/completed/initializing与null/0、零孤儿；逐语句中断包事务后旧库不变。**原父表重建丢子组源码返工关闭** | 原生产部署/旧构建识别新routine兼容及不删表回退证据仍EVID，不伪称“0004仅加法”。c6迁移器FK OFF及无损核查为Muse证据；不再请求无事实依据的恢复裁决。另有旧重复计划键导致0005升级拒绝，归W-PLAN-SAFE-001下列余项 |
+| W-PLAN-SAFE-001 / 018e2ef / A | 实际updatePlan全部7个batch语句失败注入均typed失败且旧版字节不变，owner/guest/null控制通过。**原分步删除失败丢旧计划关闭**；新增唯一约束和batch seed解决同默认双首开重复机制 | **原ID有问题**：getPlan跨表读取可混版；已检查无marker的晚到seed可污染先保存的用户计划；0005旧重复键升级拒绝。原并发/初始化/旧档矩阵继续，详下方，不因部分修复重新打开已修分项 |
+| L1-ROUTINE-001 / 3fb6851+018e2ef / A | 两侧真实声明均含五值；prompt逐字保留、labels/时间线/周消费可审，persist42、units25、周比较25、周coverage23通过。**原两新routine源码契约不相容关闭** | Muse申报真实Zod/沙箱合法保存回读与未知值拒绝；本PM本地无Zod/SDK，未独立运行原53项。原合法来源→schema→回调/落盘/页面A证据归EVID，不能称静态枚举即全链通过；指定身份例外不扩大 |
+| H-LOAD-001-D1 存档 / 5eb11bc批准、3fb6851+018e2ef交付 / A数据+B呈现 | **所有者已批准，替代历史未批建议**。实际0006为加法表；实际trend函数仅从各自日期取分、缺口保持，日期唯一upsert实现可审 | **有问题**：无版本守卫的存档可回退、旧数据日期可被新开页写成“当时”历史，H-ARCHIVE-SAFE-001/P0。批准方向继续，修安全边界不重请方向批准 |
+| F0.5 日期coverage / 018e2ef / A+B | 交付facts-card在保持fixtures/断言下以Node提取器适配132/132；另实际sourceLedgerRows已知/未知/多日/null对照及输入不变控制通过。两旧fallback改为未知。**上轮部分账户日期扩成整个来源日期P1关闭** | F0.5服务端逐源coverage/最后成功台账与F0.7真实刷新/逐笔对账仍进行中；页面修复不等于来源恢复。未变finance服务端hash复用已过检查 |
+| H-SYNC-DIVERGE-001 / 018e2ef / A+B | 健康旧回归失败已独立复现；列表排序/保null与0、七日事实冲突/完整日边界等真函数行为仍成立，多处失败为字符串/变异匹配失效 | **不能全归脚本过时**：weekLoad移除未定位coverage的降级与丢上周绝对值是原判据偏差，沿H-LOAD原ID P1/A+B；其余用逐项差异表对账，素材/排列/中文标签等B形式不门控 |
+| 其余旧已交付 / 原SHA / A-B | 训练start66/receipt36/autosave69通过；既有F1.6/F1.1/HH0/健康关闭事实保留 | 无新代码/运行证据的原EVID不重复测、不重开源码；看房新方向仍所有者暂缓 |
+
+### Bug单：两项新独立ID、两个原ID余项
+
+**W-PLAN-SAFE-001 / P0 / A计划存档并发 / 018e2ef，workout-log/server/src/actions.ts:254–288、1564–1598，drizzle/0005末尾唯一索引 / Muse立即、目标10-19（原10-18安全目标已跨日）。** 实际handler/原迁移内存SQLite受控复现：(a) getPlan读完旧exercises后令合法updatePlan整批保存新版，再继续schedule/daily读取，返回旧动作＋新排期/微练；(b) 首开seed已查无marker、暂停在batch前，先让首次合法用户保存（包含synthetic自定义key、移除默认动作）成功，再恢复seed，onConflictDoNothing只避同key、把已移除默认动作重插进保存版；(c) 在原0001→0004允许的合法旧库插入同routine/key两行（旧并发初始化可达），实际0005唯一索引失败，整包回滚且两旧行保留，**并非本轮数据丢失/生产已存在重复的断言**。预期只读取完整同一版本，初始化不能在已保存版本后落默认；旧库升级保全/诚实冲突，不能静默任择/删除冲突行。影响编辑页/开场与已存计划不一致、用户删掉的动作复活，旧重复档无法升级。修法使用同一读快照/版本整套读取；在seed写入同一原子仲裁里判marker且失败者零模板写入（不能在插默认后才抢marker）；升级兼容旧重复键，保留原记录/冲突信息，需选择时明确反馈，禁止未经批准覆盖用户数据。沿原首次矩阵一次列齐：每语句失败/两保存/跨每个读取边界/首开seed与首次保存和开场交错、空/定制/重复旧档及journal防重/合法与非法/owner三态/每日完成历史与既有workout不变；返回和新训练均整版，失败保草稿。原失败回滚和普通双首开已修不重开，实际SDK/Drizzle batch语义与UI实测仍EVID。
+
+**H-ARCHIVE-SAFE-001 / P0 / A新增历史存档安全，关联H-LOAD-001-D1 / 018e2ef，health-dashboard/server/src/actions.ts:998–1014、1174–1188→readiness_history→WhoopHero趋势 / Muse立即、10-19。** 实际archiveReadiness＋原0006内存SQLite，用明确synthetic同日score8/version18:00先写，再让早读计算score3/version16:00晚写，日期唯一行最终回退为3/16:00；getDashboard每次独立读快照后计算再调用，旧读取和新读取交错可达，主快照CAS不保护历史表。另实际函数接受synthetic旧日期2000-01-01并新增行；真实handler把health.morningReference.date或dataDate+1直接作为存档日期，不核对LA今天，旧快照开页可回填/改写已过去日期。预期批准范围仅向前记录**当日实际显示计算**，旧日保持缺口/原存档，新版本不被晚到旧计算覆盖；实际会把现在对旧数据的计算包装成过去分数，误导趋势。修法保留主响应但存档限定已证明的当日日期，日期异常/旧/未来诚实降级；按健康快照/影响评分的晨检等输入版本及同日计算次序原子仲裁，不能只比较健康version却忽略同version晨检变化。固定判据：旧/未来/跨LA午夜/DST、首开旧快照零回补、既有旧行不改、同日新旧乱序/相同输入幂等/同版晨检变化、null分/首次并发、次日新增且缺日不补、失败主响应保留且台账脱敏、owner/guest/null零越权、旧构建忽略新表不删数据。合法日期对应、输入版本/算法口径和采用哪次同日值可查；不为修复擅自重算/删除既有生产历史，已污染行先给保全方案、必要裁决。
+
+**L0-TRAIN-DOC-001 / P0 / A训练隐私文档 / c6cadac，changes.md末节W-MIG-004生产补证＋plans同段 / Muse立即、10-19。** 新增交接把真实生产训练场次/组数、完成/初始化分布、单场组数范围和迁移前时序写进跟踪文档，标“脱敏计数”仍非synthetic；本单仅记录类别，**不复制任何原值**。预期只保留不变量/通过失败、核查方法与私有运行证据引用，真实明细/统计留授权私有通道；影响个人训练足迹进入Git及下游交接。PM已在可改plans移除这批真实统计并保留无损申报/方法/局限，Muse清理changes对应段。验证一次列齐：本批原数值语境片段当前跟踪文本零命中、不是将真实值改标签synthetic，原ID/交付SHA/不变量/失败语义仍在，新增差异无个人训练数值/标识；不改生产数据/不重写Git历史，历史已有暴露如实保留，额外历史治理交所有者。
+
+**H-LOAD-001＋H-SYNC-DIVERGE-001 / P1 / A覆盖/比较口径+B呈现 / 018e2ef，App.tsx:622–645、742–777→WhoopHero / Muse10-19。** synthetic实际weekLoad：两期每日行齐、strength周coverage齐，但coverageIncomplete=true且未提供“哪一查询/哪一天缺覆盖”；当前仍sufficient=true/环比0/绿档，并输出“窗口外有日期覆盖不完整，不影响本周对比”。daily行存在不证明session查询完整，单一flag不能证明缺口在窗口外。预期未知覆盖不得断言无关/完整比较，保留已知事实；修法有可验证窗口/来源coverage时按证据定位，无此字段时保守降级，不默把flag定位到今天。另真实factsDetail已删上周绝对值，只保本周＋百分比，偏离已关闭“两期三指标三环比”的现有判据；恢复可展开上周同窗绝对数与窗口，首屏可精简。原固定完整/缺日/缺指标/同日跨源歧义/0基数/真假0/低readiness/低置信/单位/周一及缺覆盖矩阵保留，增加本反例定位断言；已修跨源保留、量纲不重开。已批准TRIMP与布局调整若有明确来源按所有者决定对账，单纯旧文字/变异匹配失败只改脚本，不制造新P0。
+
+### 新需求单与产品推进：动作帮助→同源肌群事实→规则计时
+
+**正式回应W6.1 / W6.2 / H4.6，均用户直提P1（高于普通PM P1），Muse负责；原排期从收到时算，不因本轮编号/评审重置。** 本轮已交具体方向方案，首次响应在一个评审周期内、未等待积压。5eb11bc对评分库存档的批准已生效，不再重问；W6/H4亦已批准，既有范围直接做。Muse上轮以三app修复占用/素材与映射独立工作为由顺延，记录为实现进度而非真实前项PM依赖；10-19交共用映射/规则稿，10-20交首个两app共用闭环，全部现有计划动作覆盖逐项列齐，无上限包数，单项素材缺口具体留空并继续其他动作。
+
+本轮研读[OpenGym官方仓库](https://github.com/DuarteSantos8/openGym)README的计划/动作帮助/肌群三种视图设计：可借鉴“编辑模板—训练中解释—回顾分布”的信息组织，保持现有计划频率、稳定动作key与W1规则，不复制代码/媒体；不把其功能列表当Life已交付。以下为Life本轮具体设计：
+
+| 位置/动作 | 交互与数据决策 | 空/缺/部分与完成判据 |
+| --- | --- | --- |
+| W6.1计划页 | 当前生效版与草稿明确分开；建议解释沿W1同源历史，动作帮助可从计划和训练卡同入口打开；本次不改频率/渐进算法 | 保存/读回失败保旧版与草稿，不用默认值掩盖冲突；在途训练继续其创建时动作快照 |
+| W6.2当前动作卡 | 名称旁“动作与肌群”折叠入口，先文字要点/主要与次要肌群轮廓，示意媒体点击后加载，可静态退化、无自动播放；帮助不打断组输入/计时/保存，返回焦点到入口 | 全部现有稳定exercise_key列覆盖；自定义/未知key写“尚无映射/示意”及对应名称，不按相似名称猜图。素材逐项来源/授权/版本可追溯，缺图不阻塞已可用动作帮助 |
+| 共用映射 | space-6维护唯一动作key→主要/次要肌群/映射版本/素材引用与状态；健康经现有训练摘要通道消费同版映射与原训练key，不各建一份手工表，不新增身份例外 | 名称改动保key，映射更新不重写训练事实；未知key、旧快照无映射、版本不匹配显式coverage“已映射x/y”，不能据无映射说没练 |
+| H4.6肌群页 | 身体轮廓＋同等可读列表；点肌群显示末次已完成训练、近7个LA日窗口、相关动作/主次角色、已完成组数、已测容量与未测组。只计completed组，active另示进行中、不冒充已完成 | 先统一单位再求相关动作容量；同一动作关联多肌群会重复归属，明确不可把肌群数值相加当全身总容量，不编分摊权重。重量缺失的自重/计时动作仍有训练事实，容量未知不当0 |
+| H4.6修复进度 | 与readiness分开标“参考间隔计时”，规则为clamp(距末次已完成训练小时/T,0,1)，T须有明确可查规则来源/版本；展示最后训练时间和T | synthetic T=48h、已过24h仅是50%计时示例，**不是实际恢复测量或本用户推荐窗口**。T/末次时间/来源coverage未知则“无法判断”，不显示100%或恢复完成；可用“已到参考间隔”代替医学结论，规则变动不回写训练/评分 |
+
+产品判断：用户训练中最需要“这个动作怎么做/练哪里”，健康页最需要“最近哪些部位有训练事实、哪些依据缺失”。先交共用key和可解释事实，再显示有规则出处的计时；不能用漂亮肌群热图把同步缺口变成全身恢复。财务F0.7按A只读首断点继续、保旧事实/显式月份缺口，F0.5来源台账继续；看房既有正确性可执行，新方向仍暂缓，均不等待W6/H4或PM签名。
+
+### 证据、上线事实、固定要求及期限
+
+- 独立本地**49项synthetic控制/预期缺陷复现通过**：实际完整workout Actions/seed/getPlan/updatePlan、原0001→0005内存SQLite、受控SQL builder与原子batch adapter；actual archive/trend、sevenDayFacts、weekLoad和finance sourceLedgerRows。**不是SDK/Zod/真实Drizzle/libsql/React/artifact实测**；adapter按声明的batch原子语义执行，另由Muse证明平台语义。没有业务/生产数据写入。临时提取器末尾注释吞返回、fixture缺historySleeps两个工具问题已修，pua-debugging用于核对原函数依赖/最小反例，不计产品缺陷。
+- 原生通过：训练66/36/69、健康persist42/units25/week-comparison25/week-coverage23/steps展示。finance原132脚本因缺TypeScript包不能原样启动，保留原fixtures/断言、仅用Node stripTypeScriptTypes替代AST提取后**132/132通过**。本PM未独立跑Muse53/69/672全套，不重复已知缺依赖或用桩称schema实测。健康旧脚本all-workouts13/20、hero11/20、unified28/34、seven-day44/52已复跑，所有失败逐项分账，不能宣称健康全套绿。
+- 每笔及聚合Gate通过：1/0/0、1/0/0、2/1/1、17/2/13、2/0/0；聚合18文件/3脚本/14实现，diff检查通过。0005父子保全/plan_meta/唯一索引、0006存档表均A类，不以B形式关闭migration。兼容/回滚沿保数据构建方案；旧构建不识别新routine的事实不可省略，回滚不删新表/历史。无builder/invoke_action、不运行本地build/装依赖/.space-build/app.db；上线继续既有授权。
+- **期限不重置**：F0.7真实任务链/对账及F0.5本体原10-18已超目标，责任Muse，继续A只读诊断；本轮无新任务读取/回调定位事实，不冒称竞态修复解决根因。此前A裁决保留不重问；下一需真实首断点/能力缺口的脱敏可复核说明，21:20与本轮已连续两轮无新增首断点证据，达到升级条件：Muse须在10-19本轮交具体失败步骤/现有只读调用结果和最小观测方案，供所有者裁决是否补充该项只读能力或接受持续降级；未交具体方案前不能要求所有者空手授权。原A不盲刷已定、不再重问同一A/B，不默认扩权。其他工作不停。原10-19/20/21/22/P1周上限及L1排期裁决保留，W4.3运行补证非前置，H-LOAD原方向时钟不清零。
+- 历史cde0436最老流水裁剪至20条；原负荷未批准时中性降级的关闭事实保留，后续批准取代旧流程，不能自行发明未定公式/等级；来源缺失/损坏/partial/旧数据/unknown和真0保真、健康数据日期与恢复参考日期分列、现有单主行动/disabled/锚点、合法保存回读与五态三视口及发布时间+源码hash替代version判据继续在原ID/EVID保留。截图结构性缺口不重开源码、B形式不阻塞。
+- PM仅改plans（含所辖隐私脱敏），不改changes/业务/schema/素材/真实数据；有实质文档修改才提交。提交前fetch动态枚举、PM-only Gate、SHA/push结果记automation memory。
 
 ## 2026-10-18 21:20 PDT PM 增量复验与产品推进
 
@@ -455,7 +511,7 @@
 
 **Bug单 L1-ROUTINE-001 / P0 / A跨app数据管道 / cd624c6，workout-log/server/src/actions.ts:5 / health-dashboard/server/src/actions.ts:61–77、STRENGTH_SYNC_PROMPT→saveStrengthTrainingSnapshot / Muse立即、10-18当轮。** 源码契约反例：训练侧routineSchema已产出home_posture/home_snowboard，健康strengthWorkoutSchema的routine枚举仍仅push/pull/legs；既有同步要求原routine与全部训练，不授权静默丢/改新类型。新增任一home记录按当前契约原样进入健康payload会被schema拒绝；已用两边真实声明集合差校验确认这两个值不相容，**未运行实际SDK/save action或断言线上已失败**。影响一条新训练可能使整个力量快照不能更新，或agent被迫错误映射/过滤而扭曲coverage。修法同步生产者/消费者附加兼容新原义routine，审计health/workout标签、周统计、空/旧payload与未知未来值边界；新类型不得映射成push/pull/legs或丢掉后假称完整，不新增身份例外。固定判据一次列齐：三旧＋两新各自/混合合法synthetic snapshot经实际schema保存回读，力量次数/单位/容量/完整周覆盖对账、仅新类型/无数据/旧快照、未知类型明确失败保旧、双源/周/时间线显示不崩、匿名批准内部通道及human owner门禁不变；给合法同步来源→回调→保存→页面的脱敏证据，不能仅改prompt或静态枚举即关A类。允许旧三种继续同步的保守兼容方案须明示新类型缺口、不能把部分当全量。
 
-**实现方交付登记 2026-10-18 23 时 PDT（W-MIG-004 / W-PLAN-SAFE-001 / L1-ROUTINE-001 三个 P0）：三项均已在 artifact 上线并回灌本仓，PM 结论以其后续评审为准。** (W-MIG-004) 新增迁移 0005（子表保全模式）：重建 workouts 父表前先全量复制 workout_sets 到备份表，父表保留原 id/五值 routine CHECK/initializing/索引，重建后按原 id 回填缺失子组，guard 表校验父子计数与零孤儿、失败整条迁移回滚，最后删备份表；未向生产重跑 0004。0005 本身即按此模式执行一次父表重建，若 0004 执行时 FK 为 ON 已丢失子组，备份源仅为现存行、已丢失行不在本迁移恢复范围（无可验证备份前不伪造回填，恢复方案待所有者裁决）。 (W-PLAN-SAFE-001) 平台 db 句柄无 transaction 方法（SpaceDb 类型已核），改用原子 db.batch：updatePlan 三表替换＋plan_meta 标记同一 batch，任一语句失败整批不生效、旧计划完整保留且 handler 返回可重试 ok:false；ensurePlanSeeded 同 batch 种子＋标记、各表唯一约束（新增 plan_exercises(routine, exercise_key) 唯一索引＋既有 schedule/day 与 daily item_key 唯一索引）配 onConflictDoNothing 仲裁；种子判定只认 plan_meta 标记、已保存计划删空不再被默认模板覆盖。仓库 validate-plan-safe 69/69 全过：含 0004 危害复现、0005 在 FK ON 下父子全保留、每个 batch 位置毒化注入旧计划字节级不变、双并发保存不混版、保存中 getPlan 只见完整旧版、双首开只一份模板、非 owner 零读写。 (L1-ROUTINE-001) health strengthWorkoutSchema routine 枚举扩为五值、原值保存回读，STRENGTH_SYNC_PROMPT 写明五值逐字保留不得改写/过滤，周统计/weekLoad/统一时间线消费点已审计同步，routine 标签 home_posture=「在家 A · 体态」、home_snowboard=「在家 B · 单板」；未知未来值仍 schema 拒绝保旧快照。仓库 validate-routine-archive 53/53、persist-race 42/42 全过。如实保留：健康 client 回灌同时带入线上自 2026-10-16 起未回灌的客户端分歧（workout 类型中文标签映射、游泳/全部运动区顺序、TRIMP 负荷呈现与趋势改读存档等），仓库四组旧脚本（all-workouts 13/20、hero-status 11/20、unified-hk 28/34、seven-day-facts 44/52、whoop-scores 部分断言）对新源码不再全过——已另立 H-SYNC-DIVERGE-001 对账项，不冒充全套回归通过；其余健康脚本（units 25/25、week-comparison 25/25、week-coverage 23/23、steps-display PASS）全过。 **W-MIG-004 补证（构建回执 2026-10-18 23 时送达）：构建方只读核查生产库脱敏计数——workouts 7、workout_sets 106、completed 7、孤儿子组 0、foreign_key_check 空，7 个 workout 均在 0004 journal 时间戳之前开始且合计持有全部 106 组、无零组 workout；平台迁移器源码证实迁移实际在 foreign_keys=OFF 的单一事务内执行（先 OFF、BEGIN、全部语句、COMMIT、finally 恢复 ON），这正是 0004 未丢子组的原因，与计数互相印证。结论：未发生线上丢失，恢复裁决不需要；0005 子表保全模式仍作为此后父表重建的固定做法。另：本轮安全评审对 space-6 getDashboard 无身份只读通道的 high finding 即所有者 2026-10-17 已拍板的 L0.1 例外本体，本轮未扩大未改动，按既定裁决维持。**
+**实现方交付登记 2026-10-18 23 时 PDT（W-MIG-004 / W-PLAN-SAFE-001 / L1-ROUTINE-001 三个 P0）：三项均已在 artifact 上线并回灌本仓，PM 结论以其后续评审为准。** (W-MIG-004) 新增迁移 0005（子表保全模式）：重建 workouts 父表前先全量复制 workout_sets 到备份表，父表保留原 id/五值 routine CHECK/initializing/索引，重建后按原 id 回填缺失子组，guard 表校验父子计数与零孤儿、失败整条迁移回滚，最后删备份表；未向生产重跑 0004。0005 本身即按此模式执行一次父表重建，若 0004 执行时 FK 为 ON 已丢失子组，备份源仅为现存行、已丢失行不在本迁移恢复范围（无可验证备份前不伪造回填，恢复方案待所有者裁决）。 (W-PLAN-SAFE-001) 平台 db 句柄无 transaction 方法（SpaceDb 类型已核），改用原子 db.batch：updatePlan 三表替换＋plan_meta 标记同一 batch，任一语句失败整批不生效、旧计划完整保留且 handler 返回可重试 ok:false；ensurePlanSeeded 同 batch 种子＋标记、各表唯一约束（新增 plan_exercises(routine, exercise_key) 唯一索引＋既有 schedule/day 与 daily item_key 唯一索引）配 onConflictDoNothing 仲裁；种子判定只认 plan_meta 标记、已保存计划删空不再被默认模板覆盖。仓库 validate-plan-safe 69/69 全过：含 0004 危害复现、0005 在 FK ON 下父子全保留、每个 batch 位置毒化注入旧计划字节级不变、双并发保存不混版、保存中 getPlan 只见完整旧版、双首开只一份模板、非 owner 零读写。 (L1-ROUTINE-001) health strengthWorkoutSchema routine 枚举扩为五值、原值保存回读，STRENGTH_SYNC_PROMPT 写明五值逐字保留不得改写/过滤，周统计/weekLoad/统一时间线消费点已审计同步，routine 标签 home_posture=「在家 A · 体态」、home_snowboard=「在家 B · 单板」；未知未来值仍 schema 拒绝保旧快照。仓库 validate-routine-archive 53/53、persist-race 42/42 全过。如实保留：健康 client 回灌同时带入线上自 2026-10-16 起未回灌的客户端分歧（workout 类型中文标签映射、游泳/全部运动区顺序、TRIMP 负荷呈现与趋势改读存档等），仓库四组旧脚本（all-workouts 13/20、hero-status 11/20、unified-hk 28/34、seven-day-facts 44/52、whoop-scores 部分断言）对新源码不再全过——已另立 H-SYNC-DIVERGE-001 对账项，不冒充全套回归通过；其余健康脚本（units 25/25、week-comparison 25/25、week-coverage 23/23、steps-display PASS）全过。 **W-MIG-004 补证（构建回执 2026-10-18 23 时送达）：构建方申报只读核查存档完整、无孤儿，平台迁移器以 foreign_keys=OFF 包裹单一事务，故其申报未发生线上子组丢失、无需恢复裁决；PM无生产只读通道，未独立确认。原真实训练统计已由PM脱敏，仅保留不变量结论；changes对应真实统计由Muse按L0-TRAIN-DOC-001移除。0005保全源码已交付，PM独立迁移结果见本轮评审。另：本轮安全评审对 space-6 getDashboard 无身份只读通道的 high finding 即所有者 2026-10-17 已拍板的 L0.1 例外本体，本轮未扩大未改动，按既定裁决维持。**
 
 ### 新需求单补录与训练产品推进
 
@@ -1200,12 +1256,6 @@ HH0.2 bug单全部字段、真实反例、用户影响、修法和一次列齐�
 - [ ] 同类产品调研候选已排入队列：`H4` 5 项、`W5` 3 项、`F3` 5 项（用户 2026-10-13 批准启动）；调研候选 T2/T3 已被 `W3.1/W3.3/W3.5` 覆盖、未重复纳入；看房类候选暂不纳入。
 - [ ] 在实际 artifact 对 P0 做首轮运行验收。
 
-- 2026-10-16 11:49 PDT · `cde0436`（新交付 `e207c4d` / `cde0436`）· `H-UI-001`：**负荷评分降级源码返工关闭；来源条P1局部返工／整项运行待验，不勾选。** 清洁main从1f545a0安全快进，本轮起始远端/审查游标为 `cde0436923e336254735d0bc0373ef91485f0811`；先游标及远端提交/文件范围，忽略1f545a0 PM-only，再读根/health AGENTS、需求、changes.md:256-273及七文件diff。两笔均明确ID/边界/命令/兼容/回滚；仅客户端、验证脚本及文档，无schema/migration、权限/无viewer例外、schedule/callback、刷新/版本幂等变化。追踪既有加载校验→独立strength合并→buildDataStatus/单日readiness→Dashboard/TodayView→WhoopHero及原mutation/轮询消费，不把客户端控制当受信保存或权限运行验收。
-  - **关闭与可保留。** App.tsx:358-380恒返回null/—/slate/评分未确认，完整/真零/缺项/无当日记录均不产旧等级，保留同日事实与缺项原因；:706去掉/21，:630对null无状态标记；:723-724纠正单日接口与未审定公式说明。日期/恢复参考分开、独立两来源与一个主入口的接线存在（:647-694、:896、:1072），复用现有mutations与禁用状态/数据状态锚点，未猜跨app深链。交付whoop22/22、hero12/12、weekLoad47/47及其执行变异均退出0；PM另在Node stdin抽取实际strainScore、heroSourceStatus及服务端freshnessFor/buildDataStatus（effectiveStrength仅用受控空返回桩），31个独立synthetic断言通过，覆盖四类中性输入/事实、日期、unknown/重试和下述反例。全部属函数控制，无schema/SDK/action/artifact运行。
-  - **P1首层信息保真返工。** App.tsx:649-656没有消费coverageIncomplete或来源detail。复现：合法健康来源存在，strengthLoad.state=corrupt；实际buildDataStatus（actions.ts:933-934）给detail“训练快照损坏，等待重新同步”、freshness=missing、updatedAt=null；实际hero却输出“还没有 · 尚未同步”，与从未同步的来源完全相同，丢失损坏原因。已有data-status详情保留该原因，首层不应改写成从未同步。另coverageIncomplete=true且更新时间新鲜时，首层仍只有“最近完整日/新鲜”与查看入口，没有覆盖缺口提示；“完整日”可指日历窗口，不能让用户误认为数据已完整。预期复用已有安全detail/状态与coverage标志，明确区分缺失、损坏、覆盖不完整和更新时间；未知仍未知。只修现有客户端来源条及必要消费，不加状态库、接口、同步链或新公式，保留当前缺失/过期重试路径。下一必须交真实producer→hero的损坏/未同步对照、partial+fresh控制、正常/旧数据回归与可见消费断言；不能只加字符串存在检查。本次是新来源条首次独立返工，旧负荷降级有进展，不触发两轮无进展升级。
-  - **发布对应与后续。** changes新增明确承认线上strain步数取daily.steps、仓库取steps.value；同规格回灌不能证明最终线上事实/源码一致。下一给可复核发布引用/时间与最终实际源码hash/差异映射，确认沿既有dataDate口径及降级；平台无version号可用上述替代，不要求编造编号。当前工具无Muse artifact builder/invoke_action，owner五态三视口与主入口运行仍待验，不重列其他无新证据旧阻塞。只推动上条原子修复，然后按现有队列推进；P0权限/隐私和H-LOAD历史/对账门槛保留。
-  - **检查与交接。** Gate `ab1b016..cde0436`通过（7files/3scripts/5implementation）；两笔逐段Gate通过（5/2/3、5/1/3），diff --check通过。七个受影响blob的UUID/INITIAL/固定device/个人路径及新增差异命中均0，仅窄扫描，不是全面个人数值清零证明。未本地build、安装依赖、访问app.db或重复缺依赖旧命令。本轮只改plans、游标为起始远端；仅保留最近20条，提交前再次fetch保护并发。
-
 - 2026-10-16 14:51 PDT · `fbd1d09` · `H-UI-001`：**来源条两处源码返工关闭；整项运行待验，不勾选，无新源码返工。** 清洁main从459adc6安全快进到本轮起始远端/审查游标 `fbd1d0992dd7e5d62038ec0a29207ad80dae7a80`；先读游标和远端提交/文件范围，忽略459adc6 PM-only，再读根/health AGENTS、plans、changes.md:274-282及五文件diff。交付有准确ID、范围、命令、兼容与回滚，仅客户端/脚本/文档，无schema/migration、权限/无viewer例外、schedule/callback、刷新/保存/幂等变动。
   - **实现与独立验证。** App.tsx:657-669保留missing来源现有安全detail、单独输出coverageIncomplete；:691-705在来源行后/主按钮前实际消费覆盖提示，旧同步优先级/disabled/滚动目标不变。追踪独立加载/校验→effectiveStrength→buildDataStatus→getDashboard→Dashboard/TodayView→WhoopHero；健康无效时走StrengthOnlyView/空态而非hero，未把纯函数健康损坏断言声称为该页面运行。交付脚本抽freshnessFor加指定detail，不是完整buildDataStatus；PM另独立抽当前真实effectiveStrength/freshnessFor/buildDataStatus及hero/格式函数，以合成health/strength加载状态完成24断言（真实producer两来源损坏/从未同步、正常、partial+fresh、stale优先级、legacy、空readiness/未知状态、输入不变、覆盖提示消费位置/按钮接线）。两处上轮反例不再复现；不修改schema/action也未执行React/artifact，不把受控调用当运行成功。
   - **运行边界与下一项。** changes明确同规格回灌未逐字核对线上源码；旧线上daily.steps/仓库steps.value差异尚无最终映射。仍需可打开发布引用/时间+最终实际源码hash/差异对应（无version号允许此替代）、匹配脱敏owner五态三视口前后截图与主行动实测。新增“本上下文getDashboard返回数据”仅为实现方探针摘要，没有身份/版本证明，不能关闭原P0或产品门槛；本轮无可用Muse builder/invoke_action，运行待验保留，不重复旧阻塞。无两轮无进展；下一仅H-WORKOUTS-001历史页全部类型列表，使用现有30天historyWorkouts、保留游泳专区/图；实际消费断言覆盖正常/空/仅非游泳、null与0、跨类型日期排序，再给匹配三视口/同窗来源对账；同ID时间线随后，不新增源/同步/公式或新需求。
@@ -1262,3 +1312,5 @@ HH0.2 bug单全部字段、真实反例、用户影响、修法和一次列齐�
 - 2026-10-18 18:18 PDT · `62e7ea1`（201905b/06c6a88/62e7ea1，全SHA见正文）· **财务回灌缺口及F1.6原源码余项关闭；刷新并发/冲突现金/来源标注三原ID问题入队，A只读诊断边界与来源交互定稿。** 本轮新增上线行为0、补验上轮4组，owner确认0；全队列中位等待缺真实时间戳不可算、两类新增完整样本各0。适配617/617+独立18项合成控制通过，非原Bun/TypeScript/SDK/Zod/Drizzle/React/工件运行；实际Actions与原迁移Node内存SQLite、受控SQL adapter，无生产库访问。三逐段/聚合Gate与diff过；201905b财务15文件/三加列可审，5登记hash前缀核对。所有者A已生效不重问；目录可列不证明任务读取，旧generation=null仍legacy兼容，真实刷新/对账未恢复。F1.1冲突P1原10-20，F0.7/F0.5 P0今天10-18、健康能力映射今天、W4.3映射10-19及原10-21/22/L1裁决保留，B/EVID不门控。裁剪最老8a0c442但缺失/零值/公式边界/三视口及源码发布映射固定要求保留，20条流水，仅plans；PM-only Gate/正常push及最终SHA记memory。
 
 - 2026-10-18 21:20 PDT · `c958c3c`＋并发`cd624c6`（完整SHA/范围见正文）· **财务三原源码反例关闭；训练回灌新增三个P0已入队，W4.3源码映射缺口关闭。** 初始c958/结束源游标cd；仅本PM plans暂存后安全ff/恢复无冲突。财务适配322/322＋独立16项；训练原生receipt36/start66/autosave69通过，另三旧脚本各一字面失败/D1提取失败如实保留，不等于产品P0。独立16项真实迁移/计划handler控制＋2 seeder断言：0004外键ON级联丢子组、计划分步替换失败丢旧排期/并发seed重复；新routine与健康枚举两值不兼容为源码契约事实、未冒充实际回调。W-MIG-004/W-PLAN-SAFE-001/L1-ROUTINE-001 P0/Muse立即10-18；正式W-PLAN-001既有用户需求编号/当前生效与草稿交互。F0.5日期coverage余项P1/10-19，F0.7 A只读定位不重问，其他可执行工作继续；H-LOAD映射已交，评分库未批不开工。新行为3组交付/申报上线，PM新线上0/owner新确认0，回灌不重计；总体等待缺时间戳不可算，新增已开工完整n0，3新P0未开工截点刚入队0不混旧。原期限/固定A判据/20条流水与L0.1例外保持，仅plans，逐段Gate/diff通过，提交/push记memory。
+
+- 2026-10-19 00:24 PDT · `c6cadac`（5eb11bc/ff5e76c/3fb6851/018e2ef/c6cadac）· **4组行为交付逐项标注；迁移保全/日期coverage/五值契约源码关闭，计划并发和存档安全P0、真实训练统计脱敏入队。** 起始origin c6cadac完整枚举，49独立synthetic控制＋finance适配132通过，训练原生171/健康115＋steps通过；旧脚本失败逐项区分，不称SDK/React/工件实测。计划原ID读混版/晚seed/重复旧档升级、H-ARCHIVE旧版覆盖与旧日写入、L0-TRAIN-DOC真实统计及H-LOAD coverage/比较原余项均给复现/修法/一次全判据，已修分项不重开。W6.1/W6.2/H4.6用户直提P1正式回应，共用映射/动作帮助/肌群事实与参考间隔计时方案已交，10-19稿/10-20首闭环。Muse三app上线申报、PM线上和owner新确认0；全队列等待缺queuedAt/actualstartedAt不可算、新完整开工样本0。F0.7 A诊断/原期限不重置，其余可执行不停，L0.1例外不重开。PM只plans、20流水、原固定A判据保留，无build/依赖安装/app.db，Gate/正常push及最终SHA记memory。
