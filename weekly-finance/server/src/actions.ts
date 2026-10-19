@@ -570,7 +570,12 @@ function normalizeRawMonths(rawMonths: RawMonth[]): MonthNormalization {
 
 function monthEnd(monthKey: string): string {
   const [year = 0, month = 0] = monthKey.slice(0, 7).split("-").map(Number);
-  if (!year || !month) return "";
+  // The month must be a real calendar month BEFORE any Date is
+  // constructed: Date.UTC rolls an out-of-range month into the
+  // neighbouring year (2025-13 -> 2026-01-31), which would mint a
+  // legal-looking date out of an illegal one. An illegal month
+  // has no month end at all.
+  if (!year || month < 1 || month > 12) return "";
   return new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
 }
 
@@ -582,9 +587,24 @@ function monthEnd(monthKey: string): string {
 // day; a real calendar date stands as itself; anything else
 // (e.g. 09-31) is invalid and normalizes to null, which never
 // equals a snapshot date.
+// Date-validation fix (F0.6/F1.6, PM 2026-10-19): the YYYY-MM
+// branch must validate the month (01..12) BEFORE monthEnd builds
+// a Date — Date arithmetic otherwise rolls an illegal month
+// into a legal balance date (2025-13 -> 2026-01-31, 2025-14 ->
+// 2026-02-28), and every consumer of this one function (cashflow
+// endpoints, investment reconciliation, available cash) would
+// treat the rolled date as fresh evidence. Months 00/13/14/99,
+// malformed strings and illegal explicit dates all normalize to
+// null here: no date eligibility, named as a date problem by the
+// gates, never repaired, never backfilled, and never written
+// back to stored history (read-path normalization only).
 function normalizeBalanceDate(balanceDate: string | null | undefined): string | null {
   if (balanceDate == null) return null;
-  if (/^\d{4}-\d{2}$/.test(balanceDate)) return monthEnd(balanceDate) || null;
+  if (/^\d{4}-\d{2}$/.test(balanceDate)) {
+    const month = Number(balanceDate.slice(5, 7));
+    if (month < 1 || month > 12) return null;
+    return monthEnd(balanceDate) || null;
+  }
   return isRealDateKey(balanceDate) ? balanceDate : null;
 }
 

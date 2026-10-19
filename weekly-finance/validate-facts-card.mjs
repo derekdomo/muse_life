@@ -221,11 +221,11 @@ function extractClientFns(names) {
   for (const name of names) if (!found.has(name)) throw new Error(`client function not found: ${name}`);
   return names.map((name) => found.get(name)).join("\n");
 }
-const BAND_NAMES = ["refreshStatusSymbol", "refreshStatusText", "nextRefreshActionText", "monthAvailabilityFacts", "sourceLedgerRows", "balanceSourceSummary"];
+const BAND_NAMES = ["refreshStatusSymbol", "refreshStatusText", "nextRefreshActionText", "monthAvailabilityFacts", "sourceLedgerRows", "balanceSourceSummary", "isRealDateText", "isValidBalanceDateText"];
 const bandApi = new Function(
   `const exports = {};\nconst currency = { format: (v) => "$" + v };\nconst dateLabel = { format: (d) => d.toISOString().slice(0, 10) };\n${extractClientFns(BAND_NAMES)}; return { ${BAND_NAMES.join(", ")} };`,
 )();
-const { refreshStatusSymbol, refreshStatusText, nextRefreshActionText, monthAvailabilityFacts, sourceLedgerRows } = bandApi;
+const { refreshStatusSymbol, refreshStatusText, nextRefreshActionText, monthAvailabilityFacts, sourceLedgerRows, isValidBalanceDateText } = bandApi;
 check("band: status carries a symbol AND text per state (never color alone)",
   refreshStatusSymbol("running") === "↻" && refreshStatusText("running", true) === "正在更新"
   && refreshStatusSymbol("error") === "▲" && refreshStatusText("error", true).includes("上次成功数据")
@@ -481,6 +481,114 @@ check("per-account rows: cash-scope rows render their own account.balanceDate or
   appSrc.includes("余额日期 {account.balanceDate ?? \"未知\"}") && !appSrc.includes("account.balanceDate ?? data.sourceMonth"));
 check("ledger wiring: coverage is text in the rendered row （数据日期 + coverage wording, never colour alone)",
   appSrc.includes("数据日期：{row.dataDate}") && appSrc.includes("日期已知 ${bankDatedRows.length}/${bankRows.length}"));
+
+// --- F0.5 date-coverage fix (PM 2026-10-19): 日期已知 requires
+// LEGAL date evidence — the client mirror of the server's strict
+// rule. A present balanceDate that is malformed, an illegal
+// month (2025-13/2025-14) or an illegal day (2026-02-30) used to
+// count as known 1/1 and be worn as the source date; now it is
+// counted separately as 日期无效， missing/empty stays 日期未知，
+// the denominator keeps every bank row, and stated dates/spans
+// are built from the valid dates only. Synthetic values only.
+// --- the shared strict rule itself ---
+check("date rule: legal forms are evidence (explicit date, legal YYYY-MM, leap day, year boundary)",
+  isValidBalanceDateText("2026-09-30") === true && isValidBalanceDateText("2026-09") === true
+  && isValidBalanceDateText("2024-02-29") === true && isValidBalanceDateText("2025-12") === true
+  && isValidBalanceDateText("2025-01") === true);
+check("date rule: illegal months (00/13/14/99), illegal days, bad formats, empty and missing are NOT evidence",
+  isValidBalanceDateText("2025-00") === false && isValidBalanceDateText("2025-13") === false
+  && isValidBalanceDateText("2025-14") === false && isValidBalanceDateText("2025-99") === false
+  && isValidBalanceDateText("2026-02-30") === false && isValidBalanceDateText("2023-02-29") === false
+  && isValidBalanceDateText("nonsense") === false && isValidBalanceDateText("2026-9-3") === false
+  && isValidBalanceDateText("") === false && isValidBalanceDateText(null) === false
+  && isValidBalanceDateText(undefined) === false);
+// --- the PM counterexamples, one row each ---
+const covSingleInvalidAccounts = [
+  { type: "account", live: false, value: 1200, balanceDate: "2025-14" },
+];
+const covSingleInvalid = bankRowOf(covSingleInvalidAccounts);
+check("coverage (PM counterexample): a lone 2025-14 row reads 日期已知 0/1 with 日期无效 — never 1/1, bad value never worn as the date",
+  covSingleInvalid.dataDate === "未知（日期已知 0/1；1 个账户日期无效）"
+  && !covSingleInvalid.dataDate.includes("2025-14"));
+const covSingleBadDay = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "2026-02-30" },
+]);
+check("coverage (PM counterexample): a lone 2026-02-30 row is invalid evidence too （日期已知 0/1)",
+  covSingleBadDay.dataDate === "未知（日期已知 0/1；1 个账户日期无效）"
+  && !covSingleBadDay.dataDate.includes("2026-02-30"));
+const covSingleGarbage = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "nonsense" },
+]);
+check("coverage (PM counterexample): a lone nonsense row is invalid evidence too （日期已知 0/1)",
+  covSingleGarbage.dataDate === "未知（日期已知 0/1；1 个账户日期无效）"
+  && !covSingleGarbage.dataDate.includes("nonsense"));
+// --- matrix: valid + invalid / all invalid / empty / YYYY-MM ---
+const covValidInvalid = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "2099-09-30" },
+  { type: "account", live: false, value: 3400, balanceDate: "2025-14" },
+]);
+check("coverage: valid + invalid -> the valid date stands scoped 日期已知 1/2, the invalid row named 日期无效 (not lumped into 未知）",
+  covValidInvalid.dataDate === "2099-09-30（日期已知 1/2；1 个账户日期无效）"
+  && !covValidInvalid.dataDate.includes("日期未知") && !covValidInvalid.dataDate.includes("2025-14"));
+const covAllInvalid = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "2025-14" },
+  { type: "account", live: false, value: 3400, balanceDate: "2026-02-30" },
+  { type: "account", live: false, value: 500, balanceDate: "nonsense" },
+]);
+check("coverage: all rows invalid -> 未知（日期已知 0/3；3 个账户日期无效）, no bad value stated as a date, nothing borrowed from asOf/sourceMonth",
+  covAllInvalid.dataDate === "未知（日期已知 0/3；3 个账户日期无效）"
+  && !covAllInvalid.dataDate.includes("2025-14") && !covAllInvalid.dataDate.includes("2026-02-30")
+  && !covAllInvalid.dataDate.includes("nonsense") && !covAllInvalid.dataDate.includes("2099-10-18"));
+const covValidUnknownInvalid = bankRowOf([
+  { type: "account", live: false, value: 100, balanceDate: "2099-09-30" },
+  { type: "account", live: false, value: 200, balanceDate: null },
+  { type: "account", live: false, value: 300, balanceDate: "2025-13" },
+]);
+check("coverage: valid + missing + invalid -> x/y with BOTH the unknown and the invalid counts named",
+  covValidUnknownInvalid.dataDate === "2099-09-30（日期已知 1/3；其余 1 个账户日期未知；1 个账户日期无效）");
+const covEmptyString = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "2099-09-30" },
+  { type: "account", live: false, value: 3400, balanceDate: "" },
+]);
+check("coverage: an empty-string balanceDate counts as unknown (missing-like), never known and never invalid",
+  covEmptyString.dataDate === "2099-09-30（日期已知 1/2；其余 1 个账户日期未知）");
+const covMonthForms = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "2099-09" },
+  { type: "account", live: false, value: 3400, balanceDate: "2099-13" },
+]);
+check("coverage: a legal YYYY-MM counts as known; an illegal YYYY-MM (2099-13) counts as invalid",
+  covMonthForms.dataDate === "2099-09（日期已知 1/2；1 个账户日期无效）");
+const covSpanValidOnly = bankRowOf([
+  { type: "account", live: false, value: 100, balanceDate: "2099-09-30" },
+  { type: "account", live: false, value: 200, balanceDate: "2099-08-31" },
+  { type: "account", live: false, value: 300, balanceDate: "2025-13" },
+]);
+check("coverage: a multi-date span is stated over the VALID dates only, the invalid row named outside the span",
+  covSpanValidOnly.dataDate.includes("2099-08-31 至 2099-09-30") && covSpanValidOnly.dataDate.includes("不一致")
+  && covSpanValidOnly.dataDate.includes("日期已知 2/3") && covSpanValidOnly.dataDate.includes("1 个账户日期无效")
+  && !covSpanValidOnly.dataDate.includes("2025-13"));
+const covZeroInvalid = bankRowOf([
+  { type: "account", live: false, value: 0, balanceDate: "2025-14" },
+  { type: "account", live: false, value: 0, balanceDate: "2099-09-30" },
+]);
+check("coverage: real zero-balance rows stay in the denominator next to an invalid row (1/2, range still covers both)",
+  covZeroInvalid.dataDate === "2099-09-30（日期已知 1/2；1 个账户日期无效）"
+  && covZeroInvalid.range.includes("全部 2 个余额账户"));
+// mutation sensitivity: the pre-fix predicate (balanceDate !=
+// null) counted the lone bad row as known 1/1 and wore the bad
+// value as the source date — the fixed text must differ.
+const oldKnownCount = (accounts) => accounts.filter((a) => a.type === "account" && a.balanceDate != null).length;
+check("mutation: the old != null predicate calls the lone 2025-14 row known (1/1); the fixed ledger counts it 0/1 invalid",
+  oldKnownCount(covSingleInvalidAccounts) === 1 && covSingleInvalid.dataDate.includes("日期已知 0/1"));
+// wiring: the ledger counts through the strict predicate, and
+// the existing per-account detail rows mark a present-but-
+// invalid raw value as （日期无效） for checking — the raw value
+// itself stays visible and no amount is touched.
+check("ledger wiring: coverage counts only strictly valid dates (the shared strict predicate)",
+  appSrc.includes("isValidBalanceDateText(account.balanceDate)") && appSrc.includes("个账户日期无效"));
+check("detail wiring: present-but-invalid balance dates are marked （日期无效） in the monthly-record and cash-scope rows",
+  appSrc.includes("!isValidBalanceDateText(entry.balanceDate)") && appSrc.includes("!isValidBalanceDateText(account.balanceDate)")
+  && (appSrc.match(/（日期无效）/g) ?? []).length >= 2);
 
 console.log(`validate-facts-card: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

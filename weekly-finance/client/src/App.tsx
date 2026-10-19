@@ -233,7 +233,11 @@ export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ labe
 // named inconsistent; accounts without evidence (null, absent
 // on a legacy blob, or nulled by a metadata conflict) are
 // counted and named as 日期未知 — never filled from asOf or
-// the snapshot month. Coverage is text, never colour alone.
+// the snapshot month. A present but ILLEGAL value (bad format,
+// month 13+, a non-existent day) is not evidence either: it is
+// counted and named separately as 日期无效， and only the valid
+// dates form the stated date or range. Coverage is text, never
+// colour alone.
 // Holdings carry no per-source date evidence at all, so their
 // date is 未知 too. With no data at all, no row may claim a
 // save: every result reads 未取得 / 尚无成功快照， whatever
@@ -271,25 +275,41 @@ export function sourceLedgerRows(
   // because its metadata conflicted) stay in the count as
   // date-unknown; they are never filtered out, which is what
   // used to let one dated row speak for the whole source.
+  // F0.5 date-coverage fix (PM 2026-10-19): a present balanceDate
+  // is evidence ONLY under the strict date rule
+  // (isValidBalanceDateText — the client mirror of the server's
+  // normalizeBalanceDate). A non-empty value that fails the rule
+  // (bad format, illegal month such as 2025-14, illegal day such
+  // as 2026-02-30) is counted separately as 日期无效 — never as
+  // known, never shown as the source date, and never silently
+  // lumped in with the merely-unknown rows; missing and empty
+  // values stay 日期未知. The stated date / span is built from
+  // the valid dates only.
   const bankRows = data.accounts.filter((account) => account.type === "account");
-  const bankDatedRows = bankRows.filter((account) => account.balanceDate != null);
+  const bankDatedRows = bankRows.filter((account) => isValidBalanceDateText(account.balanceDate));
+  const bankInvalidCount = bankRows.filter(
+    (account) => account.balanceDate != null && account.balanceDate !== "" && !isValidBalanceDateText(account.balanceDate),
+  ).length;
   const bankBalanceDates = [...new Set(
     bankDatedRows.map((account) => account.balanceDate as string),
   )].sort();
-  const bankUnknownCount = bankRows.length - bankDatedRows.length;
+  const bankUnknownCount = bankRows.length - bankDatedRows.length - bankInvalidCount;
   const bankCoverage = `日期已知 ${bankDatedRows.length}/${bankRows.length}`;
-  const bankUnknownNote = `其余 ${bankUnknownCount} 个账户日期未知`;
+  const bankGapNotes: string[] = [];
+  if (bankUnknownCount > 0) bankGapNotes.push(`其余 ${bankUnknownCount} 个账户日期未知`);
+  if (bankInvalidCount > 0) bankGapNotes.push(`${bankInvalidCount} 个账户日期无效`);
+  const bankGapNote = bankGapNotes.join("；");
   const bankDataDate = bankRows.length === 0
     ? "未知"
     : bankDatedRows.length === 0
-      ? `未知（${bankCoverage}；${bankUnknownNote}）`
+      ? `未知（${bankCoverage}；${bankGapNote}）`
       : bankBalanceDates.length === 1
-        ? bankUnknownCount === 0
+        ? bankGapNote === ""
           ? `${bankBalanceDates[0]}（${bankCoverage}）`
-          : `${bankBalanceDates[0]}（${bankCoverage}；${bankUnknownNote}）`
-        : bankUnknownCount === 0
+          : `${bankBalanceDates[0]}（${bankCoverage}；${bankGapNote}）`
+        : bankGapNote === ""
           ? `${bankBalanceDates[0]} 至 ${bankBalanceDates[bankBalanceDates.length - 1]}（各账户余额日期不一致；${bankCoverage}）`
-          : `${bankBalanceDates[0]} 至 ${bankBalanceDates[bankBalanceDates.length - 1]}（各账户余额日期不一致；${bankCoverage}；${bankUnknownNote}）`;
+          : `${bankBalanceDates[0]} 至 ${bankBalanceDates[bankBalanceDates.length - 1]}（各账户余额日期不一致；${bankCoverage}；${bankGapNote}）`;
   return [
     {
       source: "本地月度记录",
@@ -680,6 +700,24 @@ export function isRealDateText(value: string): boolean {
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
+// F0.5 date-coverage fix (PM 2026-10-19): the client mirror of
+// the server's strict balance-date rule (normalizeBalanceDate).
+// A balanceDate is date EVIDENCE only when it is a YYYY-MM with
+// month 01..12 (that month's last day) or a real YYYY-MM-DD
+// calendar date. Missing, empty, malformed, an illegal month
+// (2025-13 / 2025-14) or an illegal day (2026-02-30) is NOT
+// evidence — the same verdict the server gates apply, so the
+// ledger's 日期已知 x/y can never be satisfied by a bad value,
+// and a bad value shown in a detail row is marked 日期无效.
+export function isValidBalanceDateText(value: string | null | undefined): boolean {
+  if (value == null || value === "") return false;
+  if (/^\d{4}-\d{2}$/.test(value)) {
+    const month = Number(value.slice(5, 7));
+    return month >= 1 && month <= 12;
+  }
+  return isRealDateText(value);
+}
+
 // F1.6 rework: the effective period of an entry — the generic
 // period when present, the Firance-native period filling its
 // absence (generic ?? native). One resolver shared by the
@@ -808,7 +846,7 @@ function MonthlyRecords({ months }: { months: Month[] }) {
                     const period = effectivePeriodOf(entry);
                     return (
                       <p key={`${entry.type}-${entry.financeSource}`}>
-                        {entry.financeSource} · {cashflowRoleLabel(entry.cashflowRole)} · 余额日期 {entry.balanceDate ?? "未知"}
+                        {entry.financeSource} · {cashflowRoleLabel(entry.cashflowRole)} · 余额日期 {entry.balanceDate ?? "未知"}{entry.balanceDate != null && entry.balanceDate !== "" && !isValidBalanceDateText(entry.balanceDate) ? "（日期无效）" : ""}
                         {entry.status ? ` · 状态 ${entry.status}` : ""}
                         {entry.verified != null ? ` · ${entry.verified ? "已核实" : "未核实"}` : ""}
                         {period.start || period.end ? ` · 期间 ${effectivePeriodText(entry)}${entry.periodStart == null && entry.nativePeriodStart != null ? "（原生期间）" : ""}` : ""}
@@ -1178,7 +1216,7 @@ function AvailableCashPanel({
                 <strong>{account.label}</strong>
                 <span>
                   {accountCashRoleLabel(account.cashflowRole ?? null)}
-                  {" · "}余额日期 {account.balanceDate ?? "未知"}
+                  {" · "}余额日期 {account.balanceDate ?? "未知"}{account.balanceDate != null && account.balanceDate !== "" && !isValidBalanceDateText(account.balanceDate) ? "（日期无效）" : ""}
                   {" · "}{verificationText(account.verified ?? null)}
                   {account.metadataConflict ? " · 元数据冲突待核对" : ""}
                   {account.status ? ` · 状态 ${account.status}` : ""}

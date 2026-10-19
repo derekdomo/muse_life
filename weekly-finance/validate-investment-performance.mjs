@@ -833,5 +833,57 @@ check("UI: monthly record period display uses the effective period too",
 check("UI: established intervals stay readable when the period total is blocked",
   appSrc.includes("已成立区间的月度收益仍可在上方「月度记录」中查看") && appSrc.includes("区间 {month.key}"));
 
+// --- date-validation fix (PM 2026-10-19): an illegal YYYY-MM
+// balance month must NOT roll into a legal balance date ---
+// The shared normalizeBalanceDate used to roll "2025-13" to
+// 2026-01-31, so an investment endpoint carrying the bad value
+// compared EQUAL to a January snapshot and the interval
+// reconciled on a date that never existed. Fixed in the shared
+// normalization: the return (and the period figure) is null and
+// the reason names the stale/illegal balance date. Balances stay
+// recorded facts; nothing is repaired or backfilled. Synthetic
+// values only.
+const JAN26 = { periodStart: "2026-01-01", periodEnd: "2026-01-31" };
+const endRolledInv = agg([
+  invSnap("2025-12-31", 100000),
+  invSnap("2026-01-31", 115000, [E("broker_1234", "investment_contribution", 10000, JAN26)], "broker_1234", { balanceDate: "2025-13" }),
+]);
+check("illegal month (end): balanceDate 2025-13 does not roll into the 2026-01-31 snapshot — return null, date problem named",
+  endRolledInv[1].investmentReturn === null
+  && (endRolledInv[1].investmentReturnReason ?? "").includes("沿用旧余额日期"));
+check("illegal month (end): the period figure is withheld too; balances remain readable facts",
+  computeInvestmentPerformance(endRolledInv).returnAmount === null
+  && computeInvestmentPerformance(endRolledInv).endBalance === 115000
+  && computeInvestmentPerformance(endRolledInv).startBalance === 100000);
+const endLegalInv = agg([
+  invSnap("2025-12-31", 100000),
+  invSnap("2026-01-31", 115000, [E("broker_1234", "investment_contribution", 10000, JAN26)], "broker_1234", { balanceDate: "2026-01" }),
+]);
+check("illegal month sensitivity (end): the legal YYYY-MM form 2026-01 still equals the January snapshot — return reconciles (5000)",
+  endLegalInv[1].investmentReturn === 5000 && endLegalInv[1].investmentReturnReason === null);
+const MAR26 = { periodStart: "2026-03-01", periodEnd: "2026-03-31" };
+const startRolledInv = agg([
+  invSnap("2026-02-28", 100000, [], "broker_1234", { balanceDate: "2025-14" }),
+  invSnap("2026-03-31", 115000, [E("broker_1234", "investment_contribution", 10000, MAR26)]),
+]);
+check("illegal month (start): balanceDate 2025-14 does not roll into the 2026-02-28 snapshot — return null, 期初 named",
+  startRolledInv[1].investmentReturn === null
+  && (startRolledInv[1].investmentReturnReason ?? "").includes("期初投资账户沿用旧余额日期"));
+const startLegalInv = agg([
+  invSnap("2026-02-28", 100000, [], "broker_1234", { balanceDate: "2026-02" }),
+  invSnap("2026-03-31", 115000, [E("broker_1234", "investment_contribution", 10000, MAR26)]),
+]);
+check("illegal month sensitivity (start): the legal YYYY-MM form 2026-02 still equals the non-leap February snapshot — return reconciles (5000)",
+  startLegalInv[1].investmentReturn === 5000);
+check("illegal month: other illegal forms at the end endpoint (2025-00 / garbage) degrade the same way",
+  agg([
+    invSnap("2025-12-31", 100000),
+    invSnap("2026-01-31", 115000, [E("broker_1234", "investment_contribution", 10000, JAN26)], "broker_1234", { balanceDate: "2025-00" }),
+  ])[1].investmentReturn === null
+  && agg([
+    invSnap("2025-12-31", 100000),
+    invSnap("2026-01-31", 115000, [E("broker_1234", "investment_contribution", 10000, JAN26)], "broker_1234", { balanceDate: "nonsense" }),
+  ])[1].investmentReturn === null);
+
 console.log(`validate-investment-performance: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
