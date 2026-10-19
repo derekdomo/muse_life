@@ -57,6 +57,13 @@
       "when": 1792419975538,
       "tag": "0008_add_checkin_revision_arbitration",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792428284627,
+      "tag": "0009_add_game_state_and_settlements",
+      "breakpoints": true
     }
   ]
 }

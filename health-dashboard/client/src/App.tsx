@@ -31,7 +31,9 @@ type UnifiedDay = DashboardResponse["unifiedTimeline"][number];
 type StrengthTraining = NonNullable<DashboardResponse["strength"]>;
 type ReadinessHistoryPoint = DashboardResponse["readinessHistory"][number];
 type SourceState = DashboardResponse["healthState"];
-type Tab = "today" | "trends" | "history";
+type GameState = ApiResponse<typeof api, "getGameState">;
+type GameCategory = GameState["settlements"][number]["category"];
+type Tab = "today" | "trends" | "history" | "game";
 type Status = "正常" | "偏低" | "偏高" | "数据缺失" | "基线不足";
 
 // Routine labels (L1-ROUTINE-001): all five source values, with the two
@@ -1581,6 +1583,129 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
   );
 }
 
+// LIFE-C1 人生游戏 (CWEB-MVP-001·S1) 角色 view. It reads ONLY the
+// getGameState action — its own query, fully separate from getDashboard —
+// so a game-layer failure renders as a note inside this view and can
+// never take the health views down with it. Status is always text +
+// symbol, never color alone (owner is color-vision deficient); category
+// symbols differ in shape: ▲ steps, ◑ sleep, ■ strength, ★ quest.
+const GAME_CATEGORY_META: Record<GameCategory, { label: string; symbol: string }> = {
+  steps: { label: "步行", symbol: "▲" },
+  sleep: { label: "主睡眠", symbol: "◑" },
+  strength: { label: "力量训练", symbol: "■" },
+  quest_steps: { label: "主任务 · 步行达标", symbol: "★" },
+};
+
+function GameView() {
+  const game = useQuery({ queryKey: ["game"], queryFn: () => api.getGameState({}) });
+  if (game.isPending) {
+    return <div className="loading" role="status"><span /><p>正在读取角色数据…</p></div>;
+  }
+  if (game.isError || !game.data || game.data.forbidden || !game.data.ok) {
+    return (
+      <section className="game-panel" aria-labelledby="game-error-title">
+        <p className="section-kicker">人生游戏</p>
+        <h2 id="game-error-title">游戏结算暂时不可用</h2>
+        <p className="game-note">角色与经验数据暂时读不出来；健康看板的其他视图不受影响，稍后切回来再试即可。</p>
+      </section>
+    );
+  }
+  const data = game.data;
+  const quest = data.quest;
+  const levelPct = Math.min(100, (data.xpIntoLevel / data.xpPerLevel) * 100);
+  const questPct = quest.steps === null ? 0 : Math.min(100, Math.round((quest.steps / quest.targetSteps) * 100));
+  const questChip = quest.state === "settled"
+    ? { symbol: "★", text: "已达标 · 奖励已入账", cls: "status-ok" }
+    : quest.state === "achieved"
+      ? { symbol: "✓", text: "已达标 · 奖励待入账", cls: "status-ok" }
+      : quest.state === "in_progress"
+        ? { symbol: "●", text: `进行中 · 还差 ${numberLabel(quest.targetSteps - (quest.steps ?? 0))} 步`, cls: "status-watch" }
+        : { symbol: "—", text: "今日步数尚未同步", cls: "status-missing" };
+  return (
+    <div className="game-view">
+      <section className="game-panel" aria-labelledby="game-character-title">
+        <div className="section-line"><p className="section-kicker">人生游戏 · 角色</p><span>经验规则 v{data.ruleVersion}</span></div>
+        <div className="game-level-row">
+          <strong className="game-level">Lv {data.level}</strong>
+          <span className="game-total">总经验 {numberLabel(data.totalXp)} XP</span>
+        </div>
+        <div className="game-progress" role="progressbar" aria-label={`距 Lv ${data.level + 1} 进度`} aria-valuemin={0} aria-valuemax={data.xpPerLevel} aria-valuenow={data.xpIntoLevel}>
+          <i style={{ width: `${levelPct}%` }} />
+        </div>
+        <p className="game-progress-text">本级 {data.xpIntoLevel} / {data.xpPerLevel} XP · 距 Lv {data.level + 1} 还差 {data.xpToNextLevel} XP{data.settledThroughDate ? ` · 已结算至 ${fullDateLabel(data.settledThroughDate)}` : " · 尚无结算记录"}</p>
+        <p className="game-rules">经验规则 v{data.ruleVersion}：步数每 1000 步 1 XP（单日封顶 20）；主睡眠满 7 小时 10 XP，不足按比例向下取整；力量训练每完成一场 10 XP；主任务达标另 +10 XP。等级每 100 XP 一级。打开页面时按洛杉矶本地日结算，只结算数据完整的日期；缺失数据如实显示、不发经验；同一天同一类别只结算一次。</p>
+        {data.healthState !== "ok" ? <p className="game-note">健康数据{data.healthState === "corrupt" ? "快照损坏" : "尚未同步"}：步行与睡眠经验暂时无法结算，已入账的经验不受影响。</p> : null}
+      </section>
+
+      <section className="game-panel" aria-labelledby="game-quest-title">
+        <div className="section-line">
+          <h3 id="game-quest-title">今日主任务 · 步行 {numberLabel(quest.targetSteps)} 步</h3>
+          <span className={`status-chip ${questChip.cls}`}><span aria-hidden="true">{questChip.symbol}</span> {questChip.text}</span>
+        </div>
+        <div className="game-progress" role="progressbar" aria-label="今日步行进度" aria-valuemin={0} aria-valuemax={quest.targetSteps} aria-valuenow={quest.steps ?? 0}>
+          <i style={{ width: `${questPct}%` }} />
+        </div>
+        <p className="game-progress-text">
+          {quest.steps === null
+            ? "今日步数会随健康数据每日同步进来；达标奖励在该日数据完整后自动入账，昨天的结果可以在下方账本里查。"
+            : `今日已走 ${numberLabel(quest.steps)} / ${numberLabel(quest.targetSteps)} 步（${questPct}%）`}
+          {" "}· 达标奖励 +{quest.rewardXp} XP
+        </p>
+      </section>
+
+      <section className="game-panel game-camp" aria-labelledby="game-camp-title">
+        <p className="section-kicker">营地</p>
+        <h3 id="game-camp-title">营地建设中</h3>
+        <p className="game-note">营地是后续切片的内容：将来可以用经验在这里安顿角色。当前先积累经验——账本里的每一笔都不会丢失。</p>
+      </section>
+
+      {data.previews.length ? (
+        <section className="game-panel" aria-labelledby="game-preview-title">
+          <div className="section-line"><h3 id="game-preview-title">待结算与缺失</h3><span>预览不入账</span></div>
+          <div className="game-ledger">
+            {data.previews.map((preview) => {
+              const meta = GAME_CATEGORY_META[preview.category];
+              return (
+                <div className="game-ledger-row" key={`preview-${preview.localDate}-${preview.category}`}>
+                  <span className="unified-date">{dateLabel(preview.localDate)}</span>
+                  <div className="unified-main">
+                    <strong><span aria-hidden="true">{meta.symbol}</span> {meta.label}</strong>
+                    <small>{preview.note}</small>
+                  </div>
+                  <span className="game-xp game-xp-muted">{preview.state === "missing" ? "— 未发放" : `预览 +${preview.xp ?? 0} XP`}</span>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
+      <section className="game-panel" aria-labelledby="game-ledger-title">
+        <div className="section-line"><h3 id="game-ledger-title">经验账本</h3><span>逐日逐类 · 规则 v{data.ruleVersion}</span></div>
+        {data.settlements.length ? (
+          <div className="game-ledger">
+            {data.settlements.map((entry) => {
+              const meta = GAME_CATEGORY_META[entry.category];
+              return (
+                <div className="game-ledger-row" key={`${entry.localDate}-${entry.category}`}>
+                  <span className="unified-date">{dateLabel(entry.localDate)}</span>
+                  <div className="unified-main">
+                    <strong><span aria-hidden="true">{meta.symbol}</span> {meta.label}</strong>
+                    <small>{fullDateLabel(entry.localDate)} · 已结算</small>
+                  </div>
+                  <span className="game-xp">+{entry.xp} XP</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="game-note">暂无结算记录。步行、主睡眠或力量训练的数据完整入账后，打开这一页就会自动结算到这里。</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null }) {
   const [tab, setTab] = useState<Tab>("today");
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
@@ -1620,8 +1745,9 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "today" ? "selected" : ""} onClick={() => setTab("today")}>今日</button>
         <button type="button" className={tab === "trends" ? "selected" : ""} onClick={() => setTab("trends")}>趋势</button>
         <button type="button" className={tab === "history" ? "selected" : ""} onClick={() => setTab("history")}>历史</button>
+        <button type="button" className={tab === "game" ? "selected" : ""} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -1647,6 +1773,7 @@ function StrengthOnlyView({ strength, healthState, dataStatus, unifiedTimeline, 
       </section>
       <StrengthPanel strength={strength} onSync={onSyncStrength} syncing={strengthSyncing} />
       <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={strength.displayUnit} />
+      <GameView />
     </div>
   );
 }

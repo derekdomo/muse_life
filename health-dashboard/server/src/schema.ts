@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const healthSnapshot = sqliteTable("health_snapshot", {
   id: integer("id").primaryKey(),
@@ -67,6 +67,35 @@ export const readinessHistory = sqliteTable("readiness_history", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
+
+// LIFE-C1 人生游戏 (CWEB-MVP-001·S1) game-side state. These two tables hold
+// ONLY game state and settlement metadata — never health raw values. The
+// ledger records, per settled day and category, the XP awarded, the rule
+// version that produced it, and a source reference (the source calendar
+// date plus the source snapshot's updatedAt) so every award stays
+// explainable without duplicating the health record it was derived from.
+// The (local_date, category) primary key is the idempotency identity:
+// owner + LA local date + category settles at most once, enforced by the
+// database itself (inserts use ON CONFLICT DO NOTHING).
+export const gameState = sqliteTable("game_state", {
+  id: integer("id").primaryKey(),
+  totalXp: integer("total_xp").notNull().default(0),
+  settledThroughDate: text("settled_through_date"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const gameSettlements = sqliteTable("game_settlements", {
+  localDate: text("local_date").notNull(),
+  category: text("category", { enum: ["steps", "sleep", "strength", "quest_steps"] }).notNull(),
+  xp: integer("xp").notNull(),
+  ruleVersion: integer("rule_version").notNull(),
+  sourceDate: text("source_date").notNull(),
+  sourceUpdatedAt: text("source_updated_at"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.localDate, table.category] }),
+]);
 
 export const syncLog = sqliteTable("sync_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),

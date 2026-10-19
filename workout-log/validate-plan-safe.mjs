@@ -81,8 +81,23 @@
 //     leave exactly the winner's decision, the loser getting a
 //     typed stale / already_resolved answer and changing nothing;
 //     sequential duplicate submissions get the already_resolved
-//     idempotent receipt; unbound (older-client) requests still
-//     resolve normally.
+//     idempotent receipt; forbidden callers carrying binding
+//     fields write nothing.
+//  G. W-PLAN-SAFE-001 P0 rework — required binding + claim-guarded
+//     version advance: (a) a request with BOTH binding fields
+//     missing is typed-stale rejected with zero writes (conflict
+//     still open, plan byte-identical, version unchanged); (b) each
+//     field missing on its own, an empty or non-integer candidate
+//     list, and malformed version strings (negative / decimal /
+//     non-numeric) are likewise rejected with zero writes; (c) the
+//     PM compensation-ABA counterexample: a request bound to
+//     OLD/v1 whose claim loses to an interleaved MID/v2 save leaves
+//     the version at exactly v2 — never v3, never rolled back —
+//     issues no compensation batch, and a getPlan inside the window
+//     returns a whole saved version or the typed read_error; (d)
+//     bound confirmations of BOTH branches still resolve with the
+//     version advancing exactly 1, duplicates stay
+//     already_resolved without advancing it again.
 // Synthetic data only.
 import { readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -728,6 +743,12 @@ function variantOf(plan, tag) {
   const archiveId = archRow[0];
 
   const g1 = await Actions.getPlan.handler(owner(), {});
+  // The required display binding every well-formed confirmation
+  // below carries (P0 rework: both fields must arrive).
+  const shownBinding = {
+    expected_candidate_ids: g1.conflicts[0].candidates.map((c) => c.id),
+    expected_plan_version: g1.conflicts[0].plan_version,
+  };
   check('D: getPlan exposes the unconfirmed conflict explicitly',
     g1.forbidden === false && g1.conflict_count === 1 && Array.isArray(g1.conflicts) && g1.conflicts.length === 1);
   const conflict = g1.conflicts[0];
@@ -750,19 +771,19 @@ function variantOf(plan, tag) {
   check('D: guest resolvePlanConflict is forbidden', guestResolve.ok === false && guestResolve.forbidden === true);
   const anonResolve = await Actions.resolvePlanConflict.handler(anon(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: null });
   check('D: viewer-less resolvePlanConflict is forbidden', anonResolve.ok === false && anonResolve.forbidden === true);
-  const bogus = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: 999999 });
+  const bogus = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: 999999, ...shownBinding });
   check('D: selecting a non-existent archive id is a typed error, conflict untouched',
     bogus.ok === false && bogus.forbidden === false && typeof bogus.error === 'string' && bogus.error.length > 0
     && (await Actions.getPlan.handler(owner(), {})).conflict_count === 1);
 
   // Failure injection: poison the resolution batch — every position
-  // it can take (claim, insert displaced, delete live, insert
-  // restored, stamp selected, version increment = 6 statements +
-  // tail).
+  // it can take (claim, claim-guarded version advance, insert
+  // displaced, delete live, insert restored, stamp selected = 6
+  // statements + tail).
   const planBeforeFail = planPayload(await Actions.getPlan.handler(owner(), {}));
   for (let failAt = 0; failAt <= 6; failAt++) {
     hook.failAt = failAt;
-    const res = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId });
+    const res = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...shownBinding });
     hook.failAt = null;
     check(`D: resolution failure at batch position ${failAt} returns retryable ok:false`,
       res.ok === false && res.forbidden === false && typeof res.error === 'string' && res.error.length > 0);
@@ -775,7 +796,7 @@ function variantOf(plan, tag) {
   // Owner restores the archived copy.
   const versionRowBefore = (await client.execute(`SELECT value FROM plan_meta WHERE key='version'`)).rows[0];
   const versionBefore = versionRowBefore ? versionRowBefore[0] : null;
-  const resolved = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId });
+  const resolved = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...shownBinding });
   check('D: owner selecting the archived copy succeeds', resolved.ok === true && resolved.forbidden === false && resolved.error === null);
   check('D: the resolution incremented the plan version token exactly once',
     Number(await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === Number(versionBefore ?? '0') + 1);
@@ -795,7 +816,7 @@ function variantOf(plan, tag) {
     && displaced[3] === 'superseded' && displaced[4] === archiveId && typeof displaced[5] === 'number');
   check('D: no unconfirmed archive rows remain',
     (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts WHERE resolved_at IS NULL')) === 0);
-  const again = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: null });
+  const again = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: null, ...shownBinding });
   check('D: resolving an already-closed group is a typed error, not a silent success',
     again.ok === false && again.forbidden === false && typeof again.error === 'string' && again.error.length > 0);
   client.close();
@@ -806,7 +827,11 @@ function variantOf(plan, tag) {
   const { client, owner } = await freshHandlerDb({ withDuplicates: true });
   const liveId = (await client.execute(`SELECT id FROM plan_exercises WHERE exercise_key='dup-move'`)).rows[0][0];
   const before = await Actions.getPlan.handler(owner(), {});
-  const res = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: null });
+  const res = await Actions.resolvePlanConflict.handler(owner(), {
+    routine: 'push', exercise_key: 'dup-move', selected_archive_id: null,
+    expected_candidate_ids: before.conflicts[0].candidates.map((c) => c.id),
+    expected_plan_version: before.conflicts[0].plan_version,
+  });
   check('D2: owner confirming the live copy succeeds', res.ok === true && res.forbidden === false);
   const after = await Actions.getPlan.handler(owner(), {});
   check('D2: the plan is byte-identical after confirming the live copy',
@@ -1092,7 +1117,7 @@ function variantOf(plan, tag) {
     check('F4: the identical repeat is the already_resolved idempotent receipt',
       dup.ok === true && dup.outcome === 'already_resolved');
     const other = await Actions.resolvePlanConflict.handler(owner(), {
-      routine: 'push', exercise_key: 'dup-move', selected_archive_id: null,
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: null, ...bindingOf(shown),
     });
     check('F4: a different decision against the closed group is still a typed error',
       other.ok === false && other.outcome === undefined);
@@ -1138,9 +1163,11 @@ function variantOf(plan, tag) {
       proper.ok === true && proper.outcome === 'resolved');
   }
 
-  // F6: additive compatibility — a request WITHOUT the binding
-  // fields (older client) still resolves, and forbidden callers
-  // carrying binding fields write nothing at all.
+  // F6: forbidden callers carrying binding fields write nothing at
+  // all; and since the P0 rework the binding is REQUIRED — an
+  // unbound (older-client) owner request no longer resolves: it is
+  // rejected with the typed stale answer and zero writes, and the
+  // same decision WITH its binding then resolves normally.
   {
     const { client, owner, guest, anon } = await freshHandlerDb({ withDuplicates: true });
     const shown = await Actions.getPlan.handler(owner(), {});
@@ -1158,8 +1185,161 @@ function variantOf(plan, tag) {
     const unbound = await Actions.resolvePlanConflict.handler(owner(), {
       routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId,
     });
-    check('F6: an unbound (older-client) confirmation still resolves normally',
-      unbound.ok === true && unbound.outcome === 'resolved');
+    check('F6: an unbound (older-client) confirmation is typed stale with zero writes — the conflict stays open',
+      unbound.ok === false && unbound.forbidden === false && unbound.outcome === 'stale'
+      && (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts WHERE resolved_at IS NULL')) === 1
+      && (await scalar(client, `SELECT COUNT(*) FROM plan_meta WHERE key='version'`)) === 0);
+    const bound = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...bindingOf(shown),
+    });
+    check('F6: the same decision WITH its required binding resolves normally',
+      bound.ok === true && bound.outcome === 'resolved');
+  }
+}
+
+// ---------- G. W-PLAN-SAFE-001 P0 rework: the binding is REQUIRED
+// (missing/malformed bindings fail safe with zero writes) and the
+// decision batch's version advance is guarded on the claim itself
+// (a lost claim writes nothing at all — no compensation batch). --
+{
+  const bindingOfG = (plan) => {
+    const conflict = plan.conflicts[0];
+    return {
+      expected_candidate_ids: conflict.candidates.map((c) => c.id),
+      expected_plan_version: conflict.plan_version,
+    };
+  };
+  const fullVariantOfG = (plan, tag) => {
+    const copy = JSON.parse(planPayload(plan));
+    if (copy.schedule.length === 0) {
+      copy.schedule = DEFAULT_PLAN_SCHEDULE.map((e) => ({ day_index: e.day_index, routine_code: e.routine_code, note: e.note }));
+    }
+    if (copy.daily_items.length === 0) {
+      copy.daily_items = DEFAULT_DAILY_ITEMS.map((d) => ({ key: d.key, title: d.title, detail: d.detail }));
+    }
+    return variantOf(copy, tag);
+  };
+
+  // G(a)+(b): missing / malformed bindings — every shape is a typed
+  // stale rejection with zero writes: the conflict stays open, the
+  // plan stays byte-identical, the version token never appears.
+  {
+    const { client, owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const binding = bindingOfG(shown);
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    const planBefore = planPayload(shown);
+    const base = { routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId };
+    const expectStaleNoWrites = async (label, args) => {
+      const res = await Actions.resolvePlanConflict.handler(owner(), args);
+      const after = await Actions.getPlan.handler(owner(), {});
+      check(`G: ${label} — typed stale rejection, zero writes`,
+        res.ok === false && res.forbidden === false && res.outcome === 'stale'
+        && typeof res.error === 'string' && res.error.length > 0
+        && planPayload(after) === planBefore && after.conflict_count === 1
+        && (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts WHERE resolved_at IS NULL')) === 1
+        && (await scalar(client, `SELECT COUNT(*) FROM plan_meta WHERE key='version'`)) === 0);
+    };
+    await expectStaleNoWrites('(a) an older-client request with BOTH binding fields missing', { ...base });
+    await expectStaleNoWrites('(b) only expected_candidate_ids, the version field missing',
+      { ...base, expected_candidate_ids: binding.expected_candidate_ids });
+    await expectStaleNoWrites('(b) only expected_plan_version, the candidate ids field missing',
+      { ...base, expected_plan_version: binding.expected_plan_version });
+    await expectStaleNoWrites('(b) an empty candidate id list',
+      { ...base, expected_candidate_ids: [], expected_plan_version: binding.expected_plan_version });
+    await expectStaleNoWrites('(b) a non-integer candidate id',
+      { ...base, expected_candidate_ids: [1.5], expected_plan_version: binding.expected_plan_version });
+    for (const bad of ['-1', '1.5', 'abc']) {
+      await expectStaleNoWrites(`(b) a malformed plan version "${bad}"`,
+        { ...base, expected_candidate_ids: binding.expected_candidate_ids, expected_plan_version: bad });
+    }
+    client.close();
+  }
+
+  // G(c): the PM compensation-ABA counterexample. A confirmation
+  // bound to OLD/v1 is in flight; before its claim executes, another
+  // save commits MID/v2. The stale claim must stamp zero rows and
+  // its batch must write NOTHING — the version stays exactly v2
+  // (never v3, never rolled back), no compensation batch is issued,
+  // and a getPlan inside the window returns a whole saved version.
+  {
+    const { client, hook, owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown0 = await Actions.getPlan.handler(owner(), {});
+    const oldSave = await Actions.updatePlan.handler(owner(), asUpdateArgs(fullVariantOfG(shown0, '旧')));
+    check('G(c) setup: the OLD save landed (plan version v1)',
+      oldSave.ok === true
+      && (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '1');
+    const shownOld = await Actions.getPlan.handler(owner(), {});
+    const oldBinding = bindingOfG(shownOld);
+    check('G(c) setup: the displayed binding is bound to OLD/v1',
+      oldBinding.expected_plan_version === '1');
+    const midPlan = fullVariantOfG(shownOld, '中');
+    let gatePhase = 'armed'; // armed → saving (MID's own batch) → spent
+    let saveResult = null;
+    let versionAfterMid = null;
+    let gatePlan = null;
+    const laterGateVersions = [];
+    hook.seedBatchGate = async () => {
+      if (gatePhase === 'armed') {
+        gatePhase = 'saving';
+        saveResult = await Actions.updatePlan.handler(owner(), asUpdateArgs(midPlan));
+        gatePhase = 'spent';
+        versionAfterMid = await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`);
+        gatePlan = await Actions.getPlan.handler(owner(), {});
+        return;
+      }
+      if (gatePhase === 'saving') return; // the MID save's own batch gate
+      // Any FURTHER batch in this window (a compensation write in
+      // the pre-rework design) is observed BEFORE it executes: the
+      // token must still read exactly v2 there.
+      laterGateVersions.push(await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`));
+    };
+    const batchesBefore = hook.batchCount;
+    const res = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: null, ...oldBinding,
+    });
+    hook.seedBatchGate = null;
+    const batchesUsed = hook.batchCount - batchesBefore;
+    check('G(c): the interleaved MID save landed inside the stale claim\u2019s batch window',
+      saveResult !== null && saveResult.ok === true && versionAfterMid === '2');
+    check('G(c): the OLD-bound confirmation is a typed stale failure',
+      res.ok === false && res.forbidden === false && res.outcome === 'stale');
+    check('G(c): the version is exactly v2 afterwards — never v3, never rolled back to v1',
+      (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '2'
+      && laterGateVersions.every((v) => v === '2'),
+      `later batch gates observed versions: ${JSON.stringify(laterGateVersions)}`);
+    check('G(c): the stale claim issued NO compensation batch (only the MID save + its own decision batch ran)',
+      batchesUsed === 2, `batches=${batchesUsed}`);
+    check('G(c): the getPlan inside the window returned the whole MID plan (or the typed read_error), never a mix',
+      gatePlan !== null
+      && (typeof gatePlan.read_error === 'string' || planPayload(gatePlan) === planPayload(midPlan)));
+    const after = await Actions.getPlan.handler(owner(), {});
+    check('G(c): the plan is exactly MID and the conflict is still open with every candidate',
+      planPayload(after) === planPayload(midPlan)
+      && after.conflict_count === 1 && after.conflicts[0].candidate_count === 2);
+    client.close();
+  }
+
+  // G(d): bound confirmations of both branches still resolve, the
+  // version advances by exactly 1, and a duplicate submission is
+  // the already_resolved receipt WITHOUT advancing it again.
+  for (const [label, pickArchived] of [['live', false], ['archive', true]]) {
+    const { client, owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    const args = {
+      routine: 'push', exercise_key: 'dup-move',
+      selected_archive_id: pickArchived ? archiveId : null, ...bindingOfG(shown),
+    };
+    const first = await Actions.resolvePlanConflict.handler(owner(), args);
+    check(`G(d): a bound ${label} confirmation resolves and the version advances exactly 1 (absent → 1)`,
+      first.ok === true && first.outcome === 'resolved'
+      && (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '1');
+    const dup = await Actions.resolvePlanConflict.handler(owner(), args);
+    check(`G(d): the duplicate ${label} confirmation is already_resolved and does NOT advance the version again`,
+      dup.ok === true && dup.outcome === 'already_resolved'
+      && (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '1');
+    client.close();
   }
 }
 

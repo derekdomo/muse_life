@@ -28,3 +28,33 @@ export const financeState = sqliteTable("finance_state", {
     .notNull()
     .$defaultFn(() => new Date()),
 });
+
+// F0.7 read-only refresh observability (additive, 0004): one row
+// per refresh-chain event — refresh starts, spawn attachment /
+// failure, and every ingest callback's arrival plus its single
+// result (applied or ignored, with a short-code reason). `detail`
+// only ever carries short enum codes (or a saved-month count for
+// an applied success); no financial values, payload fragments,
+// account data or raw error text ever land in this table. Rows are
+// diagnostics only: nothing in the refresh chain reads them back.
+export const refreshObservations = sqliteTable("refresh_observations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  generation: text("generation"),
+  event: text("event", {
+    enum: [
+      "refresh_started",
+      "spawn_attached",
+      "spawn_failed",
+      "spawn_tail_unattached",
+      "callback_received",
+      "callback_applied_success",
+      "callback_applied_failure",
+      "callback_ignored",
+    ],
+  }).notNull(),
+  outcome: text("outcome").notNull(),
+  detail: text("detail"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});

@@ -2027,46 +2027,67 @@ export const Actions = {
   // Until this action runs, nothing marks any copy as confirmed:
   // getPlan keeps surfacing the conflict on every read.
   //
-  // W-PLAN-SAFE-001 P0 tail (bound, atomically claimed decisions):
-  // a confirmation is bound to what the owner was actually shown.
-  // The client echoes the candidate set it displayed
-  // (expected_candidate_ids) and the plan version those candidates
-  // belonged to (expected_plan_version); when present, both are
+  // W-PLAN-SAFE-001 P0 tail + rework (bound, atomically claimed
+  // decisions): a confirmation is bound to what the owner was
+  // actually shown, and the binding is REQUIRED. The client echoes
+  // the candidate set it displayed (expected_candidate_ids) and
+  // the plan version those candidates belonged to
+  // (expected_plan_version). Both fields must arrive with the
+  // request — expected_plan_version may be null (the token row did
+  // not exist when the conflict was displayed) but the field itself
+  // may not be absent; it must otherwise be a non-negative integer
+  // decimal string, and expected_candidate_ids a non-empty array of
+  // integers. A request missing or malforming either field — an
+  // older client above all — is rejected with the typed stale
+  // answer BEFORE any database write: it fails safe and can never
+  // claim a version it was never shown. A well-formed binding is
   // checked against a fresh read BEFORE anything is written, and a
-  // mismatch is a typed stale failure — the decision is not applied
-  // to a plan or candidate set the owner never saw. The binding is
-  // then re-verified INSIDE the same atomic batch by its FIRST
-  // statement: a conditional claim that stamps the still-unresolved
-  // group rows with this decision's marker value — the version
-  // token read back through a RETURNING on the version-increment
-  // statement — only while every unresolved row still carries a NULL
-  // resolution_selected_id (i.e. no other decision claimed the group
-  // first) AND the plan version token still equals the bound one.
-  // A save or a rival decision landing between this handler's
-  // pre-read and the batch therefore makes the claim stamp ZERO
-  // rows — and because every decision statement in the batch is
-  // guarded on that same claim marker, a zero claim means the
-  // decision statements write zero rows too: the batch's only
-  // effect is its version increment, which the handler cancels
-  // before answering typed stale / already_resolved. It never
+  // mismatch is the same typed stale failure — the decision is not
+  // applied to a plan or candidate set the owner never saw.
+  //
+  // The binding is then re-verified INSIDE the same atomic batch by
+  // its FIRST statement: a conditional claim that stamps the
+  // still-unresolved group rows with this decision's marker, only
+  // while every unresolved row still carries a NULL
+  // resolution_selected_id (i.e. no other decision claimed the
+  // group first) AND the plan version token still equals the bound
+  // one. The batch's SECOND statement is the version advance,
+  // itself guarded on the claim marker (and, for a non-null bound
+  // version, on the token still equalling it; for a null bound
+  // version it inserts '1' only while the token row is still
+  // absent). A save or a rival decision landing between this
+  // handler's pre-read and the batch therefore makes the claim
+  // stamp ZERO rows — and then every later statement in the batch
+  // writes zero rows too, the version advance included: the batch
+  // is a no-op, there is NO compensation write afterwards (a
+  // cross-transaction −1 was the ABA hazard removed by this
+  // rework), and the handler simply re-reads and answers the typed
+  // stale / already_resolved verdict. On a landed claim the token
+  // advances by exactly 1, atomically with the decision, and the
+  // handler judges the outcome from a post-batch re-read of the
+  // actual token (never from a statement RETURNING). It never
   // reports success for a version the owner did not see, never
   // overwrites the newer plan, never resets a winner's rows, and
-  // never drops a candidate. A repeated submission of the SAME decision
-  // (double tap, retried request) is answered from the recorded
-  // decision: ok with outcome "already_resolved". Requests that omit
-  // the binding fields (older clients) keep working: the claim is
-  // then bound to the state this handler itself just read.
+  // never drops a candidate. A repeated submission of the SAME
+  // decision (double tap, retried request) is answered from the
+  // recorded decision: ok with outcome "already_resolved".
   resolvePlanConflict: defineAction({
     request: z.object({
       routine: z.string().min(1),
       exercise_key: z.string().min(1),
       selected_archive_id: z.number().int().nullable(),
-      // Additive, optional (P0 tail): the displayed candidate ids,
-      // in display order — the live candidate's plan_exercises id
-      // (when a live candidate was shown) followed by the archived
-      // candidates' archive ids — and the plan version token the
-      // displayed conflict belonged to. Omitted by older clients.
-      expected_candidate_ids: z.array(z.number().int()).optional(),
+      // Required binding (P0 tail, made mandatory by the P0
+      // rework): the displayed candidate ids, in display order —
+      // the live candidate's plan_exercises id (when a live
+      // candidate was shown) followed by the archived candidates'
+      // archive ids — and the plan version token the displayed
+      // conflict belonged to (null when the token row did not exist
+      // at display time). Both fields must arrive with the request;
+      // the schema keeps them optional and the ids unrefined ONLY
+      // so a request that omits or malforms them reaches the
+      // handler, which answers the typed stale rejection with zero
+      // writes instead of a transport-level schema error.
+      expected_candidate_ids: z.array(z.number()).optional(),
       expected_plan_version: z.string().nullable().optional(),
     }),
     response: resolvePlanConflictResponse,
@@ -2076,6 +2097,34 @@ export const Actions = {
       }
       const db = ctx.db<typeof schema>();
       const staleError = "计划或候选副本已经变化，你看到的版本已过期；没有确认任何版本，请刷新后按最新候选重新确认";
+      // W-PLAN-SAFE-001 P0 rework (required binding): both binding
+      // fields MUST arrive with the request. expected_plan_version
+      // may be null (the token row did not exist when the conflict
+      // was displayed) but the field itself may not be absent; the
+      // version must be null or a non-negative integer decimal
+      // string, and expected_candidate_ids a non-empty array of
+      // integers. Anything else — above all an older client that
+      // sends neither field — is rejected here, BEFORE any database
+      // write, with the typed stale answer: zero writes, the
+      // conflict stays open, the plan untouched. (The isOwner gate
+      // above runs first, so forbidden callers still hear only
+      // "forbidden".)
+      const candidateIdsArg = args.expected_candidate_ids;
+      const planVersionArg = args.expected_plan_version;
+      if (
+        !Array.isArray(candidateIdsArg) ||
+        candidateIdsArg.length === 0 ||
+        !candidateIdsArg.every((id) => Number.isInteger(id)) ||
+        planVersionArg === undefined ||
+        (planVersionArg !== null && !/^\d+$/.test(planVersionArg))
+      ) {
+        return {
+          ok: false,
+          forbidden: false,
+          error: "确认请求缺少有效的候选绑定（候选编号与计划版本为必填，旧版请求无法确认未展示的版本），没有确认任何版本，请刷新后按最新候选重新确认",
+          outcome: "stale",
+        };
+      }
       const groupRows = () =>
         db
           .select()
@@ -2176,24 +2225,21 @@ export const Actions = {
       if (args.selected_archive_id === null && !live0) {
         return { ok: false, forbidden: false, error: "当前显示的这一份已不在计划中，请从归档副本里选一份恢复" };
       }
-      // Display binding: when the client echoed what it was shown,
-      // the current state must still stamp identically — same plan
-      // version, same candidate ids, same candidate contents.
-      // Otherwise this confirmation refers to a version the owner
-      // never saw: typed stale, zero writes.
+      // Display binding (presence and shape already enforced
+      // above): the current state must still be what the client was
+      // shown — same plan version, same candidate ids in display
+      // order. Otherwise this confirmation refers to a version the
+      // owner never saw: typed stale, zero writes.
       let boundVersion = await readPlanVersion(ctx);
-      if (args.expected_candidate_ids !== undefined || args.expected_plan_version !== undefined) {
+      {
         const displayedIds = [
           ...(live0 ? [live0.id] : []),
           ...unresolved.map((row) => row.id),
         ];
         const idsMatch =
-          args.expected_candidate_ids === undefined ||
-          (args.expected_candidate_ids.length === displayedIds.length &&
-            args.expected_candidate_ids.every((id, index) => id === displayedIds[index]));
-        const versionMatch =
-          args.expected_plan_version === undefined || args.expected_plan_version === boundVersion;
-        if (!idsMatch || !versionMatch) {
+          candidateIdsArg.length === displayedIds.length &&
+          candidateIdsArg.every((id, index) => id === displayedIds[index]);
+        if (!idsMatch || planVersionArg !== boundVersion) {
           return { ok: false, forbidden: false, error: staleError, outcome: "stale" };
         }
       }
@@ -2224,10 +2270,9 @@ export const Actions = {
           // was shown, and the requested winner still exists.
           const freshIds = [...(live ? [live.id] : []), ...unresolvedNow.map((row) => row.id)];
           const bindingStillMatches =
-            (args.expected_plan_version === undefined || args.expected_plan_version === boundVersion) &&
-            (args.expected_candidate_ids === undefined ||
-              (args.expected_candidate_ids.length === freshIds.length &&
-                args.expected_candidate_ids.every((id, index) => id === freshIds[index])));
+            planVersionArg === boundVersion &&
+            candidateIdsArg.length === freshIds.length &&
+            candidateIdsArg.every((id, index) => id === freshIds[index]);
           const winnerStillExists =
             args.selected_archive_id !== null
               ? unresolvedNow.some((row) => row.id === args.selected_archive_id)
@@ -2342,6 +2387,39 @@ export const Actions = {
         const claimExists = () =>
           sql`EXISTS (SELECT 1 FROM plan_exercise_conflicts WHERE routine = ${args.routine} AND exercise_key = ${args.exercise_key} AND resolution_selected_id = ${marker})`;
 
+        // (2) The claim-guarded version advance, in the SAME batch,
+        // immediately after the claim: it fires only while this
+        // decision's claim marker exists — i.e. only when the claim
+        // above actually stamped the still-unresolved rows. With a
+        // non-null bound version it additionally requires the token
+        // to still equal that version; with a null bound version
+        // (no token row at display time) it inserts '1' only while
+        // the claim marker exists AND the token row is still
+        // absent. A claim that stamped zero rows therefore leaves
+        // the version untouched: the whole batch writes zero rows
+        // and there is NOTHING to compensate afterwards. On a
+        // landed claim the token advances by exactly 1, atomically
+        // with the decision statements below.
+        if (boundVersion === null) {
+          statements.push(
+            db.run(sql`
+              INSERT INTO plan_meta (key, value)
+              SELECT ${PLAN_META_VERSION_KEY}, '1'
+              WHERE ${claimExists()}
+                AND NOT EXISTS (SELECT 1 FROM plan_meta WHERE key = ${PLAN_META_VERSION_KEY})
+            `),
+          );
+        } else {
+          statements.push(
+            db.run(sql`
+              UPDATE plan_meta
+              SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+              WHERE key = ${PLAN_META_VERSION_KEY} AND value = ${boundVersion}
+                AND ${claimExists()}
+            `),
+          );
+        }
+
         if (args.selected_archive_id === null) {
           if (!live) {
             return { ok: false, forbidden: false, error: "当前显示的这一份已不在计划中，请从归档副本里选一份恢复" };
@@ -2405,20 +2483,10 @@ export const Actions = {
             );
           }
         }
-        statements.push(
-          db
-            .insert(schema.planMeta)
-            .values({ key: PLAN_META_VERSION_KEY, value: "1" })
-            .onConflictDoUpdate({
-              target: schema.planMeta.key,
-              set: { value: sql`CAST(CAST(${schema.planMeta.value} AS INTEGER) + 1 AS TEXT)` },
-            })
-            .returning({ value: schema.planMeta.value }),
-        );
-        // Every branch above pushes the claim plus at least one
-        // decision statement before the version increment, so the
-        // batch is never empty — the tuple shape db.batch requires
-        // is guaranteed at runtime.
+        // Every branch above pushes the claim, the claim-guarded
+        // version advance and at least one decision statement, so
+        // the batch is never empty — the tuple shape db.batch
+        // requires is guaranteed at runtime.
         const batchItems = statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]];
         let results: unknown[];
         try {
@@ -2449,23 +2517,25 @@ export const Actions = {
         if (claimCount === 0) {
           // The claim stamped nothing: the bound state had already
           // moved (a save or a rival decision bumped the version
-          // token first). Every decision statement was guarded on
-          // the claim marker, so this batch's ONLY effect is its
-          // version increment — cancel exactly that +1 and loop:
-          // the re-read answers the typed verdict (stale /
+          // token first). Every decision statement AND the version
+          // advance were guarded on the claim marker, so this batch
+          // wrote ZERO rows — no version change, no decision write,
+          // and NO compensation write afterwards (a cross-transaction
+          // −1 here was the ABA hazard: a concurrent getPlan could
+          // bracket-read the transient +1 as its versionBefore, watch
+          // a real save land, and then see the −1 restore the token
+          // to versionBefore over the NEW plan). Just loop: the
+          // re-read answers the typed verdict (stale /
           // already_resolved / re-decide). Nothing else is touched;
           // in particular a winning decision's rows are never reset
           // by a loser.
-          await db.batch([
-            db
-              .update(schema.planMeta)
-              .set({ value: sql`CAST(CAST(${schema.planMeta.value} AS INTEGER) - 1 AS TEXT)` })
-              .where(eq(schema.planMeta.key, PLAN_META_VERSION_KEY)),
-          ]);
           continue;
         }
-        const versionRows = results[results.length - 1] as { value: string }[];
-        const newVersion = versionRows[0]?.value ?? null;
+        // The decision landed. Judge the committed version by
+        // re-reading the actual token — never from a statement
+        // RETURNING — so the stamp comparison below is against the
+        // state the database really holds now.
+        const newVersion = await readPlanVersion(ctx);
         const postRows = await groupRows();
         const postLiveRows = await liveRowFor();
         const postLive = postLiveRows[0];
