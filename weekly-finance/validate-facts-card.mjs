@@ -317,8 +317,11 @@ const ledgerSplit = sourceLedgerRows({
   holdingsComplete: false,
 }, { status: "idle" });
 check("ledger (PM case): bank + holdings rows never show the asOf date (2099-10-18) as their data date",
-  ledgerSplit[1].dataDate === "未知" && ledgerSplit[3].dataDate === "未知"
+  ledgerSplit[1].dataDate.startsWith("未知") && ledgerSplit[3].dataDate === "未知"
   && !ledgerSplit[1].dataDate.includes("2099-10-18") && !ledgerSplit[3].dataDate.includes("2099-10-18"));
+check("ledger (PM case): the single undated bank row states its coverage （日期已知 0/1) instead of borrowing the snapshot month",
+  ledgerSplit[1].dataDate.includes("日期已知 0/1") && ledgerSplit[1].dataDate.includes("日期未知")
+  && !ledgerSplit[1].dataDate.includes("2099-09-30"));
 check("ledger (PM case): the local monthly row keeps its real fact — sourceMonth + month range",
   ledgerSplit[0].dataDate === "2099-09-30" && ledgerSplit[0].range.includes("2099-09-30"));
 // With real balanceDate evidence the bank row shows THAT date.
@@ -329,8 +332,8 @@ const ledgerDated = sourceLedgerRows({
     { type: "income", live: false },
   ],
 }, { status: "idle" });
-check("ledger: a retained balanceDate is the bank row's data date (the real per-source evidence)",
-  ledgerDated[1].dataDate === "2026-09-30");
+check("ledger: a retained balanceDate is the bank row's data date (the real per-source evidence), with full coverage stated",
+  ledgerDated[1].dataDate === "2026-09-30（日期已知 1/1）");
 const ledgerDatedMixed = sourceLedgerRows({
   ...ledgerData,
   accounts: [
@@ -342,6 +345,8 @@ const ledgerDatedMixed = sourceLedgerRows({
 check("ledger: differing balance dates are presented as a span AND named inconsistent (never collapsed to asOf or one day)",
   ledgerDatedMixed[1].dataDate.includes("2026-09-15") && ledgerDatedMixed[1].dataDate.includes("2026-09-30")
   && ledgerDatedMixed[1].dataDate.includes("不一致"));
+check("ledger: a fully-dated inconsistent span still states its full coverage （日期已知 2/2)",
+  ledgerDatedMixed[1].dataDate.includes("日期已知 2/2") && !ledgerDatedMixed[1].dataDate.includes("日期未知"));
 // Combination: bank facts saved, transactions failed/unknown —
 // the transaction row keeps its old coverage statement and its
 // unknown per-source result; the bank row's state never lends
@@ -363,6 +368,119 @@ check("band wiring: last-success snapshot time and attempt start are separate fi
   && appSrc.includes("formatInstant(refresh.startedAt, false)"));
 check("band wiring: server stamps and returns the attempt start (startedAt), distinct from updatedAt",
   serverSrc.includes("startedAt: new Date()") && serverSrc.includes("startedAt: state?.startedAt?.toISOString() ?? null"));
+
+// --- F0.5 P1: bank-row date coverage matrix (PM bug单 c958c3c) ---
+// The known date describes ONLY the accounts carrying date
+// evidence; every bank row counts toward the coverage
+// denominator, and unknown dates are named as unknown — never
+// filled from the snapshot asOf (2099-10-18) or the snapshot
+// month (2099-09-30 as a stand-in for a missing row date).
+const bankRowOf = (accounts, extra = {}, status = "idle") => sourceLedgerRows({
+  ...ledgerData,
+  asOf: "2099-10-18T12:00:00-07:00",
+  sourceMonth: "2099-09-30",
+  ...extra,
+  accounts,
+}, { status })[1];
+// 全部同日： the single date stands, with its full coverage.
+const covAllSame = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "2099-09-30" },
+  { type: "account", live: true, value: 3400, balanceDate: "2099-09-30" },
+]);
+check("coverage: all accounts dated the same day -> the date with 日期已知 2/2, no unknown note",
+  covAllSame.dataDate === "2099-09-30（日期已知 2/2）" && !covAllSame.dataDate.includes("日期未知"));
+// 全未知 (null + legacy-absent field): no date is stated at all.
+const covAllUnknown = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: null },
+  { type: "account", live: false, value: 3400 },
+]);
+check("coverage: all dates unknown (null + legacy-absent) -> 未知 with 日期已知 0/2, no date borrowed from asOf/sourceMonth",
+  covAllUnknown.dataDate === "未知（日期已知 0/2；其余 2 个账户日期未知）"
+  && !covAllUnknown.dataDate.includes("2099-10-18") && !covAllUnknown.dataDate.includes("2099-09-30"));
+// 部分未知 — the PM counterexample itself: one dated row must not
+// speak for the whole bank source.
+const covPartialData = {
+  ...ledgerData,
+  asOf: "2099-10-18T12:00:00-07:00",
+  sourceMonth: "2099-09-30",
+  accounts: [
+    { type: "account", live: false, value: 1200, balanceDate: "2099-09-30" },
+    { type: "account", live: false, value: 3400, balanceDate: null },
+  ],
+};
+const covPartialBefore = JSON.stringify(covPartialData);
+const covPartial = sourceLedgerRows(covPartialData, { status: "idle" })[1];
+check("coverage (PM counterexample): one dated + one null row -> the date is scoped by 日期已知 1/2 with the other row named unknown",
+  covPartial.dataDate === "2099-09-30（日期已知 1/2；其余 1 个账户日期未知）");
+check("coverage (PM counterexample): the bank range still covers BOTH accounts — the undated balance is not dropped",
+  covPartial.range.includes("全部 2 个余额账户"));
+check("coverage: building the ledger never mutates the payload (amounts and stored blob untouched)",
+  JSON.stringify(covPartialData) === covPartialBefore);
+// 多个已知日期 + 未知： span + inconsistency + partial coverage.
+const covSpanPartial = bankRowOf([
+  { type: "account", live: false, value: 100, balanceDate: "2099-09-30" },
+  { type: "account", live: false, value: 200, balanceDate: "2099-08-31" },
+  { type: "account", live: false, value: 300, balanceDate: null },
+]);
+check("coverage: two differing known dates + one unknown -> span, named inconsistent, 日期已知 2/3 with the unknown row named",
+  covSpanPartial.dataDate.includes("2099-08-31 至 2099-09-30") && covSpanPartial.dataDate.includes("不一致")
+  && covSpanPartial.dataDate.includes("日期已知 2/3") && covSpanPartial.dataDate.includes("其余 1 个账户日期未知"));
+// 真实 0 余额账户： a zero balance is still a bank row — it counts
+// toward coverage exactly like any other row.
+const covZero = bankRowOf([
+  { type: "account", live: false, value: 0, balanceDate: "2099-09-30" },
+  { type: "account", live: false, value: 0, balanceDate: null },
+]);
+check("coverage: real zero-balance rows still count toward date coverage (1/2, not dropped as empty)",
+  covZero.dataDate === "2099-09-30（日期已知 1/2；其余 1 个账户日期未知）" && covZero.range.includes("全部 2 个余额账户"));
+// 旧 blob: a payload whose account rows predate the balanceDate
+// field entirely — every row is date-unknown, nothing inferred.
+const covLegacy = bankRowOf([
+  { type: "account", live: false, value: 500 },
+  { type: "investment", live: false, value: 900 },
+]);
+check("coverage: legacy blob (no balanceDate field anywhere) -> 未知（日期已知 0/1), investment rows stay out of the bank denominator",
+  covLegacy.dataDate === "未知（日期已知 0/1；其余 1 个账户日期未知）");
+// 刷新失败保留旧数据： the date statement derives from the stored
+// rows only, so a failed attempt shows the SAME coverage text as
+// the idle state while its result keeps the old data.
+const covPartialError = sourceLedgerRows(covPartialData, { status: "error" })[1];
+const covPartialRunning = sourceLedgerRows(covPartialData, { status: "running" })[1];
+check("coverage: a failed refresh keeps the old rows — identical date coverage, result still 保留上次成功数据",
+  covPartialError.dataDate === covPartial.dataDate && covPartialError.result.includes("保留上次成功数据")
+  && covPartialRunning.dataDate === covPartial.dataDate);
+// 元数据冲突账户日期为 null: a conflicted field arrives nulled —
+// it counts as unknown coverage, never promoted to the other
+// row's date and never filled from asOf.
+const covConflict = bankRowOf([
+  { type: "account", live: false, value: 1200, balanceDate: "2099-09-30" },
+  { type: "account", live: false, value: 3400, balanceDate: null, metadataConflict: true },
+]);
+check("coverage: a metadata-conflict row (balanceDate null) counts as date-unknown — 日期已知 1/2, no promotion, no asOf fill",
+  covConflict.dataDate === "2099-09-30（日期已知 1/2；其余 1 个账户日期未知）"
+  && !covConflict.dataDate.includes("2099-10-18"));
+// mutation sensitivity: the old filter-out-the-null-rows logic
+// produced the bare single date for the PM counterexample — the
+// coverage text must differ from that defective output.
+const oldBankDataDate = (accounts) => {
+  const dates = [...new Set(accounts
+    .filter((a) => a.type === "account" && a.balanceDate != null)
+    .map((a) => a.balanceDate))].sort();
+  return dates.length === 0 ? "未知" : dates.length === 1 ? dates[0] : `${dates[0]} 至 ${dates[dates.length - 1]}（各账户余额日期不一致）`;
+};
+check("mutation: filtering out null rows reproduces the defect (bare 2099-09-30); the real row text does not",
+  oldBankDataDate(covPartialData.accounts) === "2099-09-30" && covPartial.dataDate !== "2099-09-30");
+// Requirement (3): the expanded per-account rows show each row's
+// OWN real balanceDate or 未知 — a missing date is never filled
+// with the snapshot date / snapshot month in the 余额日期 slot
+// (the snapshot date may only appear labelled as the snapshot's
+// own, as the cashflow endpoint rows do with 未提供（按快照 …）).
+check("per-account rows: monthly-record balance rows render their own entry.balanceDate or 未知 (no snapshot-date fill)",
+  appSrc.includes("余额日期 {entry.balanceDate ?? \"未知\"}") && !appSrc.includes("entry.balanceDate ?? snapshotDate"));
+check("per-account rows: cash-scope rows render their own account.balanceDate or 未知 (no snapshot-month fill)",
+  appSrc.includes("余额日期 {account.balanceDate ?? \"未知\"}") && !appSrc.includes("account.balanceDate ?? data.sourceMonth"));
+check("ledger wiring: coverage is text in the rendered row （数据日期 + coverage wording, never colour alone)",
+  appSrc.includes("数据日期：{row.dataDate}") && appSrc.includes("日期已知 ${bankDatedRows.length}/${bankRows.length}"));
 
 console.log(`validate-facts-card: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

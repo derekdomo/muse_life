@@ -29,16 +29,109 @@ type StrengthWorkout = Snapshot["strengthTraining"]["workouts"][number];
 type DataStatus = NonNullable<DashboardResponse["dataStatus"]>;
 type UnifiedDay = DashboardResponse["unifiedTimeline"][number];
 type StrengthTraining = NonNullable<DashboardResponse["strength"]>;
+type ReadinessHistoryPoint = DashboardResponse["readinessHistory"][number];
 type SourceState = DashboardResponse["healthState"];
 type Tab = "today" | "trends" | "history";
 type Status = "正常" | "偏低" | "偏高" | "数据缺失" | "基线不足";
 
-const ROUTINE_LABELS: Record<StrengthWorkout["routine"], string> = { push: "推", pull: "拉", legs: "腿" };
+// Routine labels (L1-ROUTINE-001): all five source values, with the two
+// home routines labelled exactly as 训练记录 (space-6) labels them —
+// home_posture is 「在家 A · 体态」, home_snowboard is 「在家 B · 单板」.
+// The raw value is never relabelled as one of the gym routines.
+const ROUTINE_LABELS: Record<StrengthWorkout["routine"], string> = {
+  push: "推",
+  pull: "拉",
+  legs: "腿",
+  home_posture: "在家 A · 体态",
+  home_snowboard: "在家 B · 单板",
+};
+
+// HealthKit workout_type values arrive as raw English codes ("swimming",
+// "cycling", "elliptical"). The UI is Chinese: rendering the raw code made
+// real records unrecognizable — a list full of "swimming" does not read as
+// 游泳记录 to the user scanning for it. Unknown types keep their raw value
+// rather than being relabeled by guesswork.
+const WORKOUT_TYPE_LABELS: Record<string, string> = {
+  swimming: "游泳",
+  swim: "游泳",
+  cycling: "骑行",
+  biking: "骑行",
+  elliptical: "椭圆机",
+  running: "跑步",
+  walking: "步行",
+  hiking: "徒步",
+  rowing: "划船",
+  yoga: "瑜伽",
+  core_training: "核心训练",
+  traditional_strength_training: "力量训练",
+  functional_strength_training: "力量训练",
+  strength_training: "力量训练",
+};
+
+function workoutTypeLabel(type: string): string {
+  return WORKOUT_TYPE_LABELS[type.toLowerCase()] ?? type;
+}
+
+function isSwimWorkout(type: string): boolean {
+  const normalized = type.toLowerCase();
+  return normalized.includes("swim") || normalized.includes("游泳");
+}
+
+// One-line workout summary for a unified-timeline day, e.g.
+// "运动 1 次 · 游泳 600 米". Empty string when the day has no workouts.
+function unifiedWorkoutText(day: UnifiedDay): string {
+  if (!day.workoutSessions) return "";
+  const types = day.workoutTypes.map(workoutTypeLabel).join("、");
+  const swim = day.swimMeters !== null && day.swimMeters > 0 ? ` · 游泳 ${numberLabel(day.swimMeters)} 米` : "";
+  return `运动 ${day.workoutSessions} 次${types ? ` · ${types}` : ""}${swim}`;
+}
+
+// Per-type HealthKit workout label for a unified-timeline day
+// (H-WORKOUTS-001 item 2), e.g. "运动 3 次 · Running、Swimming · 已知时长 50 分".
+// Types are the raw HealthKit strings; the duration segment appears only
+// when at least one group's duration is known — a group whose sessions
+// all lack durations contributes its count but no minutes, and a real
+// 0-minute total still shows "已知时长 0 分". The durations are only the
+// recorded subtotal (missing durations are not counted as 0), labeled
+// 已知时长 rather than a blanket total. Empty string when the day has
+// no HK workout groups (or the field is absent on an older payload).
+function unifiedHkLabel(day: UnifiedDay): string {
+  const groups = day.hkWorkouts ?? [];
+  if (!groups.length) return "";
+  const totalSessions = groups.reduce((sum, group) => sum + group.sessions, 0);
+  const types = groups.map((group) => group.type).join("、");
+  const knownDurations = groups.map((group) => group.durationMinutes).filter((value): value is number => value !== null);
+  const totalMinutes = Math.round(knownDurations.reduce((a, b) => a + b, 0) * 10) / 10;
+  const duration = knownDurations.length ? ` · 已知时长 ${totalMinutes.toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 分` : "";
+  return `运动 ${totalSessions} 次 · ${types}${duration}`;
+}
 
 function statusClass(status: Status): string {
   if (status === "正常") return "status-ok";
   if (status === "数据缺失" || status === "基线不足") return "status-missing";
   return "status-watch";
+}
+
+// Status is never carried by color alone (the owner is color-vision
+// deficient): every status also gets a shape/symbol and its text label,
+// and numeric deviations get a direction arrow. Symbols are chosen to
+// differ in shape, not hue: ✓ normal, ↓ low, ↑ high, — missing.
+function statusSymbol(status: Status): string {
+  if (status === "正常") return "✓";
+  if (status === "偏低") return "↓";
+  if (status === "偏高") return "↑";
+  return "—";
+}
+
+// Same rule for the Whoop bands: the band word is always paired with a
+// distinct shape (✓ / ● / ▲ / ○ / —) and the marker's position on the
+// segmented track, so red-vs-green is never the only signal.
+function bandSymbol(band: WhoopBand): string {
+  if (band === "green") return "✓";
+  if (band === "yellow") return "●";
+  if (band === "red") return "▲";
+  if (band === "blue") return "○";
+  return "—";
 }
 
 function dateLabel(date: string): string {
@@ -80,7 +173,7 @@ function actualSleepHours(sleep: Pick<Snapshot["sleep"], "coreHours" | "deepHour
 function Kpi({ label, value, unit, detail, status }: { label: string; value: string; unit?: string; detail: string; status: Status }) {
   return (
     <div className="kpi">
-      <div className="kpi-topline"><span>{label}</span><span className={`status-chip ${statusClass(status)}`}>{status}</span></div>
+      <div className="kpi-topline"><span>{label}</span><span className={`status-chip ${statusClass(status)}`}><span aria-hidden="true">{statusSymbol(status)}</span> {status}</span></div>
       <div className="kpi-value">{value}{unit ? <span>{unit}</span> : null}</div>
       <p>{detail}</p>
     </div>
@@ -121,7 +214,7 @@ function SleepPanel({ sleep }: { sleep: Snapshot["sleep"] }) {
     <section className="sleep-panel" aria-labelledby="sleep-title">
       <div className="section-heading">
         <div><p className="section-kicker">昨晚睡眠</p><h2 id="sleep-title">{actualHours.toFixed(1)} 小时</h2></div>
-        <span className={`status-chip ${statusClass(sleep.status)}`}>{sleep.status}</span>
+        <span className={`status-chip ${statusClass(sleep.status)}`}><span aria-hidden="true">{statusSymbol(sleep.status)}</span> {sleep.status}</span>
       </div>
       <div className="sleep-clock"><div><span>入睡</span><strong>{sleep.bedtime}</strong></div><div className="sleep-line" aria-hidden="true" /><div><span>起床</span><strong>{sleep.wakeTime}</strong></div></div>
       {hasStages ? (
@@ -131,7 +224,7 @@ function SleepPanel({ sleep }: { sleep: Snapshot["sleep"] }) {
             <span className="stage-rem" style={{ width: pct(sleep.remHours ?? 0) }} /><span className="stage-awake" style={{ width: pct((sleep.awakeMinutes ?? 0) / 60) }} />
           </div>
           <div className="stage-legend">
-            <span><i className="dot core" />浅睡 <b>{(sleep.coreHours ?? 0).toFixed(1)}h</b></span><span><i className="dot deep" />深睡 <b>{Math.round((sleep.deepHours ?? 0) * 60)}m</b></span><span><i className="dot rem" />REM <b>{(sleep.remHours ?? 0).toFixed(1)}h</b></span>
+            <span><i className="dot core" />浅睡 <b>{(sleep.coreHours ?? 0).toFixed(1)}h</b></span><span><i className="dot deep" />深睡 <b>{Math.round((sleep.deepHours ?? 0) * 60)}m</b></span><span><i className="dot rem" />REM <b>{(sleep.remHours ?? 0).toFixed(1)}h</b></span><span><i className="dot awake" />清醒 <b>{Math.round(sleep.awakeMinutes ?? 0)}m</b></span>
           </div>
         </>
       ) : <p className="empty-inline">本次同步暂未返回睡眠分期。</p>}
@@ -301,15 +394,13 @@ function recoveryScore(readiness: Readiness | null): WhoopScore {
     display: String(pct),
     band: percentBand(pct),
     bandLabel: pct >= 67 ? "恢复良好" : pct >= 34 ? "恢复一般" : "需要恢复",
-    detail: readiness.status,
+    // No visible caption: the status word is already the hero headline,
+    // and repeating it under the ring is the kind of duplicate text the
+    // owner flagged as clutter. The band label carries the glance value.
+    detail: "",
   };
 }
 
-// H-UI-001 (rework): a sleep session counts as recorded only when the
-// snapshot does not flag it missing and it has a positive actual duration.
-// The server radar defaults the sleep dimension to 5 when both sleep
-// components are missing, so the radar value is only honest when at least
-// one of lastSleep / sleepBank carries a real component score.
 function hasSleepSession(snapshot: Snapshot): boolean {
   return snapshot.sleep.status !== "数据缺失" && actualSleepHours(snapshot.sleep) > 0;
 }
@@ -321,13 +412,16 @@ function sleepScore(snapshot: Snapshot, readiness: Readiness | null): WhoopScore
     return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: "昨晚睡眠未记录" };
   }
   const radarSleep = readiness?.radar.find((dimension) => dimension.key === "sleep");
-  const sleepSignalAvailable = (readiness?.components ?? []).some(
-    (component) => (component.key === "lastSleep" || component.key === "sleepBank") && component.score !== null,
-  );
-  if (radarSleep && !sleepSignalAvailable) {
-    return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: `${detail} · 睡眠信号不足` };
-  }
   if (radarSleep) {
+    // The server fills the radar sleep dimension with a neutral default
+    // when both sleep components are missing; only trust it when at
+    // least one real sleep signal contributed.
+    const hasSleepSignal = readiness?.components.some(
+      (component) => (component.key === "lastSleep" || component.key === "sleepBank") && component.score !== null,
+    ) ?? false;
+    if (!hasSleepSignal) {
+      return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail: `${detail} · 睡眠信号不足` };
+    }
     const pct = Math.round(radarSleep.score * 10);
     return {
       pct,
@@ -355,29 +449,106 @@ function sleepScore(snapshot: Snapshot, readiness: Readiness | null): WhoopScore
   return { pct: null, display: "—", band: "slate", bandLabel: "数据不足", detail };
 }
 
-function strainScore(snapshot: Snapshot): WhoopScore {
-  // H-UI-001 (rework, PM 2026-10-16 08:46): the 0–21 strain formula was
-  // never reviewed, so no numeric score or band is ever shown — only the
-  // data date's own recorded activity facts, in a neutral 评分未确认
-  // presentation. Only the row dated exactly dataDate may be used —
-  // never splice another date's exercise/energy with dataDate's steps —
-  // and a missing item is named in the detail instead of silently
-  // counting as 0. Real zeros are data and are shown as 0.
-  const neutral = { pct: null, display: "—", band: "slate", bandLabel: "评分未确认" } as const;
+interface StrainFacts {
+  hasRow: boolean;
+  exerciseMinutes: number | null;
+  activeKcal: number | null;
+  steps: number | null;
+  detail: string;
+}
+
+function strainFacts(snapshot: Snapshot): StrainFacts {
+  // No strain score is shown — the third hero slot presents the data
+  // date's own recorded activity facts instead of an empty ring. Only
+  // that day's record counts: never splice in another day's activity,
+  // and never treat a missing quantity as zero.
   const row = snapshot.historyDaily.find((daily) => daily.date === snapshot.dataDate);
   if (!row) {
-    return { ...neutral, detail: `${snapshot.dataDate} 的活动记录缺失` };
+    return { hasRow: false, exerciseMinutes: null, activeKcal: null, steps: null, detail: `${dateLabel(snapshot.dataDate)} 的活动记录缺失` };
   }
-  const exercise = row.exerciseMinutes ?? null;
-  const kcal = row.activeKcal ?? null;
-  const steps = snapshot.steps.value;
-  const present = `运动 ${exercise === null ? "—" : `${Math.round(exercise)} 分钟`} · 活动 ${kcal === null ? "—" : `${Math.round(kcal)} kcal`} · ${steps === null ? "—" : `${numberLabel(steps)} 步`}`;
-  const missing = [
-    exercise === null ? "运动时长缺失" : null,
-    kcal === null ? "活动能量缺失" : null,
-    steps === null ? "步数缺失" : null,
-  ].filter(Boolean).join("、");
-  return { ...neutral, detail: missing ? `${present} · ${missing}` : present };
+  const detail = [
+    row.activeKcal === null ? "活动能量未记录" : `活动 ${Math.round(row.activeKcal)} kcal`,
+    row.steps === null ? "步数未记录" : `${numberLabel(row.steps)} 步`,
+  ].join(" · ");
+  return { hasRow: true, exerciseMinutes: row.exerciseMinutes, activeKcal: row.activeKcal, steps: row.steps, detail };
+}
+
+interface StrainScore extends WhoopScore {
+  computable: boolean;
+  trimp: number | null;
+  scoredSessions: number;
+  totalSessions: number;
+  hrMaxBpm: number | null;
+  missingReason: string | null;
+}
+
+// Daily load score (definition adopted by the user 2026-10-17, "按学术
+// 来"): Banister TRIMP (1991) — the published academic formula underneath
+// this product class. WHOOP's Strain formula and Garmin/Firstbeat's EPOC
+// model are both proprietary and unpublished, so neither can be copied;
+// TRIMP can, exactly. Per session:
+//   ΔHR   = (session average HR − resting HR) / (HRmax − resting HR)
+//   TRIMP = duration (min) × ΔHR × 0.64 · e^(1.92 · ΔHR)   (men's constants)
+// The day's sessions sum to the daily TRIMP. The 0–21 display is a
+// saturating map, 21 × (1 − e^(−TRIMP/150)), banded by WHOOP's published
+// ranges (Light 0–9 / Moderate 10–13 / High 14–17 / All Out 18–21) — the
+// map and bands are presentation only; the score is TRIMP, never WHOOP's
+// formula, and the raw TRIMP value stays visible in the ring detail.
+// HRmax is the highest daily hr_max_bpm observed in the stored window;
+// resting HR is the data date's own daily value (falling back to the
+// snapshot's main value, which is that same day's). A session missing
+// duration or average HR cannot be scored: it is counted in the detail,
+// never silently dropped and never treated as zero load. When resting HR
+// or HRmax is unavailable the score is not computed at all. Only workout
+// sessions count — non-workout daily activity is not in this definition,
+// and the detail says so on workout-free days. Self-contained so it can
+// be extracted and run standalone, like sevenDayFacts below.
+function strainScore(snapshot: Snapshot): StrainScore {
+  const date = snapshot.dataDate;
+  const sessions = snapshot.historyWorkouts.filter((workout) => workout.date === date);
+  const dailyRow = snapshot.historyDaily.find((row) => row.date === date);
+  const resting = dailyRow?.restingHr ?? snapshot.restingHr.value;
+  const hrMaxValues = snapshot.historyDaily.flatMap((row) => (row.hrMax !== null && row.hrMax !== undefined ? [row.hrMax] : []));
+  const hrMax = hrMaxValues.length ? Math.max(...hrMaxValues) : null;
+  const notComputable = (bandLabel: string, detail: string, missingReason: string): StrainScore => ({
+    computable: false, trimp: null, scoredSessions: 0, totalSessions: sessions.length, hrMaxBpm: hrMax,
+    pct: null, display: "—", band: "slate", bandLabel, detail, missingReason,
+  });
+  if (resting === null) {
+    return notComputable("数据不足", `${dateLabel(date)} 静息心率缺失，TRIMP 无法计算`, "静息心率缺失");
+  }
+  if (hrMax === null || hrMax <= resting) {
+    return notComputable("待同步", "最高心率未同步，下次同步后自动计算", "最高心率未同步");
+  }
+  let trimp = 0;
+  let scored = 0;
+  for (const session of sessions) {
+    if (session.durationMinutes === null || session.averageHr === null) continue;
+    const delta = Math.min(1, Math.max(0, (session.averageHr - resting) / (hrMax - resting)));
+    trimp += session.durationMinutes * delta * 0.64 * Math.exp(1.92 * delta);
+    scored += 1;
+  }
+  if (sessions.length > 0 && scored === 0) {
+    return notComputable("数据不足", `${dateLabel(date)} 的运动缺平均心率或时长，TRIMP 无法计算`, "运动缺心率或时长");
+  }
+  const value = Math.round(21 * (1 - Math.exp(-trimp / 150)) * 10) / 10;
+  const band: WhoopBand = value < 10 ? "blue" : value < 14 ? "green" : value < 18 ? "yellow" : "red";
+  const bandLabel = value < 10 ? "轻负荷" : value < 14 ? "中等负荷" : value < 18 ? "高负荷" : "全力以赴";
+  // Caption stays to the number itself; the HRmax provenance lives in
+  // the collapsed 负荷口径 note (hrMaxBpm below), not under the ring.
+  const parts = [`TRIMP ${Math.round(trimp)} · ${scored} 次运动`];
+  if (sessions.length > scored) parts.push(`另 ${sessions.length - scored} 次缺心率/时长未计入`);
+  if (sessions.length === 0) {
+    const exercise = dailyRow?.exerciseMinutes;
+    parts.push(exercise !== null && exercise !== undefined && exercise > 0
+      ? `当日运动 ${Math.round(exercise)} 分钟无单次心率记录，未计入`
+      : "当日无运动记录");
+  }
+  return {
+    computable: true, trimp, scoredSessions: scored, totalSessions: sessions.length, hrMaxBpm: hrMax,
+    pct: Math.round((value / 21) * 100), display: value.toFixed(1), band, bandLabel,
+    detail: parts.join(" · "), missingReason: null,
+  };
 }
 
 function mondayOf(date: string): string {
@@ -403,9 +574,12 @@ interface WeekLoadWindow {
   strengthVolume: number;
 }
 
-interface ReadinessTrendPoint {
+interface WeekDayFact {
   date: string;
-  score: number | null;
+  exerciseMinutes: number | null;
+  steps: number | null;
+  sleepHours: number | null;
+  sessions: number;
 }
 
 interface WeekLoad {
@@ -414,14 +588,13 @@ interface WeekLoad {
   detail: string;
   sufficient: boolean;
   reasons: string[];
+  coverageNote: string | null;
   current: WeekLoadWindow;
   previous: WeekLoadWindow;
-  currentWindow: { start: string; end: string };
-  previousWindow: { start: string; end: string };
   sessionsChangePct: number | null;
   durationChangePct: number | null;
   volumeChangePct: number | null;
-  readinessTrend: ReadinessTrendPoint[];
+  dayFacts: WeekDayFact[];
 }
 
 const LB_TO_KG = 0.45359237;
@@ -435,19 +608,17 @@ function volumeInDisplayUnit(volume: number, unit: "lb" | "kg", displayUnit: "lb
 // a three-tier verdict. Both windows are explicit same-span date ranges —
 // this week mondayOf(dataDate)..dataDate and the same span shifted 7 days
 // back — and every fact comes from session-level records: HealthKit
-// workout sessions plus completed strength workouts from 训练记录.
-// Cross-source duplicate handling (PM 2026-10-16 05:45): a HealthKit
-// workout record carries only id/date/type/duration — no start/end time
-// and no cross-source link — so an HK strength session on a date that
-// also has a completed strength workout can never be proven to be the
-// same session. Such a date is never silently merged by date: both
-// sources' facts are kept, the window is marked 重复归属未确认 and no
-// percentage or verdict is produced. Any other coverage gap in either
-// window — a missing or duplicated daily row, an unsynced or partially
-// measured strength week, a session without a duration — likewise means
-// no percentage and no verdict, never a guessed one. Percentages are
-// only computed per metric when both windows are complete and last
-// week's value is above zero.
+// workout sessions plus completed strength workouts from 训练记录. HK
+// records carry only id/date/type/duration — no start/end instants and no
+// cross-source link id — so a same-day HK strength session and a completed
+// strength workout cannot be proven to be the same session: instead of
+// merging them, the overlap downgrades the whole comparison to data
+// insufficient (no percentage, no verdict), while both sides' known facts
+// stay visible. Any coverage gap in either window — a missing or
+// duplicated daily row, an unsynced or partially measured strength week, a
+// session without a duration — means no percentage and no verdict, never
+// a guessed one. Percentages are only computed per metric when both
+// windows are complete and last week's value is above zero.
 function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const weekStart = mondayOf(snapshot.dataDate);
   const prevStart = shiftDateStr(weekStart, -7);
@@ -458,7 +629,16 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const reasons: string[] = [];
   const addReason = (reason: string) => { if (!reasons.includes(reason)) reasons.push(reason); };
 
-  if (snapshot.coverageIncomplete) addReason("健康数据还没同步完");
+  // The snapshot-level coverageIncomplete flag is NOT a veto on its own:
+  // it is set whenever any source query reports incomplete coverage,
+  // which routinely means this morning's partial day is still syncing —
+  // while the completed days this comparison actually uses are all
+  // present (the hero can simultaneously show same-day data with high
+  // confidence). Only gaps inside the two comparison windows count, and
+  // they are named concretely below: which dates lack a daily row, which
+  // window metric is null, which strength week lacks whole-week
+  // coverage. The flag survives only as a scoped note (coverageNote)
+  // when every window check passes.
 
   // Daily coverage: every enumerated date in both windows must appear in
   // historyDaily exactly once.
@@ -469,6 +649,14 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
     if (missing.length) addReason(`${label}每日记录缺 ${missing.join("、")}`);
     const duplicated = dates.filter((date) => (dailyCounts.get(date) ?? 0) > 1);
     if (duplicated.length) addReason(`${label}每日记录 ${duplicated.join("、")} 重复`);
+    // A present row whose exercise minutes were never recorded is a
+    // concrete gap in a metric this panel shows per day — name the
+    // dates instead of a blanket "not synced yet".
+    const noExercise = dates.filter((date) => {
+      const row = snapshot.historyDaily.find((daily) => daily.date === date);
+      return row !== undefined && row.exerciseMinutes === null;
+    });
+    if (noExercise.length) addReason(`${label}${noExercise.map((date) => dateLabel(date)).join("、")} 运动分钟未记录`);
   };
   checkDaily(currentDates, "本周");
   checkDaily(previousDates, "上周同期");
@@ -501,16 +689,17 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const windowFacts = (dates: string[], label: string): WeekLoadWindow => {
     const inWindow = new Set(dates);
     const strengthDone = strength.workouts.filter((workout) => workout.status === "completed" && inWindow.has(workout.date));
-    // No date-based dedup (PM 2026-10-16 05:45): every HK session in the
-    // window is kept and counted. A date carrying both a completed
-    // strength workout and an HK strength-type session is ambiguous —
-    // the stored HK fields cannot prove sameness — so it degrades the
-    // whole comparison instead of deleting either source's facts.
+    // No cross-source dedup: every HK session is kept and counted. An HK
+    // record has no start/end instant or link id, so when a date carries
+    // both a completed strength workout and an HK strength session the
+    // pair is ambiguous — flag it and let the sufficiency gate downgrade
+    // instead of silently dropping one side.
     const hkAll = snapshot.historyWorkouts.filter((session) => inWindow.has(session.date));
     const strengthDates = new Set(strengthDone.map((workout) => workout.date));
-    for (const date of dates) {
-      if (strengthDates.has(date) && hkAll.some((session) => session.date === date && session.type.toLowerCase().includes("strength"))) {
-        addReason(`重复归属未确认：${date} 同日有训练记录力量场次与 HealthKit 力量记录，现有字段无法证明是否为同一次，不合并、不比较`);
+    const hkStrengthDates = new Set(hkAll.filter((session) => session.type.toLowerCase().includes("strength")).map((session) => session.date));
+    for (const date of strengthDates) {
+      if (hkStrengthDates.has(date)) {
+        addReason(`${dateLabel(date)} 两处力量记录归属未确认`);
       }
     }
     const strengthDuration = strengthDone.some((workout) => workout.durationMinutes === null)
@@ -541,54 +730,69 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
     ? pctChange(current.durationMinutes, previous.durationMinutes)
     : null;
   const volumeChangePct = pctChange(current.strengthVolume, previous.strengthVolume);
-  // Readiness 7-day trend (honest form): the server provides only the
-  // latest day's readiness — there is no stored per-day series — so the
-  // trend carries the real score only on readiness.date and null (a
-  // dated gap) on the other six days. Today's value is never copied
-  // onto other dates and no substitute algorithm is invented here.
-  const trendEnd = readiness?.date ?? shiftDateStr(snapshot.dataDate, 1);
-  const readinessTrend: ReadinessTrendPoint[] = Array.from({ length: 7 }, (_, index) => {
-    const date = shiftDateStr(trendEnd, index - 6);
-    return { date, score: readiness && date === readiness.date ? readiness.score : null };
+  // Per-day facts for the 7 completed days ending at dataDate, taken
+  // from records the snapshot already carries (daily rows, sleep
+  // sessions, workout sessions from both sources). The server keeps
+  // only today's readiness score, so a day-by-day recovery strip would
+  // be six holes out of seven; these facts are what those days actually
+  // contain. A missing row or metric stays null — never 0, never a copy
+  // of another day.
+  const dayFacts: WeekDayFact[] = Array.from({ length: 7 }, (_, index) => {
+    const date = shiftDateStr(snapshot.dataDate, index - 6);
+    const daily = snapshot.historyDaily.find((row) => row.date === date);
+    const sleepRow = snapshot.historySleeps.filter((row) => row.date === date).at(-1);
+    const sessions = snapshot.historyWorkouts.filter((session) => session.date === date).length
+      + strength.workouts.filter((workout) => workout.status === "completed" && workout.date === date).length;
+    return {
+      date,
+      exerciseMinutes: daily?.exerciseMinutes ?? null,
+      steps: daily?.steps ?? null,
+      sleepHours: sleepRow ? sleepRow.totalHours : null,
+      sessions,
+    };
   });
-  const facts = {
-    sufficient, reasons, current, previous,
-    currentWindow: { start: weekStart, end: snapshot.dataDate },
-    previousWindow: { start: prevStart, end: shiftDateStr(snapshot.dataDate, -7) },
-    sessionsChangePct, durationChangePct, volumeChangePct, readinessTrend,
-  };
+  // Scoped coverage note: the snapshot flag may still be set (e.g. this
+  // morning's partial day is still syncing) even when both comparison
+  // windows are complete. It is reported once, as a note about coverage
+  // outside the comparison — never as the panel's verdict.
+  const coverageNote = snapshot.coverageIncomplete && sufficient
+    ? "窗口外有日期覆盖不完整，不影响本周对比。"
+    : null;
+  const facts = { sufficient, reasons, coverageNote, current, previous, sessionsChangePct, durationChangePct, volumeChangePct, dayFacts };
 
-  const recovery = recoveryScore(readiness);
   const hrvZ = readiness?.components.find((component) => component.key === "hrv")?.zScore ?? null;
   const restingZ = readiness?.components.find((component) => component.key === "restingHr")?.zScore ?? null;
   const debt = readiness?.sleepDebtHours ?? null;
   const pctText = (value: number) => `${value > 0 ? "+" : ""}${Math.round(value)}%`;
+  // One compact line: this week's numbers, then the week-over-week
+  // deltas. The previous week's absolutes and the recovery figure are
+  // not restated here — recovery already headlines the hero, and the
+  // deltas carry the comparison. A metric whose previous window is a
+  // genuine zero gets "无基数" instead of an invented percentage.
   const factsDetail = (withPct: boolean): string => {
-    const sessionsNote = !withPct ? ""
-      : sessionsChangePct !== null ? `（次数较上周同期 ${pctText(sessionsChangePct)}）`
-      : previous.sessions === 0 ? "（上周同期次数为 0，不算百分比）" : "";
-    const durationNote = !withPct ? ""
-      : durationChangePct !== null ? `（时长较上周同期 ${pctText(durationChangePct)}）`
-      : previous.durationMinutes === 0 ? "（上周同期时长为 0，不算百分比）" : "";
-    const volumeNote = !withPct ? ""
-      : volumeChangePct !== null ? `（容量较上周同期 ${pctText(volumeChangePct)}）`
-      : previous.strengthVolume === 0 ? "（上周同期容量为 0，不算百分比）" : "";
-    return [
-      `本周（${dateLabel(weekStart)}–${dateLabel(snapshot.dataDate)}）训练 ${current.sessions} 次${sessionsNote} · ${current.durationMinutes === null ? "时长不完整" : `${Math.round(current.durationMinutes)} 分钟`}${durationNote}`,
-      `上周同期（${dateLabel(prevStart)}–${dateLabel(shiftDateStr(snapshot.dataDate, -7))}） ${previous.sessions} 次 · ${previous.durationMinutes === null ? "时长不完整" : `${Math.round(previous.durationMinutes)} 分钟`}`,
-      `力量 本周 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}${volumeNote} · 上周同期 ${previous.strengthSessions} 次 · 容量 ${volumeLabel(previous.strengthVolume)} ${strength.displayUnit}`,
-      `恢复 ${recovery.display === "—" ? "—" : `${recovery.display}%`}${debt === null ? "" : ` · 睡眠债 ${debt.toFixed(1)}h`}`,
-    ].join(" · ");
+    const main = `本周 ${current.sessions} 次 · ${current.durationMinutes === null ? "时长不完整" : `${Math.round(current.durationMinutes)} 分钟`} · 力量 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}`;
+    if (!withPct) return main;
+    const changes: string[] = [];
+    if (sessionsChangePct !== null) changes.push(`次数 ${pctText(sessionsChangePct)}`);
+    else if (previous.sessions === 0) changes.push("次数无基数");
+    if (durationChangePct !== null) changes.push(`时长 ${pctText(durationChangePct)}`);
+    else if (previous.durationMinutes === 0) changes.push("时长无基数");
+    if (volumeChangePct !== null) changes.push(`容量 ${pctText(volumeChangePct)}`);
+    else if (previous.strengthVolume === 0) changes.push("容量无基数");
+    return changes.length ? `${main} · 较上周 ${changes.join(" · ")}` : main;
   };
 
   if (!sufficient) {
     const knownParts = [
-      `本周已知训练 ${current.sessions} 次（力量 ${current.strengthSessions} 次 + HealthKit ${current.healthKitSessions} 次，两边事实都保留）`,
-      current.durationMinutes === null ? "本周时长不完整" : `本周时长 ${Math.round(current.durationMinutes)} 分钟`,
+      `本周已知 ${current.sessions} 次`,
+      current.durationMinutes === null ? "时长不完整" : `${Math.round(current.durationMinutes)} 分钟`,
     ];
-    if (strength.updatedAt !== null) knownParts.push(`力量容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}`);
-    knownParts.push(`数据不足：${reasons.join("；")}`);
-    return { band: "slate", verdict: `数据不足：${reasons[0] ?? "覆盖不完整"}`, detail: knownParts.join(" · "), ...facts };
+    if (strength.updatedAt !== null) knownParts.push(`力量 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}`);
+    // The blocking reasons are stated once, here in the detail line;
+    // the header verdict stays a short label instead of repeating the
+    // first reason a second time.
+    knownParts.push(`未比较：${reasons.join("；")}`);
+    return { band: "slate", verdict: "数据不足，暂不比较", detail: knownParts.join(" · "), ...facts };
   }
   if (!readiness || readiness.score === null) {
     return { band: "slate", verdict: "恢复数据不足，先不下结论", detail: factsDetail(true), ...facts };
@@ -610,27 +814,6 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
     return { band: "slate", verdict: "恢复置信度低，先不下结论", detail, ...facts };
   }
   return { band: "green", verdict: "状态稳定，可以按计划训练", detail, ...facts };
-}
-
-function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: WhoopScore; suffix: string; bandKind: "recovery" | "strain" }) {
-  const radius = 40;
-  const circumference = 2 * Math.PI * radius;
-  const filled = score.pct === null ? 0 : score.pct / 100;
-  return (
-    <div className={`whoop-score whoop-${score.band}`}>
-      <div className="whoop-ring" role="img" aria-label={`${label} ${score.display}${suffix}，${score.bandLabel}。${score.detail}`}>
-        <svg viewBox="0 0 96 96" aria-hidden="true">
-          <circle className="whoop-ring-track" cx="48" cy="48" r={radius} />
-          <circle className="whoop-ring-value" cx="48" cy="48" r={radius} strokeDasharray={circumference} strokeDashoffset={circumference * (1 - filled)} />
-        </svg>
-        <div className="whoop-ring-center"><strong>{score.display}</strong><span>{suffix}</span></div>
-      </div>
-      <span className="whoop-score-label">{label}</span>
-      <span className="whoop-band-label">{score.bandLabel}</span>
-      <div className={`whoop-band ${bandKind === "strain" ? "whoop-band-strain" : ""}`} aria-hidden="true">{score.pct === null ? null : <i style={{ left: `${score.pct}%` }} />}</div>
-      <p>{score.detail}</p>
-    </div>
-  );
 }
 
 type SevenDayMetricKey = "exerciseMinutes" | "steps" | "hrvMs" | "restingHr";
@@ -719,7 +902,7 @@ function sevenDayFacts(
   if (!validDate) {
     return {
       metric, metrics, days: [], covered: 0, boundaryOk: false,
-      boundaryNote: `日期边界未满足：数据日期「${dataDate}」不是合法日期，无法确定近 7 天的结束日，不呈现为完整趋势。`,
+      boundaryNote: `数据日期「${dataDate}」不合法，近 7 天窗口无法确定。`,
       coverageIncomplete,
     };
   }
@@ -750,10 +933,10 @@ function sevenDayFacts(
   const boundaryOk = hasEndRow && isRealDate(todayLa) && dataDate < todayLa;
   let boundaryNote: string | null = null;
   if (!boundaryOk) {
-    if (!hasEndRow) boundaryNote = "日期边界未满足：数据日期当天尚无完整的每日记录，以下逐日值不作为完整趋势。";
-    else if (!isRealDate(todayLa)) boundaryNote = "日期边界未满足：无法确认数据日期是否已结束，以下逐日值不作为完整趋势。";
-    else if (dataDate === todayLa) boundaryNote = "日期边界未满足：数据日期为今天，当天尚未结束，以下逐日值为当日未完整数据，不作为完整趋势。";
-    else boundaryNote = "日期边界未满足：数据日期在未来，日期边界异常，以下逐日值不作为完整趋势。";
+    if (!hasEndRow) boundaryNote = "当天尚无每日记录，不作完整趋势。";
+    else if (!isRealDate(todayLa)) boundaryNote = "无法确认数据日期是否已结束，以下逐日值不作为完整趋势。";
+    else if (dataDate === todayLa) boundaryNote = "数据日期为今天，当天尚未结束，以下逐日值为当日未完整数据，不作为完整趋势。";
+    else boundaryNote = "数据日期在未来，日期边界异常，以下逐日值不作为完整趋势。";
   }
   return {
     metric, metrics, days, covered, boundaryOk, boundaryNote,
@@ -762,75 +945,125 @@ function sevenDayFacts(
 }
 
 type HeroActionKind = "sync-health" | "sync-strength" | "view-status";
-type HeroSource = { dataDateLine: string; healthLine: string; strengthLine: string; coverageLine: string | null; action: { kind: HeroActionKind; label: string } };
 
-// H-UI-001 source strip: the hero must open with the data date and each
-// source's own status before any score is shown. The snapshot's dataDate is
-// the last complete day; the readiness reference may carry a different date
-// and is always labelled separately — the two clocks are never merged. The
-// whole strip reduces to exactly one primary action: retry whichever source
-// is missing/stale (health first), otherwise jump to the data-status panel.
-// No cross-artifact URL is guessed: opening the workout log from here is not
-// a platform capability, so the action stays inside this artifact.
-function heroSourceStatus(snapshot: Snapshot, readiness: Readiness | null, dataStatus: DataStatus | null): HeroSource {
-  const readinessDate = readiness?.date ?? null;
-  const dataDateLine = readinessDate === null
-    ? `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考缺失`
-    : readinessDate === snapshot.dataDate
-      ? `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考同日`
-      : `数据日期 ${snapshot.dataDate}（最近完整日） · 恢复参考日期 ${readinessDate}`;
-  // A missing freshness is not always "never synced": the server's
-  // buildDataStatus already distinguishes a corrupt snapshot (detail
-  // "…快照损坏，等待重新同步") from never synced (detail "尚未同步过…").
-  // The strip must surface that detail verbatim instead of rewriting both
-  // states to 尚未同步 (H-UI-001 source fidelity rework).
-  const sourceLine = (row: DataStatus["health"] | null): string => {
-    if (row === null) return "来源状态未知";
-    if (row.freshness === "missing") return row.detail ? row.detail : "尚未同步";
-    return `${freshnessLabel(row.freshness)} · ${row.updatedAt ? `更新于 ${updatedLabel(row.updatedAt)}` : "尚未同步"}`;
+interface HeroSourceStatus {
+  dataDateLine: string;
+  healthLine: string;
+  strengthLine: string;
+  coverageLine: string | null;
+  action: { kind: HeroActionKind; label: string };
+}
+
+// Pure derivation of the hero's source-status strip: which day the numbers
+// describe, how fresh each source is, and the single next action worth
+// offering. The data date (snapshot.dataDate, the most recent complete day)
+// and the readiness reference date are different clocks and are never
+// merged into one date. Freshness wording matches freshnessLabel and the
+// update-time format matches updatedLabel; both are inlined so this
+// function stays self-contained and can be extracted from this file by
+// name and run standalone (repo-side validate-hero-status.mjs does that).
+// Nothing is guessed: a null dataStatus means both sources are unknown
+// and the action falls back to retrying the health sync.
+function heroSourceStatus(snapshot: Snapshot, readiness: Readiness | null, dataStatus: DataStatus | null): HeroSourceStatus {
+  const dataDate = snapshot.dataDate;
+  const dataDateLine = readiness === null
+    ? `数据日期 ${dataDate}（最近完整日）`
+    : readiness.date === dataDate
+      ? `数据日期 ${dataDate}（最近完整日）· 恢复参考同日`
+      : `数据日期 ${dataDate}（最近完整日）· 恢复参考日期 ${readiness.date}`;
+  const freshnessText = (freshness: DataStatus["health"]["freshness"]): string =>
+    freshness === "fresh" ? "新鲜" : freshness === "today" ? "今天更新" : freshness === "stale" ? "已过期" : "还没有";
+  const updatedText = (value: string): string => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
   };
-  const healthLine = sourceLine(dataStatus?.health ?? null);
-  const strengthLine = sourceLine(dataStatus?.strength ?? null);
-  // Coverage is a separate axis from freshness: a source can be freshly
-  // updated yet still incomplete, and the strip must say so instead of
-  // letting a fresh timestamp read as complete data.
-  const coverageLine = snapshot.coverageIncomplete ? "健康数据覆盖不完整：还没同步完（更新时间新鲜不代表覆盖完整）" : null;
-  const healthBad = dataStatus === null || dataStatus.health.freshness === "missing" || dataStatus.health.freshness === "stale";
-  const strengthBad = dataStatus !== null && (dataStatus.strength.freshness === "missing" || dataStatus.strength.freshness === "stale");
-  const action: { kind: HeroActionKind; label: string } = readiness === null || healthBad
+  const sourceLine = (source: DataStatus["health"] | DataStatus["strength"] | undefined): string => {
+    if (source === undefined) return "来源状态未知";
+    // A missing source shows the server-provided detail verbatim: it
+    // distinguishes "never synced" from "snapshot damaged, resync" —
+    // collapsing both to one "not synced" wording would hide damage.
+    if (source.freshness === "missing") return source.detail ? source.detail : "尚未同步";
+    return `${freshnessText(source.freshness)} · ${source.updatedAt ? `更新于 ${updatedText(source.updatedAt)}` : "尚未同步"}`;
+  };
+  const healthLine = sourceLine(dataStatus?.health);
+  const strengthLine = sourceLine(dataStatus?.strength);
+  // A fresh update timestamp does not mean the health data is complete:
+  // the hero flags the gap with a short chip ("覆盖不完整") so it is not
+  // misread as whole; the per-date gaps are named in the panels below.
+  // The flag is also set when only this morning's partial day is still
+  // arriving, so the chip never claims a sync is in progress.
+  const coverageLine = snapshot.coverageIncomplete
+    ? "覆盖不完整"
+    : null;
+  const healthStale = dataStatus === null || dataStatus.health.freshness === "missing" || dataStatus.health.freshness === "stale";
+  const strengthStale = dataStatus !== null && (dataStatus.strength.freshness === "missing" || dataStatus.strength.freshness === "stale");
+  const action: HeroSourceStatus["action"] = readiness === null || healthStale
     ? { kind: "sync-health", label: "重新同步健康数据" }
-    : strengthBad
+    : strengthStale
       ? { kind: "sync-strength", label: "同步训练记录" }
       : { kind: "view-status", label: "查看数据状态" };
   return { dataDateLine, healthLine, strengthLine, coverageLine, action };
 }
 
-function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing }: { snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null; onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean }) {
+function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: WhoopScore; suffix: string; bandKind: "recovery" | "strain" }) {
+  const radius = 40;
+  const circumference = 2 * Math.PI * radius;
+  const filled = score.pct === null ? 0 : score.pct / 100;
+  return (
+    <div className={`whoop-score whoop-${score.band}`}>
+      <div className="whoop-ring" role="img" aria-label={`${label} ${score.display}${suffix}，${score.bandLabel}${score.detail ? `。${score.detail}` : ""}`}>
+        <svg viewBox="0 0 96 96" aria-hidden="true">
+          <circle className="whoop-ring-track" cx="48" cy="48" r={radius} />
+          <circle className="whoop-ring-value" cx="48" cy="48" r={radius} strokeDasharray={circumference} strokeDashoffset={circumference * (1 - filled)} />
+        </svg>
+        <div className="whoop-ring-center"><strong>{score.display}</strong><span>{suffix}</span></div>
+      </div>
+      <span className="whoop-score-label">{label}</span>
+      <span className="whoop-band-label"><span className="band-symbol" aria-hidden="true">{bandSymbol(score.band)}</span> {score.bandLabel}</span>
+      <div className={`whoop-band ${bandKind === "strain" ? "whoop-band-strain" : ""}`} aria-hidden="true">{score.pct === null ? null : <i style={{ left: `${score.pct}%` }} />}</div>
+      <div className="whoop-band-zones" aria-hidden="true">{bandKind === "strain" ? <><span>轻</span><span>中</span><span>高</span><span>全力</span></> : <><span>低</span><span>中</span><span>高</span></>}</div>
+      {score.detail ? <p>{score.detail}</p> : null}
+    </div>
+  );
+}
+
+// One-word freshness for the hero's single source line; the full
+// per-source wording (with update times) lives in the 数据状态 panel.
+function freshnessShort(freshness: DataStatus["health"]["freshness"] | undefined): string {
+  if (freshness === undefined) return "未知";
+  if (freshness === "fresh") return "新鲜";
+  if (freshness === "today") return "今天更新";
+  if (freshness === "stale") return "已过期";
+  return "未同步";
+}
+
+function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, onSyncHealth, onSyncStrength, syncing }: {
+  snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null;
+  onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean;
+}) {
   const recovery = recoveryScore(readiness);
   const sleep = sleepScore(snapshot, readiness);
+  const facts = strainFacts(snapshot);
   const strain = strainScore(snapshot);
   const load = weekLoad(snapshot, readiness);
   const sleepHours = actualSleepHours(snapshot.sleep);
-  const hero = heroSourceStatus(snapshot, readiness, dataStatus);
-  const heroActionBusy = syncing && hero.action.kind !== "view-status";
+  const source = heroSourceStatus(snapshot, readiness, dataStatus);
+  const handleSourceAction = () => {
+    if (source.action.kind === "sync-health") onSyncHealth();
+    else if (source.action.kind === "sync-strength") onSyncStrength();
+    else document.getElementById("data-status-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   return (
     <section className="whoop-hero" aria-labelledby="whoop-title">
-      <div className="whoop-source-strip">
-        <p className="whoop-source-date">{hero.dataDateLine}</p>
-        <p>Apple 健康 · {hero.healthLine}</p>
-        <p>训练记录 · {hero.strengthLine}</p>
-        {hero.coverageLine ? <p className="whoop-source-coverage">{hero.coverageLine}</p> : null}
-        <button
-          className="sync-button"
-          type="button"
-          aria-label={hero.action.label}
-          disabled={heroActionBusy}
-          onClick={() => {
-            if (hero.action.kind === "sync-health") onSyncHealth();
-            else if (hero.action.kind === "sync-strength") onSyncStrength();
-            else document.getElementById("data-status-panel")?.scrollIntoView({ behavior: "smooth" });
-          }}
-        >{heroActionBusy ? "同步中…" : hero.action.label}</button>
+      <div className="whoop-source-bar">
+        <p className="whoop-source-line">
+          <strong>{dateLabel(snapshot.dataDate)}</strong>
+          <span>健康 {freshnessShort(dataStatus?.health.freshness)}</span>
+          <span>训练 {freshnessShort(dataStatus?.strength.freshness)}</span>
+          {source.coverageLine ? <span className="whoop-source-coverage">{source.coverageLine}</span> : null}
+        </p>
+        <button className="whoop-source-action" type="button" aria-label={source.action.label} onClick={handleSourceAction} disabled={syncing}>{syncing ? "同步中…" : source.action.label}</button>
       </div>
       <div className="whoop-head">
         <div>
@@ -843,8 +1076,30 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
       <div className="whoop-scores">
         <ScoreRing label="恢复" score={recovery} suffix="%" bandKind="recovery" />
         <ScoreRing label="睡眠" score={sleep} suffix="%" bandKind="recovery" />
-        <ScoreRing label="负荷" score={strain} suffix="" bandKind="strain" />
+        {strain.computable ? (
+          <ScoreRing label="负荷" score={strain} suffix="/ 21" bandKind="strain" />
+        ) : (
+          <div className="whoop-score whoop-slate">
+            <div className="whoop-fact-tile" role="img" aria-label={`负荷，${dateLabel(snapshot.dataDate)} 活动事实：运动 ${facts.exerciseMinutes === null ? "未记录" : `${Math.round(facts.exerciseMinutes)} 分钟`}，${facts.detail}`}>
+              <strong>{facts.exerciseMinutes === null ? "—" : Math.round(facts.exerciseMinutes)}</strong>
+              <span>{facts.exerciseMinutes === null ? "运动时长未记录" : "分钟 · 运动"}</span>
+              <small>{facts.detail}</small>
+            </div>
+            <span className="whoop-score-label">负荷</span>
+            <span className="whoop-band-label"><span className="band-symbol" aria-hidden="true">{bandSymbol(strain.band)}</span> {strain.bandLabel}</span>
+            <p>{strain.detail}</p>
+          </div>
+        )}
       </div>
+      <details className="whoop-strain-note">
+        <summary>负荷口径 · Banister TRIMP</summary>
+        <p>
+          单次负荷 = 时长（分）× ΔHR × 0.64·e^(1.92·ΔHR)，ΔHR =（平均心率 − 静息心率）÷（最高心率 − 静息心率），当日各次运动求和；0–21 分为饱和映射 21×(1 − e^(−TRIMP/150))，分档参照 Whoop 公布标准（轻 0–9 · 中 10–13 · 高 14–17 · 全力 18–21）。Whoop 与 Garmin 的原始公式均未公开，此分不冒充任何一家的官方分数；原始 TRIMP 值见负荷环下。{strain.hrMaxBpm !== null ? `本次最高心率取近 30 天实测最大值 ${Math.round(strain.hrMaxBpm)} bpm。` : ""}来源：
+          <a href="https://www.whoop.com/us/en/thelocker/how-does-whoop-strain-work-101/" target="_blank" rel="noreferrer">Whoop Strain 说明</a>
+          {" · "}
+          <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC6162408/" target="_blank" rel="noreferrer">TRIMP 方法综述</a>
+        </p>
+      </details>
       <div className="whoop-drivers">
         <div><span>HRV</span><strong>{snapshot.hrv.value === null ? "—" : `${numberLabel(snapshot.hrv.value, 1)} ms`}</strong></div>
         <div><span>静息心率</span><strong>{snapshot.restingHr.value === null ? "—" : `${numberLabel(snapshot.restingHr.value, 1)} bpm`}</strong></div>
@@ -852,16 +1107,20 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
         <div><span>睡眠债</span><strong>{readiness?.sleepDebtHours === null || readiness?.sleepDebtHours === undefined ? "—" : `${readiness.sleepDebtHours.toFixed(1)} h`}</strong></div>
       </div>
       <div className={`whoop-load whoop-${load.band}`}>
-        <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong>{load.verdict}</strong></div>
+        <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong><span className="band-symbol" aria-hidden="true">{bandSymbol(load.band)}</span> {load.verdict}</strong></div>
         <p>{load.detail}</p>
-        <div className="whoop-readiness-trend" aria-label="readiness 近 7 天趋势">
-          <span className="whoop-trend-label">readiness 近 7 天</span>
-          {load.readinessTrend.map((point) => (
-            <span className="whoop-trend-point" key={point.date}>{dateLabel(point.date)} {point.score === null ? "—" : point.score.toFixed(1)}</span>
-          ))}
-        </div>
-        <p className="whoop-load-note">readiness 近 7 天：当前接口仅返回单日恢复参考，历史未提供，其余日期为缺口，不复制今日值。</p>
-        <p className="whoop-load-note">负荷评分公式未经审定，不再显示数值与等级，只呈现数据日期当天的运动时长、活动能量与步数事实及缺失原因。恢复与睡眠分沿用现有服务端 readiness/radar 口径，本轮未改任何评分公式。</p>
+        {load.coverageNote ? <p className="whoop-load-note">{load.coverageNote}</p> : null}
+        {readinessHistory.length ? (
+          <>
+            <div className="whoop-readiness-trend" aria-label="readiness 近 7 天趋势">
+              <span className="whoop-trend-label">readiness 近 7 天</span>
+              {readinessHistory.map((point) => (
+                <span className="whoop-trend-point" key={point.date}>{dateLabel(point.date)} {point.score === null ? "—" : point.score.toFixed(1)}</span>
+              ))}
+            </div>
+            <p className="whoop-load-note">readiness 近 7 天：有存档的日期显示当日分数；无存档的日期历史未提供，显示缺口，不复制今日值。存档自上线日起逐日积累，旧日期不回补。</p>
+          </>
+        ) : null}
       </div>
       <SevenDayFacts snapshot={snapshot} />
     </section>
@@ -883,10 +1142,9 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
   return (
     <div className="seven-facts" aria-label="近 7 天事实">
       <div className="seven-facts-head">
-        <span>近 7 天事实</span>
+        <span>近 7 天</span>
         <span className="seven-facts-coverage">覆盖 {facts.covered}/7 天</span>
       </div>
-      <p className="seven-facts-note">逐日原始记录，不是恢复或负荷评分；缺口表示当天没有该指标的记录，不按 0 计算，真实 0 照常显示。</p>
       <div className="seven-facts-switch" role="group" aria-label="切换近 7 天事实指标">
         {facts.metrics.map((metric) => (
           <button
@@ -900,7 +1158,7 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
         ))}
       </div>
       {facts.boundaryNote ? <p className="seven-facts-warn">{facts.boundaryNote}</p> : null}
-      {facts.coverageIncomplete ? <p className="seven-facts-warn">来源覆盖不完整：健康数据还没同步完，部分日期可能缺记录；请用上方同步入口补全，这里不推测缺失日期的值。</p> : null}
+      {facts.coverageIncomplete ? <p className="seven-facts-warn">来源覆盖不完整，缺口如实标注。</p> : null}
       {facts.days.length ? (
         <div className="seven-facts-grid">
           {facts.days.map((day) => (
@@ -922,9 +1180,8 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
       {openCell ? (
         <dl className="seven-facts-detail">
           <div><dt>日期</dt><dd>{fullDateLabel(openCell.date)}</dd></div>
-          <div><dt>{facts.metric.label}原值</dt><dd>{openCell.conflict ? "冲突/不可用（同日多条记录数值不一致，未求和、未挑较大值）" : cellText(openCell)}</dd></div>
-          <div><dt>来源</dt><dd>该日记录未单独标注来源（整份快照来自 Apple 健康）</dd></div>
-          <div><dt>更新时间</dt><dd>该日记录未单独记录（快照更新于 {updatedLabel(snapshot.updatedAt)}）</dd></div>
+          <div><dt>{facts.metric.label}原值</dt><dd>{openCell.conflict ? "冲突/不可用（同日记录不一致，未合并）" : cellText(openCell)}</dd></div>
+          <div><dt>来源 · 更新</dt><dd>Apple 健康 · 快照更新于 {updatedLabel(snapshot.updatedAt)}</dd></div>
         </dl>
       ) : null}
     </div>
@@ -976,7 +1233,7 @@ function ReadinessPanel({ readiness, compact = false }: { readiness: Readiness; 
         <div><label htmlFor="morning-feeling">今天感觉</label><output htmlFor="morning-feeling">{feeling}/10</output></div>
         <input id="morning-feeling" aria-label="今天感觉 1 到 10" type="range" min="1" max="10" step="1" value={feeling} onChange={(event) => setFeeling(Number(event.target.value))} />
         <button type="submit" disabled={saveFeeling.isPending}>{saveFeeling.isPending ? "保存中…" : readiness.morningFeeling === null ? "保存晨检" : "更新晨检"}</button>
-        <p>{saveFeeling.isSuccess ? "已保存；感觉好不会上调客观分，感觉差只会保守下调。" : "只向保守方向修正客观分。"}</p>
+        {saveFeeling.isSuccess ? <p>已保存</p> : null}
       </form>
 
       {readiness.adjustments.length ? <div className="readiness-adjustments" aria-label="保守修正规则">{readiness.adjustments.map((item) => <p key={item}>{item}</p>)}</div> : null}
@@ -1018,6 +1275,12 @@ function freshnessLabel(freshness: DataStatus["health"]["freshness"]): string {
   return "还没有";
 }
 
+function freshnessSymbol(freshness: DataStatus["health"]["freshness"]): string {
+  if (freshness === "fresh" || freshness === "today") return "✓";
+  if (freshness === "stale") return "▲";
+  return "—";
+}
+
 function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; displayUnit: string }) {
   const queryClient = useQueryClient();
   const [diag, setDiag] = useState<{ verdict: string; checks: Array<{ key: string; label: string; ok: boolean; detail: string }> } | null>(null);
@@ -1040,13 +1303,12 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
         {rows.map((row) => (
           <div className="data-status-row" key={row.source}>
             <div><strong>{row.label}</strong><span>{row.detail}</span></div>
-            <div className="data-status-meta"><span className={`status-chip ${row.freshness === "fresh" || row.freshness === "today" ? "status-ok" : row.freshness === "stale" ? "status-watch" : "status-missing"}`}>{freshnessLabel(row.freshness)}</span><small>{row.updatedAt ? `${updatedLabel(row.updatedAt)} · ${ageLabel(row.ageMinutes)}` : "尚未同步"}</small></div>
+            <div className="data-status-meta"><span className={`status-chip ${row.freshness === "fresh" || row.freshness === "today" ? "status-ok" : row.freshness === "stale" ? "status-watch" : "status-missing"}`}><span aria-hidden="true">{freshnessSymbol(row.freshness)}</span> {freshnessLabel(row.freshness)}</span><small>{row.updatedAt ? `${updatedLabel(row.updatedAt)} · ${ageLabel(row.ageMinutes)}` : "尚未同步"}</small></div>
           </div>
         ))}
       </div>
       <div className="data-status-actions">
         <button className="sync-button" type="button" aria-label="检查数据状态" onClick={() => diagnose.mutate()} disabled={diagnose.isPending}>{diagnose.isPending ? "检查中…" : "一键体检"}</button>
-        <span>失败不再静默：每次保存和失败都会记进下面的台账。</span>
       </div>
       {diag ? (
         <div className="diagnostics-box" role="status">
@@ -1067,18 +1329,18 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
             ))}
           </div>
         </details>
-      ) : <p className="empty-inline">台账还是空的：下一次同步保存后，这里会留下第一条记录，之后每次成功或失败都能查到。</p>}
+      ) : <p className="empty-inline">暂无同步记录。</p>}
       {unifiedTimeline.length ? (
         <div className="unified-timeline" aria-label="统一时间线">
           <h3>统一时间线 · 最近 {Math.min(unifiedTimeline.length, 7)} 天</h3>
-          <p className="empty-inline">运动时长说明：仅汇总有记录的时长，缺失不按0。</p>
+          <p className="unified-note">仅汇总有记录的时长，缺失不按0</p>
           <div className="unified-list">
             {unifiedTimeline.slice(0, 7).map((day) => (
               <div className="unified-row" key={day.date}>
                 <span className="unified-date">{dateLabel(day.date)}</span>
                 <div className="unified-main">
                   <strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong>
-                  <small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${displayUnit} · ${day.strengthRoutines.map((r) => ROUTINE_LABELS[r as StrengthWorkout["routine"]] ?? r).join("、")}` : "当天没有力量训练"}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}{day.restingHr !== null ? ` · 静息 ${day.restingHr.toFixed(0)} bpm` : ""}{day.hrvMs !== null ? ` · HRV ${day.hrvMs.toFixed(0)} ms` : ""}</small>
+                  <small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${displayUnit} · ${day.strengthRoutines.map((r) => ROUTINE_LABELS[r as StrengthWorkout["routine"]] ?? r).join("、")}` : "当天没有力量训练"}{unifiedWorkoutText(day) ? ` · ${unifiedWorkoutText(day)}` : ""}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}{day.restingHr !== null ? ` · 静息 ${day.restingHr.toFixed(0)} bpm` : ""}{day.hrvMs !== null ? ` · HRV ${day.hrvMs.toFixed(0)} ms` : ""}</small>
                 </div>
                 <span className={`unified-badge ${day.hasHealth && day.hasStrength ? "both" : ""}`}>{day.hasHealth && day.hasStrength ? "两边都有" : day.hasStrength ? "只有力量" : "只有健康"}</span>
               </div>
@@ -1090,7 +1352,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, onSyncStrength, onSyncHealth, strengthSyncing, dataStatus, unifiedTimeline }: { snapshot: Snapshot; readiness: Readiness | null; onSyncStrength: () => void; onSyncHealth: () => void; strengthSyncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[] }) {
+function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[] }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
   const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineIncomplete ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
@@ -1098,7 +1360,7 @@ function TodayView({ snapshot, readiness, onSyncStrength, onSyncHealth, strength
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={strengthSyncing} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} />
       {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
       <section className="verdict" aria-labelledby="verdict-title">
         <p>昨日概览</p>
@@ -1117,12 +1379,50 @@ function TodayView({ snapshot, readiness, onSyncStrength, onSyncHealth, strength
         <section className="morning-strip" aria-label="今晨参考">
           <div><span>今晨参考 · {dateLabel(snapshot.morningReference.date)}</span><strong>HRV {numberLabel(snapshot.morningReference.hrvMs, 1)} ms</strong></div>
           <div><span>平均心率</span><strong>{numberLabel(snapshot.morningReference.avgHrBpm, 1)} bpm</strong></div>
-          <p>今日数据仍在累计，不与完整日比较。</p>
         </section>
       ) : null}
       <SleepPanel sleep={snapshot.sleep} />
       <section className="workout-line" aria-label="运动记录"><div><span>近7天运动</span><strong>{snapshot.workouts.count7d} 次</strong></div><p>{snapshot.workouts.note}</p></section>
+      <RecentWorkouts snapshot={snapshot} />
     </div>
+  );
+}
+
+// Recent HealthKit workouts on the 今日 tab. Until now this tab carried
+// only a "近7天运动 N 次" count line — the actual sessions (swimming
+// included) lived solely in the 历史 tab, buried below the unified
+// timeline, the strength history, and the full workouts list, so real
+// stored records read as missing. The latest five sessions are listed
+// here with Chinese type labels; the full 30 days stay in 历史.
+function RecentWorkouts({ snapshot }: { snapshot: Snapshot }) {
+  const recent = [...snapshot.historyWorkouts]
+    .sort((a, b) => (a.date !== b.date ? b.date.localeCompare(a.date) : a.id.localeCompare(b.id)))
+    .slice(0, 5);
+  const swimCount = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).length;
+  return (
+    <section className="history-section recent-workouts-section" aria-labelledby="recent-workouts-title">
+      <div className="section-heading">
+        <div><p className="section-kicker">HealthKit workout</p><h2 id="recent-workouts-title">最近运动记录</h2></div>
+        <span className="record-count">近30天游泳 {swimCount} 次</span>
+      </div>
+      {recent.length ? (
+        <div className="record-list">
+          {recent.map((workout) => (
+            <article className="record-row" key={workout.id}>
+              <div>
+                <strong>{dateLabel(workout.date)} · {workoutTypeLabel(workout.type)}</strong>
+                <span>{workout.distanceMeters === null ? "—" : workout.distanceMeters === 0 ? "0 米" : `${numberLabel(workout.distanceMeters)} 米`}</span>
+              </div>
+              <dl>
+                <div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div>
+                <div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div>
+                <div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      ) : <p className="empty-inline">近30天没有 HealthKit 运动记录。</p>}
+    </section>
   );
 }
 
@@ -1160,10 +1460,10 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
               <ResponsiveContainer width="100%" height="100%"><AreaChart data={history} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis domain={[0, "auto"]} width={46} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Area type="monotone" dataKey="steps" name="步数" unit=" 步" stroke="var(--accent)" fill="var(--accent-fade)" strokeWidth={2.25} connectNulls={false} /></AreaChart></ResponsiveContainer>
             </ChartPanel>
             <ChartPanel eyebrow="左轴 kcal · 右轴 分钟" title="活动能量与运动时间">
-              <ResponsiveContainer width="100%" height="100%"><LineChart data={history} margin={{ top: 8, right: 0, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="kcal" domain={[0, "auto"]} width={42} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="minutes" orientation="right" domain={[0, "auto"]} width={34} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Line yAxisId="kcal" type="monotone" dataKey="activeKcal" name="活动能量" unit=" kcal" stroke="var(--amber)" strokeWidth={2} dot={false} connectNulls={false} /><Line yAxisId="minutes" type="monotone" dataKey="exerciseMinutes" name="运动时间" unit=" 分钟" stroke="var(--accent)" strokeWidth={2} dot={false} connectNulls={false} /></LineChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%"><LineChart data={history} margin={{ top: 8, right: 0, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="kcal" domain={[0, "auto"]} width={42} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="minutes" orientation="right" domain={[0, "auto"]} width={34} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Line yAxisId="kcal" type="monotone" dataKey="activeKcal" name="活动能量（实线）" unit=" kcal" stroke="var(--amber)" strokeWidth={2} dot={false} connectNulls={false} /><Line yAxisId="minutes" type="monotone" dataKey="exerciseMinutes" name="运动时间（虚线）" unit=" 分钟" stroke="var(--accent)" strokeWidth={2} strokeDasharray="7 4" dot={{ r: 2.5 }} connectNulls={false} /></LineChart></ResponsiveContainer>
             </ChartPanel>
             <ChartPanel eyebrow="左轴 bpm · 右轴 ms" title="静息心率与 HRV">
-              <ResponsiveContainer width="100%" height="100%"><LineChart data={history} margin={{ top: 8, right: 0, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="hr" domain={["dataMin - 3", "dataMax + 3"]} width={34} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="hrv" orientation="right" domain={["dataMin - 5", "dataMax + 5"]} width={34} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Line yAxisId="hr" type="linear" dataKey="restingHr" name="静息心率" unit=" bpm" stroke="var(--amber)" strokeWidth={2} dot={false} connectNulls={false} /><Line yAxisId="hrv" type="linear" dataKey="hrvMs" name="HRV" unit=" ms" stroke="var(--accent)" strokeWidth={2} dot={false} connectNulls={false} /></LineChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%"><LineChart data={history} margin={{ top: 8, right: 0, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="hr" domain={["dataMin - 3", "dataMax + 3"]} width={34} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis yAxisId="hrv" orientation="right" domain={["dataMin - 5", "dataMax + 5"]} width={34} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Line yAxisId="hr" type="linear" dataKey="restingHr" name="静息心率（实线）" unit=" bpm" stroke="var(--amber)" strokeWidth={2} dot={false} connectNulls={false} /><Line yAxisId="hrv" type="linear" dataKey="hrvMs" name="HRV（虚线）" unit=" ms" stroke="var(--accent)" strokeWidth={2} strokeDasharray="7 4" dot={{ r: 2.5 }} connectNulls={false} /></LineChart></ResponsiveContainer>
             </ChartPanel>
             <ChartPanel eyebrow="游泳 · 米" title="每日游泳距离">
               <ResponsiveContainer width="100%" height="100%"><BarChart data={history} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis domain={[0, "auto"]} width={42} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Bar dataKey="swimMeters" name="游泳距离" unit=" 米" fill="var(--blue)" radius={[3,3,0,0]} /></BarChart></ResponsiveContainer>
@@ -1178,38 +1478,19 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
-// H-WORKOUTS-001 (1): every HealthKit workout session in the snapshot,
-// newest first; same-day ties break by id so the order is stable across
-// renders. Returns a copy — the snapshot array is never mutated. Missing
-// fields stay null here and render as "—" in the list; nothing is filled in.
-// H-WORKOUTS-001 (2): parallel label for the day's HealthKit workout
-// sessions on the unified timeline. Empty when the day has no HK workouts
-// (or the field is absent on an older payload). The duration sums only
-// groups with a known duration, so it is labelled 已知时长 (known
-// duration), never as an unconditional total: when every group is
-// unknown the duration segment is omitted entirely — never shown as 0.
-// A real known total of 0 renders as 已知时长 0 分. Types are shown
-// verbatim. Both timeline render sites carry the visible note
-// 仅汇总有记录的时长，缺失不按0 next to the list.
-function unifiedHkLabel(day: UnifiedDay): string {
-  const groups = day.hkWorkouts ?? [];
-  if (!groups.length) return "";
-  const totalSessions = groups.reduce((sum, group) => sum + group.sessions, 0);
-  const types = groups.map((group) => group.type).join("、");
-  const known = groups.filter((group) => group.durationMinutes !== null);
-  if (!known.length) return `运动 ${totalSessions} 次 · ${types}`;
-  const totalMinutes = known.reduce((sum, group) => sum + (group.durationMinutes ?? 0), 0);
-  return `运动 ${totalSessions} 次 · ${types} · 已知时长 ${Math.round(totalMinutes * 10) / 10} 分`;
-}
+type HistoryWorkout = Snapshot["historyWorkouts"][number];
 
-function allWorkoutsList(historyWorkouts: Snapshot["historyWorkouts"]): Snapshot["historyWorkouts"] {
-  return historyWorkouts.slice().sort((a, b) => (a.date === b.date ? (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : a.date < b.date ? 1 : -1));
+function allWorkoutsList(historyWorkouts: HistoryWorkout[]): HistoryWorkout[] {
+  return [...historyWorkouts].sort((a, b) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date);
+    return a.id.localeCompare(b.id);
+  });
 }
 
 function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifiedTimeline?: UnifiedDay[] }) {
   const strengths = [...snapshot.strengthTraining.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const allWorkouts = allWorkoutsList(snapshot.historyWorkouts);
-  const swims = snapshot.historyWorkouts.filter((workout) => workout.type.toLowerCase().includes("swim")).slice().reverse();
+  const swims = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).slice().reverse();
   const weights = snapshot.historyDaily.filter((row): row is Daily & { weightKg: number } => row.weightKg !== null).slice().reverse();
   const sleeps = snapshot.historySleeps.slice().reverse();
   return (
@@ -1217,12 +1498,12 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
       {unifiedTimeline && unifiedTimeline.length ? (
         <section className="history-section" aria-labelledby="unified-history-title">
           <div className="section-heading"><div><p className="section-kicker">一体时间线</p><h2 id="unified-history-title">每天合在一起看</h2></div><span className="record-count">{unifiedTimeline.length} 天</span></div>
-          <p className="empty-inline">运动时长说明：仅汇总有记录的时长，缺失不按0。</p>
+          <p className="unified-note">仅汇总有记录的时长，缺失不按0</p>
           <div className="unified-list">
             {unifiedTimeline.map((day) => (
               <div className="unified-row" key={day.date}>
                 <span className="unified-date">{dateLabel(day.date)}</span>
-                <div className="unified-main"><strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong><small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${snapshot.strengthTraining.displayUnit}` : "没有力量训练"}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}</small></div>
+                <div className="unified-main"><strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong><small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${snapshot.strengthTraining.displayUnit}` : "没有力量训练"}{unifiedWorkoutText(day) ? ` · ${unifiedWorkoutText(day)}` : ""}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}</small></div>
                 <span className={`unified-badge ${day.hasHealth && day.hasStrength ? "both" : ""}`}>{day.hasHealth && day.hasStrength ? "两边都有" : day.hasStrength ? "只有力量" : "只有健康"}</span>
               </div>
             ))}
@@ -1246,14 +1527,14 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
         ))}</div> : <p className="empty-inline">{snapshot.strengthTraining.note}</p>}
       </section>
 
-      <section className="history-section" aria-labelledby="all-workouts-title">
-        <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="all-workouts-title">全部运动记录</h2></div><span className="record-count">{allWorkouts.length} 次</span></div>
-        {allWorkouts.length ? <div className="record-list">{allWorkouts.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)}</strong><span>{workout.type}</span></div><dl><div><dt>距离</dt><dd>{workout.distanceMeters === null ? "—" : `${numberLabel(workout.distanceMeters)} 米`}</dd></div><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有 HealthKit 运动记录。</p>}
-      </section>
-
       <section className="history-section" aria-labelledby="swim-history-title">
         <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="swim-history-title">游泳记录</h2></div><span className="record-count">{swims.length} 次</span></div>
-        {swims.length ? <div className="record-list">{swims.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)}</strong><span>{numberLabel(workout.distanceMeters)} 米</span></div><dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有游泳 workout 记录。</p>}
+        {swims.length ? <div className="record-list">{swims.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)} · 游泳</strong><span>{numberLabel(workout.distanceMeters)} 米</span></div><dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有游泳 workout 记录。</p>}
+      </section>
+
+      <section className="history-section all-workouts-section" aria-labelledby="all-workouts-title">
+        <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="all-workouts-title">全部运动记录</h2></div><span className="record-count">{allWorkouts.length} 次</span></div>
+        {allWorkouts.length ? <div className="record-list">{allWorkouts.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)} · {workoutTypeLabel(workout.type)}</strong><span>{workout.distanceMeters === null ? "—" : workout.distanceMeters === 0 ? "0 米" : `${numberLabel(workout.distanceMeters)} 米`}</span></div><dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有 HealthKit 运动记录。</p>}
       </section>
 
       <section className="history-section" aria-labelledby="weight-history-title">
@@ -1269,7 +1550,7 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
   );
 }
 
-function Dashboard({ snapshot, readiness, dataStatus, unifiedTimeline, autoSyncFailureNote }: { snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null }) {
+function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null }) {
   const [tab, setTab] = useState<Tab>("today");
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -1309,7 +1590,7 @@ function Dashboard({ snapshot, readiness, dataStatus, unifiedTimeline, autoSyncF
         <button type="button" className={tab === "trends" ? "selected" : ""} onClick={() => setTab("trends")}>趋势</button>
         <button type="button" className={tab === "history" ? "selected" : ""} onClick={() => setTab("history")}>历史</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} onSyncStrength={() => strengthRefresh.mutate()} onSyncHealth={() => refresh.mutate()} strengthSyncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -1376,7 +1657,7 @@ export function App() {
   const strengthSyncing = strengthRefresh.isPending || polling.syncing;
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}

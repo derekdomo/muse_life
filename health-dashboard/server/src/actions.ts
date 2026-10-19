@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
@@ -21,6 +21,10 @@ const dailySchema = z.object({
   respiratoryRate: z.number().positive().nullable(),
   weightKg: z.number().positive().nullable(),
   swimMeters: z.number().nonnegative().nullable(),
+  // The day's highest observed heart rate (hr_max_bpm). Optional so
+  // snapshots saved before this field existed still parse; it feeds the
+  // Banister TRIMP load score's HRmax (max over the stored window).
+  hrMax: z.number().positive().nullable().optional(),
 });
 
 const workoutSchema = z.object({
@@ -68,7 +72,14 @@ const strengthWorkoutSchema = z.object({
   startedAt: z.string().datetime(),
   completedAt: z.string().datetime().nullable(),
   status: z.enum(["active", "completed"]),
-  routine: z.enum(["push", "pull", "legs"]),
+  // Five routine values (L1-ROUTINE-001): 训练记录 (space-6) added the two
+  // home routines home_posture / home_snowboard to its plan. The value is
+  // stored and read back verbatim — a home routine is never remapped onto
+  // push/pull/legs and never dropped. An unknown future routine value
+  // fails this schema outright, which rejects the whole incoming snapshot
+  // and keeps the previously stored one (see the CAS persist path); a
+  // partial write masquerading as complete is not possible.
+  routine: z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]),
   unit: z.enum(["lb", "kg"]),
   durationMinutes: z.number().nonnegative().nullable(),
   completedSets: z.number().int().nonnegative(),
@@ -575,7 +586,7 @@ function normalizeStoredSnapshot(value: unknown): Snapshot | null {
     ...record,
     respiratoryRate: record.respiratoryRate ?? { value: null, status: "数据缺失" },
     strengthTraining: record.strengthTraining ?? EMPTY_STRENGTH,
-    historyDaily: rawDaily.map((row) => row && typeof row === "object" && !Array.isArray(row) ? { respiratoryRate: null, ...row } : row),
+    historyDaily: rawDaily.map((row) => row && typeof row === "object" && !Array.isArray(row) ? { respiratoryRate: null, hrMax: null, ...row } : row),
     historyWorkouts: Array.isArray(record.historyWorkouts) ? record.historyWorkouts : [],
     historySleeps: rawSleeps.map((row) => row && typeof row === "object" && !Array.isArray(row) ? { awakenings: null, efficiency: null, ...row } : row),
   };
@@ -766,6 +777,17 @@ const dataStatusSchema = z.object({
   recentLogs: z.array(syncLogEntrySchema).max(8),
 });
 
+// One HealthKit workout type's sessions on a unified-timeline day
+// (H-WORKOUTS-001 item 2): grouped from historyWorkouts by raw type string.
+// durationMinutes is the sum of that group's known session durations, or
+// null when every session in the group has an unknown duration — null must
+// never be replaced with 0, which would pose as a known zero-length total.
+const hkWorkoutGroupSchema = z.object({
+  type: z.string(),
+  sessions: z.number().int().min(1),
+  durationMinutes: z.number().nonnegative().nullable(),
+});
+
 const unifiedDaySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   steps: z.number().nonnegative().nullable(),
@@ -775,24 +797,41 @@ const unifiedDaySchema = z.object({
   strengthSessions: z.number().int().nonnegative(),
   strengthVolume: z.number().nonnegative(),
   strengthRoutines: z.array(z.string()),
-  // HealthKit workout sessions aggregated per day and type (H-WORKOUTS-001
-  // (2)): sourced only from historyWorkouts (the sessions query), never
-  // derived from daily summaries and never merged into the strength counts.
-  // durationMinutes is the sum of the known durations, or null when every
-  // session of that type that day has an unknown duration.
-  hkWorkouts: z.array(z.object({
-    type: z.string(),
-    sessions: z.number().int().positive(),
-    durationMinutes: z.number().nonnegative().nullable(),
-  })),
+  // HealthKit workout sessions for the day (H-WORKOUTS-001 follow-up):
+  // without these, the unified timeline showed steps/sleep/strength only
+  // and a swim day read as "no workout", which is why swimming records
+  // looked missing even though they were stored in historyWorkouts.
+  workoutSessions: z.number().int().nonnegative(),
+  workoutTypes: z.array(z.string()),
+  swimMeters: z.number().nonnegative().nullable(),
+  // Per-type HealthKit workout groups for the day (H-WORKOUTS-001 item 2),
+  // sorted ascending by raw type string. Additive: always present in
+  // buildUnifiedTimeline output, defaulting to [] for days without HK
+  // sessions. These stay separate from the strength snapshot — an HK
+  // session never counts toward strengthSessions/strengthVolume, even
+  // when its type mentions strength.
+  hkWorkouts: z.array(hkWorkoutGroupSchema),
   hasHealth: z.boolean(),
   hasStrength: z.boolean(),
+});
+
+// One day of the readiness near-7-day trend (H-LOAD-001 archive): the
+// score is read ONLY from the readiness_history archive — the score that
+// was computed and shown on that date. A null score means no archive row
+// exists for the date (or that day's readiness was 数据不足): a gap,
+// rendered "—", never filled with today's or any other day's score.
+const readinessHistoryPointSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  score: z.number().min(0).max(10).nullable(),
 });
 
 const getDashboardResponse = z.object({
   forbidden: z.boolean(),
   snapshot: snapshotSchema.nullable(),
   readiness: readinessSchema.nullable(),
+  // The 7 archive-backed trend points ending at the readiness date,
+  // ascending. Empty when there is no usable health snapshot.
+  readinessHistory: z.array(readinessHistoryPointSchema).max(7),
   strengthSyncTaskId: z.string().nullable(),
   dataStatus: dataStatusSchema.nullable(),
   unifiedTimeline: z.array(unifiedDaySchema).max(14),
@@ -841,7 +880,7 @@ const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(
 // are single-flighted), silently swallowing them. Every explicit sync below
 // therefore spawns a fresh task with allowParallel, and getDashboard
 // re-syncs on every open (see maybeAutoSyncStrength).
-const STRENGTH_SYNC_PROMPT = `Synchronize the user's strength-training summary from their existing web artifact named 训练记录 (slug space-6). Treat that artifact as the only source for strength sets; do not infer workouts from Apple Health. Use its published getDashboard action with recent_limit 20. Include the active workout, if any, plus every returned recent completed workout. For each workout preserve the source id as a string, routine, unit, start and completion instants, status, all sets grouped by exercise, and completed flags. Compute completedSets and totalVolume from completed sets only; a set contributes weight × reps only when both are present. Compute durationMinutes from timestamps when completion exists; for an active workout use the current instant. Use America/Los_Angeles to derive the workout date and Monday-based week starts. Choose the most recent workout's unit as displayUnit (default lb when there are no workouts); convert mixed-unit volume exactly when aggregating weekly totals (1 lb = 0.45359237 kg) so every weeklyTrend volume is in displayUnit. Include up to the latest eight Monday-based weeks, ascending, with zero-volume intervening weeks retained. The getDashboard response also returns week_summaries: whole-week summaries that the source computes server-side over its full data for the current week and the previous week, each with week_start, sessions, measured_completed_sets, unmeasured_completed_sets, volume_lb, and volume_kg. For a weeklyTrend week whose weekStart matches a week_summaries entry's week_start, take sessions, measuredCompletedSets, and unmeasuredCompletedSets directly from that entry, compute volume by converting volume_lb and volume_kg into displayUnit and adding them (1 lb = 0.45359237 kg), and set coverageComplete: true. For weeks not covered by week_summaries, do not set coverageComplete, and never infer whole-week sessions or set counts from the truncated workouts list (capped at 20) — those counts may simply be omitted. If the getDashboard response has no week_summaries at all (an older source), set coverageComplete on no week and leave measuredCompletedSets and unmeasuredCompletedSets empty; never present sample counts as whole-week coverage. Version contract: BEFORE you call getDashboard on 训练记录, record the current instant as readStartedAt, and set the payload's updatedAt to that readStartedAt — the moment the source read began. Never set updatedAt to the instant the task finishes or to the callback instant. Why: the save versions snapshots by read-start time and applies them with an atomic compare-and-write that rejects any version older than the one already stored, so a read that started earlier can never overwrite a newer snapshot even when it finishes later; stamping the completion time instead would disguise an old read as new data and defeat that guard. If the source is read successfully and contains no workouts, return empty workouts and weeklyTrend and explain in note that completed or active sets from 训练记录 will appear after synchronization. A response with forbidden: true counts as a failed read, not as an empty source. If the source cannot be read, do not replace the last successful strength snapshot with an empty one. Do not create plausible workouts or sets. Call the expected save action exactly once only after a successful source read.`;
+const STRENGTH_SYNC_PROMPT = `Synchronize the user's strength-training summary from their existing web artifact named 训练记录 (slug space-6). Treat that artifact as the only source for strength sets; do not infer workouts from Apple Health. Use its published getDashboard action with recent_limit 20. Include the active workout, if any, plus every returned recent completed workout. For each workout preserve the source id as a string, routine, unit, start and completion instants, status, all sets grouped by exercise, and completed flags. Routine contract: routine has exactly five possible values — push, pull, legs, home_posture, home_snowboard — and you must preserve each workout's routine value verbatim from the source. Never rewrite home_posture or home_snowboard as push, pull, or legs, and never omit or filter out a workout because of its routine value; every returned workout belongs in the payload with its original routine. Compute completedSets and totalVolume from completed sets only; a set contributes weight × reps only when both are present. Compute durationMinutes from timestamps when completion exists; for an active workout use the current instant. Use America/Los_Angeles to derive the workout date and Monday-based week starts. Choose the most recent workout's unit as displayUnit (default lb when there are no workouts); convert mixed-unit volume exactly when aggregating weekly totals (1 lb = 0.45359237 kg) so every weeklyTrend volume is in displayUnit. Include up to the latest eight Monday-based weeks, ascending, with zero-volume intervening weeks retained. The getDashboard response also returns week_summaries: whole-week summaries that the source computes server-side over its full data for the current week and the previous week, each with week_start, sessions, measured_completed_sets, unmeasured_completed_sets, volume_lb, and volume_kg. For a weeklyTrend week whose weekStart matches a week_summaries entry's week_start, take sessions, measuredCompletedSets, and unmeasuredCompletedSets directly from that entry, compute volume by converting volume_lb and volume_kg into displayUnit and adding them (1 lb = 0.45359237 kg), and set coverageComplete: true. For weeks not covered by week_summaries, do not set coverageComplete, and never infer whole-week sessions or set counts from the truncated workouts list (capped at 20) — those counts may simply be omitted. If the getDashboard response has no week_summaries at all (an older source), set coverageComplete on no week and leave measuredCompletedSets and unmeasuredCompletedSets empty; never present sample counts as whole-week coverage. Version contract: BEFORE you call getDashboard on 训练记录, record the current instant as readStartedAt, and set the payload's updatedAt to that readStartedAt — the moment the source read began. Never set updatedAt to the instant the task finishes or to the callback instant. Why: the save versions snapshots by read-start time and applies them with an atomic compare-and-write that rejects any version older than the one already stored, so a read that started earlier can never overwrite a newer snapshot even when it finishes later; stamping the completion time instead would disguise an old read as new data and defeat that guard. If the source is read successfully and contains no workouts, return empty workouts and weeklyTrend and explain in note that completed or active sets from 训练记录 will appear after synchronization. A response with forbidden: true counts as a failed read, not as an empty source. If the source cannot be read, do not replace the last successful strength snapshot with an empty one. Do not create plausible workouts or sets. Call the expected save action exactly once only after a successful source read.`;
 
 // Every-open strength sync (2026-10-15): the user rejected the five-minute
 // staleness threshold — training data is local to the sibling artifact, so
@@ -916,6 +955,68 @@ async function loadRecentLogs(ctx: Ctx): Promise<SyncLogEntry[]> {
   }
 }
 
+type ReadinessHistoryPoint = z.infer<typeof readinessHistoryPointSchema>;
+
+// Pure trend builder (H-LOAD-001 archive): the 7 consecutive dates ending
+// at endDate, ascending, each carrying ONLY its own archived score. A date
+// with no archive row — or an archived row whose score was null — stays a
+// null gap. Nothing is ever copied from another day: a recomputation
+// today does not equal the score that was actually shown on a past date,
+// and past dates were never archived before this table existed.
+function buildReadinessTrendPoints(rows: Array<{ date: string; score: number | null }>, endDate: string): ReadinessHistoryPoint[] {
+  const byDate = new Map(rows.map((row) => [row.date, row.score]));
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = shiftDate(endDate, index - 6);
+    return { date, score: byDate.get(date) ?? null };
+  });
+}
+
+// Read the trend window from the archive ONLY. A read failure degrades to
+// seven gaps rather than breaking the dashboard response — the trend is a
+// read-only display of what was archived, never a live recomputation.
+async function loadReadinessTrendPoints(ctx: Ctx, endDate: string): Promise<ReadinessHistoryPoint[]> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const rows = await db.select({ date: schema.readinessHistory.date, score: schema.readinessHistory.score })
+      .from(schema.readinessHistory)
+      .where(and(gte(schema.readinessHistory.date, shiftDate(endDate, -6)), lte(schema.readinessHistory.date, endDate)))
+      .orderBy(asc(schema.readinessHistory.date));
+    return buildReadinessTrendPoints(rows, endDate);
+  } catch {
+    return buildReadinessTrendPoints([], endDate);
+  }
+}
+
+// Archive one computed readiness under its date (H-LOAD-001, owner-
+// approved 2026-10-18). Upsert keyed by date: recomputing the same date
+// overwrites that date's row (the last successful computation wins) and
+// never creates a duplicate. Only dates actually computed from now on are
+// archived — no backfill, no recomputation of past dates. A write failure
+// must not block the dashboard's main response, so it is caught here and
+// surfaced in the sync ledger instead; the ledger note deliberately
+// carries no health values, only the fact and the date affected.
+async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion: string | null): Promise<void> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const now = new Date();
+    const components = JSON.stringify(readiness.components);
+    await db.insert(schema.readinessHistory).values({
+      date: readiness.date,
+      score: readiness.score,
+      components,
+      confidence: readiness.confidence,
+      snapshotVersion,
+      createdAt: now,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: schema.readinessHistory.date,
+      set: { score: readiness.score, components, confidence: readiness.confidence, snapshotVersion, updatedAt: now },
+    });
+  } catch {
+    await recordSyncLog(ctx, { source: "system", status: "failed", itemCount: 0, note: `readiness 评分存档写入失败 · 日期 ${readiness.date} · 趋势位可能缺当日分数`, sourceUpdatedAt: null });
+  }
+}
+
 function freshnessFor(source: "health" | "strength", label: string, updatedAt: string | null, dataDate: string | null, detailBase: string): z.infer<typeof sourceFreshnessSchema> {
   if (!updatedAt) {
     return { source, label, updatedAt: null, dataDate, ageMinutes: null, freshness: "missing", detail: detailBase };
@@ -971,7 +1072,7 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
   const ensure = (date: string): UnifiedDay => {
     const existing = byDate.get(date);
     if (existing) return existing;
-    const created: UnifiedDay = { date, steps: null, sleepHours: null, restingHr: null, hrvMs: null, strengthSessions: 0, strengthVolume: 0, strengthRoutines: [], hkWorkouts: [], hasHealth: false, hasStrength: false };
+    const created: UnifiedDay = { date, steps: null, sleepHours: null, restingHr: null, hrvMs: null, strengthSessions: 0, strengthVolume: 0, strengthRoutines: [], workoutSessions: 0, workoutTypes: [], swimMeters: null, hkWorkouts: [], hasHealth: false, hasStrength: false };
     byDate.set(date, created);
     return created;
   };
@@ -988,25 +1089,36 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
       day.sleepHours = round(totalSleepHours(sleep, sleep.totalHours), 1);
       day.hasHealth = true;
     }
-    // HealthKit workout sessions merge into the timeline by local date
-    // (H-WORKOUTS-001 (2)): grouped by date, then by the verbatim type.
-    // Sessions only — never derived from historyDaily summaries (exercise
-    // minutes / swimMeters keep their own meaning) and never counted as
-    // strength: even a strength-typed HK session stays in hkWorkouts,
-    // separate from the training-log strengthSessions/strengthVolume.
-    const hkByDateType = new Map<string, Map<string, { sessions: number; durationSum: number; hasDuration: boolean }>>();
-    for (const workout of healthSnapshot.historyWorkouts ?? []) {
-      let byType = hkByDateType.get(workout.date);
-      if (!byType) { byType = new Map(); hkByDateType.set(workout.date, byType); }
+    for (const workout of healthSnapshot.historyWorkouts) {
+      const day = ensure(workout.date);
+      day.workoutSessions += 1;
+      if (!day.workoutTypes.includes(workout.type)) day.workoutTypes.push(workout.type);
+      if (workout.type.toLowerCase().includes("swim") && workout.distanceMeters !== null) {
+        day.swimMeters = (day.swimMeters ?? 0) + workout.distanceMeters;
+      }
+      day.hasHealth = true;
+    }
+    // Per-type HealthKit groups (H-WORKOUTS-001 item 2): aggregate the
+    // same historyWorkouts sessions by date, then by raw type string.
+    // Sessions come only from these HealthKit session rows — never
+    // reverse-derived from historyDaily aggregates (exerciseMinutes,
+    // swimMeters, …) — and never merge into the strength counts above.
+    // A date with only HK sessions still gets a day row via ensure() and
+    // hasHealth = true. Groups are sorted ascending by type string so the
+    // output order is deterministic.
+    const hkByDate = new Map<string, Map<string, { sessions: number; durationSum: number; hasDuration: boolean }>>();
+    for (const workout of healthSnapshot.historyWorkouts) {
+      let byType = hkByDate.get(workout.date);
+      if (!byType) { byType = new Map(); hkByDate.set(workout.date, byType); }
       let group = byType.get(workout.type);
       if (!group) { group = { sessions: 0, durationSum: 0, hasDuration: false }; byType.set(workout.type, group); }
       group.sessions += 1;
       if (workout.durationMinutes !== null) { group.durationSum += workout.durationMinutes; group.hasDuration = true; }
     }
-    for (const [date, byType] of hkByDateType) {
+    for (const [date, byType] of hkByDate) {
       const day = ensure(date);
       day.hkWorkouts = [...byType.entries()]
-        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+        .sort(([a], [b]) => a.localeCompare(b))
         .map(([type, group]) => ({ type, sessions: group.sessions, durationMinutes: group.hasDuration ? round(group.durationSum, 1) : null }));
       day.hasHealth = true;
     }
@@ -1027,7 +1139,7 @@ export const Actions = {
   getDashboard: defineAction({
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -1047,7 +1159,7 @@ export const Actions = {
       if (healthLoad.state !== "ok" || !healthLoad.snapshot) {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
-        return { forbidden: false, snapshot: null, readiness: null, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
+        return { forbidden: false, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -1064,7 +1176,17 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
       const morningFeeling = checkinRows[0]?.feeling ?? null;
-      return { forbidden: false, snapshot, readiness: calculateReadiness(snapshot, readinessDate, morningFeeling), strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
+      const readiness = calculateReadiness(snapshot, readinessDate, morningFeeling);
+      // Archive the score exactly as computed now (H-LOAD-001): this is
+      // the only place readiness is ever computed, so archiving here
+      // covers both manual opens and the daily refresh's reads. The
+      // archive write is failure-isolated (see archiveReadiness) — the
+      // response below is returned regardless — and the trend is then
+      // read back from the archive alone, so today's point is the
+      // archived value and every unarchived date stays a gap.
+      await archiveReadiness(ctx, readiness, health.updatedAt);
+      const readinessHistory = await loadReadinessTrendPoints(ctx, readinessDate);
+      return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
     },
   }),
 
@@ -1243,7 +1365,7 @@ export const Actions = {
       // still rejected.
       if (!isOwnerOrSyncChannel(ctx)) return { forbidden: true, accepted: false, taskId: null, strengthTaskId: null, message: "健康数据仅所有者可同步" };
       const healthTask = await ctx.agent.spawnTask(
-        `Refresh the user's Apple HealthKit dashboard with real data. Use America/Los_Angeles as the health calendar timezone and determine the latest complete calendar day (normally yesterday). Every health-cli command must include --provider healthkit. Query daily metrics for the 30 completed days ending on the latest complete day with fields body_mass_average,step_count,active_energy_burned_kcal,resting_hr_average_bpm,heart_rate_variability_ms,respiratory_rate_average,hr_average_bpm,apple_exercise_time_sum,distance_swimming_sum,distance_walking_running_meters,flights_climbed_sum,basal_energy_burned_kcal. Query the current partial day separately for the morning reference. Query workout sessions over the same 30-day window with fields id,start_datetime,end_datetime,timezone,workout_type,distance_meters,hr_average_bpm,energy_burned_kcal,active_duration_sec. Query sleep sessions covering the latest 15 calendar days and retain the latest 14 sessions. For every sleep session, preserve coreHours, deepHours, remHours, and awakeMinutes. Calculate actual sleep duration strictly as core + deep + REM; awake time is never part of actual sleep. Set every historySleeps.totalHours and the main sleep.inBedHours display value to that actual-sleep sum. Calculate sleep efficiency as actual sleep duration divided by time in bed, where time in bed is end_datetime minus start_datetime; do not use a sleep-stage duration as the denominator. Build trends from the final seven completed daily rows. Build the main daily snapshot from the latest completed metrics day. Define the readiness date from the current partial day's local date. For the main sleep and every one of its fields (bedtime, wakeTime, inBedHours, coreHours, deepHours, remHours, awakeMinutes, efficiency, quality, awakenings), select the completed sleep session whose end_datetime local date equals that readiness date; only if that morning's session has not ended or has not synced may you fall back to the most recent earlier completed sleep session. Set each historySleeps.date to the local calendar date of end_datetime. Preserve absent fields as null and set coverageIncomplete=true if any relevant query reports coverage.complete=false. For display-only step baseline/range fields, use exactly this rule: consider only complete days with step data; when there are at least 14 such completed days, compute the mean and standard deviation of step_count over the prior 14 completed days and set baseline = mean (when all 14 days are zero, baseline = 0 — that is a valid baseline, not missing data), usualMin = max(0, mean − standard deviation) (clamped at 0), and usualMax = mean + standard deviation (when all 14 days are zero, usualMax = 0); when fewer than 14 completed days are available or step data is absent, set baseline, usualMin, and usualMax all to null — never substitute any fixed or typical value. For display-only resting-HR and HRV baseline/range fields, derive mean and mean ± standard deviation from the prior 14 completed days when available; the server independently computes readiness from raw history. Status must be one of 正常, 偏低, 偏高, 数据缺失; missing is based on absent fields, not inferred as an anomaly. Include respiratoryRate on the main day and respiratoryRate on every historyDaily row, preserving absent values as null. Convert walking distance to km, workout duration seconds to minutes, and sleep stages to hours; display bedtime/wake as HH:mm. historyDaily must map the source fields to steps, activeKcal, exerciseMinutes, restingHr, hrvMs, respiratoryRate, weightKg, swimMeters. For historySleeps preserve awakenings and efficiency when present, otherwise null. historyWorkouts and historySleeps must contain only source-backed values, sorted ascending by date. Version contract: BEFORE you run any health-cli query, record the current instant as readStartedAt, and set the payload's updatedAt to that readStartedAt in ISO 8601 — the moment the source read began. Never set updatedAt to the instant the task finishes or to the callback instant. Why: the save versions snapshots by read-start time and applies them with an atomic compare-and-write that rejects any version older than the one already stored, so a read that started earlier can never overwrite a newer snapshot even when it finishes later; stamping the completion time instead would disguise an old read as new data and defeat that guard. Cap historyDaily at 35, historyWorkouts at 100, and historySleeps at 14. The workout note must refer only to Apple Watch workout sessions. Set strengthTraining to its empty default with updatedAt null; the save action preserves the separately synchronized training-record data. Call the expected save action exactly once with the completed HealthKit snapshot.`,
+        `Refresh the user's Apple HealthKit dashboard with real data. Use America/Los_Angeles as the health calendar timezone and determine the latest complete calendar day (normally yesterday). Every health-cli command must include --provider healthkit. Query daily metrics for the 30 completed days ending on the latest complete day with fields body_mass_average,step_count,active_energy_burned_kcal,resting_hr_average_bpm,heart_rate_variability_ms,respiratory_rate_average,hr_average_bpm,hr_max_bpm,apple_exercise_time_sum,distance_swimming_sum,distance_walking_running_meters,flights_climbed_sum,basal_energy_burned_kcal. Query the current partial day separately for the morning reference. Query workout sessions over the same 30-day window with fields id,start_datetime,end_datetime,timezone,workout_type,distance_meters,hr_average_bpm,energy_burned_kcal,active_duration_sec. Query sleep sessions covering the latest 15 calendar days and retain the latest 14 sessions. For every sleep session, preserve coreHours, deepHours, remHours, and awakeMinutes. Calculate actual sleep duration strictly as core + deep + REM; awake time is never part of actual sleep. Set every historySleeps.totalHours and the main sleep.inBedHours display value to that actual-sleep sum. Calculate sleep efficiency as actual sleep duration divided by time in bed, where time in bed is end_datetime minus start_datetime; do not use a sleep-stage duration as the denominator. Build trends from the final seven completed daily rows. Build the main daily snapshot from the latest completed metrics day. Define the readiness date from the current partial day's local date. For the main sleep and every one of its fields (bedtime, wakeTime, inBedHours, coreHours, deepHours, remHours, awakeMinutes, efficiency, quality, awakenings), select the completed sleep session whose end_datetime local date equals that readiness date; only if that morning's session has not ended or has not synced may you fall back to the most recent earlier completed sleep session. Set each historySleeps.date to the local calendar date of end_datetime. Preserve absent fields as null and set coverageIncomplete=true if any relevant query reports coverage.complete=false. For display-only step baseline/range fields, use exactly this rule: consider only complete days with step data; when there are at least 14 such completed days, compute the mean and standard deviation of step_count over the prior 14 completed days and set baseline = mean (when all 14 days are zero, baseline = 0 — that is a valid baseline, not missing data), usualMin = max(0, mean − standard deviation) (clamped at 0), and usualMax = mean + standard deviation (when all 14 days are zero, usualMax = 0); when fewer than 14 completed days are available or step data is absent, set baseline, usualMin, and usualMax all to null — never substitute any fixed or typical value. For display-only resting-HR and HRV baseline/range fields, derive mean and mean ± standard deviation from the prior 14 completed days when available; the server independently computes readiness from raw history. Status must be one of 正常, 偏低, 偏高, 数据缺失; missing is based on absent fields, not inferred as an anomaly. Include respiratoryRate on the main day and respiratoryRate on every historyDaily row, preserving absent values as null. Convert walking distance to km, workout duration seconds to minutes, and sleep stages to hours; display bedtime/wake as HH:mm. historyDaily must map the source fields to steps, activeKcal, exerciseMinutes, restingHr, hrvMs, respiratoryRate, weightKg, swimMeters, hrMax. hrMax is the day's hr_max_bpm (the highest heart rate observed that day); preserve it as null when the field is absent — never substitute an average or an estimate, because the load score takes the maximum hrMax over the stored window as HRmax. For historySleeps preserve awakenings and efficiency when present, otherwise null. historyWorkouts and historySleeps must contain only source-backed values, sorted ascending by date. Version contract: BEFORE you run any health-cli query, record the current instant as readStartedAt, and set the payload's updatedAt to that readStartedAt in ISO 8601 — the moment the source read began. Never set updatedAt to the instant the task finishes or to the callback instant. Why: the save versions snapshots by read-start time and applies them with an atomic compare-and-write that rejects any version older than the one already stored, so a read that started earlier can never overwrite a newer snapshot even when it finishes later; stamping the completion time instead would disguise an old read as new data and defeat that guard. Cap historyDaily at 35, historyWorkouts at 100, and historySleeps at 14. The workout note must refer only to Apple Watch workout sessions. Set strengthTraining to its empty default with updatedAt null; the save action preserves the separately synchronized training-record data. Call the expected save action exactly once with the completed HealthKit snapshot.`,
         { expectsAction: "saveHealthSnapshot", allowParallel: true },
       );
       const strengthTask = await ctx.agent.spawnTask(STRENGTH_SYNC_PROMPT, { expectsAction: "saveStrengthTrainingSnapshot", allowParallel: true });

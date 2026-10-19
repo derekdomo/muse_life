@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const healthSnapshot = sqliteTable("health_snapshot", {
   id: integer("id").primaryKey(),
@@ -19,6 +19,24 @@ export const strengthTrainingSnapshot = sqliteTable("strength_training_snapshot"
 export const morningCheckin = sqliteTable("morning_checkin", {
   date: text("date").primaryKey(),
   feeling: integer("feeling").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// Readiness score archive (H-LOAD-001, owner-approved 2026-10-18): one row
+// per readiness date, written whenever getDashboard computes that date's
+// readiness. Scores are archived exactly as computed at the time — history
+// is never backfilled or recomputed, so dates before this table existed
+// simply have no row and render as gaps. `score` is null when the day's
+// readiness was 数据不足. `snapshotVersion` records the health snapshot
+// version (its payload updatedAt, the read-start instant) the score was
+// computed from.
+export const readinessHistory = sqliteTable("readiness_history", {
+  date: text("date").primaryKey(),
+  score: real("score"),
+  components: text("components").notNull(),
+  confidence: text("confidence", { enum: ["高", "中", "低"] }).notNull(),
+  snapshotVersion: text("snapshot_version"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

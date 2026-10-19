@@ -36,6 +36,13 @@
       "when": 1792049562095,
       "tag": "0005_add_sync_log_and_unified_view_support",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792390864398,
+      "tag": "0006_add_readiness_history_archive",
+      "breakpoints": true
     }
   ]
 }
