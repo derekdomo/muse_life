@@ -274,7 +274,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 
 .routine-name-home { font-size: 30px; letter-spacing: -.02em; }
 
-.schedule-section, .daily-section, .plan-editor-section { padding-top: 32px; }
+.schedule-section, .daily-section, .plan-editor-section, .plan-conflict-section { padding-top: 32px; }
 .schedule-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
 .schedule-row { display: grid; grid-template-columns: 52px 1fr auto; align-items: center; gap: 10px; min-height: 56px; padding: 8px 4px; border-bottom: 1px solid var(--border); }
 .schedule-row.is-today { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding-left: 10px; padding-right: 10px; }
@@ -319,6 +319,17 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .plan-save:disabled { opacity: .55; cursor: wait; }
 .plan-saved { margin: 12px 0 0; color: color-mix(in srgb, var(--accent) 72%, var(--text)); font-size: 13px; font-weight: 800; }
 .plan-editor-note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+
+.plan-conflict-card { margin-top: 12px; padding: 14px 16px; border: 2px solid var(--danger); border-radius: var(--radius); background: var(--surface); }
+.plan-conflict-notice { margin: 0; font-size: 13px; font-weight: 700; line-height: 1.65; }
+.plan-conflict-candidates { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.plan-conflict-candidate { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.plan-conflict-candidate-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.plan-conflict-candidate-text strong { font-size: 13px; font-weight: 850; }
+.plan-conflict-candidate-text span { color: var(--dim); font-size: 12px; line-height: 1.45; }
+.plan-conflict-pick { flex: 0 0 auto; min-height: 44px; padding: 0 14px; border: 0; border-radius: 4px; background: var(--text); color: var(--bg); font-size: 13px; font-weight: 850; cursor: pointer; white-space: nowrap; }
+.plan-conflict-pick:disabled { opacity: .55; cursor: wait; }
+.plan-conflict-note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
 select:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
 
 @media (min-width: 680px) {

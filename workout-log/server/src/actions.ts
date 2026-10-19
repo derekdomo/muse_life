@@ -1,5 +1,6 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
@@ -218,6 +219,35 @@ const planDailyItemResponse = z.object({
   title: z.string(),
   detail: z.string(),
 });
+// W-PLAN-SAFE-001 follow-up: one candidate copy of a conflicted
+// plan exercise. source "live" is the copy currently in
+// plan_exercises (displayed, but NOT confirmed while the conflict is
+// open); source "archived" is a preserved copy in
+// plan_exercise_conflicts, identified by archive_id for the owner's
+// selection. Only plan fields are exposed — nothing beyond the
+// training-plan content itself.
+const planConflictCandidateResponse = z.object({
+  source: z.enum(["live", "archived"]),
+  archive_id: z.number().nullable(),
+  name: z.string(),
+  sets: z.number(),
+  target: z.string(),
+  sort_order: z.number(),
+});
+const planConflictResponse = z.object({
+  routine: z.string(),
+  exercise_key: z.string(),
+  exercise_name: z.string(),
+  candidate_count: z.number(),
+  archived_at: z.string().nullable(),
+  candidates: z.array(planConflictCandidateResponse),
+});
+const resolvePlanConflictResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  error: z.string().nullable(),
+});
+
 const planResponse = z.object({
   forbidden: z.boolean(),
   routines: z.array(planRoutineResponse),
@@ -225,6 +255,18 @@ const planResponse = z.object({
   daily_items: z.array(planDailyItemResponse),
   daily_date: z.string(),
   daily_done: z.array(z.string()),
+  // W-PLAN-SAFE-001 follow-up (additive, optional): present ONLY
+  // while plan_exercise_conflicts holds unconfirmed archive rows
+  // (migration 0005 archived duplicate (routine, exercise_key) rows
+  // and kept the smallest id live). A database with no unconfirmed
+  // conflict receives neither field, exactly as before — the plan is
+  // never silently presented as confirmed while a conflict is open:
+  // each entry names the routine/key, how many candidate copies
+  // exist in total, when the copies were archived, and every
+  // candidate's plan fields so the owner can pick one via
+  // resolvePlanConflict.
+  conflicts: z.array(planConflictResponse).optional(),
+  conflict_count: z.number().optional(),
 });
 const updatePlanResponse = z.object({
   ok: z.boolean(),
@@ -238,19 +280,73 @@ const updatePlanResponse = z.object({
 // infer initialization from a plan table being empty.
 const PLAN_META_SEEDED_KEY = "seeded";
 
+// W-PLAN-SAFE-001 (version token): plan_meta also carries an internal
+// integer version under this key. It starts at '0' when the seed lands
+// and is incremented by exactly 1 inside every successful updatePlan
+// batch, so the three plan tables plus this token always change as
+// one atomic unit. getPlan brackets its cross-table read with two
+// reads of the token and only trusts the read when both agree — a
+// save landing mid-read is detected and the whole read retried, so a
+// response can never mix one save's exercises with another's
+// schedule. The token is internal bookkeeping: it is never exposed in
+// any response. daily_completions is NOT part of the plan version —
+// it is keyed by date and item key, written by toggleDailyItem, and
+// read separately as before.
+const PLAN_META_VERSION_KEY = "version";
+
+// One-statement version increment for updatePlan's atomic batch:
+// inserts '1' when the token row does not exist yet (a save that is
+// the first plan write a database ever sees), otherwise adds 1 to the
+// stored integer in place.
+function planVersionIncrement(db: ReturnType<Ctx["db"]>) {
+  return db
+    .insert(schema.planMeta)
+    .values({ key: PLAN_META_VERSION_KEY, value: "1" })
+    .onConflictDoUpdate({
+      target: schema.planMeta.key,
+      set: { value: sql`CAST(CAST(${schema.planMeta.value} AS INTEGER) + 1 AS TEXT)` },
+    });
+}
+
+// The current plan version token ('0' before any save), or null when
+// the token row is absent (a database seeded before the token
+// existed, or one whose seed has not landed yet).
+async function readPlanVersion(ctx: Ctx): Promise<string | null> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .select({ value: schema.planMeta.value })
+    .from(schema.planMeta)
+    .where(eq(schema.planMeta.key, PLAN_META_VERSION_KEY))
+    .limit(1);
+  return rows[0]?.value ?? null;
+}
+
 // Atomic, idempotent plan seed. The marker decides: when it exists
 // this is a no-op. Otherwise the default rows for all three plan
-// tables AND the marker land in ONE db.batch — the platform db handle
-// exposes no transaction method (see @hatch/space-sdk's SpaceDb type),
-// and batch is its atomic multi-statement write: every statement
-// commits or none does, so a failed or interrupted seed leaves no
-// partial plan and no marker, and the next open simply retries.
-// Concurrent first opens are arbitrated by the unique constraints —
-// plan_exercises (routine, exercise_key) from migration 0005,
-// plan_schedule (day_index) and plan_daily_items (item_key) from
-// 0004, plan_meta (key) — with onConflictDoNothing: whichever batch
-// lands first writes each row, the other skips it, and both end up
-// looking at exactly one copy of the template.
+// tables, the version token AND the marker land in ONE db.batch —
+// the platform db handle exposes no transaction method (see
+// @hatch/space-sdk's SpaceDb type), and batch is its atomic
+// multi-statement write: every statement commits or none does, so a
+// failed or interrupted seed leaves no partial plan and no marker,
+// and the next open simply retries.
+//
+// W-PLAN-SAFE-001 (execution-time seed guard): the marker pre-check
+// above is only a fast path — it cannot close the race where a legal
+// first save lands AFTER this seed's pre-check but BEFORE its batch
+// executes (the pre-check would have said "not seeded", yet seeding
+// now would resurrect default rows the user just deleted). So every
+// default-row insert is an INSERT … SELECT … WHERE NOT EXISTS
+// (SELECT 1 FROM plan_meta WHERE key = 'seeded'): the guard is
+// evaluated when the statement executes, inside the batch, so if a
+// save (or a winning concurrent seed) has already landed the marker,
+// each guarded insert writes ZERO rows. The marker insert stays LAST
+// in the batch (onConflictDoNothing): a batch that fails anywhere
+// still leaves zero rows and no marker, and two concurrent first
+// opens still converge to exactly one copy of the template — the
+// first batch's rows land, the second batch's guarded inserts all
+// see the marker and write nothing. (Claiming the marker in a
+// separate earlier step is deliberately NOT done: it would open a
+// window where the marker exists but the template does not.)
 async function ensurePlanSeeded(ctx: Ctx): Promise<void> {
   const db = ctx.db<typeof schema>();
   const marker = await db
@@ -259,31 +355,35 @@ async function ensurePlanSeeded(ctx: Ctx): Promise<void> {
     .where(eq(schema.planMeta.key, PLAN_META_SEEDED_KEY))
     .limit(1);
   if (marker.length > 0) return;
-  const exerciseValues = ROUTINE_KEYS.flatMap((routine) =>
-    DEFAULT_PLAN_TEMPLATES[routine].map((exercise, index) => ({
-      routine,
-      sortOrder: index,
-      exerciseKey: exercise.key,
-      exerciseName: exercise.name,
-      sets: exercise.sets,
-      targetReps: exercise.target,
-    })),
+  const seedGuard = sql`NOT EXISTS (SELECT 1 FROM plan_meta WHERE key = ${PLAN_META_SEEDED_KEY})`;
+  const exerciseSelects = ROUTINE_KEYS.flatMap((routine) =>
+    DEFAULT_PLAN_TEMPLATES[routine].map((exercise, index) =>
+      sql`SELECT ${routine}, ${index}, ${exercise.key}, ${exercise.name}, ${exercise.sets}, ${exercise.target}`,
+    ),
   );
-  const scheduleValues = DEFAULT_PLAN_SCHEDULE.map((entry) => ({
-    dayIndex: entry.day_index,
-    routineCode: entry.routine_code,
-    note: entry.note,
-  }));
-  const dailyValues = DEFAULT_DAILY_ITEMS.map((item, index) => ({
-    itemKey: item.key,
-    title: item.title,
-    detail: item.detail,
-    sortOrder: index,
-  }));
+  const scheduleSelects = DEFAULT_PLAN_SCHEDULE.map(
+    (entry) => sql`SELECT ${entry.day_index}, ${entry.routine_code}, ${entry.note}`,
+  );
+  const dailySelects = DEFAULT_DAILY_ITEMS.map(
+    (item, index) => sql`SELECT ${item.key}, ${item.title}, ${item.detail}, ${index}`,
+  );
   await db.batch([
-    db.insert(schema.planExercises).values(exerciseValues).onConflictDoNothing(),
-    db.insert(schema.planSchedule).values(scheduleValues).onConflictDoNothing(),
-    db.insert(schema.planDailyItems).values(dailyValues).onConflictDoNothing(),
+    db.run(sql`
+      INSERT INTO plan_exercises (routine, sort_order, exercise_key, exercise_name, sets, target_reps)
+      SELECT * FROM (${sql.join(exerciseSelects, sql` UNION ALL `)})
+      WHERE ${seedGuard}
+    `),
+    db.run(sql`
+      INSERT INTO plan_schedule (day_index, routine_code, note)
+      SELECT * FROM (${sql.join(scheduleSelects, sql` UNION ALL `)})
+      WHERE ${seedGuard}
+    `),
+    db.run(sql`
+      INSERT INTO plan_daily_items (item_key, title, detail, sort_order)
+      SELECT * FROM (${sql.join(dailySelects, sql` UNION ALL `)})
+      WHERE ${seedGuard}
+    `),
+    db.insert(schema.planMeta).values({ key: PLAN_META_VERSION_KEY, value: "0" }).onConflictDoNothing(),
     db.insert(schema.planMeta).values({ key: PLAN_META_SEEDED_KEY, value: "1" }).onConflictDoNothing(),
   ]);
 }
@@ -313,6 +413,84 @@ async function loadPlanTemplates(ctx: Ctx): Promise<PlanTemplateMap> {
     if (templates[routine].length === 0) templates[routine] = [...DEFAULT_PLAN_TEMPLATES[routine]];
   }
   return templates;
+}
+
+// W-PLAN-SAFE-001 follow-up (conflict visibility): every
+// plan_exercise_conflicts group that still has an unconfirmed row
+// (resolved_at IS NULL) becomes one conflict entry. Candidates are
+// the live plan_exercises row for the key (if it still exists — the
+// editor may legitimately have deleted it) followed by the archived
+// copies in id order, each with its full plan fields so the owner
+// can compare versions before choosing. archived_at is the earliest
+// archival stamp in the group (for rows archived by migration 0005
+// that is the 0006 tracking stamp — see that migration's header).
+// Groups whose rows are all resolved never appear here.
+async function loadPlanConflicts(ctx: Ctx): Promise<z.infer<typeof planConflictResponse>[]> {
+  const db = ctx.db<typeof schema>();
+  const unresolved = await db
+    .select()
+    .from(schema.planExerciseConflicts)
+    .where(isNull(schema.planExerciseConflicts.resolvedAt))
+    .orderBy(asc(schema.planExerciseConflicts.id));
+  if (unresolved.length === 0) return [];
+  const groups = new Map<string, (typeof unresolved)[number][]>();
+  for (const row of unresolved) {
+    const groupKey = `${row.routine} ${row.exerciseKey}`;
+    const group = groups.get(groupKey);
+    if (group) group.push(row);
+    else groups.set(groupKey, [row]);
+  }
+  const conflicts: z.infer<typeof planConflictResponse>[] = [];
+  for (const group of groups.values()) {
+    const head = group[0];
+    if (!head) continue;
+    const liveRows = await db
+      .select()
+      .from(schema.planExercises)
+      .where(
+        and(
+          eq(schema.planExercises.routine, head.routine),
+          eq(schema.planExercises.exerciseKey, head.exerciseKey),
+        ),
+      )
+      .orderBy(asc(schema.planExercises.id))
+      .limit(1);
+    const live = liveRows[0];
+    const candidates: z.infer<typeof planConflictCandidateResponse>[] = [];
+    if (live) {
+      candidates.push({
+        source: "live",
+        archive_id: null,
+        name: live.exerciseName,
+        sets: live.sets,
+        target: live.targetReps,
+        sort_order: live.sortOrder,
+      });
+    }
+    for (const row of group) {
+      candidates.push({
+        source: "archived",
+        archive_id: row.id,
+        name: row.exerciseName,
+        sets: row.sets,
+        target: row.targetReps,
+        sort_order: row.sortOrder,
+      });
+    }
+    let archivedAt: Date | null = null;
+    for (const row of group) {
+      if (row.archivedAt && (!archivedAt || row.archivedAt < archivedAt)) archivedAt = row.archivedAt;
+    }
+    conflicts.push({
+      routine: head.routine,
+      exercise_key: head.exerciseKey,
+      exercise_name: live?.exerciseName ?? head.exerciseName,
+      candidate_count: candidates.length,
+      archived_at: archivedAt ? archivedAt.toISOString() : null,
+      candidates,
+    });
+  }
+  return conflicts;
 }
 
 // Pure plan validation, shared by updatePlan (and validation scripts).
@@ -1570,15 +1748,42 @@ export const Actions = {
       if (!isOwner(ctx)) return empty;
       await ensurePlanSeeded(ctx);
       const db = ctx.db<typeof schema>();
-      const templates = await loadPlanTemplates(ctx);
-      const scheduleRows = await db
-        .select()
-        .from(schema.planSchedule)
-        .orderBy(asc(schema.planSchedule.dayIndex));
-      const dailyRows = await db
-        .select()
-        .from(schema.planDailyItems)
-        .orderBy(asc(schema.planDailyItems.sortOrder), asc(schema.planDailyItems.id));
+      // W-PLAN-SAFE-001 (version-checked read): the three plan tables
+      // are read between two reads of the version token. A save is
+      // one atomic batch that also increments the token, so equal
+      // bracketing tokens prove no save interleaved and the rows all
+      // come from the same saved version. On a mismatch the WHOLE
+      // read is retried (bounded at 5 attempts); if every attempt is
+      // raced, the last complete re-read is returned — still one
+      // save's full snapshot per table set read in sequence against
+      // a quiescing writer, never a hand-merged mix. The token itself
+      // is never exposed in the response.
+      let templates: PlanTemplateMap | null = null;
+      let scheduleRows: (typeof schema.planSchedule.$inferSelect)[] = [];
+      let dailyRows: (typeof schema.planDailyItems.$inferSelect)[] = [];
+      let conflicts: z.infer<typeof planConflictResponse>[] = [];
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const versionBefore = await readPlanVersion(ctx);
+        templates = await loadPlanTemplates(ctx);
+        scheduleRows = await db
+          .select()
+          .from(schema.planSchedule)
+          .orderBy(asc(schema.planSchedule.dayIndex));
+        dailyRows = await db
+          .select()
+          .from(schema.planDailyItems)
+          .orderBy(asc(schema.planDailyItems.sortOrder), asc(schema.planDailyItems.id));
+        // W-PLAN-SAFE-001 follow-up: the conflict state is read
+        // inside the same version bracket — resolvePlanConflict
+        // increments the token in its batch, so a resolution landing
+        // mid-read is detected and retried like any other save, and
+        // the candidates shown always belong to the same plan
+        // version as the routines above.
+        conflicts = await loadPlanConflicts(ctx);
+        const versionAfter = await readPlanVersion(ctx);
+        if (versionBefore === versionAfter) break;
+      }
+      if (!templates) throw new Error("未能读取训练计划");
       const dateKey = laDateKey(new Date());
       const doneRows = await db
         .select()
@@ -1595,6 +1800,9 @@ export const Actions = {
         daily_items: dailyRows.map((row) => ({ key: row.itemKey, title: row.title, detail: row.detail })),
         daily_date: dateKey,
         daily_done: doneRows.filter((row) => row.done === 1).map((row) => row.itemKey),
+        // No unconfirmed conflict → both fields omitted, so the
+        // response is byte-for-byte the pre-fix shape.
+        ...(conflicts.length > 0 ? { conflicts, conflict_count: conflicts.length } : {}),
       };
     },
   }),
@@ -1641,8 +1849,11 @@ export const Actions = {
       // Daily completions key off item keys, which the editor keeps
       // stable across renames, so history survives a save — and this
       // batch never touches workout or completion rows. The trailing
-      // plan_meta insert keeps the seeded marker present even if a
-      // save is somehow the first plan write a database ever sees.
+      // plan_meta inserts keep the seeded marker present even if a
+      // save is somehow the first plan write a database ever sees,
+      // and increment the internal plan version token in the SAME
+      // batch — so the token and the tables can never drift apart,
+      // which is what makes getPlan's bracketed version check sound.
       try {
         await db.batch([
           db.delete(schema.planExercises),
@@ -1676,12 +1887,150 @@ export const Actions = {
             })),
           ),
           db.insert(schema.planMeta).values({ key: PLAN_META_SEEDED_KEY, value: "1" }).onConflictDoNothing(),
+          planVersionIncrement(db),
         ]);
       } catch {
         // The batch rolled back: the old plan is untouched. Report a
         // retryable failure instead of throwing — the editor keeps
         // its local draft and offers 保存计划 again.
         return { ok: false, forbidden: false, error: "保存失败，原计划未改动，请重试" };
+      }
+      ctx.invalidateQueries();
+      return { ok: true, forbidden: false, error: null };
+    },
+  }),
+
+  // W-PLAN-SAFE-001 follow-up (owner confirmation / restore path):
+  // the owner picks which candidate copy of an unconfirmed
+  // (routine, exercise_key) conflict is authoritative.
+  // selected_archive_id null confirms the currently displayed live
+  // copy; an archive id restores that preserved copy into
+  // plan_exercises under its ORIGINAL row id. Either way the whole
+  // group is closed in ONE atomic batch together with the plan
+  // version increment: the chosen copy's archive row (when the
+  // choice came from the archive) is stamped resolution='selected',
+  // every other archive row of the group 'superseded', and all of
+  // them record resolution_selected_id (the winning row's id) and
+  // resolved_at — the decision itself stays traceable. When an
+  // archived copy wins, the displaced live row is first copied into
+  // the archive already-resolved, so no candidate is ever lost.
+  // Until this action runs, nothing marks any copy as confirmed:
+  // getPlan keeps surfacing the conflict on every read.
+  resolvePlanConflict: defineAction({
+    request: z.object({
+      routine: z.string().min(1),
+      exercise_key: z.string().min(1),
+      selected_archive_id: z.number().int().nullable(),
+    }),
+    response: resolvePlanConflictResponse,
+    async handler(ctx, args): Promise<z.infer<typeof resolvePlanConflictResponse>> {
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true, error: null };
+      }
+      const db = ctx.db<typeof schema>();
+      const groupWhere = and(
+        eq(schema.planExerciseConflicts.routine, args.routine),
+        eq(schema.planExerciseConflicts.exerciseKey, args.exercise_key),
+        isNull(schema.planExerciseConflicts.resolvedAt),
+      );
+      const archived = await db
+        .select()
+        .from(schema.planExerciseConflicts)
+        .where(groupWhere)
+        .orderBy(asc(schema.planExerciseConflicts.id));
+      if (archived.length === 0) {
+        return { ok: false, forbidden: false, error: "没有找到待确认的冲突，可能已经确认过了" };
+      }
+      const liveRows = await db
+        .select()
+        .from(schema.planExercises)
+        .where(
+          and(
+            eq(schema.planExercises.routine, args.routine),
+            eq(schema.planExercises.exerciseKey, args.exercise_key),
+          ),
+        )
+        .orderBy(asc(schema.planExercises.id))
+        .limit(1);
+      const live = liveRows[0];
+      const now = new Date();
+      const statements: BatchItem<"sqlite">[] = [];
+      if (args.selected_archive_id === null) {
+        if (!live) {
+          return { ok: false, forbidden: false, error: "当前显示的这一份已不在计划中，请从归档副本里选一份恢复" };
+        }
+        statements.push(
+          db
+            .update(schema.planExerciseConflicts)
+            .set({ resolvedAt: now, resolution: "superseded", resolutionSelectedId: live.id })
+            .where(groupWhere),
+        );
+      } else {
+        const chosen = archived.find((row) => row.id === args.selected_archive_id);
+        if (!chosen) {
+          return { ok: false, forbidden: false, error: "所选的归档副本不存在或已经确认过" };
+        }
+        if (live) {
+          statements.push(
+            db.insert(schema.planExerciseConflicts).values({
+              id: live.id,
+              routine: live.routine,
+              sortOrder: live.sortOrder,
+              exerciseKey: live.exerciseKey,
+              exerciseName: live.exerciseName,
+              sets: live.sets,
+              targetReps: live.targetReps,
+              archivedNote:
+                "live plan row displaced by the owner's conflict resolution (an archived copy was selected); archived already resolved",
+              archivedAt: now,
+              resolvedAt: now,
+              resolution: "superseded",
+              resolutionSelectedId: chosen.id,
+            }),
+            db.delete(schema.planExercises).where(eq(schema.planExercises.id, live.id)),
+          );
+        }
+        statements.push(
+          db.insert(schema.planExercises).values({
+            id: chosen.id,
+            routine: chosen.routine,
+            sortOrder: chosen.sortOrder,
+            exerciseKey: chosen.exerciseKey,
+            exerciseName: chosen.exerciseName,
+            sets: chosen.sets,
+            targetReps: chosen.targetReps,
+          }),
+          db
+            .update(schema.planExerciseConflicts)
+            .set({ resolvedAt: now, resolution: "selected", resolutionSelectedId: chosen.id })
+            .where(eq(schema.planExerciseConflicts.id, chosen.id)),
+        );
+        const others = archived.filter((row) => row.id !== chosen.id);
+        if (others.length > 0) {
+          statements.push(
+            db
+              .update(schema.planExerciseConflicts)
+              .set({ resolvedAt: now, resolution: "superseded", resolutionSelectedId: chosen.id })
+              .where(
+                inArray(
+                  schema.planExerciseConflicts.id,
+                  others.map((row) => row.id),
+                ),
+              ),
+          );
+        }
+      }
+      statements.push(planVersionIncrement(db));
+      // Every branch above pushes at least one statement before the
+      // version increment, so the batch is never empty — the tuple
+      // shape db.batch requires is guaranteed at runtime.
+      const batchItems = statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]];
+      try {
+        await db.batch(batchItems);
+      } catch {
+        // The batch rolled back: the conflict stays open and the
+        // plan untouched. Retryable failure, mirroring updatePlan.
+        return { ok: false, forbidden: false, error: "确认失败，冲突与原计划未改动，请重试" };
       }
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, error: null };

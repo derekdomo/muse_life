@@ -2590,6 +2590,87 @@ function DailyChecklist({ plan }: { plan: Plan }) {
   );
 }
 
+// W-PLAN-SAFE-001 follow-up: unconfirmed upgrade conflicts. Rendered
+// only while plan.conflicts is non-empty (getPlan omits the field
+// entirely when there is nothing to confirm, so a conflict-free plan
+// never shows this). The notice is text-first — a heading, the count
+// and an explicit 尚未确认 state — never color alone. Each candidate
+// copy is listed with its plan fields and its own "以这一份为准"
+// button; choosing one calls resolvePlanConflict, after which the
+// panel disappears on the refetched plan. Until then the currently
+// displayed copy is labelled as unconfirmed, never as the valid one.
+function PlanConflicts({ plan }: { plan: Plan }) {
+  const queryClient = useQueryClient();
+  const conflicts = plan.conflicts ?? [];
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const resolve = useMutation({
+    mutationFn: (args: { routine: string; exercise_key: string; selected_archive_id: number | null }) =>
+      api.resolvePlanConflict(args),
+    onSuccess: async (result) => {
+      if (result.ok) {
+        setResolveError(null);
+        await queryClient.invalidateQueries({ queryKey: ["plan"] });
+        await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else {
+        setResolveError(result.error ?? "确认失败，请重试");
+      }
+    },
+    onError: () => setResolveError("确认失败，请再试一次"),
+  });
+  if (conflicts.length === 0) return null;
+  return (
+    <section className="plan-conflict-section" aria-labelledby="plan-conflict-title">
+      <div className="section-heading">
+        <h2 id="plan-conflict-title">计划冲突待确认</h2>
+        <span>{conflicts.length} 处未确认</span>
+      </div>
+      {conflicts.map((conflict) => {
+        const routineTitle = (ROUTINE_META as Record<string, { title: string }>)[conflict.routine]?.title ?? conflict.routine;
+        return (
+          <div key={`${conflict.routine}-${conflict.exercise_key}`} className="plan-conflict-card">
+            <p className="plan-conflict-notice" role="alert">
+              ▲ 尚未确认：升级时发现「{routineTitle} · {conflict.exercise_name}」有 {conflict.candidate_count} 份不同版本，
+              已保留全部副本；下面当前显示的是其中一份，还没有确认以哪一份为准。
+              {conflict.archived_at
+                ? `（副本归档时间：${new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" }).format(new Date(conflict.archived_at))}）`
+                : ""}
+            </p>
+            <ul className="plan-conflict-candidates">
+              {conflict.candidates.map((candidate) => {
+                const isLive = candidate.source === "live";
+                const label = isLive ? "当前显示的版本（尚未确认）" : `归档副本${candidate.archive_id != null ? ` #${candidate.archive_id}` : ""}`;
+                return (
+                  <li key={isLive ? "live" : `archived-${candidate.archive_id}`} className="plan-conflict-candidate">
+                    <span className="plan-conflict-candidate-text">
+                      <strong>{label}</strong>
+                      <span>{candidate.name} · {candidate.sets} 组 · 目标 {candidate.target}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="plan-conflict-pick"
+                      aria-label={`以「${candidate.name}」（${label}）为准，确认这条冲突`}
+                      disabled={resolve.isPending}
+                      onClick={() => resolve.mutate({
+                        routine: conflict.routine,
+                        exercise_key: conflict.exercise_key,
+                        selected_archive_id: candidate.archive_id,
+                      })}
+                    >
+                      以这一份为准
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })}
+      {resolveError ? <p className="error-banner" role="alert">{resolveError}</p> : null}
+      <p className="plan-conflict-note">确认前计划照常可用；在你选择之前，不会把任何一份当作已确认的版本。</p>
+    </section>
+  );
+}
+
 function PlanEditor({ plan }: { plan: Plan }) {
   const queryClient = useQueryClient();
   const [draftRoutines, setDraftRoutines] = useState<PlanRoutineEntry[]>(() =>
@@ -2922,6 +3003,7 @@ function StartScreen({ recent, comparableHistory, receiptId, onCloseReceipt }: {
 
       {planData ? <WeeklySchedule key={`schedule-${planData.daily_date}`} plan={planData} /> : null}
       {planData ? <DailyChecklist key={`daily-${planData.daily_date}`} plan={planData} /> : null}
+      {planData ? <PlanConflicts plan={planData} /> : null}
       {planData ? (
         <PlanEditor
           key={JSON.stringify([planData.routines, planData.schedule, planData.daily_items])}

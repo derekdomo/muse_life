@@ -82,6 +82,31 @@ export const planMeta = sqliteTable("plan_meta", {
   value: text("value").notNull(),
 });
 
+// Archive of duplicate (routine, exercise_key) plan rows (migration
+// 0005): when a pre-0005 database held two rows for one key, every
+// copy except the smallest id was moved here verbatim before the
+// unique index was created — nothing was dropped. Migration 0006
+// added the tracking columns: a group is an UNCONFIRMED conflict
+// while any of its rows has resolvedAt null; getPlan surfaces such
+// groups explicitly and resolvePlanConflict closes them, recording
+// which candidate the owner picked (resolutionSelectedId) and when
+// (resolvedAt) on every row of the group. Rows archived later as the
+// displaced live copy of a resolution are born already-resolved.
+export const planExerciseConflicts = sqliteTable("plan_exercise_conflicts", {
+  id: integer("id").primaryKey(),
+  routine: text("routine").notNull(),
+  sortOrder: integer("sort_order").notNull(),
+  exerciseKey: text("exercise_key").notNull(),
+  exerciseName: text("exercise_name").notNull(),
+  sets: integer("sets").notNull(),
+  targetReps: text("target_reps").notNull(),
+  archivedNote: text("archived_note").notNull(),
+  archivedAt: integer("archived_at", { mode: "timestamp_ms" }),
+  resolvedAt: integer("resolved_at", { mode: "timestamp_ms" }),
+  resolution: text("resolution"),
+  resolutionSelectedId: integer("resolution_selected_id"),
+});
+
 // Per-day completion of one daily micro-routine item. date_key is the
 // America/Los_Angeles calendar date (YYYY-MM-DD). Purely informational:
 // it never gates starting or finishing a workout.
