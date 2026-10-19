@@ -50,6 +50,13 @@
       "when": 1792412359033,
       "tag": "0007_add_checkin_version_to_readiness_history",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1792419975538,
+      "tag": "0008_add_checkin_revision_arbitration",
+      "breakpoints": true
     }
   ]
 }

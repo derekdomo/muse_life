@@ -19,6 +19,15 @@ export const strengthTrainingSnapshot = sqliteTable("strength_training_snapshot"
 export const morningCheckin = sqliteTable("morning_checkin", {
   date: text("date").primaryKey(),
   feeling: integer("feeling").notNull(),
+  // Persistent monotonic input revision (H-ARCHIVE-SAFE-001 follow-up):
+  // incremented atomically inside the saveMorningCheckin upsert itself
+  // (first insert = 1, conflict update = COALESCE(revision, 0) + 1), so
+  // two successful saves within the same millisecond still get distinct,
+  // ordered versions — updated_at cannot provide that. Nullable because
+  // rows saved before this column existed carry no revision; a null (or
+  // legacy 0) revision is treated as the OLDEST input version by the
+  // readiness archive arbitration.
+  revision: integer("revision"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
@@ -37,14 +46,24 @@ export const readinessHistory = sqliteTable("readiness_history", {
   components: text("components").notNull(),
   confidence: text("confidence", { enum: ["高", "中", "低"] }).notNull(),
   snapshotVersion: text("snapshot_version"),
-  // Morning check-in input version (H-ARCHIVE-SAFE-001 race fix): the
-  // morning_checkin.updated_at (ISO instant) of the check-in row the score
-  // was computed from, bound at read time. Null when no check-in existed
-  // for the date — and on every row archived before this column existed;
-  // a null stored checkin_version is treated as the OLDEST version by the
-  // archive arbitration, so legacy rows stay overwritable and are never
-  // deleted or recomputed.
+  // Morning check-in input version, TEXT form (H-ARCHIVE-SAFE-001 race
+  // fix): the morning_checkin.updated_at (ISO instant) of the check-in
+  // row the score was computed from, bound at read time. Kept for
+  // compatibility, but arbitration NO LONGER judges freshness from it:
+  // two saves in the same millisecond share an updated_at while their
+  // feelings differ, so the text version cannot order them. Freshness is
+  // judged by `checkinRevision` below.
   checkinVersion: text("checkin_version"),
+  // Morning check-in input version, NUMERIC form (H-ARCHIVE-SAFE-001
+  // follow-up): the morning_checkin.revision bound at the same read as
+  // the feeling. The archive arbitration compares this integer: at equal
+  // health snapshot version an incoming write is accepted only when its
+  // checkin_revision is not older than the stored one; an incoming null
+  // never overwrites a stored non-null; a stored null (every row archived
+  // before this column existed, including rows that carry only the legacy
+  // text checkin_version) counts as the OLDEST and stays overwritable —
+  // legacy rows are never deleted or recomputed.
+  checkinRevision: integer("checkin_revision"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

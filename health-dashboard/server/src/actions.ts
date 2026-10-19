@@ -1012,30 +1012,34 @@ async function loadReadinessTrendPoints(ctx: Ctx, endDate: string): Promise<Read
 // failure ledger entry is written (a skipped backfill is not a fault).
 // (2) Same-day version arbitration over BOTH inputs the score was
 // computed from — the health snapshot version AND the morning check-in
-// version (`checkinVersion`: the morning_checkin.updated_at the caller
-// read alongside the feeling, bound at read time, null when no check-in
-// row existed). The upsert is ONE atomic statement whose ON CONFLICT …
-// WHERE applies the update only when the incoming health version is
-// non-null AND (strictly newer than the stored one, OR equal to it while
-// the incoming check-in version is not older than the stored one). The
-// health version alone used to arbitrate with >=, which let a request
-// that had read an OLDER check-in (but paused before its archive write)
-// overwrite a score a newer request had already archived from a NEWER
-// check-in under the same health version. Equal check-in versions are
-// the same input replayed idempotently, so they may overwrite; an
-// incoming null check-in version never overwrites a stored non-null one
-// (the row was computed without an input the stored score had); a stored
-// null check-in version (rows archived before this arbitration existed)
-// counts as the oldest and may always be superseded at equal health
-// version. A null incoming health version may only ever be the first
-// insert for its date and never overwrites an existing row. Freshness is
-// judged ONLY by these input versions, never by the write instant. Only
-// dates actually computed from now on are archived — no backfill, no
-// recomputation of past dates. A write failure must not block the
-// dashboard's main response, so it is caught here and surfaced in the
-// sync ledger instead; the ledger note deliberately carries no health
-// values, only the fact and the date affected.
-async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion: string | null, checkinVersion: string | null, todayLA?: string): Promise<void> {
+// input version. The check-in version is judged by its NUMERIC revision
+// (`checkinRevision`: the morning_checkin.revision the caller read
+// alongside the feeling, bound at read time, null when no check-in row
+// existed). The legacy text `checkinVersion` (the row's updated_at) is
+// still stored for compatibility but no longer arbitrates: two saves in
+// the same millisecond share an updated_at while their feelings differ,
+// so the text version stamped both inputs as "the same version" and a
+// request that had read the OLDER feeling (but paused before its archive
+// write) could overwrite the score archived from the NEWER feeling. The
+// upsert is ONE atomic statement whose ON CONFLICT … WHERE applies the
+// update only when the incoming health version is non-null AND (strictly
+// newer than the stored one, OR equal to it while the incoming
+// check-in revision is not older than the stored one). Equal check-in
+// revisions are the same input replayed idempotently, so they may
+// overwrite; an incoming null check-in revision never overwrites a
+// stored non-null one (the row was computed without an input the stored
+// score had); a stored null check-in revision (rows archived before
+// revisions existed — including rows carrying only the legacy text
+// checkin_version) counts as the oldest and may always be superseded at
+// equal health version. A null incoming health version may only ever be
+// the first insert for its date and never overwrites an existing row.
+// Freshness is judged ONLY by these input versions, never by the write
+// instant. Only dates actually computed from now on are archived — no
+// backfill, no recomputation of past dates. A write failure must not
+// block the dashboard's main response, so it is caught here and surfaced
+// in the sync ledger instead; the ledger note deliberately carries no
+// health values, only the fact and the date affected.
+async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion: string | null, checkinVersion: string | null, checkinRevision: number | null, todayLA?: string): Promise<void> {
   if (todayLA !== undefined && readiness.date !== todayLA) return;
   try {
     const db = ctx.db<typeof schema>();
@@ -1048,12 +1052,13 @@ async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion:
       confidence: readiness.confidence,
       snapshotVersion,
       checkinVersion,
+      checkinRevision,
       createdAt: now,
       updatedAt: now,
     }).onConflictDoUpdate({
       target: schema.readinessHistory.date,
-      set: { score: readiness.score, components, confidence: readiness.confidence, snapshotVersion, checkinVersion, updatedAt: now },
-      setWhere: sql`excluded.snapshot_version IS NOT NULL AND (${schema.readinessHistory.snapshotVersion} IS NULL OR excluded.snapshot_version > ${schema.readinessHistory.snapshotVersion} OR (excluded.snapshot_version = ${schema.readinessHistory.snapshotVersion} AND (${schema.readinessHistory.checkinVersion} IS NULL OR (excluded.checkin_version IS NOT NULL AND excluded.checkin_version >= ${schema.readinessHistory.checkinVersion}))))`,
+      set: { score: readiness.score, components, confidence: readiness.confidence, snapshotVersion, checkinVersion, checkinRevision, updatedAt: now },
+      setWhere: sql`excluded.snapshot_version IS NOT NULL AND (${schema.readinessHistory.snapshotVersion} IS NULL OR excluded.snapshot_version > ${schema.readinessHistory.snapshotVersion} OR (excluded.snapshot_version = ${schema.readinessHistory.snapshotVersion} AND (${schema.readinessHistory.checkinRevision} IS NULL OR (excluded.checkin_revision IS NOT NULL AND excluded.checkin_revision >= ${schema.readinessHistory.checkinRevision}))))`,
     });
   } catch {
     await recordSyncLog(ctx, { source: "system", status: "failed", itemCount: 0, note: `readiness 评分存档写入失败 · 日期 ${readiness.date} · 趋势位可能缺当日分数`, sourceUpdatedAt: null });
@@ -1217,7 +1222,7 @@ export const Actions = {
       // Morning check-in is read only when the health snapshot is usable.
       const readinessDate = health.morningReference?.date ?? shiftDate(health.dataDate, 1);
       const db = ctx.db<typeof schema>();
-      const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling, updatedAt: schema.morningCheckin.updatedAt }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
+      const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling, updatedAt: schema.morningCheckin.updatedAt, revision: schema.morningCheckin.revision }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
       const morningFeeling = checkinRows[0]?.feeling ?? null;
       // Bind the check-in INPUT VERSION at the same read instant as the
       // feeling (H-ARCHIVE-SAFE-001 race fix): the row's updated_at as
@@ -1226,6 +1231,13 @@ export const Actions = {
       // overwrite a score archived from a newer one — even under the
       // same health snapshot version. Null when no check-in row exists.
       const checkinVersion = checkinRows[0] ? checkinRows[0].updatedAt.toISOString() : null;
+      // The NUMERIC revision bound at that same read (H-ARCHIVE-SAFE-001
+      // follow-up) is what the archive arbitration now judges freshness
+      // by: updated_at cannot order two saves that landed in the same
+      // millisecond, the revision can. Null when no check-in row exists,
+      // and also null for a legacy row saved before revisions existed —
+      // both count as the oldest input in the arbitration.
+      const checkinRevision = checkinRows[0]?.revision ?? null;
       const readiness = calculateReadiness(snapshot, readinessDate, morningFeeling);
       // Archive the score exactly as computed now (H-LOAD-001): this is
       // the only place readiness is ever computed, so archiving here
@@ -1237,7 +1249,7 @@ export const Actions = {
       // today gate (H-ARCHIVE-SAFE-001) means opening the dashboard on a
       // stale snapshot archives nothing: only the readiness actually
       // displayed for LA today is recorded.
-      await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, laTodayString());
+      await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, checkinRevision, laTodayString());
       const readinessHistory = await loadReadinessTrendPoints(ctx, readinessDate);
       return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
     },
@@ -1261,8 +1273,17 @@ export const Actions = {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
       const now = new Date();
-      await db.insert(schema.morningCheckin).values({ date: args.date, feeling: args.feeling, createdAt: now, updatedAt: now })
-        .onConflictDoUpdate({ target: schema.morningCheckin.date, set: { feeling: args.feeling, updatedAt: now } });
+      // The revision advances inside the SAME atomic upsert statement
+      // (H-ARCHIVE-SAFE-001 follow-up): first insert writes 1; a conflict
+      // update sets revision = COALESCE(existing revision, 0) + 1 via a
+      // SQL expression evaluated against the stored row — never a
+      // read-then-write in application code and never a client clock, so
+      // two successful saves in the same millisecond still receive
+      // distinct, ordered revisions. A rejected (non-owner) save returns
+      // above before any statement runs, so it cannot advance the
+      // revision; a failed statement likewise leaves the row untouched.
+      await db.insert(schema.morningCheckin).values({ date: args.date, feeling: args.feeling, revision: 1, createdAt: now, updatedAt: now })
+        .onConflictDoUpdate({ target: schema.morningCheckin.date, set: { feeling: args.feeling, revision: sql`COALESCE(${schema.morningCheckin.revision}, 0) + 1`, updatedAt: now } });
       ctx.invalidateQueries(["dashboard"]);
       return { ok: true, forbidden: false };
     },
