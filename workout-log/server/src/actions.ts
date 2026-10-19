@@ -229,6 +229,13 @@ const planDailyItemResponse = z.object({
 const planConflictCandidateResponse = z.object({
   source: z.enum(["live", "archived"]),
   archive_id: z.number().nullable(),
+  // W-PLAN-SAFE-001 P0 tail (additive): the candidate's own row id —
+  // the plan_exercises id for the live copy, the archive row id for
+  // an archived copy (same value as archive_id there). The client
+  // echoes the full candidate id set back as expected_candidate_ids
+  // when confirming, so a confirmation is bound to exactly the
+  // candidates that were displayed.
+  id: z.number(),
   name: z.string(),
   sets: z.number(),
   target: z.string(),
@@ -241,11 +248,28 @@ const planConflictResponse = z.object({
   candidate_count: z.number(),
   archived_at: z.string().nullable(),
   candidates: z.array(planConflictCandidateResponse),
+  // W-PLAN-SAFE-001 P0 tail (additive): the plan version token as
+  // read inside the same version bracket as the candidates above.
+  // The client echoes it as expected_plan_version when confirming;
+  // unlike the bare token rule for the plan body (never exposed on a
+  // conflict-free response), it appears ONLY inside a conflict entry
+  // the owner is being asked to decide on, because binding the
+  // decision to the displayed version is the point of the field.
+  plan_version: z.string().nullable(),
 });
 const resolvePlanConflictResponse = z.object({
   ok: z.boolean(),
   forbidden: z.boolean(),
   error: z.string().nullable(),
+  // W-PLAN-SAFE-001 P0 tail (additive, optional): the typed outcome
+  // of a confirmation. "resolved" — this call closed the conflict;
+  // "already_resolved" — an earlier identical decision already
+  // closed it (idempotent receipt, ok:true); "stale" — the plan or
+  // the candidate set changed after the candidates were displayed,
+  // nothing was written, refresh and re-decide (ok:false). Omitted
+  // on responses that predate the field and on plain validation /
+  // batch failures (retryable, error carries the message).
+  outcome: z.enum(["resolved", "already_resolved", "stale"]).optional(),
 });
 
 const planResponse = z.object({
@@ -267,6 +291,14 @@ const planResponse = z.object({
   // resolvePlanConflict.
   conflicts: z.array(planConflictResponse).optional(),
   conflict_count: z.number().optional(),
+  // W-PLAN-SAFE-001 P0 tail (additive, optional): present ONLY when
+  // the version-bracketed read exhausted its bounded retries because
+  // saves kept landing mid-read. The response then carries NO plan
+  // body at all (empty arrays) plus this retryable error — a caller
+  // must keep whatever plan it already has and offer a retry, never
+  // present the empty body as the plan. A successful read omits the
+  // field entirely, exactly as before.
+  read_error: z.string().optional(),
 });
 const updatePlanResponse = z.object({
   ok: z.boolean(),
@@ -294,6 +326,11 @@ const PLAN_META_SEEDED_KEY = "seeded";
 // read separately as before.
 const PLAN_META_VERSION_KEY = "version";
 
+// W-PLAN-SAFE-001 P0 tail: getPlan's version-bracketed read retries
+// at most this many times before returning its explicit retryable
+// read_error. Finite on purpose (see the getPlan handler).
+export const PLAN_READ_MAX_ATTEMPTS = 5;
+
 // One-statement version increment for updatePlan's atomic batch:
 // inserts '1' when the token row does not exist yet (a save that is
 // the first plan write a database ever sees), otherwise adds 1 to the
@@ -319,6 +356,46 @@ async function readPlanVersion(ctx: Ctx): Promise<string | null> {
     .where(eq(schema.planMeta.key, PLAN_META_VERSION_KEY))
     .limit(1);
   return rows[0]?.value ?? null;
+}
+
+// W-PLAN-SAFE-001 P0 tail (decision binding): a canonical stamp of
+// one conflict group's full decision state — the plan version token,
+// the group's archive rows (id + every plan field + archived_at) and
+// the live row (id + every plan field, or its absence). Two reads of
+// the group produce the same stamp iff the owner would be shown
+// exactly the same candidates for the same plan version, so
+// resolvePlanConflict can bind a confirmation to what was displayed:
+// the client echoes the stamp it saw, and the handler compares it
+// against a fresh stamp inside the claim (see there). Pure and
+// self-contained so validation scripts can exercise it directly.
+export function conflictVersionStamp(input: {
+  planVersion: string | null;
+  live: { id: number; sortOrder: number; exerciseName: string; sets: number; targetReps: string } | null;
+  archived: {
+    id: number;
+    sortOrder: number;
+    exerciseName: string;
+    sets: number;
+    targetReps: string;
+    archivedAtMs: number | null;
+  }[];
+}): string {
+  const livePart = input.live
+    ? [
+        input.live.id,
+        input.live.sortOrder,
+        input.live.exerciseName,
+        input.live.sets,
+        input.live.targetReps,
+      ].join("\u001F")
+    : "none";
+  const archivedPart = [...input.archived]
+    .sort((a, b) => a.id - b.id)
+    .map((row) =>
+      [row.id, row.sortOrder, row.exerciseName, row.sets, row.targetReps, row.archivedAtMs ?? "null"].join("\u001F"),
+    )
+    .join("\u001E");
+  return `v${input.planVersion ?? "null"}|live:${livePart}|arch:${archivedPart}`;
 }
 
 // Atomic, idempotent plan seed. The marker decides: when it exists
@@ -424,8 +501,14 @@ async function loadPlanTemplates(ctx: Ctx): Promise<PlanTemplateMap> {
 // can compare versions before choosing. archived_at is the earliest
 // archival stamp in the group (for rows archived by migration 0005
 // that is the 0006 tracking stamp — see that migration's header).
-// Groups whose rows are all resolved never appear here.
-async function loadPlanConflicts(ctx: Ctx): Promise<z.infer<typeof planConflictResponse>[]> {
+// Groups whose rows are all resolved never appear here. planVersion
+// is the version token of the bracket this read belongs to (see
+// getPlan); it is stamped onto every entry so the client can bind a
+// later confirmation to the exact version it was shown.
+async function loadPlanConflicts(
+  ctx: Ctx,
+  planVersion: string | null,
+): Promise<z.infer<typeof planConflictResponse>[]> {
   const db = ctx.db<typeof schema>();
   const unresolved = await db
     .select()
@@ -461,6 +544,7 @@ async function loadPlanConflicts(ctx: Ctx): Promise<z.infer<typeof planConflictR
       candidates.push({
         source: "live",
         archive_id: null,
+        id: live.id,
         name: live.exerciseName,
         sets: live.sets,
         target: live.targetReps,
@@ -471,6 +555,7 @@ async function loadPlanConflicts(ctx: Ctx): Promise<z.infer<typeof planConflictR
       candidates.push({
         source: "archived",
         archive_id: row.id,
+        id: row.id,
         name: row.exerciseName,
         sets: row.sets,
         target: row.targetReps,
@@ -488,6 +573,7 @@ async function loadPlanConflicts(ctx: Ctx): Promise<z.infer<typeof planConflictR
       candidate_count: candidates.length,
       archived_at: archivedAt ? archivedAt.toISOString() : null,
       candidates,
+      plan_version: planVersion,
     });
   }
   return conflicts;
@@ -1753,16 +1839,23 @@ export const Actions = {
       // one atomic batch that also increments the token, so equal
       // bracketing tokens prove no save interleaved and the rows all
       // come from the same saved version. On a mismatch the WHOLE
-      // read is retried (bounded at 5 attempts); if every attempt is
-      // raced, the last complete re-read is returned — still one
-      // save's full snapshot per table set read in sequence against
-      // a quiescing writer, never a hand-merged mix. The token itself
-      // is never exposed in the response.
+      // read is retried (bounded — see below).
+      //
+      // W-PLAN-SAFE-001 P0 tail (exhaustion must fail, never mix):
+      // the retry is bounded at PLAN_READ_MAX_ATTEMPTS and exhaustion
+      // is an explicit retryable failure (read_error, no plan body) —
+      // NEVER a "successful" response assembled from the last raced
+      // attempt, whose routines could come from one save and its
+      // schedule/daily from another, a combination that was never
+      // saved together. The bound stays finite on purpose: an
+      // unbounded loop would hide writer starvation behind a hung
+      // read instead of surfacing a retryable error.
       let templates: PlanTemplateMap | null = null;
       let scheduleRows: (typeof schema.planSchedule.$inferSelect)[] = [];
       let dailyRows: (typeof schema.planDailyItems.$inferSelect)[] = [];
       let conflicts: z.infer<typeof planConflictResponse>[] = [];
-      for (let attempt = 0; attempt < 5; attempt++) {
+      let consistent = false;
+      for (let attempt = 0; attempt < PLAN_READ_MAX_ATTEMPTS; attempt++) {
         const versionBefore = await readPlanVersion(ctx);
         templates = await loadPlanTemplates(ctx);
         scheduleRows = await db
@@ -1778,13 +1871,30 @@ export const Actions = {
         // increments the token in its batch, so a resolution landing
         // mid-read is detected and retried like any other save, and
         // the candidates shown always belong to the same plan
-        // version as the routines above.
-        conflicts = await loadPlanConflicts(ctx);
+        // version as the routines above. The bracket's version is
+        // stamped onto the conflict entries for decision binding.
+        conflicts = await loadPlanConflicts(ctx, versionBefore);
         const versionAfter = await readPlanVersion(ctx);
-        if (versionBefore === versionAfter) break;
+        if (versionBefore === versionAfter) {
+          consistent = true;
+          break;
+        }
       }
-      if (!templates) throw new Error("未能读取训练计划");
       const dateKey = laDateKey(new Date());
+      if (!consistent || !templates) {
+        // Retry exhaustion: no consistent snapshot was read. Return
+        // the typed retryable failure with NO plan body — the client
+        // keeps the plan/draft it already shows and offers a retry.
+        return {
+          forbidden: false,
+          routines: [],
+          schedule: [],
+          daily_items: [],
+          daily_date: dateKey,
+          daily_done: [],
+          read_error: "计划读取时另一窗口正在连续保存，未能读到完整一致的版本；当前显示未改动，请重试",
+        };
+      }
       const doneRows = await db
         .select()
         .from(schema.dailyCompletions)
@@ -1916,11 +2026,48 @@ export const Actions = {
   // the archive already-resolved, so no candidate is ever lost.
   // Until this action runs, nothing marks any copy as confirmed:
   // getPlan keeps surfacing the conflict on every read.
+  //
+  // W-PLAN-SAFE-001 P0 tail (bound, atomically claimed decisions):
+  // a confirmation is bound to what the owner was actually shown.
+  // The client echoes the candidate set it displayed
+  // (expected_candidate_ids) and the plan version those candidates
+  // belonged to (expected_plan_version); when present, both are
+  // checked against a fresh read BEFORE anything is written, and a
+  // mismatch is a typed stale failure — the decision is not applied
+  // to a plan or candidate set the owner never saw. The binding is
+  // then re-verified INSIDE the same atomic batch by its FIRST
+  // statement: a conditional claim that stamps the still-unresolved
+  // group rows with this decision's marker value — the version
+  // token read back through a RETURNING on the version-increment
+  // statement — only while every unresolved row still carries a NULL
+  // resolution_selected_id (i.e. no other decision claimed the group
+  // first) AND the plan version token still equals the bound one.
+  // A save or a rival decision landing between this handler's
+  // pre-read and the batch therefore makes the claim stamp ZERO
+  // rows — and because every decision statement in the batch is
+  // guarded on that same claim marker, a zero claim means the
+  // decision statements write zero rows too: the batch's only
+  // effect is its version increment, which the handler cancels
+  // before answering typed stale / already_resolved. It never
+  // reports success for a version the owner did not see, never
+  // overwrites the newer plan, never resets a winner's rows, and
+  // never drops a candidate. A repeated submission of the SAME decision
+  // (double tap, retried request) is answered from the recorded
+  // decision: ok with outcome "already_resolved". Requests that omit
+  // the binding fields (older clients) keep working: the claim is
+  // then bound to the state this handler itself just read.
   resolvePlanConflict: defineAction({
     request: z.object({
       routine: z.string().min(1),
       exercise_key: z.string().min(1),
       selected_archive_id: z.number().int().nullable(),
+      // Additive, optional (P0 tail): the displayed candidate ids,
+      // in display order — the live candidate's plan_exercises id
+      // (when a live candidate was shown) followed by the archived
+      // candidates' archive ids — and the plan version token the
+      // displayed conflict belonged to. Omitted by older clients.
+      expected_candidate_ids: z.array(z.number().int()).optional(),
+      expected_plan_version: z.string().nullable().optional(),
     }),
     response: resolvePlanConflictResponse,
     async handler(ctx, args): Promise<z.infer<typeof resolvePlanConflictResponse>> {
@@ -1928,112 +2075,416 @@ export const Actions = {
         return { ok: false, forbidden: true, error: null };
       }
       const db = ctx.db<typeof schema>();
-      const groupWhere = and(
-        eq(schema.planExerciseConflicts.routine, args.routine),
-        eq(schema.planExerciseConflicts.exerciseKey, args.exercise_key),
-        isNull(schema.planExerciseConflicts.resolvedAt),
-      );
-      const archived = await db
-        .select()
-        .from(schema.planExerciseConflicts)
-        .where(groupWhere)
-        .orderBy(asc(schema.planExerciseConflicts.id));
-      if (archived.length === 0) {
+      const staleError = "计划或候选副本已经变化，你看到的版本已过期；没有确认任何版本，请刷新后按最新候选重新确认";
+      const groupRows = () =>
+        db
+          .select()
+          .from(schema.planExerciseConflicts)
+          .where(
+            and(
+              eq(schema.planExerciseConflicts.routine, args.routine),
+              eq(schema.planExerciseConflicts.exerciseKey, args.exercise_key),
+            ),
+          )
+          .orderBy(asc(schema.planExerciseConflicts.id));
+      const liveRowFor = () =>
+        db
+          .select()
+          .from(schema.planExercises)
+          .where(
+            and(
+              eq(schema.planExercises.routine, args.routine),
+              eq(schema.planExercises.exerciseKey, args.exercise_key),
+            ),
+          )
+          .orderBy(asc(schema.planExercises.id))
+          .limit(1);
+      type GroupRow = typeof schema.planExerciseConflicts.$inferSelect;
+      type LiveRow = typeof schema.planExercises.$inferSelect;
+      const stampOf = (version: string | null, live: LiveRow | undefined, rows: GroupRow[]) =>
+        conflictVersionStamp({
+          planVersion: version,
+          live: live
+            ? {
+                id: live.id,
+                sortOrder: live.sortOrder,
+                exerciseName: live.exerciseName,
+                sets: live.sets,
+                targetReps: live.targetReps,
+              }
+            : null,
+          archived: rows.map((row) => ({
+            id: row.id,
+            sortOrder: row.sortOrder,
+            exerciseName: row.exerciseName,
+            sets: row.sets,
+            targetReps: row.targetReps,
+            archivedAtMs: row.archivedAt ? row.archivedAt.getTime() : null,
+          })),
+        });
+      // Idempotent receipt / closed-group verdict, from the group's
+      // recorded decision. The decision's KIND is part of its
+      // identity: an archive restore marks the winning row
+      // 'selected', while a live confirmation marks every row
+      // 'superseded' with the live row's id recorded. A repeat is
+      // the SAME decision only when it asks for the same kind and
+      // the same winner — confirming "the live copy" after an
+      // archive restore is a different request (the live copy is
+      // now the restored row, which the original decision picked
+      // from the archive) and stays an error, as before.
+      const closedGroupVerdict = (
+        rows: GroupRow[],
+        live: LiveRow | undefined,
+      ): z.infer<typeof resolvePlanConflictResponse> | null => {
+        if (rows.length === 0 || rows.some((row) => row.resolvedAt === null)) return null;
+        const alreadyResolved: z.infer<typeof resolvePlanConflictResponse> = {
+          ok: true,
+          forbidden: false,
+          error: null,
+          outcome: "already_resolved",
+        };
+        const closedError: z.infer<typeof resolvePlanConflictResponse> = {
+          ok: false,
+          forbidden: false,
+          error: "没有找到待确认的冲突，可能已经确认过了",
+        };
+        const selectedRow = rows.find((row) => row.resolution === "selected");
+        if (args.selected_archive_id !== null) {
+          return selectedRow && selectedRow.id === args.selected_archive_id
+            ? alreadyResolved
+            : closedError;
+        }
+        if (selectedRow) return closedError;
+        const winner = rows[0]?.resolutionSelectedId ?? null;
+        return winner !== null && live !== undefined && winner === live.id
+          ? alreadyResolved
+          : closedError;
+      };
+
+      const allRows = await groupRows();
+      const unresolved = allRows.filter((row) => row.resolvedAt === null);
+      const liveRows0 = await liveRowFor();
+      const live0 = liveRows0[0];
+      if (unresolved.length === 0) {
+        const verdict = closedGroupVerdict(allRows, live0);
+        if (verdict) return verdict;
         return { ok: false, forbidden: false, error: "没有找到待确认的冲突，可能已经确认过了" };
       }
-      const liveRows = await db
-        .select()
-        .from(schema.planExercises)
-        .where(
-          and(
-            eq(schema.planExercises.routine, args.routine),
-            eq(schema.planExercises.exerciseKey, args.exercise_key),
-          ),
-        )
-        .orderBy(asc(schema.planExercises.id))
-        .limit(1);
-      const live = liveRows[0];
-      const now = new Date();
-      const statements: BatchItem<"sqlite">[] = [];
-      if (args.selected_archive_id === null) {
-        if (!live) {
-          return { ok: false, forbidden: false, error: "当前显示的这一份已不在计划中，请从归档副本里选一份恢复" };
+      if (args.selected_archive_id !== null && !unresolved.some((row) => row.id === args.selected_archive_id)) {
+        return { ok: false, forbidden: false, error: "所选的归档副本不存在或已经确认过" };
+      }
+      if (args.selected_archive_id === null && !live0) {
+        return { ok: false, forbidden: false, error: "当前显示的这一份已不在计划中，请从归档副本里选一份恢复" };
+      }
+      // Display binding: when the client echoed what it was shown,
+      // the current state must still stamp identically — same plan
+      // version, same candidate ids, same candidate contents.
+      // Otherwise this confirmation refers to a version the owner
+      // never saw: typed stale, zero writes.
+      let boundVersion = await readPlanVersion(ctx);
+      if (args.expected_candidate_ids !== undefined || args.expected_plan_version !== undefined) {
+        const displayedIds = [
+          ...(live0 ? [live0.id] : []),
+          ...unresolved.map((row) => row.id),
+        ];
+        const idsMatch =
+          args.expected_candidate_ids === undefined ||
+          (args.expected_candidate_ids.length === displayedIds.length &&
+            args.expected_candidate_ids.every((id, index) => id === displayedIds[index]));
+        const versionMatch =
+          args.expected_plan_version === undefined || args.expected_plan_version === boundVersion;
+        if (!idsMatch || !versionMatch) {
+          return { ok: false, forbidden: false, error: staleError, outcome: "stale" };
         }
+      }
+
+      // Decision loop (bounded): build the decision batch from a
+      // fresh read, claim the group as the batch's first statement,
+      // and verify from the batch results + a post-read stamp that
+      // the claim actually landed on the state the decision was
+      // built from. A lost race retries against the fresh state at
+      // most once (identical re-decision → proceed; anything else →
+      // typed verdict); a rollback that itself fails throws, so a
+      // torn state is never answered as success.
+      for (let decisionAttempt = 0; decisionAttempt < 2; decisionAttempt++) {
+        const rowsNow = decisionAttempt === 0 ? allRows : await groupRows();
+        const unresolvedNow = rowsNow.filter((row) => row.resolvedAt === null);
+        const liveRowsNow = decisionAttempt === 0 ? liveRows0 : await liveRowFor();
+        const live = liveRowsNow[0];
+        if (decisionAttempt > 0) {
+          if (unresolvedNow.length === 0) {
+            const verdict = closedGroupVerdict(rowsNow, live);
+            if (verdict) return verdict;
+            return { ok: false, forbidden: false, error: staleError, outcome: "stale" };
+          }
+          boundVersion = await readPlanVersion(ctx);
+          // Re-decide against the fresh state: proceed only if the
+          // request still denotes the SAME decision here — the bound
+          // version and candidate ids still match what the client
+          // was shown, and the requested winner still exists.
+          const freshIds = [...(live ? [live.id] : []), ...unresolvedNow.map((row) => row.id)];
+          const bindingStillMatches =
+            (args.expected_plan_version === undefined || args.expected_plan_version === boundVersion) &&
+            (args.expected_candidate_ids === undefined ||
+              (args.expected_candidate_ids.length === freshIds.length &&
+                args.expected_candidate_ids.every((id, index) => id === freshIds[index])));
+          const winnerStillExists =
+            args.selected_archive_id !== null
+              ? unresolvedNow.some((row) => row.id === args.selected_archive_id)
+              : live !== undefined;
+          if (!bindingStillMatches || !winnerStillExists) {
+            return { ok: false, forbidden: false, error: staleError, outcome: "stale" };
+          }
+        }
+        // The decision's own batch increments the token exactly
+        // once, so a cleanly landed decision reads back stamped at
+        // bound+1 ('1' when the token row did not exist yet). A
+        // rival write landing in between moves it further — the
+        // post-read stamp comparison below catches both that and a
+        // claim that stamped zero rows.
+        const expectedPostVersion =
+          boundVersion === null ? "1" : String(Number(boundVersion) + 1);
+        const now = new Date();
+        // The post-decision state a clean landing produces, derived
+        // from the pre-decision state: confirming the live copy
+        // changes no plan row; restoring an archived copy makes
+        // THAT copy the live row and archives the displaced live row
+        // (already resolved) alongside the group's rows. (The stamp
+        // ignores resolution fields, so the group's own rows stamp
+        // identically before and after being closed.)
+        const chosenPre =
+          args.selected_archive_id === null
+            ? undefined
+            : unresolvedNow.find((row) => row.id === args.selected_archive_id);
+        const expectedPostLive: LiveRow | undefined =
+          args.selected_archive_id === null
+            ? live
+            : chosenPre
+              ? {
+                  id: chosenPre.id,
+                  routine: chosenPre.routine,
+                  sortOrder: chosenPre.sortOrder,
+                  exerciseKey: chosenPre.exerciseKey,
+                  exerciseName: chosenPre.exerciseName,
+                  sets: chosenPre.sets,
+                  targetReps: chosenPre.targetReps,
+                }
+              : undefined;
+        const expectedPostArchived: GroupRow[] =
+          args.selected_archive_id === null || !live
+            ? unresolvedNow
+            : [
+                ...unresolvedNow,
+                {
+                  id: live.id,
+                  routine: live.routine,
+                  sortOrder: live.sortOrder,
+                  exerciseKey: live.exerciseKey,
+                  exerciseName: live.exerciseName,
+                  sets: live.sets,
+                  targetReps: live.targetReps,
+                  archivedNote: "",
+                  archivedAt: now,
+                  resolvedAt: now,
+                  resolution: "superseded",
+                  resolutionSelectedId: chosenPre?.id ?? null,
+                },
+              ];
+        // Rows of the group closed by EARLIER decisions stamp
+        // identically on both sides of the comparison.
+        const stampExpected = stampOf(expectedPostVersion, expectedPostLive, [
+          ...rowsNow.filter((row) => row.resolvedAt !== null),
+          ...expectedPostArchived,
+        ]);
+        // The pre-decision stamp of this attempt, for telling a
+        // genuine batch failure (state untouched → retryable) from
+        // a race the batch itself rejected (state moved → stale).
+        const stampPre = stampOf(boundVersion, live, rowsNow);
+        const marker = -(decisionAttempt + 1);
+        const statements: BatchItem<"sqlite">[] = [];
+        // (1) The atomic claim, FIRST in the batch: stamp every
+        // still-unresolved row of the group with this decision's
+        // marker, conditioned — evaluated when the statement
+        // executes, inside the batch — on the plan version token
+        // still equalling the bound version (or still being absent,
+        // when the bound version was absent). Any save or rival
+        // decision that landed after the pre-read bumped the token,
+        // so the claim then stamps ZERO rows and the decision below
+        // is rolled back instead of applied to an unseen version.
+        const versionGuard =
+          boundVersion === null
+            ? sql`NOT EXISTS (SELECT 1 FROM plan_meta WHERE key = ${PLAN_META_VERSION_KEY})`
+            : sql`EXISTS (SELECT 1 FROM plan_meta WHERE key = ${PLAN_META_VERSION_KEY} AND value = ${boundVersion})`;
         statements.push(
           db
             .update(schema.planExerciseConflicts)
-            .set({ resolvedAt: now, resolution: "superseded", resolutionSelectedId: live.id })
-            .where(groupWhere),
+            .set({ resolutionSelectedId: marker })
+            .where(
+              and(
+                eq(schema.planExerciseConflicts.routine, args.routine),
+                eq(schema.planExerciseConflicts.exerciseKey, args.exercise_key),
+                isNull(schema.planExerciseConflicts.resolvedAt),
+                isNull(schema.planExerciseConflicts.resolutionSelectedId),
+                versionGuard,
+              ),
+            )
+            .returning({ id: schema.planExerciseConflicts.id }),
         );
-      } else {
-        const chosen = archived.find((row) => row.id === args.selected_archive_id);
-        if (!chosen) {
-          return { ok: false, forbidden: false, error: "所选的归档副本不存在或已经确认过" };
-        }
-        if (live) {
-          statements.push(
-            db.insert(schema.planExerciseConflicts).values({
-              id: live.id,
-              routine: live.routine,
-              sortOrder: live.sortOrder,
-              exerciseKey: live.exerciseKey,
-              exerciseName: live.exerciseName,
-              sets: live.sets,
-              targetReps: live.targetReps,
-              archivedNote:
-                "live plan row displaced by the owner's conflict resolution (an archived copy was selected); archived already resolved",
-              archivedAt: now,
-              resolvedAt: now,
-              resolution: "superseded",
-              resolutionSelectedId: chosen.id,
-            }),
-            db.delete(schema.planExercises).where(eq(schema.planExercises.id, live.id)),
-          );
-        }
-        statements.push(
-          db.insert(schema.planExercises).values({
-            id: chosen.id,
-            routine: chosen.routine,
-            sortOrder: chosen.sortOrder,
-            exerciseKey: chosen.exerciseKey,
-            exerciseName: chosen.exerciseName,
-            sets: chosen.sets,
-            targetReps: chosen.targetReps,
-          }),
-          db
-            .update(schema.planExerciseConflicts)
-            .set({ resolvedAt: now, resolution: "selected", resolutionSelectedId: chosen.id })
-            .where(eq(schema.planExerciseConflicts.id, chosen.id)),
-        );
-        const others = archived.filter((row) => row.id !== chosen.id);
-        if (others.length > 0) {
+
+        // Every decision statement below is guarded on this claim
+        // marker still being present (for updates: on the target row
+        // itself carrying the marker; for inserts/deletes: on a
+        // marker row existing in the group). When the claim stamped
+        // zero rows, each decision statement therefore writes ZERO
+        // rows too — a lost race can never apply its decision to a
+        // state it did not bind, and never has to be "undone" off
+        // another decision's rows.
+        const claimExists = () =>
+          sql`EXISTS (SELECT 1 FROM plan_exercise_conflicts WHERE routine = ${args.routine} AND exercise_key = ${args.exercise_key} AND resolution_selected_id = ${marker})`;
+
+        if (args.selected_archive_id === null) {
+          if (!live) {
+            return { ok: false, forbidden: false, error: "当前显示的这一份已不在计划中，请从归档副本里选一份恢复" };
+          }
           statements.push(
             db
               .update(schema.planExerciseConflicts)
-              .set({ resolvedAt: now, resolution: "superseded", resolutionSelectedId: chosen.id })
+              .set({ resolvedAt: now, resolution: "superseded", resolutionSelectedId: live.id })
+              .where(eq(schema.planExerciseConflicts.resolutionSelectedId, marker)),
+          );
+        } else {
+          const chosen = unresolvedNow.find((row) => row.id === args.selected_archive_id);
+          if (!chosen) {
+            return { ok: false, forbidden: false, error: "所选的归档副本不存在或已经确认过" };
+          }
+          if (live) {
+            statements.push(
+              db.run(sql`
+                INSERT INTO plan_exercise_conflicts (id, routine, sort_order, exercise_key, exercise_name, sets, target_reps, archived_note, archived_at, resolved_at, resolution, resolution_selected_id)
+                SELECT ${live.id}, ${live.routine}, ${live.sortOrder}, ${live.exerciseKey}, ${live.exerciseName}, ${live.sets}, ${live.targetReps},
+                  ${"live plan row displaced by the owner's conflict resolution (an archived copy was selected); archived already resolved"},
+                  ${now.getTime()}, ${now.getTime()}, ${"superseded"}, ${chosen.id}
+                WHERE ${claimExists()}
+              `),
+              db
+                .delete(schema.planExercises)
+                .where(and(eq(schema.planExercises.id, live.id), claimExists())),
+            );
+          }
+          statements.push(
+            db.run(sql`
+              INSERT INTO plan_exercises (id, routine, sort_order, exercise_key, exercise_name, sets, target_reps)
+              SELECT ${chosen.id}, ${chosen.routine}, ${chosen.sortOrder}, ${chosen.exerciseKey}, ${chosen.exerciseName}, ${chosen.sets}, ${chosen.targetReps}
+              WHERE ${claimExists()}
+            `),
+            db
+              .update(schema.planExerciseConflicts)
+              .set({ resolvedAt: now, resolution: "selected", resolutionSelectedId: chosen.id })
               .where(
-                inArray(
-                  schema.planExerciseConflicts.id,
-                  others.map((row) => row.id),
+                and(
+                  eq(schema.planExerciseConflicts.id, chosen.id),
+                  eq(schema.planExerciseConflicts.resolutionSelectedId, marker),
                 ),
               ),
           );
+          const others = unresolvedNow.filter((row) => row.id !== chosen.id);
+          if (others.length > 0) {
+            statements.push(
+              db
+                .update(schema.planExerciseConflicts)
+                .set({ resolvedAt: now, resolution: "superseded", resolutionSelectedId: chosen.id })
+                .where(
+                  and(
+                    inArray(
+                      schema.planExerciseConflicts.id,
+                      others.map((row) => row.id),
+                    ),
+                    eq(schema.planExerciseConflicts.resolutionSelectedId, marker),
+                  ),
+                ),
+            );
+          }
         }
+        statements.push(
+          db
+            .insert(schema.planMeta)
+            .values({ key: PLAN_META_VERSION_KEY, value: "1" })
+            .onConflictDoUpdate({
+              target: schema.planMeta.key,
+              set: { value: sql`CAST(CAST(${schema.planMeta.value} AS INTEGER) + 1 AS TEXT)` },
+            })
+            .returning({ value: schema.planMeta.value }),
+        );
+        // Every branch above pushes the claim plus at least one
+        // decision statement before the version increment, so the
+        // batch is never empty — the tuple shape db.batch requires
+        // is guaranteed at runtime.
+        const batchItems = statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]];
+        let results: unknown[];
+        try {
+          results = await db.batch(batchItems);
+        } catch {
+          // The batch rolled back atomically: nothing of this
+          // decision was written. WHY it failed decides the answer:
+          // if a rival decision closed the group in the meantime,
+          // answer from that recorded decision (already_resolved
+          // for an identical repeat, the closed-group error for a
+          // different one); if the bound state otherwise moved, the
+          // confirmation is stale; only a failure against an
+          // untouched state is the plain retryable error.
+          const rowsAfter = await groupRows();
+          const liveAfter = (await liveRowFor())[0];
+          if (rowsAfter.length > 0 && rowsAfter.every((row) => row.resolvedAt !== null)) {
+            const verdict = closedGroupVerdict(rowsAfter, liveAfter);
+            if (verdict) return verdict;
+          }
+          const versionAfter = await readPlanVersion(ctx);
+          if (stampOf(versionAfter, liveAfter, rowsAfter) !== stampPre) {
+            return { ok: false, forbidden: false, error: staleError, outcome: "stale" };
+          }
+          return { ok: false, forbidden: false, error: "确认失败，冲突与原计划未改动，请重试" };
+        }
+        const claimRows = results[0] as unknown[];
+        const claimCount = Array.isArray(claimRows) ? claimRows.length : 0;
+        if (claimCount === 0) {
+          // The claim stamped nothing: the bound state had already
+          // moved (a save or a rival decision bumped the version
+          // token first). Every decision statement was guarded on
+          // the claim marker, so this batch's ONLY effect is its
+          // version increment — cancel exactly that +1 and loop:
+          // the re-read answers the typed verdict (stale /
+          // already_resolved / re-decide). Nothing else is touched;
+          // in particular a winning decision's rows are never reset
+          // by a loser.
+          await db.batch([
+            db
+              .update(schema.planMeta)
+              .set({ value: sql`CAST(CAST(${schema.planMeta.value} AS INTEGER) - 1 AS TEXT)` })
+              .where(eq(schema.planMeta.key, PLAN_META_VERSION_KEY)),
+          ]);
+          continue;
+        }
+        const versionRows = results[results.length - 1] as { value: string }[];
+        const newVersion = versionRows[0]?.value ?? null;
+        const postRows = await groupRows();
+        const postLiveRows = await liveRowFor();
+        const postLive = postLiveRows[0];
+        const committedStamp = stampOf(newVersion, postLive, postRows);
+        const claimLanded =
+          claimCount === unresolvedNow.length && committedStamp === stampExpected;
+        if (claimLanded) {
+          ctx.invalidateQueries();
+          return { ok: true, forbidden: false, error: null, outcome: "resolved" };
+        }
+        // The claim landed yet the committed state is not the state
+        // this decision derives — an invariant violation that must
+        // never be papered over by tearing at rows we no longer
+        // understand. Fail loudly instead.
+        throw new Error("计划冲突确认出现不一致状态，已停止以避免误改计划");
+        // Loop: re-read and either re-decide identically or answer
+        // the typed verdict (stale / already_resolved).
       }
-      statements.push(planVersionIncrement(db));
-      // Every branch above pushes at least one statement before the
-      // version increment, so the batch is never empty — the tuple
-      // shape db.batch requires is guaranteed at runtime.
-      const batchItems = statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]];
-      try {
-        await db.batch(batchItems);
-      } catch {
-        // The batch rolled back: the conflict stays open and the
-        // plan untouched. Retryable failure, mirroring updatePlan.
-        return { ok: false, forbidden: false, error: "确认失败，冲突与原计划未改动，请重试" };
-      }
-      ctx.invalidateQueries();
-      return { ok: true, forbidden: false, error: null };
+      return { ok: false, forbidden: false, error: staleError, outcome: "stale" };
     },
   }),
 

@@ -2604,15 +2604,27 @@ function PlanConflicts({ plan }: { plan: Plan }) {
   const conflicts = plan.conflicts ?? [];
   const [resolveError, setResolveError] = useState<string | null>(null);
   const resolve = useMutation({
-    mutationFn: (args: { routine: string; exercise_key: string; selected_archive_id: number | null }) =>
-      api.resolvePlanConflict(args),
+    mutationFn: (args: {
+      routine: string;
+      exercise_key: string;
+      selected_archive_id: number | null;
+      expected_candidate_ids: number[];
+      expected_plan_version: string | null;
+    }) => api.resolvePlanConflict(args),
     onSuccess: async (result) => {
       if (result.ok) {
+        // Includes the already_resolved idempotent receipt: the
+        // decision is recorded either way, so just refetch.
         setResolveError(null);
         await queryClient.invalidateQueries({ queryKey: ["plan"] });
         await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       } else {
         setResolveError(result.error ?? "确认失败，请重试");
+        if (result.outcome === "stale") {
+          // The displayed candidates are outdated: refetch so the
+          // owner re-decides on the candidates actually current.
+          await queryClient.invalidateQueries({ queryKey: ["plan"] });
+        }
       }
     },
     onError: () => setResolveError("确认失败，请再试一次"),
@@ -2654,6 +2666,13 @@ function PlanConflicts({ plan }: { plan: Plan }) {
                         routine: conflict.routine,
                         exercise_key: conflict.exercise_key,
                         selected_archive_id: candidate.archive_id,
+                        // W-PLAN-SAFE-001 P0 tail: bind the decision
+                        // to exactly the candidates + plan version
+                        // displayed here — if the plan changed in
+                        // another window, the server answers stale
+                        // and nothing unseen is confirmed.
+                        expected_candidate_ids: conflict.candidates.map((c) => c.id),
+                        expected_plan_version: conflict.plan_version,
                       })}
                     >
                       以这一份为准
@@ -2952,7 +2971,17 @@ function StartScreen({ recent, comparableHistory, receiptId, onCloseReceipt }: {
     mutationFn: (routine: Routine) => api.startWorkout({ routine, unit }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
   });
-  const planData = plan.data && !plan.data.forbidden ? plan.data : null;
+  // W-PLAN-SAFE-001 P0 tail: a getPlan read_error (bounded retries
+  // exhausted by another window's saves) carries NO plan body — the
+  // screen must keep the last good plan (and the editor's draft,
+  // which is keyed to it) and offer a retry, never blank the plan.
+  const freshPlan = plan.data && !plan.data.forbidden && !plan.data.read_error ? plan.data : null;
+  const [lastGoodPlan, setLastGoodPlan] = useState<Plan | null>(null);
+  useEffect(() => {
+    if (freshPlan) setLastGoodPlan(freshPlan);
+  }, [freshPlan]);
+  const planData = freshPlan ?? lastGoodPlan;
+  const planReadFailed = plan.isError || (plan.data != null && !plan.data.forbidden && plan.data.read_error != null);
 
   return (
     <main className="home-shell">
@@ -3000,6 +3029,13 @@ function StartScreen({ recent, comparableHistory, receiptId, onCloseReceipt }: {
       </section>
 
       {start.isError ? <p className="error-banner">没能开始训练，请再试一次。</p> : null}
+
+      {planReadFailed ? (
+        <p className="error-banner" role="alert">
+          {plan.data?.read_error ?? "计划读取失败"}——已保留当前显示的计划与编辑草稿，没有清空。
+          <button type="button" className="plan-read-retry" onClick={() => plan.refetch()}>重试读取</button>
+        </p>
+      ) : null}
 
       {planData ? <WeeklySchedule key={`schedule-${planData.daily_date}`} plan={planData} /> : null}
       {planData ? <DailyChecklist key={`daily-${planData.daily_date}`} plan={planData} /> : null}

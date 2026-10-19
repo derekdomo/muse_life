@@ -734,3 +734,10 @@
 - 改动文件（回灌本仓 weekly-finance）：`server/src/actions.ts`、`client/src/App.tsx`、`validate-cashflow.mjs`、`validate-investment-performance.mjs`、`validate-available-cash.mjs`、`validate-facts-card.mjs`。
 - 验证证据：构建方全套扩充全过、审计 pass；实现方以仓库副本（临时目录＋依赖链接）独立复跑一致——cashflow 90/90、investment-performance 106/106、available-cash 101/101、facts-card 147/147、monthly-facts 73/73、payload 50/50、holdings 66/66、color-vision 16/16；含旧滚动实现/旧 != null 谓词的 mutation 对照可区分。验证样例全为 synthetic，无真实财务值入仓。局限：所有者视角台账渲染以所有者本人打开为准（B 类口径）；F0.5 服务端逐源台账本体与 F0.7 真实同步仍未完成，不勾选。回滚：revert 本提交＋线上回退上一构建。
 - `F0.7` 最小只读观测（559c301 已批准）：本轮两组 P0 构建（本节财务＋下节 W-PLAN）占满，观测实现（既有刷新任务的执行/回调只读台账）顺延下一轮首位执行，批准不需重问；真实同步/对账仍未恢复、按 A 保旧事实不盲刷。
+
+## 2026-10-19（muse-life-plans-sync 09:13 轮次续：W-PLAN-SAFE-001 两项并发余项 P0 交付）
+
+- 沿 `W-PLAN-SAFE-001` / P0 / A（space-6，已上线并回灌）：按 PM 09:21 bug 单修两项并发余项。(1) getPlan 混版：版本括号校验改为有界一致性读——最多 5 轮「读版本→读三表→复读版本」全量重读，任一轮三表同版即成功返回该版并附 planVersion；五轮耗尽返回 typed 错误 `{ok:false, error:'plan_changed_during_read', retryable:true}`，绝不返回拼接混版、不作成功；每次尝试均经 ensureSeeded，合法保存恰递增一次令牌、失败保存不递增。(2) resolvePlanConflict 旧确认认领新计划：请求新增必填 expected_plan_version（缺失/非有限整数在任何 DB 访问前 typed 拒绝）；归档选择与实时选择两分支均改为单条条件 UPDATE 原子认领——冲突仍 open、plan_meta.version 仍等于用户所见版本、所选归档行仍存在三者同时成立才关闭并记录所选 id；认领落空不写任何数据、重读区分 version_changed/conflict_resolved/selection_missing，stale 确认零写入且新计划逐字不变；同版本重复提交返回 already_resolved 幂等回执。计划页新增过期计划处理：getPlan 失败保留已加载计划并显示「计划已在其他窗口更新」可重试提示与重试按钮；冲突保存捕获当前 planVersion 随请求发送，version_changed 显示「计划已更新，请重新查看冲突内容」并刷新候选、不自动重放旧选择；色弱口径：状态靠文字与符号、不只靠颜色；L0.1 例外未动。
+- 改动文件（回灌本仓 workout-log）：`server/src/actions.ts`、`client/src/App.tsx`、`client/src/theme.css`、`validate-plan-safe.mjs`（145→182 项）。
+- 验证证据与局限（如实分账）：构建审计 pass、内容评审由当前源码直接确认两项防御均已实现；但 validate-plan-safe.mjs 在构建方工作区与实现方仓库副本两处均因依赖解析失败未能执行（构建方：工作区无法解析自身依赖；实现方复跑：@hatch/space-sdk 子路径缺失），182 项断言（含 PM 两反例的真实 handler 复现矩阵）属已编写未执行，运行时行为证据未捕获——沿 EVID-LIFE-001 保留，下轮以可执行环境补跑，不冒称运行时已验证。回滚：revert 本提交＋线上回退上一构建；expected_plan_version 必填使旧客户端确认请求被 typed 拒绝（可接受的 fail-closed）。
+- 本轮顺延：F0.7 最小只读观测实现（已批准，下轮首位）、W6.2/H4.6 首个共用闭环（目标 10-20 不变）、CWEB-SPIKE-001 最终结论（10-21 18:00）。本轮用户可见增量：2 组 P0 修复（财务日期校验、训练计划并发）。未提交 app.db/.env/任何真实数据。
