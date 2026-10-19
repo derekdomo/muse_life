@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import * as schema from "./schema";
 
 const financeTypeSchema = z.enum([
@@ -385,6 +385,147 @@ const ingestResponse = z.object({
   savedMonths: z.number(),
   issue: z.string().nullable().default(null),
 });
+
+// F0.7 read-only refresh observability. The diagnosis is a PURE
+// function of the current refresh state summary plus the recorded
+// observation stream (newest first), so it can be unit-verified
+// offline and the client only ever renders its output. It answers
+// the one question the status band cannot: which stage of the
+// refresh chain last moved — task never spawned, spawn failed,
+// started but no callback arrived, a callback arrived and was
+// ignored by the generation / stale rules, or the refresh settled
+// (success / failure).
+export const refreshDiagnosisCodes = [
+  "no_attempt",
+  "awaiting_callback",
+  "callback_ignored",
+  "settled_success",
+  "settled_failure",
+  "spawn_failed",
+] as const;
+
+export type RefreshDiagnosisCode = (typeof refreshDiagnosisCodes)[number];
+
+export type RefreshObservationLike = {
+  event: string;
+  outcome: string;
+  detail: string | null;
+};
+
+const refreshDiagnosisText: Record<RefreshDiagnosisCode, string> = {
+  no_attempt: "尚无任何刷新尝试记录（下一次刷新开始记录）",
+  awaiting_callback: "刷新已启动，等待回调到达（任务可能仍在执行，或回调尚未投递）",
+  callback_ignored: "任务执行过、回调已到达，但被代次/陈旧规则忽略，未落盘保存",
+  settled_success: "最近一次刷新已成功落盘",
+  settled_failure: "最近一次刷新已以失败收尾",
+  spawn_failed: "任务未能启动（spawn 失败）",
+};
+
+export function deriveRefreshDiagnosis(input: {
+  status: "idle" | "running" | "error" | null | undefined;
+  observations: RefreshObservationLike[];
+}): { code: RefreshDiagnosisCode; text: string } {
+  const code = ((): RefreshDiagnosisCode => {
+    const obs = input.observations;
+    if (obs.length === 0) return "no_attempt";
+    const latest = obs[0];
+    if (!latest) return "no_attempt";
+    // An ignored callback is the freshest signal of the chain
+    // break this observability exists to surface — it outranks
+    // the settled/running status derivation.
+    if (latest.event === "callback_ignored") return "callback_ignored";
+    if (latest.event === "spawn_failed") return "spawn_failed";
+    // A callback was received (arrived) but its result event has
+    // not been recorded yet — still in flight.
+    if (latest.event === "callback_received") return "awaiting_callback";
+    if (latest.event === "callback_applied_success") return "settled_success";
+    if (latest.event === "callback_applied_failure") return "settled_failure";
+    // Started / attached / tail events: if the state still says
+    // running and no callback has arrived since this attempt
+    // started, the chain is waiting on delivery.
+    if (input.status === "running") return "awaiting_callback";
+    if (input.status === "error") return "settled_failure";
+    if (input.status === "idle") {
+      return obs.some((row) => row.event === "callback_applied_success")
+        ? "settled_success"
+        : "settled_failure";
+    }
+    return "no_attempt";
+  })();
+  return { code, text: refreshDiagnosisText[code] };
+}
+
+const refreshObservationsResponse = z.object({
+  access: z.enum(["owner", "guest_denied"]),
+  state: z.object({
+    status: z.enum(["idle", "running", "error"]),
+    startedAt: z.string().nullable(),
+    updatedAt: z.string().nullable(),
+    hasTaskId: z.boolean(),
+    hasGeneration: z.boolean(),
+  }).nullable(),
+  observations: z.array(z.object({
+    event: z.string(),
+    outcome: z.string(),
+    detail: z.string().nullable(),
+    createdAt: z.string(),
+  })),
+  diagnosis: z.object({
+    code: z.enum([
+      "no_attempt",
+      "awaiting_callback",
+      "callback_ignored",
+      "settled_success",
+      "settled_failure",
+      "spawn_failed",
+    ]),
+    text: z.string(),
+  }).nullable(),
+});
+
+// F0.7 observability write: appends one refresh-chain observation.
+// `detail` accepts ONLY a short code from a fixed allowlist (or a
+// `saved_months:N` count) — anything else is dropped to null, so
+// no financial value, payload fragment, account string or raw
+// error text can ever land in the table through this path. A
+// failed insert is swallowed: observability must never break the
+// refresh chain it observes.
+const observationDetailCodes = new Set([
+  "generation_gate",
+  "stale_decision",
+  "claim_lost",
+  "settle_superseded",
+  "spawn_error",
+  "spawn_tail",
+  "status_idle",
+  "status_error",
+  "status_running",
+  "normalization_issue",
+  "no_dashboard",
+]);
+
+async function recordObservation(
+  ctx: Ctx,
+  row: {
+    generation: string | null;
+    event: (typeof schema.refreshObservations.$inferInsert)["event"];
+    outcome: string;
+    detail?: string | null;
+  },
+): Promise<void> {
+  try {
+    const detail =
+      row.detail != null && (observationDetailCodes.has(row.detail) || /^saved_months:\d+$/.test(row.detail))
+        ? row.detail
+        : null;
+    await ctx.db<typeof schema>()
+      .insert(schema.refreshObservations)
+      .values({ generation: row.generation, event: row.event, outcome: row.outcome, detail });
+  } catch {
+    // Observability is read-only diagnostics; a write failure
+    // never interrupts the refresh flow.
+  }
+}
 
 const excludedLiveSources = new Set([
   "titan",
@@ -2507,12 +2648,19 @@ export const Actions = {
       if (!claimed) {
         return { ok: false, status: "error", message: "刷新任务未能启动" };
       }
+      // F0.7 observability: only a won claim records a start —
+      // already_running / lost-claim early returns leave no
+      // refresh_started row, so the stream names real attempts.
+      await recordObservation(ctx, { generation, event: "refresh_started", outcome: "claimed" });
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
         `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 先定位目标设备：用设备列表工具列出当前可访问的设备，按设备名找到用户的 Mac mini（设备名含 “Mac mini” 的那台），本次刷新只使用这个运行时解析出的设备 ID。若按设备名找不到 Mac mini，或有多台候选无法唯一确定，不要猜测、不要用任何预置或写死的 ID 兜底，立即以 success:false 回调 ingestFinanceData 并在 error 中明确说明未能按设备名定位 Mac mini。在定位到的 Mac mini 上，先在运行时解析当前登录用户的主目录（home directory），再据此构造 Firance 数据目录为 <home>/Library/Application Support/Firance/FinanceData/（即 ~/Library/Application Support/Firance/FinanceData/）；不得使用任何写死的用户名或绝对用户路径。若无法解析主目录，不要猜测路径，立即以 success:false 回调 ingestFinanceData 并在 error 中说明无法解析主目录。然后用文件列表工具列出该目录，再读取全部文件名符合 YYYY-MM-DD 或 YYYY-MM 的无扩展名文件，月份键必须原样返回文件名、不要自行补成某一天（服务端会把 YYYY-MM 归一为该月月末估值）。每条记录是一组 key/value 行，至少含 finance_source、type、number；现行 Firance 记录还可能带 cashflow_role、balance_date、status、period_start、period_end、verified 等扩展行，且每条记录的行数不固定，必须按 key 解析、不得假定恰好三行或固定顺序。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income、flexible_spend、cashflow_adjustment、investment_external_adjustment 且 number 为有限数字的记录；扩展行按原 key 映射返回：cashflow_role→cashflowRole（cash/credit/debt/non_cash）、balance_date→balanceDate、status→status、period_start→periodStart、period_end→periodEnd、verified→verified，其余未知扩展 key 原样放入该记录的 extra 对象（值按数字/布尔/字符串原样保留）。其中 investment_period_start、investment_period_end、investment_flow_verified 是 Firance 原生 key：必须以原 key 原样放入该记录的 extra，不得改名或映射为 period_start/period_end/verified，也不得与通用 periodStart/periodEnd/verified 合并或互相覆盖（两套字段并存时以各自原值返回）；status 的值必须原样返回，不得改写、翻译或归一化。原始文件只读，不得回写，不得为历史记录补造核实标记。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后逐条返回，不要预先截断为 Top 10（服务端会保留全量规范化集合）：每条返回 ticker/name/value（取 institution_value）/currency/institution，其中 currency 为该持仓的 iso_currency_code（确实无法确定时返回 null，不得默认填 USD）、institution 为持仓所在机构名称；institution_value 缺失时 value 返回 null，负值原样返回，不得丢弃、不得取绝对值；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number,可选 cashflowRole/balanceDate/status/periodStart/periodEnd/verified/extra}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value,currency,institution}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。回传 ingestFinanceData 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略，且不会改变刷新状态）。不要发送聊天消息。`,
         { expectsAction: "ingestFinanceData", dedupeKey: "weekly-firance-finance-refresh" },
       );
       if (!task.ok) {
+        // F0.7 observability: the spawn itself returned failure.
+        // The raw spawn error is never recorded — only the code.
+        await recordObservation(ctx, { generation, event: "spawn_failed", outcome: "spawn_returned_failure", detail: "spawn_error" });
         // Spawn-tail CAS: settle to error only if this generation
         // is still the running one; a late spawn failure must not
         // error a generation that already settled or a newer
@@ -2522,6 +2670,9 @@ export const Actions = {
           taskId: null,
           message: "本次更新失败，显示上次数据",
         });
+        if (!settled) {
+          await recordObservation(ctx, { generation, event: "spawn_tail_unattached", outcome: "spawn_failed_tail", detail: "spawn_tail" });
+        }
         ctx.invalidateQueries();
         if (settled) {
           return { ok: false, status: "error", message: "刷新任务未能启动" };
@@ -2547,7 +2698,28 @@ export const Actions = {
         message: "正在同步 Firance 与 Plaid",
       });
       if (attached) {
+        await recordObservation(ctx, { generation, event: "spawn_attached", outcome: "task_attached" });
         return { ok: true, status: "started", message: "更新已开始" };
+      }
+      // F0.7 observability: the spawn succeeded but its tail CAS
+      // missed — this generation no longer owns the state row
+      // (its callback settled first, or a newer generation did).
+      // The detail names only the status code now on the row,
+      // never the task id.
+      {
+        const tailState = await getState(ctx);
+        await recordObservation(ctx, {
+          generation,
+          event: "spawn_tail_unattached",
+          outcome: "spawn_ok_tail",
+          detail: tailState?.status === "idle"
+            ? "status_idle"
+            : tailState?.status === "error"
+              ? "status_error"
+              : tailState?.status === "running"
+                ? "status_running"
+                : null,
+        });
       }
       const nowState = await getState(ctx);
       ctx.invalidateQueries();
@@ -2622,6 +2794,17 @@ export const Actions = {
       //     never settled by an old winner.
       const db = ctx.db<typeof schema>();
       const incomingGeneration = args.generation ?? null;
+      // F0.7 observability: EVERY owner callback is recorded on
+      // arrival, BEFORE any gate/decision — this is what makes a
+      // delivered-but-ignored callback distinguishable from one
+      // that never arrived. The row carries only the success flag
+      // and whether a generation was echoed; never asOf, amounts,
+      // payload fragments or error text.
+      await recordObservation(ctx, {
+        generation: incomingGeneration,
+        event: "callback_received",
+        outcome: args.success ? "success_flag" : "failure_flag",
+      });
       const readIngestInputs = async () => {
         const state = await getState(ctx);
         let latestPayloadAsOf: string | null = null;
@@ -2651,9 +2834,25 @@ export const Actions = {
         });
       const ignoredResult = (): z.infer<typeof ingestResponse> =>
         ({ ok: args.success, savedMonths: 0, issue: null });
+      // F0.7 observability: exactly one result event per callback
+      // that passed arrival recording. `detail` names the branch
+      // that produced the outcome — a short code only.
+      const recordIgnored = async (detail: string) => {
+        await recordObservation(ctx, {
+          generation: incomingGeneration,
+          event: "callback_ignored",
+          outcome: args.success ? "success_flag" : "failure_flag",
+          detail,
+        });
+      };
 
       const firstRead = await readIngestInputs();
-      if (gateFor(firstRead.state) === "ignore" || decideFor(firstRead.state, firstRead.latestPayloadAsOf) === "ignore") {
+      if (gateFor(firstRead.state) === "ignore") {
+        await recordIgnored("generation_gate");
+        return ignoredResult();
+      }
+      if (decideFor(firstRead.state, firstRead.latestPayloadAsOf) === "ignore") {
+        await recordIgnored("stale_decision");
         return ignoredResult();
       }
       // The claim token this call would stamp if it wins
@@ -2693,16 +2892,25 @@ export const Actions = {
           // and decision; an already-claimed generation is a hard
           // stop, never a proceed-anyway.
           const secondRead = await readIngestInputs();
-          if (
-            gateFor(secondRead.state) === "ignore" ||
-            decideFor(secondRead.state, secondRead.latestPayloadAsOf) === "ignore"
-          ) {
+          if (gateFor(secondRead.state) === "ignore") {
+            await recordIgnored("generation_gate");
             return ignoredResult();
           }
-          if (!secondRead.state) return ignoredResult();
+          if (decideFor(secondRead.state, secondRead.latestPayloadAsOf) === "ignore") {
+            await recordIgnored("stale_decision");
+            return ignoredResult();
+          }
+          if (!secondRead.state) {
+            await recordIgnored("claim_lost");
+            return ignoredResult();
+          }
+          if (secondRead.state.claimedGeneration != null) await recordIgnored("claim_lost");
           if (secondRead.state.claimedGeneration != null) return ignoredResult();
           const wonRetry = await tryClaim(secondRead.state);
-          if (!wonRetry) return ignoredResult();
+          if (!wonRetry) {
+            await recordIgnored("claim_lost");
+            return ignoredResult();
+          }
         }
       }
       // Claim-bound settle: the ONLY way a claimed callback may
@@ -2751,7 +2959,16 @@ export const Actions = {
         // superseded (a new generation started), settleClaimed
         // matches zero rows and the new generation's running state
         // is left exactly as it is.
-        await settleClaimed({ status: "error", message: "本次更新失败，显示上次数据" });
+        const settled = await settleClaimed({ status: "error", message: "本次更新失败，显示上次数据" });
+        if (settled) {
+          await recordObservation(ctx, {
+            generation: incomingGeneration,
+            event: "callback_applied_failure",
+            outcome: "failure_flag",
+          });
+        } else {
+          await recordIgnored("settle_superseded");
+        }
         ctx.invalidateQueries();
         return { ok: false, savedMonths: 0, issue: null };
       }
@@ -2761,10 +2978,22 @@ export const Actions = {
       // problem category, never the submitted values.
       const normalization = normalizeRawMonths(args.months);
       if (!normalization.ok) {
-        await settleClaimed({
+        const settled = await settleClaimed({
           status: "error",
           message: `本次更新未保存：${normalization.issue}。已保留上次成功数据，修正后可重新更新。`,
         });
+        if (settled) {
+          // The issue text itself is never recorded — only the
+          // category code.
+          await recordObservation(ctx, {
+            generation: incomingGeneration,
+            event: "callback_applied_failure",
+            outcome: "success_flag",
+            detail: "normalization_issue",
+          });
+        } else {
+          await recordIgnored("settle_superseded");
+        }
         ctx.invalidateQueries();
         return { ok: false, savedMonths: 0, issue: normalization.issue };
       }
@@ -2778,7 +3007,17 @@ export const Actions = {
         firstRead.previousLiveNetWorth,
       );
       if (!dashboard) {
-        await settleClaimed({ status: "error", message: "本次更新没有可用的月度数据，显示上次数据" });
+        const settled = await settleClaimed({ status: "error", message: "本次更新没有可用的月度数据，显示上次数据" });
+        if (settled) {
+          await recordObservation(ctx, {
+            generation: incomingGeneration,
+            event: "callback_applied_failure",
+            outcome: "success_flag",
+            detail: "no_dashboard",
+          });
+        } else {
+          await recordIgnored("settle_superseded");
+        }
         ctx.invalidateQueries();
         return { ok: false, savedMonths: 0, issue: null };
       }
@@ -2794,9 +3033,67 @@ export const Actions = {
         // so nothing was written — the stored payload keeps the
         // newer generation's data and this callback reports an
         // honest savedMonths=0.
+        await recordIgnored("settle_superseded");
         return { ok: true, savedMonths: 0, issue: null };
       }
+      await recordObservation(ctx, {
+        generation: incomingGeneration,
+        event: "callback_applied_success",
+        outcome: "success_flag",
+        detail: `saved_months:${dashboard.months.length}`,
+      });
       return { ok: true, savedMonths: dashboard.months.length, issue: null };
+    },
+  }),
+
+  // F0.7 read-only observability query. Strictly owner-only, like
+  // every other finance read: a non-owner gets guest_denied and
+  // zero data (no state summary, no observations, no diagnosis).
+  // The state summary reports only the EXISTENCE of taskId /
+  // generation — never their values. The diagnosis is derived by
+  // the exported pure function from the state + observation
+  // stream, so the UI renders facts, not guesses.
+  getRefreshObservations: defineAction({
+    request: z.object({}),
+    response: refreshObservationsResponse,
+    async handler(ctx): Promise<z.infer<typeof refreshObservationsResponse>> {
+      if (!isOwner(ctx)) {
+        return { access: "guest_denied", state: null, observations: [], diagnosis: null };
+      }
+      const db = ctx.db<typeof schema>();
+      const state = await getState(ctx);
+      const rows = await db
+        .select({
+          event: schema.refreshObservations.event,
+          outcome: schema.refreshObservations.outcome,
+          detail: schema.refreshObservations.detail,
+          createdAt: schema.refreshObservations.createdAt,
+        })
+        .from(schema.refreshObservations)
+        .orderBy(desc(schema.refreshObservations.id))
+        .limit(20);
+      const observations = rows.map((row) => ({
+        event: row.event,
+        outcome: row.outcome,
+        detail: row.detail,
+        createdAt: row.createdAt.toISOString(),
+      }));
+      const diagnosis = deriveRefreshDiagnosis({
+        status: state?.status ?? null,
+        observations,
+      });
+      return {
+        access: "owner",
+        state: {
+          status: state?.status ?? "idle",
+          startedAt: state?.startedAt?.toISOString() ?? null,
+          updatedAt: state?.updatedAt?.toISOString() ?? null,
+          hasTaskId: state?.taskId != null,
+          hasGeneration: state?.generation != null,
+        },
+        observations,
+        diagnosis,
+      };
     },
   }),
 } satisfies ActionsModule;

@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
@@ -887,6 +887,215 @@ const saveSnapshotResponse = z.object({ ok: z.boolean(), forbidden: z.boolean(),
 const refreshResponse = z.object({ forbidden: z.boolean(), accepted: z.boolean(), taskId: z.string().nullable(), strengthTaskId: z.string().nullable(), message: z.string() });
 const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(["queued", "running", "completed", "failed", "not_found", "unknown"]), contractSatisfied: z.boolean() });
 
+// ---------------------------------------------------------------------------
+// LIFE-C1 人生游戏 (CWEB-MVP-001·S1): XP settlement over the health summary.
+//
+// The game layer reads ONLY the already-loaded health/strength snapshots
+// (the same data getDashboard returns) and writes ONLY the game tables.
+// It stores settlement metadata — category, LA local date, XP, rule
+// version, source date + source updatedAt reference — never health raw
+// values. Settlement is idempotent: (local_date, category) is the ledger
+// primary key and inserts are ON CONFLICT DO NOTHING, so re-opening the
+// page never re-awards a day. A day settles only once it is inside the
+// complete window (on or before the health snapshot's dataDate; the
+// wake-day sleep additionally requires the snapshot's coverage to be
+// complete). Anything newer is returned as a preview — visible, but not
+// booked. Missing source data yields no XP and an explicit gap entry.
+// Rule version is audit metadata only: a settled row is never recomputed
+// or revoked when rules change later.
+// ---------------------------------------------------------------------------
+const GAME_RULE_VERSION = 1;
+const GAME_XP_PER_LEVEL = 100;
+const GAME_QUEST_TARGET_STEPS = 8000;
+const GAME_QUEST_REWARD_XP = 10;
+const GAME_STRENGTH_SESSION_XP = 10;
+
+const gameCategorySchema = z.enum(["steps", "sleep", "strength", "quest_steps"]);
+type GameCategory = z.infer<typeof gameCategorySchema>;
+
+const gameSettlementEntrySchema = z.object({
+  localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  category: gameCategorySchema,
+  xp: z.number().int().nonnegative(),
+  ruleVersion: z.number().int().positive(),
+  sourceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  sourceUpdatedAt: z.string().nullable(),
+  settledAt: z.string().datetime(),
+});
+
+const gamePreviewEntrySchema = z.object({
+  localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  category: gameCategorySchema,
+  xp: z.number().int().nonnegative().nullable(),
+  state: z.enum(["preview", "missing"]),
+  note: z.string().min(1),
+});
+type GamePreviewEntry = z.infer<typeof gamePreviewEntrySchema>;
+
+const gameQuestSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  targetSteps: z.number().int().positive(),
+  steps: z.number().int().nonnegative().nullable(),
+  rewardXp: z.number().int().positive(),
+  state: z.enum(["in_progress", "achieved", "settled", "missing"]),
+});
+
+const getGameStateResponse = z.object({
+  forbidden: z.boolean(),
+  ok: z.boolean(),
+  healthState: z.enum(["ok", "missing", "corrupt"]),
+  ruleVersion: z.number().int().positive(),
+  totalXp: z.number().int().nonnegative(),
+  level: z.number().int().positive(),
+  xpIntoLevel: z.number().int().nonnegative(),
+  xpPerLevel: z.number().int().positive(),
+  xpToNextLevel: z.number().int().nonnegative(),
+  settledThroughDate: z.string().nullable(),
+  quest: gameQuestSchema,
+  settlements: z.array(gameSettlementEntrySchema).max(60),
+  previews: z.array(gamePreviewEntrySchema).max(60),
+});
+
+interface GameCandidate {
+  localDate: string;
+  category: GameCategory;
+  xp: number;
+  sourceDate: string;
+  sourceUpdatedAt: string | null;
+}
+
+// XP rules v1 (rule_version = 1, shown verbatim on the 角色 page):
+// steps — 1 XP per full 1000 steps, capped at 20 per day; sleep — main
+// sleep of 7h or more earns 10 XP, shorter nights earn proportionally
+// (floor); strength — 10 XP per completed session; the daily quest
+// (8000 steps) earns a flat 10 XP once the day completes.
+function stepsXpFor(steps: number): number {
+  return Math.min(20, Math.floor(steps / 1000));
+}
+
+function sleepXpFor(hours: number): number {
+  if (hours >= 7) return 10;
+  return Math.floor((hours / 7) * 10);
+}
+
+// Build the settlement plan from the loaded snapshots: candidates are
+// days inside the complete window (ready to book); previews are days the
+// sources can already see but that are not complete yet, plus explicit
+// gaps where a complete day has no source data (no XP, stated honestly).
+function buildGamePlan(health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): { candidates: GameCandidate[]; previews: GamePreviewEntry[] } {
+  const candidates: GameCandidate[] = [];
+  const previews: GamePreviewEntry[] = [];
+  if (health) {
+    const dataDate = health.dataDate;
+    const readinessDate = health.morningReference?.date ?? shiftDate(dataDate, 1);
+    const sleepDates = new Set(health.historySleeps.map((row) => row.date));
+    for (const row of health.historyDaily) {
+      if (row.date <= dataDate) {
+        if (row.steps === null) {
+          previews.push({ localDate: row.date, category: "steps", xp: null, state: "missing", note: "当日步数缺失，未发放经验" });
+        } else {
+          candidates.push({ localDate: row.date, category: "steps", xp: stepsXpFor(row.steps), sourceDate: row.date, sourceUpdatedAt: health.updatedAt });
+          if (row.steps >= GAME_QUEST_TARGET_STEPS) {
+            candidates.push({ localDate: row.date, category: "quest_steps", xp: GAME_QUEST_REWARD_XP, sourceDate: row.date, sourceUpdatedAt: health.updatedAt });
+          }
+        }
+        // A completed day inside the recent week with no main-sleep row
+        // is a stated gap, not a silent zero.
+        if (row.date > shiftDate(dataDate, -7) && !sleepDates.has(row.date)) {
+          previews.push({ localDate: row.date, category: "sleep", xp: null, state: "missing", note: "当日无主睡眠记录，未发放经验" });
+        }
+      } else if (row.date === todayLA && row.steps !== null) {
+        previews.push({ localDate: row.date, category: "steps", xp: stepsXpFor(row.steps), state: "preview", note: "今日数据尚未完整，暂为预览，完整后自动结算" });
+        if (row.steps >= GAME_QUEST_TARGET_STEPS) {
+          previews.push({ localDate: row.date, category: "quest_steps", xp: GAME_QUEST_REWARD_XP, state: "preview", note: "今日已达标，奖励将在该日数据完整后入账" });
+        }
+      }
+    }
+    for (const row of health.historySleeps) {
+      // Main sleep belongs to its wake-up date; future or not-yet-due
+      // rows never settle.
+      if (row.date > readinessDate || row.date > todayLA) continue;
+      const xp = sleepXpFor(totalSleepHours(row, row.totalHours));
+      if (row.date <= dataDate || !health.coverageIncomplete) {
+        candidates.push({ localDate: row.date, category: "sleep", xp, sourceDate: row.date, sourceUpdatedAt: health.updatedAt });
+      } else {
+        previews.push({ localDate: row.date, category: "sleep", xp, state: "preview", note: "今晨睡眠可能还在同步，暂为预览，同步完整后结算" });
+      }
+    }
+  }
+  if (strength) {
+    const sessionsByDate = new Map<string, number>();
+    for (const workout of strength.workouts) {
+      if (workout.status !== "completed") continue;
+      sessionsByDate.set(workout.date, (sessionsByDate.get(workout.date) ?? 0) + 1);
+    }
+    for (const [date, count] of sessionsByDate) {
+      const xp = GAME_STRENGTH_SESSION_XP * count;
+      if (health && date <= health.dataDate) {
+        candidates.push({ localDate: date, category: "strength", xp, sourceDate: date, sourceUpdatedAt: strength.updatedAt });
+      } else {
+        previews.push({ localDate: date, category: "strength", xp, state: "preview", note: health ? "训练日期超出健康完整窗口，暂为预览" : "健康数据尚未同步，暂为预览，同步后结算" });
+      }
+    }
+  }
+  previews.sort((a, b) => b.localDate.localeCompare(a.localDate) || a.category.localeCompare(b.category));
+  return { candidates, previews: previews.slice(0, 60) };
+}
+
+// Book every not-yet-settled candidate and read back the totals. The
+// ledger table is the source of truth for total XP (summed, never
+// incremented by hand); game_state is a one-row summary kept in sync for
+// future game features. All writes are idempotent: re-running with the
+// same candidates changes nothing.
+async function settleGame(ctx: Ctx, candidates: GameCandidate[]): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[] }> {
+  const db = ctx.db<typeof schema>();
+  const unique = [...new Map(candidates.map((candidate) => [`${candidate.localDate}|${candidate.category}`, candidate])).values()];
+  if (unique.length) {
+    const dates = [...new Set(unique.map((candidate) => candidate.localDate))];
+    const existing = await db.select({ localDate: schema.gameSettlements.localDate, category: schema.gameSettlements.category })
+      .from(schema.gameSettlements).where(inArray(schema.gameSettlements.localDate, dates));
+    const existingKeys = new Set(existing.map((row) => `${row.localDate}|${row.category}`));
+    const now = new Date();
+    for (const candidate of unique) {
+      if (existingKeys.has(`${candidate.localDate}|${candidate.category}`)) continue;
+      await db.insert(schema.gameSettlements).values({
+        localDate: candidate.localDate,
+        category: candidate.category,
+        xp: candidate.xp,
+        ruleVersion: GAME_RULE_VERSION,
+        sourceDate: candidate.sourceDate,
+        sourceUpdatedAt: candidate.sourceUpdatedAt,
+        createdAt: now,
+      }).onConflictDoNothing();
+    }
+  }
+  const totals = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)`, through: sql`MAX(${schema.gameSettlements.localDate})` }).from(schema.gameSettlements);
+  const totalRow = totals[0];
+  const totalXp = Number(totalRow?.total ?? 0);
+  const settledThroughDate = typeof totalRow?.through === "string" ? totalRow.through : null;
+  const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
+  const stored = stateRows[0];
+  if (!stored || stored.totalXp !== totalXp || stored.settledThroughDate !== settledThroughDate) {
+    const now = new Date();
+    await db.insert(schema.gameState).values({ id: 1, totalXp, settledThroughDate, createdAt: now, updatedAt: now })
+      .onConflictDoUpdate({ target: schema.gameState.id, set: { totalXp, settledThroughDate, updatedAt: now } });
+  }
+  const ledgerRows = await db.select().from(schema.gameSettlements).orderBy(desc(schema.gameSettlements.localDate), asc(schema.gameSettlements.category)).limit(60);
+  return {
+    totalXp,
+    settledThroughDate,
+    ledger: ledgerRows.map((row) => ({
+      localDate: row.localDate,
+      category: row.category,
+      xp: row.xp,
+      ruleVersion: row.ruleVersion,
+      sourceDate: row.sourceDate,
+      sourceUpdatedAt: row.sourceUpdatedAt,
+      settledAt: row.createdAt.toISOString(),
+    })),
+  };
+}
+
 // The strength source (训练记录, space-6) is local data in a sibling artifact:
 // it changes the moment the user finishes a set there, so it must not ride
 // along with the once-a-day HealthKit refresh or sit behind a fixed
@@ -1252,6 +1461,66 @@ export const Actions = {
       await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, checkinRevision, laTodayString());
       const readinessHistory = await loadReadinessTrendPoints(ctx, readinessDate);
       return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
+    },
+  }),
+
+  // LIFE-C1 人生游戏 (CWEB-MVP-001·S1): settles XP from the health summary
+  // on open and returns the character state. STRICT owner gate — the game
+  // reads health-derived data, so it never rides the L0.1 sync-channel
+  // exception. Fully failure-isolated: any error in the game layer is
+  // caught here and returned as ok:false, so it can never break
+  // getDashboard or the health views.
+  getGameState: defineAction({
+    request: z.object({}), response: getGameStateResponse,
+    async handler(ctx): Promise<z.infer<typeof getGameStateResponse>> {
+      const todayLA = laTodayString();
+      const emptyQuest: z.infer<typeof gameQuestSchema> = { date: todayLA, targetSteps: GAME_QUEST_TARGET_STEPS, steps: null, rewardXp: GAME_QUEST_REWARD_XP, state: "missing" };
+      const empty = { ruleVersion: GAME_RULE_VERSION, totalXp: 0, level: 1, xpIntoLevel: 0, xpPerLevel: GAME_XP_PER_LEVEL, xpToNextLevel: GAME_XP_PER_LEVEL, settledThroughDate: null, quest: emptyQuest, settlements: [], previews: [] };
+      if (!isOwner(ctx)) return { forbidden: true, ok: false, healthState: "missing", ...empty };
+      try {
+        const healthLoad = await loadHealthSnapshot(ctx);
+        const strengthLoad = await loadStrengthSnapshot(ctx);
+        const strength = effectiveStrength(healthLoad, strengthLoad);
+        const health = healthLoad.state === "ok" ? healthLoad.snapshot : null;
+        const plan = buildGamePlan(health, strength, todayLA);
+        const settled = await settleGame(ctx, plan.candidates);
+        const db = ctx.db<typeof schema>();
+        // A preview whose (date, category) is already booked — possible
+        // when a later snapshot's complete window moved backwards — is
+        // dropped instead of double-showing as both settled and pending.
+        let previews = plan.previews;
+        if (previews.length) {
+          const previewDates = [...new Set(previews.map((preview) => preview.localDate))];
+          const booked = await db.select({ localDate: schema.gameSettlements.localDate, category: schema.gameSettlements.category })
+            .from(schema.gameSettlements).where(inArray(schema.gameSettlements.localDate, previewDates));
+          const bookedKeys = new Set(booked.map((row) => `${row.localDate}|${row.category}`));
+          previews = previews.filter((preview) => !bookedKeys.has(`${preview.localDate}|${preview.category}`));
+        }
+        const todaySteps = health?.historyDaily.find((row) => row.date === todayLA)?.steps ?? null;
+        const todayBooked = await db.select({ category: schema.gameSettlements.category }).from(schema.gameSettlements).where(eq(schema.gameSettlements.localDate, todayLA));
+        const questState: z.infer<typeof gameQuestSchema>["state"] = todayBooked.some((row) => row.category === "quest_steps")
+          ? "settled"
+          : todaySteps === null ? "missing" : todaySteps >= GAME_QUEST_TARGET_STEPS ? "achieved" : "in_progress";
+        const level = Math.floor(settled.totalXp / GAME_XP_PER_LEVEL) + 1;
+        const xpIntoLevel = settled.totalXp % GAME_XP_PER_LEVEL;
+        return {
+          forbidden: false,
+          ok: true,
+          healthState: healthLoad.state,
+          ruleVersion: GAME_RULE_VERSION,
+          totalXp: settled.totalXp,
+          level,
+          xpIntoLevel,
+          xpPerLevel: GAME_XP_PER_LEVEL,
+          xpToNextLevel: GAME_XP_PER_LEVEL - xpIntoLevel,
+          settledThroughDate: settled.settledThroughDate,
+          quest: { date: todayLA, targetSteps: GAME_QUEST_TARGET_STEPS, steps: todaySteps, rewardXp: GAME_QUEST_REWARD_XP, state: questState },
+          settlements: settled.ledger,
+          previews,
+        };
+      } catch {
+        return { forbidden: false, ok: false, healthState: "missing", ...empty };
+      }
     },
   }),
 

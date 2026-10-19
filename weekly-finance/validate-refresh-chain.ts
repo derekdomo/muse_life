@@ -514,5 +514,110 @@ async function waitFor(label: string, cond: () => boolean, ms = 5000) {
   }
 }
 
+// =====================================================================
+// Group 12: F0.7 read-only observability (refresh_observations)
+// =====================================================================
+function obsRows(sqlite: Database): any[] {
+  return sqlite.query("SELECT * FROM refresh_observations ORDER BY id ASC").all();
+}
+function obsEvents(sqlite: Database): string[] {
+  return obsRows(sqlite).map((r: any) => r.event);
+}
+{
+  // (a) spawn success path records refresh_started + spawn_attached,
+  // and the owner query reports awaiting_callback while running.
+  const { sqlite, db } = freshDb();
+  const started = await Actions.refreshFinanceData.handler(ownerCtx(db), {});
+  check("obs: refresh starts", started.ok && started.status === "started");
+  check("obs: spawn success path records refresh_started then spawn_attached",
+    JSON.stringify(obsEvents(sqlite)) === JSON.stringify(["refresh_started", "spawn_attached"]));
+  const genA: string = stateRow(sqlite).generation;
+  const viewA = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs: owner reads the observation view while running",
+    viewA.access === "owner" && viewA.observations.length === 2
+    && viewA.state?.status === "running" && viewA.state?.hasTaskId === true && viewA.state?.hasGeneration === true);
+  check("obs: running with no callback yet diagnoses awaiting_callback",
+    viewA.diagnosis?.code === "awaiting_callback");
+  check("obs: the view never leaks the full generation or task id values",
+    !JSON.stringify(viewA).includes(genA) && !JSON.stringify(viewA).includes("task-harness"));
+
+  // (b) wrong-generation callback: state untouched, and the stream
+  // records callback_received + callback_ignored(generation_gate).
+  const beforeB = { ...stateRow(sqlite) };
+  const wrongGen = await Actions.ingestFinanceData.handler(ownerCtx(db), successPayload("gen-WRONG", freshAsOf()));
+  check("obs: wrong-generation callback saves nothing", wrongGen.savedMonths === 0 && payloadAsOf(sqlite) === null);
+  const afterB = stateRow(sqlite);
+  check("obs: wrong-generation callback leaves state untouched",
+    afterB.status === "running" && afterB.generation === genA && afterB.updated_at === beforeB.updated_at);
+  const rowsB = obsRows(sqlite).slice(-2);
+  check("obs: ignored callback is recorded (received + ignored/generation_gate)",
+    rowsB[0]?.event === "callback_received" && rowsB[0]?.outcome === "success_flag"
+    && rowsB[1]?.event === "callback_ignored" && rowsB[1]?.detail === "generation_gate");
+  const viewB = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs: an arrived-but-ignored callback diagnoses callback_ignored",
+    viewB.diagnosis?.code === "callback_ignored");
+
+  // (c) a legal success callback records applied_success with the
+  // saved-month count, and the diagnosis settles to success.
+  const asOfC = freshAsOf();
+  const okC = await Actions.ingestFinanceData.handler(ownerCtx(db), successPayload(genA, asOfC));
+  check("obs: legal success callback saves", okC.savedMonths === 2 && stateRow(sqlite).status === "idle");
+  const rowsC = obsRows(sqlite).slice(-2);
+  check("obs: applied success recorded with the saved-month count",
+    rowsC[0]?.event === "callback_received"
+    && rowsC[1]?.event === "callback_applied_success" && rowsC[1]?.detail === "saved_months:2");
+  const viewC = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs: settled success diagnoses settled_success", viewC.diagnosis?.code === "settled_success");
+
+  // (d) a legal failure callback records applied_failure and the
+  // diagnosis settles to failure.
+  await Actions.refreshFinanceData.handler(ownerCtx(db), {});
+  const genD: string = stateRow(sqlite).generation;
+  const failD = await Actions.ingestFinanceData.handler(ownerCtx(db), { success: false, error: "boom", generation: genD });
+  check("obs: legal failure callback settles error", failD.ok === false && stateRow(sqlite).status === "error");
+  const rowsD = obsRows(sqlite).slice(-2);
+  check("obs: applied failure recorded (received + applied_failure)",
+    rowsD[0]?.event === "callback_received" && rowsD[0]?.outcome === "failure_flag"
+    && rowsD[1]?.event === "callback_applied_failure");
+  const viewD = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs: settled failure diagnoses settled_failure", viewD.diagnosis?.code === "settled_failure");
+
+  // (e) spawn failure records spawn_failed and diagnoses spawn_failed.
+  const { sqlite: sqliteE, db: dbE } = freshDb();
+  const failSpawn = async () => ({ ok: false });
+  const resE = await Actions.refreshFinanceData.handler(ownerCtx(dbE, { spawnTask: failSpawn }), {});
+  check("obs: spawn failure still returns the honest error", resE.ok === false && resE.status === "error");
+  check("obs: spawn failure path records refresh_started then spawn_failed",
+    JSON.stringify(obsEvents(sqliteE)) === JSON.stringify(["refresh_started", "spawn_failed"]));
+  const viewE = await Actions.getRefreshObservations.handler(ownerCtx(dbE), {});
+  check("obs: spawn failure diagnoses spawn_failed", viewE.diagnosis?.code === "spawn_failed");
+
+  // (f) identity: the observation query is strictly owner-only.
+  const guestView = await Actions.getRefreshObservations.handler(guestCtx(db), {});
+  const anonView = await Actions.getRefreshObservations.handler(anonCtx(db), {});
+  check("obs: guest/anonymous get guest_denied with zero data",
+    guestView.access === "guest_denied" && guestView.state === null && guestView.observations.length === 0 && guestView.diagnosis === null
+    && anonView.access === "guest_denied" && anonView.state === null && anonView.observations.length === 0);
+
+  // (g) a fresh artifact has no observations: the honest empty
+  // state (no_attempt), not fabricated history.
+  const { db: dbG } = freshDb();
+  const viewG = await Actions.getRefreshObservations.handler(ownerCtx(dbG), {});
+  check("obs: no records yet -> empty stream + no_attempt diagnosis",
+    viewG.access === "owner" && viewG.observations.length === 0 && viewG.diagnosis?.code === "no_attempt");
+
+  // (h) detail hygiene across every recorded row in every stream
+  // above: only short codes / counts — no amounts, payload
+  // fragments, account strings or raw error text.
+  const detailPattern = /^(generation_gate|stale_decision|claim_lost|settle_superseded|spawn_error|spawn_tail|status_idle|status_error|status_running|normalization_issue|no_dashboard|saved_months:\d+)$/;
+  const allRows = [...obsRows(sqlite), ...obsRows(sqliteE)];
+  check("obs: every recorded detail is a short code or a saved-month count",
+    allRows.every((r: any) => r.detail == null || detailPattern.test(r.detail)));
+  const streamText = JSON.stringify(allRows);
+  check("obs: no financial values / payload fragments / raw errors in the stream",
+    !streamText.includes("100000") && !streamText.includes("115000") && !streamText.includes("broker_1234")
+    && !streamText.includes("boom") && !streamText.includes("asOf") && !streamText.includes("payload"));
+}
+
 console.log(`validate-refresh-chain: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

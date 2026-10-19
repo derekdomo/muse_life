@@ -1569,6 +1569,130 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
   );
 }
 
+// F0.7 observability: text labels for the refresh-chain
+// observation stream. Meaning rides on words and symbols, never
+// on color alone (the user is color-weak): each event and each
+// ignore-reason code has a plain Chinese reading, and the
+// diagnosis carries a symbol next to its sentence.
+export function observationEventText(event: string): string {
+  switch (event) {
+    case "refresh_started": return "刷新已启动（代次已领取）";
+    case "spawn_attached": return "任务已启动并附着";
+    case "spawn_failed": return "任务启动失败";
+    case "spawn_tail_unattached": return "任务尾部未能附着（状态已归他人）";
+    case "callback_received": return "收到回调";
+    case "callback_applied_success": return "回调已落盘（成功）";
+    case "callback_applied_failure": return "回调已落盘（失败收尾）";
+    case "callback_ignored": return "回调被忽略（未落盘）";
+    default: return event;
+  }
+}
+
+export function observationOutcomeText(outcome: string): string {
+  switch (outcome) {
+    case "success_flag": return "回调报成功";
+    case "failure_flag": return "回调报失败";
+    case "claimed": return "领取成功";
+    case "task_attached": return "已附着任务";
+    case "spawn_returned_failure": return "spawn 返回失败";
+    case "spawn_ok_tail": return "spawn 成功但尾部未命中";
+    case "spawn_failed_tail": return "spawn 失败且尾部未命中";
+    default: return outcome;
+  }
+}
+
+export function observationDetailText(detail: string | null): string | null {
+  if (detail == null) return null;
+  if (detail.startsWith("saved_months:")) {
+    return `保存 ${detail.slice("saved_months:".length)} 个月`;
+  }
+  switch (detail) {
+    case "generation_gate": return "代次不符（旧代/外来回调）";
+    case "stale_decision": return "数据不新于已存快照或属于上一代";
+    case "claim_lost": return "领取仲裁未胜出";
+    case "settle_superseded": return "落盘时已被新一代取代";
+    case "spawn_error": return "spawn 出错";
+    case "spawn_tail": return "尾部写入未命中";
+    case "status_idle": return "当时状态：已完成";
+    case "status_error": return "当时状态：失败";
+    case "status_running": return "当时状态：进行中（新一代）";
+    case "normalization_issue": return "快照数据校验未通过";
+    case "no_dashboard": return "无可用月度数据";
+    default: return detail;
+  }
+}
+
+export function refreshDiagnosisSymbol(code: string): string {
+  switch (code) {
+    case "settled_success": return "✓";
+    case "settled_failure": return "▲";
+    case "spawn_failed": return "▲";
+    case "callback_ignored": return "●";
+    case "awaiting_callback": return "↻";
+    default: return "○";
+  }
+}
+
+// F0.7 observability panel: an expandable, read-only view of the
+// refresh chain's recorded events, rendered inside the status
+// band. It distinguishes the three failures the band alone cannot
+// tell apart — task never ran, callback never arrived, callback
+// arrived but was ignored. With no recorded rows it says so
+// plainly; it never fabricates history.
+function RefreshObservationsPanel() {
+  const observations = useQuery({
+    queryKey: ["finance-refresh-observations"],
+    queryFn: () => api.getRefreshObservations({}),
+    refetchInterval: (query) => query.state.data?.state?.status === "running" ? 3000 : false,
+  });
+  const result = observations.data;
+  const formatInstant = (value: string): string => {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "未提供" : timestampLabel.format(date);
+  };
+  return (
+    <details className="refresh-band__ledger">
+      <summary aria-label="刷新观测（刷新链各阶段的只读记录）">刷新观测</summary>
+      {observations.isPending ? (
+        <p className="refresh-band__note">正在读取观测记录…</p>
+      ) : observations.isError || !result || result.access !== "owner" ? (
+        <p className="refresh-band__note">观测记录暂时无法读取。</p>
+      ) : result.observations.length === 0 ? (
+        <p className="refresh-band__note">暂无观测记录（下一次刷新开始记录）</p>
+      ) : (
+        <>
+          {result.diagnosis ? (
+            <p className="refresh-band__note">
+              <span aria-hidden="true">{refreshDiagnosisSymbol(result.diagnosis.code)}</span>
+              {" "}链路诊断：{result.diagnosis.text}
+            </p>
+          ) : null}
+          {result.state ? (
+            <p className="refresh-band__note">
+              当前状态：{result.state.status === "running" ? "进行中" : result.state.status === "error" ? "失败" : "空闲"}
+              {" · "}任务标识：{result.state.hasTaskId ? "有" : "无"}
+              {" · "}代次标识：{result.state.hasGeneration ? "有" : "无"}
+            </p>
+          ) : null}
+          <div className="refresh-band__ledger-rows">
+            {result.observations.map((row, index) => {
+              const detailText = observationDetailText(row.detail);
+              return (
+                <p key={`${row.createdAt}-${index}`}>
+                  <strong>{formatInstant(row.createdAt)}</strong>
+                  {" · "}{observationEventText(row.event)}
+                  {" · "}{observationOutcomeText(row.outcome)}
+                  {detailText ? ` · ${detailText}` : ""}
+                </p>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </details>
+  );
+}
+
 // F0.5/F0.7: the read-only refresh status band, shown right after
 // the access check. It never writes anything: retrying stays on
 // the existing 「立即更新」 button, and a retry never clears the
@@ -1628,6 +1752,7 @@ function RefreshStatusBand({
           ))}
         </div>
       </details>
+      <RefreshObservationsPanel />
     </section>
   );
 }
@@ -1641,7 +1766,10 @@ export function App() {
   });
   const refresh = useMutation({
     mutationFn: () => api.refreshFinanceData({}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["finance-dashboard"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["finance-dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["finance-refresh-observations"] });
+    },
   });
 
   const response = dashboard.data;

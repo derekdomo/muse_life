@@ -22,6 +22,13 @@
       "when": 1792356125952,
       "tag": "0003_refresh_generation_binding",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792437826408,
+      "tag": "0004_refresh_observations",
+      "breakpoints": true
     }
   ]
 }
