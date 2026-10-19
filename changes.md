@@ -675,3 +675,9 @@
 - 健康源码回灌（EVID，space-4）：将 23:16 已交付的线上源码逐文件回灌本仓——`health-dashboard/server/src/actions.ts`、`server/src/schema.ts`、`drizzle/0006_add_readiness_history_archive.sql`＋`meta/_journal.json`、`client/src/App.tsx`、`client/src/theme.css`、`DATA-PLAN.md`。复跑：validate-routine-archive 53/53、persist-race 42/42、units 25/25、week-comparison 25/25、week-coverage 23/23、steps-display PASS。
 - 如实保留（分歧对账）：本次回灌同时带入线上自 2026-10-16 起未回灌的客户端改动（workout 类型中文标签映射、游泳专区与全部运动记录区顺序互换、负荷 TRIMP 呈现、七日事实/hero 呈现结构调整），仓库四组旧脚本对新源码不再全过：all-workouts 13/20、hero-status 11/20、unified-hk 28/34、seven-day-facts 44/52、whoop-scores 9 过 4 败后提取崩溃、week-load/source 提取崩溃（回灌前同一批脚本对旧仓库源码全过，已实测对照）。已在 plans.md 立 `H-SYNC-DIVERGE-001`（P1/实现方提案）逐项对账：属已批准新行为的更新脚本与口径，属偏离已关闭判据的修线上；对账完成前不宣称健康全套回归通过。steps-contract 仍为既有缺 zod 环境失败，与本轮无关。
 - 顺延：`W6.2`/`H4.6`（共用动作→肌群映射表＋合规示意素材）与 `W6.1`（OpenGym 研读）未在本轮开工——本轮三构建（space-6/space-4/space-3）已占满，肌群映射与素材合规需独立一轮，下轮按队列在 P0 之后推进；`F0.7` 按所有者裁决 A 维持（不盲目触发刷新）。回滚：本轮各提交均可 revert；0005/0006 均为保全/加法迁移，不删数据。
+
+## 2026-10-18（muse-life-plans-sync 23:13 轮次补证：W-MIG-004 线上未丢失结论）
+
+- space-6 构建回执在本轮提交后送达，补齐 W-MIG-004 的生产核查证据（上一节中「未取得生产脱敏计数」就此关闭）：只读核查生产 app.db——workouts 7 条、workout_sets 106 组、completed 7、initializing 0、孤儿子组 0、foreign_key_check 为空；7 个 workout 全部在 0004 的 journal 时间戳之前开始、合计持有全部 106 组（每个 10–20 组、无零组 workout）；迁移 journal 已应用至 0004（共 4 条）；当前 workouts 表 routine CHECK 已含五值。
+- FK 执行证据：平台迁移器（ts-runtime migrate.js）对 libsql 的实际执行序列为 `PRAGMA foreign_keys=off → BEGIN → 全部语句 → COMMIT → finally PRAGMA foreign_keys=on`，即迁移在 FK OFF 的单一事务内执行——这是 0004 的 DROP 未级联删除子组的原因，与计数互相印证；中途失败整批回滚不损旧库。结论：**未发生线上数据丢失，无需恢复方案与所有者裁决**；0005 的子表保全模式仍已交付，作为此后任何父表重建的固定做法（验证脚本在 FK ON 下实测保全成立，见上一节 69/69）。
+- 安全评审附注：构建审计对 space-6 `getDashboard` 无身份只读通道给出 high finding——即所有者 2026-10-17 已知情拍板的 L0.1 例外本体（范围仅该只读入口、供 space-4 同步；面向真人读取保持严格 owner 校验）；本轮按简报未扩大、未改动，getPlan/updatePlan/toggleDailyItem 经脚本实测保持严格 owner-only。按既定裁决维持现状，所有者可随时撤销。
