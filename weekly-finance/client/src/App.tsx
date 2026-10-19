@@ -211,37 +211,66 @@ export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ labe
 }
 
 // F0.5: the four-row source ledger the status band expands into
-// （本地月度记录 / 银行余额 / 交易 / 持仓）. Each row states its
-// source data date, the range actually obtained, and this
-// attempt's result. Stages the platform does not report are
-// written as 未知 — no fabricated percentages, no invented task
-// completion. The save result is shared because all four sources
-// land through the one legal ingest write; transaction coverage
-// is only ever stated through the per-month spend provenance the
-// months themselves carry.
+// （本地月度记录 / 银行余额 / 交易 / 持仓）. Each row presents TWO
+// separate groups: the last usable fact this source retains (its
+// real date / actual range / saved-or-not state) and this
+// attempt's result (only the stages actually proven; unknown
+// stages are written 未知 — no fabricated percentages, no
+// invented task completion). The save result is shared because
+// all four sources land through the one legal ingest write;
+// transaction coverage is only ever stated through the per-month
+// spend provenance the months themselves carry.
+// F0.5 rework (per-source dates): the snapshot asOf is ONLY the
+// snapshot generation / last-success time (the band labels it
+// as such) — it is never a per-source data date. The bank row's
+// date is the balanceDate evidence the account rows themselves
+// retain: one shared date is stated as-is, differing dates are
+// stated as a range AND named inconsistent, and a legacy blob
+// with no balanceDate evidence reads 未知 — never inferred
+// from asOf. Holdings carry no per-source date evidence at all,
+// so their date is 未知 too. With no data at all, no row may
+// claim a save: every result reads 未取得 / 尚无成功快照，
+// whatever the refresh state.
 export function sourceLedgerRows(
   data: Dashboard | null,
   refresh: { status: RefreshStatus },
 ): Array<{ source: string; dataDate: string; range: string; result: string }> {
+  if (!data) {
+    const noDataResult = refresh.status === "running"
+      ? "本次更新进行中，尚未取得，尚无成功快照"
+      : refresh.status === "error"
+        ? "本次未成功，未取得，尚无成功快照"
+        : "未取得（尚无成功快照）";
+    return [
+      { source: "本地月度记录", dataDate: "未知", range: "未取得", result: noDataResult },
+      { source: "银行余额", dataDate: "未知", range: "未取得", result: noDataResult },
+      { source: "交易", dataDate: "未知", range: "未取得", result: "未知（平台未提供逐源结果）" },
+      { source: "持仓", dataDate: "未知", range: "未取得", result: noDataResult },
+    ];
+  }
   const attemptResult = refresh.status === "running"
     ? "本次更新进行中，尚未落盘保存"
     : refresh.status === "error"
       ? "本次未成功，未写入新数据，保留上次成功数据"
       : "已落盘保存（当前显示即已保存范围）";
-  if (!data) {
-    return [
-      { source: "本地月度记录", dataDate: "未知", range: "未取得", result: attemptResult },
-      { source: "银行余额", dataDate: "未知", range: "未取得", result: attemptResult },
-      { source: "交易", dataDate: "未知", range: "未取得", result: "未知（平台未提供逐源结果）" },
-      { source: "持仓", dataDate: "未知", range: "未取得", result: attemptResult },
-    ];
-  }
   const first = data.months[0];
   const last = data.months.at(-1);
-  const asOfDate = new Date(data.asOf);
-  const asOfText = Number.isNaN(asOfDate.getTime()) ? "未知" : dateLabel.format(asOfDate);
   const provenMonths = data.months.filter((month) => month.spendProven).map((month) => month.key.slice(0, 7));
   const balanceAccounts = data.accounts.filter((account) => account.type === "account" || account.type === "investment");
+  // Bank balance date evidence, from the account rows only: the
+  // balance entries are the type "account" rows. No evidence ->
+  // 未知； one date -> that date; several -> the span, named
+  // inconsistent rather than silently collapsed to one day.
+  const bankBalanceDates = [...new Set(
+    data.accounts
+      .filter((account) => account.type === "account" && account.balanceDate != null)
+      .map((account) => account.balanceDate as string),
+  )].sort();
+  const bankDataDate = bankBalanceDates.length === 0
+    ? "未知"
+    : bankBalanceDates.length === 1
+      ? bankBalanceDates[0]!
+      : `${bankBalanceDates[0]} 至 ${bankBalanceDates[bankBalanceDates.length - 1]}（各账户余额日期不一致）`;
   return [
     {
       source: "本地月度记录",
@@ -251,7 +280,7 @@ export function sourceLedgerRows(
     },
     {
       source: "银行余额",
-      dataDate: asOfText,
+      dataDate: bankDataDate,
       range: balanceSourceSummary(data.accounts),
       result: balanceAccounts.length > 0 ? attemptResult : "未提供",
     },
@@ -265,7 +294,7 @@ export function sourceLedgerRows(
     },
     {
       source: "持仓",
-      dataDate: asOfText,
+      dataDate: "未知",
       range: data.holdingsComplete
         ? `全部持仓 ${data.holdingsAll.length} 只${data.holdingsTotal != null ? ` · 分母 ${currency.format(data.holdingsTotal)}` : ""}`
         : "仅 Top 10 摘要（旧缓存，长尾未保存）",
@@ -323,7 +352,7 @@ export function verificationText(verified: boolean | null | undefined): string {
 }
 
 export function emergencyCoverage(
-  accounts: Array<{ source: string; type: string; value: number; availableCash?: boolean; verified?: boolean | null; status?: string | null }>,
+  accounts: Array<{ source: string; type: string; value: number; availableCash?: boolean; verified?: boolean | null; status?: string | null; metadataConflict?: boolean }>,
   serverAvailableCash: number | null,
   staleSources: string[],
   excludedSources: ReadonlySet<string>,
@@ -336,6 +365,18 @@ export function emergencyCoverage(
   }
   if (selected.length === 0) {
     return { months: null, cashAmount: null, selectedCount: 0, reason: "本页试算已排除全部现金账户，未输出覆盖" };
+  }
+  // F1.1 conflict rework (same verdict as the server summary):
+  // a cash account whose preserved metadata conflicts
+  // (metadataConflict) is NOT a legacy unknown — its metadata
+  // exists but cannot be uniquely associated, so while it is in
+  // scope no coverage is produced and the reason names the
+  // conflict; excluding it in this page's trial restores a
+  // normal trial figure from the remaining cash. A row with no
+  // metadata at all keeps the legacy caliber below.
+  const conflictSelected = selected.filter((account) => account.metadataConflict === true);
+  if (conflictSelected.length > 0) {
+    return { months: null, cashAmount: null, selectedCount: selected.length, reason: `现金账户元数据冲突待核对（${conflictSelected.map((account) => account.source).join("、")} 的重复元数据冲突，无法唯一关联），金额只作已记录事实，未计入可动用现金，未输出覆盖` };
   }
   // F1.1 rework: explicitly unverified cash never enters the
   // coverage numerator — verified === false, or the raw Firance
@@ -1067,6 +1108,16 @@ function AvailableCashPanel({
   );
   const activeUnverified = unverifiedCash.filter((account) => !excludedSources.has(account.source));
   const excludedUnverified = unverifiedCash.filter((account) => excludedSources.has(account.source));
+  // Same agreement rule for metadata-conflicted cash: in scope
+  // it blocks coverage and is named as 元数据冲突待核对 (text,
+  // not color alone); excluded in this page's trial it is
+  // reported as excluded, and the default caliber never counts
+  // its amount either way.
+  const conflictCash = balanceAccounts.filter(
+    (account) => account.availableCash === true && account.metadataConflict === true,
+  );
+  const activeConflict = conflictCash.filter((account) => !excludedSources.has(account.source));
+  const excludedConflict = conflictCash.filter((account) => excludedSources.has(account.source));
   const trialActive = excludedSources.size > 0;
   return (
     <section className="fact-card" aria-label="可动用现金账户范围">
@@ -1091,6 +1142,12 @@ function AvailableCashPanel({
       {excludedUnverified.length > 0 ? (
         <p className="fact-card__note">未核实现金账户 {excludedUnverified.map((account) => account.source).join("、")} 已在本页试算中排除，未计入试算金额；默认口径同样不计入其金额。</p>
       ) : null}
+      {activeConflict.length > 0 ? (
+        <p className="fact-card__stale">现金账户元数据冲突待核对：{activeConflict.map((account) => account.source).join("、")} 的重复元数据冲突，无法唯一关联，金额只作已记录事实，未计入可动用现金，本次未输出覆盖。</p>
+      ) : null}
+      {excludedConflict.length > 0 ? (
+        <p className="fact-card__note">元数据冲突现金账户 {excludedConflict.map((account) => account.source).join("、")} 已在本页试算中排除，未计入试算金额；默认口径同样不计入其金额，待核对后恢复。</p>
+      ) : null}
       <div className="cash-scope-list">
         {balanceAccounts.length === 0 ? <p className="empty-inline">最新快照没有余额账户。</p> : null}
         {balanceAccounts.map((account) => {
@@ -1104,6 +1161,7 @@ function AvailableCashPanel({
                   {accountCashRoleLabel(account.cashflowRole ?? null)}
                   {" · "}余额日期 {account.balanceDate ?? data.sourceMonth}
                   {" · "}{verificationText(account.verified ?? null)}
+                  {account.metadataConflict ? " · 元数据冲突待核对" : ""}
                   {account.status ? ` · 状态 ${account.status}` : ""}
                   {" · "}{account.live ? "同步读取" : "月度快照"}
                 </span>
@@ -1484,7 +1542,7 @@ function RefreshStatusBand({
           <span aria-hidden="true">{refreshStatusSymbol(refresh.status)}</span>
           {refreshStatusText(refresh.status, hasData)}
         </span>
-        <span>最后成功数据日期：{hasData ? formatInstant(data.asOf, true) : "尚无成功数据"}</span>
+        <span>最后成功快照时间：{hasData ? formatInstant(data.asOf, true) : "尚无成功数据"}</span>
         <span>{refresh.status === "running" ? "本次尝试开始" : "最近一次尝试开始"}：{formatInstant(refresh.startedAt, false)}</span>
         <span>状态写入时刻：{formatInstant(refresh.updatedAt, false)}</span>
         <span>下一可用操作：{nextRefreshActionText(refresh.status, hasData)}</span>
@@ -1506,9 +1564,9 @@ function RefreshStatusBand({
           {ledger.map((row) => (
             <p key={row.source}>
               <strong>{row.source}</strong>
-              {" · "}来源数据日期：{row.dataDate}
-              {" · "}已取得范围：{row.range}
-              {" · "}本次结果：{row.result}
+              {" · "}上次可用事实 — 数据日期：{row.dataDate}
+              {" · "}实际范围：{row.range}
+              {" · "}本次尝试：{row.result}
             </p>
           ))}
         </div>

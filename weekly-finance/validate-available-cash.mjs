@@ -332,9 +332,66 @@ const dupConflict = ensureAvailableCash(legacyBase(
   ])],
   [{ ...bareRow }],
 ));
-check("association: CONFLICTING duplicate account meta fills nothing (ambiguous -> conservative, fields stay missing)",
+// F1.1 conflict rework (PM counterexample): conflicting duplicate
+// meta fills nothing (no winner picked, fields stay null) — but
+// the row is stamped metadataConflict and its cash is WITHHELD:
+// a conflict is not the legacy "never saved" state, so it must
+// not ride the legacy caliber into coverage.
+check("conflict (PM case): verified + balanceDate both conflict -> fields stay null, row stamped metadataConflict",
   dupConflict.accounts[0].verified === null && dupConflict.accounts[0].balanceDate === null
-  && dupConflict.live.availableCash === 4000);
+  && dupConflict.accounts[0].metadataConflict === true);
+check("conflict (PM case): cash withheld — availableCash null, source named in availableCashConflict (not counted as 4000 / 4 months)",
+  dupConflict.live.availableCash === null
+  && (dupConflict.live.availableCashConflict ?? []).join() === "bank_1234"
+  && (dupConflict.live.availableCashUnverified ?? []).length === 0
+  && (dupConflict.live.availableCashStale ?? []).length === 0
+  && dupConflict.live.availableCashAccountCount === 1);
+check("conflict (PM case): the balance itself stays a recorded fact on the row",
+  dupConflict.accounts[0].value === 4000 && dupConflict.accounts[0].availableCash === true);
+const conflictBlob = legacyBase(
+  [metaMonth([
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: true },
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-08-31", status: null, periodStart: null, periodEnd: null, verified: false },
+  ])],
+  [{ ...bareRow }],
+);
+const conflictBlobBefore = JSON.stringify(conflictBlob);
+ensureAvailableCash(conflictBlob);
+check("conflict: the read path never writes back — the stored blob object is byte-identical, no flag stamped into it",
+  JSON.stringify(conflictBlob) === conflictBlobBefore && conflictBlob.accounts[0].metadataConflict === undefined);
+const conflictOnly = (meta) => ensureAvailableCash(legacyBase([metaMonth(meta)], [{ ...bareRow }]));
+const verifiedOnlyConflict = conflictOnly([
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: true },
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false },
+]);
+check("conflict: verified-only conflict blocks (metadataConflict, cash null, named)",
+  verifiedOnlyConflict.accounts[0].metadataConflict === true && verifiedOnlyConflict.live.availableCash === null
+  && (verifiedOnlyConflict.live.availableCashConflict ?? []).join() === "bank_1234");
+const dateOnlyConflict = conflictOnly([
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: null },
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-15", status: null, periodStart: null, periodEnd: null, verified: null },
+]);
+check("conflict: balanceDate-only conflict blocks (not silently treated as dateless legacy)",
+  dateOnlyConflict.accounts[0].metadataConflict === true && dateOnlyConflict.accounts[0].balanceDate === null
+  && dateOnlyConflict.live.availableCash === null
+  && (dateOnlyConflict.live.availableCashConflict ?? []).join() === "bank_1234");
+const statusOnlyConflict = conflictOnly([
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: "active", periodStart: null, periodEnd: null, verified: null },
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: "carried_forward_unverified", periodStart: null, periodEnd: null, verified: null },
+]);
+check("conflict: status-only conflict blocks (status stays null, no winner picked)",
+  statusOnlyConflict.accounts[0].metadataConflict === true && statusOnlyConflict.accounts[0].status === null
+  && statusOnlyConflict.live.availableCash === null
+  && (statusOnlyConflict.live.availableCashConflict ?? []).join() === "bank_1234");
+const dupAgreeFull = conflictOnly([
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: true },
+  { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: true },
+]);
+check("conflict: duplicates that AGREE on every field fill and count by the filled values (no conflict flag)",
+  dupAgreeFull.accounts[0].metadataConflict === false && dupAgreeFull.accounts[0].verified === true
+  && dupAgreeFull.accounts[0].balanceDate === "2026-09-30" && dupAgreeFull.live.availableCash === 4000);
+check("conflict: a truly metadata-free legacy row is NOT a conflict (legacy caliber unchanged)",
+  fillMissing.accounts[0].metadataConflict === false && fillMissing.live.availableCash === 4000);
 const otherSnapshot = ensureAvailableCash(legacyBase(
   [
     { key: "2026-08-31", entryMeta: [{ financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: null, status: null, periodStart: null, periodEnd: null, verified: false }] },
@@ -416,6 +473,30 @@ const legacyAccounts = [
 const covLegacy = emergencyCoverage(legacyAccounts, 6000, [], new Set(), goodBasis);
 check("coverage: legacy unknown verification state keeps the legacy caliber (6000 / 2000 = 3)",
   covLegacy.months === 3 && covLegacy.cashAmount === 6000);
+// --- client: metadata-conflicted cash blocks coverage until trialled away ---
+// Server + client share one verdict: build the rows through the
+// REAL ensureAvailableCash (conflict row bank_1234 / 4000 +
+// clean row bank_5678 / 2000), then run the REAL client
+// emergencyCoverage over them.
+const mixedConflict = ensureAvailableCash(legacyBase(
+  [metaMonth([
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: true },
+    { financeSource: "bank_1234", type: "account", cashflowRole: "cash", balanceDate: "2026-08-31", status: null, periodStart: null, periodEnd: null, verified: false },
+    { financeSource: "bank_5678", type: "account", cashflowRole: "cash", balanceDate: "2026-09-30", status: null, periodStart: null, periodEnd: null, verified: true },
+  ])],
+  [{ ...bareRow }, { ...bareRow, source: "bank_5678", label: "Bank 5678", value: 2000 }],
+));
+check("conflict (server): one conflicted cash account withholds the whole server amount and is named",
+  mixedConflict.live.availableCash === null
+  && (mixedConflict.live.availableCashConflict ?? []).join() === "bank_1234"
+  && mixedConflict.live.availableCashAccountCount === 2);
+const covConflict = emergencyCoverage(mixedConflict.accounts, mixedConflict.live.availableCash, [], new Set(), goodBasis);
+check("coverage: metadata-conflicted cash in scope -> null, reason names it 元数据冲突待核对 (server/client same verdict)",
+  covConflict.months === null && covConflict.cashAmount === null
+  && (covConflict.reason ?? "").includes("元数据冲突待核对") && (covConflict.reason ?? "").includes("bank_1234"));
+const covConflictExcluded = emergencyCoverage(mixedConflict.accounts, mixedConflict.live.availableCash, [], new Set(["bank_1234"]), goodBasis);
+check("coverage: excluding the conflicted account in the page trial restores a figure from the clean remainder (2000 / 2000 = 1)",
+  covConflictExcluded.months === 1 && covConflictExcluded.cashAmount === 2000);
 const covShortBasis = emergencyCoverage(accounts, 12000, [], new Set(), { averageMonthlySpend: 2000, usedMonths: 2, missingMonths: 1 });
 check("coverage: fewer than 3 valid months -> no figure, cash amount still reported as a fact",
   covShortBasis.months === null && covShortBasis.cashAmount === 12000 && (covShortBasis.reason ?? "").includes("完整有效月不足"));
@@ -466,6 +547,17 @@ check("server: staleness compares the balanceDate EXACTLY to the snapshot date v
 check("client: panel shows verification as text per row and names unverified cash both ways",
   appSrc.includes("verificationText(account.verified ?? null)") && appSrc.includes("现金账户未核实")
   && appSrc.includes("未核实现金账户") && appSrc.includes("核实状态未提供"));
+check("server: metadata conflict is an additive account field + a named live list (legacy payloads default to no conflict)",
+  src.includes("metadataConflict: z.boolean().default(false)")
+  && src.includes("availableCashConflict: summary.conflictSources")
+  && src.includes("availableCashConflict: availableCashSummary.conflictSources")
+  && extractFns(src, ["summarizeAvailableCash"], ts.ScriptKind.TS).includes("account.metadataConflict === true"));
+check("server: ensureAvailableCash stamps the conflict from its duplicate-meta pick (conflict is distinct from absence)",
+  extractFns(src, ["ensureAvailableCash"], ts.ScriptKind.TS).includes("conflict: true")
+  && extractFns(src, ["ensureAvailableCash"], ts.ScriptKind.TS).includes("metadataConflict:"));
+check("client: conflict blocks coverage with the same verdict and the panel names it in text (not color alone)",
+  appSrc.includes("account.metadataConflict === true") && appSrc.includes("元数据冲突待核对")
+  && appSrc.includes("现金账户元数据冲突待核对") && appSrc.includes("已在本页试算中排除"));
 
 console.log(`validate-available-cash: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
