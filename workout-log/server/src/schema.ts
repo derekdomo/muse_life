@@ -2,7 +2,9 @@ import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const workouts = sqliteTable("workouts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  routine: text("routine", { enum: ["push", "pull", "legs"] }).notNull(),
+  routine: text("routine", {
+    enum: ["push", "pull", "legs", "home_posture", "home_snowboard"],
+  }).notNull(),
   unit: text("unit", { enum: ["lb", "kg"] }).notNull().default("lb"),
   startedAt: integer("started_at", { mode: "timestamp_ms" })
     .notNull()
@@ -32,6 +34,50 @@ export const workoutSets = sqliteTable("workout_sets", {
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Editable training plan (2026-10-18 frequency sync): routine templates
+// are persisted rows, not code constants. startWorkout builds a session
+// from these rows; the plan editor rewrites them through updatePlan.
+export const planExercises = sqliteTable("plan_exercises", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  routine: text("routine").notNull(),
+  sortOrder: integer("sort_order").notNull(),
+  exerciseKey: text("exercise_key").notNull(),
+  exerciseName: text("exercise_name").notNull(),
+  sets: integer("sets").notNull(),
+  targetReps: text("target_reps").notNull(),
+});
+
+// One row per weekday (day_index 0 = Monday … 6 = Sunday). routine_code
+// is a workout routine key or the non-workout codes "swim" / "rest".
+export const planSchedule = sqliteTable("plan_schedule", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dayIndex: integer("day_index").notNull(),
+  routineCode: text("routine_code").notNull(),
+  note: text("note").notNull().default(""),
+});
+
+// The daily posture micro-routine items (checklist on the home screen).
+export const planDailyItems = sqliteTable("plan_daily_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  itemKey: text("item_key").notNull(),
+  title: text("title").notNull(),
+  detail: text("detail").notNull().default(""),
+  sortOrder: integer("sort_order").notNull(),
+});
+
+// Per-day completion of one daily micro-routine item. date_key is the
+// America/Los_Angeles calendar date (YYYY-MM-DD). Purely informational:
+// it never gates starting or finishing a workout.
+export const dailyCompletions = sqliteTable("daily_completions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dateKey: text("date_key").notNull(),
+  itemKey: text("item_key").notNull(),
+  done: integer("done").notNull().default(0),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
