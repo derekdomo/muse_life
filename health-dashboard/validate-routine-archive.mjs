@@ -15,6 +15,12 @@
 //     the archive, gaps stay gaps, same-day recomputation overwrites the
 //     same row, and an archive write failure never breaks the dashboard
 //     response (it lands in the sync ledger with no health values).
+//     H-ARCHIVE-SAFE-001 adds two gates, both covered below: only LA
+//     today may be archived (a stale/future date writes nothing and is
+//     not a ledger failure), and same-day writes are arbitrated by an
+//     atomic version guard (a late older snapshot_version never rolls
+//     the stored score back; the same version may overwrite; a null
+//     version may only be the first insert).
 //
 // Method (same as validate-persist-race.mjs): the REAL production code
 // is extracted verbatim from the artifact source and executed — the real
@@ -119,12 +125,18 @@ const archiveMigration = migrationFiles.map((f) => readFileSync(join(ROOT, 'driz
 check('source: an additive migration creates readiness_history', Boolean(archiveMigration) && archiveMigration.includes('CREATE TABLE'));
 check('source: getDashboard response carries readinessHistory and the handler archives + reads the archive',
   actionsSrc.includes('readinessHistory: z.array(readinessHistoryPointSchema).max(7)')
-  && actionsSrc.includes('await archiveReadiness(ctx, readiness, health.updatedAt)')
+  && actionsSrc.includes('await archiveReadiness(ctx, readiness, health.updatedAt, laTodayString())')
   && actionsSrc.includes('await loadReadinessTrendPoints(ctx, readinessDate)'));
 {
   const body = extractFunction(actionsSrc, 'archiveReadiness');
   check('source: archive upserts on the date key (same-day recompute overwrites, never duplicates)',
     body.includes('.onConflictDoUpdate(') && body.includes('target: schema.readinessHistory.date'));
+  check('source: archive upsert is version-guarded atomically (setWhere: excluded version non-null and >= stored)',
+    body.includes('setWhere:') && body.includes('excluded.snapshot_version IS NOT NULL') && body.includes('excluded.snapshot_version >='));
+  check('source: archive skips the write when readiness.date is not the caller-provided LA today',
+    body.includes('readiness.date !== todayLA'));
+  check('source: laTodayString computes the LA calendar date via Intl',
+    extractFunction(actionsSrc, 'laTodayString').includes('America/Los_Angeles'));
   const noteMatch = body.match(/note: `([^`]*)`/);
   check('source: archive failure is ledger-visible and its note carries no health values',
     body.includes('recordSyncLog') && body.includes('status: "failed"')
@@ -194,7 +206,7 @@ const schemaStub = {
   healthSnapshot: { __table: 'health_snapshot', __cols: { id: 'id', payload: 'payload', sourceUpdatedAt: 'source_updated_at', createdAt: 'created_at', updatedAt: 'updated_at' }, id: colRef('health_snapshot', 'id'), payload: colRef('health_snapshot', 'payload'), sourceUpdatedAt: colRef('health_snapshot', 'source_updated_at') },
   strengthTrainingSnapshot: { __table: 'strength_training_snapshot', __cols: { id: 'id', payload: 'payload', sourceUpdatedAt: 'source_updated_at', createdAt: 'created_at', updatedAt: 'updated_at' }, id: colRef('strength_training_snapshot', 'id'), payload: colRef('strength_training_snapshot', 'payload'), sourceUpdatedAt: colRef('strength_training_snapshot', 'source_updated_at') },
   morningCheckin: { __table: 'morning_checkin', __cols: { date: 'date', feeling: 'feeling', createdAt: 'created_at', updatedAt: 'updated_at' }, date: colRef('morning_checkin', 'date'), feeling: colRef('morning_checkin', 'feeling') },
-  readinessHistory: { __table: 'readiness_history', __cols: { date: 'date', score: 'score', components: 'components', confidence: 'confidence', snapshotVersion: 'snapshot_version', createdAt: 'created_at', updatedAt: 'updated_at' }, date: colRef('readiness_history', 'date'), score: colRef('readiness_history', 'score') },
+  readinessHistory: { __table: 'readiness_history', __cols: { date: 'date', score: 'score', components: 'components', confidence: 'confidence', snapshotVersion: 'snapshot_version', createdAt: 'created_at', updatedAt: 'updated_at' }, date: colRef('readiness_history', 'date'), score: colRef('readiness_history', 'score'), snapshotVersion: colRef('readiness_history', 'snapshot_version') },
   syncLog: { __table: 'sync_log', __cols: { id: 'id', source: 'source', status: 'status', itemCount: 'item_count', note: 'note', sourceUpdatedAt: 'source_updated_at', createdAt: 'created_at' }, id: colRef('sync_log', 'id') },
 };
 function sqlTag(strings, ...values) {
@@ -311,7 +323,7 @@ const SERVER_FNS = [
   'loadHealthSnapshot', 'loadStrengthSnapshot', 'effectiveStrength',
   'persistStrengthSnapshot', 'recordSyncLog', 'loadRecentLogs',
   'freshnessFor', 'buildDataStatus', 'buildUnifiedTimeline',
-  'buildReadinessTrendPoints', 'loadReadinessTrendPoints', 'archiveReadiness', 'maybeAutoSyncStrength',
+  'buildReadinessTrendPoints', 'loadReadinessTrendPoints', 'archiveReadiness', 'maybeAutoSyncStrength', 'laTodayString',
 ];
 function buildServerImpl(source) {
   let code = SERVER_FNS.map((n) => extractFunction(source, n)).join('\n');
@@ -321,7 +333,7 @@ function buildServerImpl(source) {
   const prelude = 'const LB_TO_KG = 0.45359237;\nconst STRENGTH_SYNC_PROMPT = "stub";\nlet lastAutoStrengthSpawnAt = 0;\nlet lastAutoStrengthTaskId = null;\n';
   const factory = new Function('schema', 'sql', 'eq', 'desc', 'asc', 'and', 'gte', 'lte', 'snapshotSchema', 'strengthTrainingSchema',
     prelude + stripTypeScriptTypes(code)
-    + '\nreturn { persistStrengthSnapshot, loadStrengthSnapshot, buildUnifiedTimeline, buildReadinessTrendPoints, loadReadinessTrendPoints, archiveReadiness, getDashboardHandler };');
+    + '\nreturn { persistStrengthSnapshot, loadStrengthSnapshot, buildUnifiedTimeline, buildReadinessTrendPoints, loadReadinessTrendPoints, archiveReadiness, getDashboardHandler, laTodayString };');
   return factory(schemaStub, sqlTag, eqStub, descStub, ascStub, andStub, gteStub, lteStub, schemas.snapshotSchema, schemas.strengthTrainingSchema);
 }
 const impl = buildServerImpl(actionsSrc);
@@ -431,16 +443,16 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
 {
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), '2026-10-18T15:00:00.000Z');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), '2026-10-18T15:00:00.000Z', '2026-10-18');
   let rows = archiveRows(db);
   check('archive: first computation lands exactly one row with score, confidence, snapshot version, components',
     rows.length === 1 && rows[0].score === 7.5 && rows[0].confidence === '中'
     && rows[0].snapshot_version === '2026-10-18T15:00:00.000Z' && JSON.parse(rows[0].components).length === 2);
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), '2026-10-18T16:00:00.000Z');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), '2026-10-18T16:00:00.000Z', '2026-10-18');
   rows = archiveRows(db);
   check('archive: same-day recomputation still leaves one row, holding the latest score',
     rows.length === 1 && rows[0].score === 8.0 && rows[0].snapshot_version === '2026-10-18T16:00:00.000Z');
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 6.0), '2026-10-19T15:00:00.000Z');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 6.0), '2026-10-19T15:00:00.000Z', '2026-10-19');
   rows = archiveRows(db);
   check('archive: the next day adds a second row', rows.length === 2 && rows[1].date === '2026-10-19' && rows[1].score === 6.0);
   const trend = await impl.loadReadinessTrendPoints(ctx, '2026-10-19');
@@ -450,7 +462,7 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
     trend[5].score === 8.0 && trend[6].score === 6.0);
   check('archive: unarchived dates stay gaps — never filled with today\'s or any other day\'s score',
     trend.slice(0, 5).every((p) => p.score === null));
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-20', null), '2026-10-20T15:00:00.000Z');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-20', null), '2026-10-20T15:00:00.000Z', '2026-10-20');
   const trend2 = await impl.loadReadinessTrendPoints(ctx, '2026-10-20');
   check('archive: a day archived with a null score （数据不足） still renders as a gap, not a number',
     trend2[6].date === '2026-10-20' && trend2[6].score === null && trend2[5].score === 6.0);
@@ -459,7 +471,7 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true }, new Set(['readiness_history']));
   let threw = false;
-  try { await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1'); } catch { threw = true; }
+  try { await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1', '2026-10-18'); } catch { threw = true; }
   const failed = db.prepare("SELECT note FROM sync_log WHERE status = 'failed'").all();
   check('archive: a write failure is swallowed by archiveReadiness (the dashboard response is not blocked)', !threw);
   check('archive: the failure is visible in the sync ledger, with no health values in the note',
@@ -467,6 +479,62 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
   const trend = await impl.loadReadinessTrendPoints(ctx, '2026-10-18');
   check('archive: trend after a failed write shows gaps only (nothing invented)',
     trend.length === 7 && trend.every((p) => p.score === null));
+}
+
+// --------------------- (h) H-ARCHIVE-SAFE-001: date + version gates
+{
+  check('laTodayString: 06:30Z is still yesterday in LA (PDT, UTC-7)',
+    impl.laTodayString(new Date('2026-10-19T06:30:00.000Z')) === '2026-10-18');
+  check('laTodayString: 07:30Z is today in LA (PDT)',
+    impl.laTodayString(new Date('2026-10-19T07:30:00.000Z')) === '2026-10-19');
+  check('laTodayString: winter boundary uses PST (UTC-8)',
+    impl.laTodayString(new Date('2026-01-15T07:30:00.000Z')) === '2026-01-14'
+    && impl.laTodayString(new Date('2026-01-15T08:30:00.000Z')) === '2026-01-15');
+  check('laTodayString: DST spring-forward day resolves to the LA date',
+    impl.laTodayString(new Date('2026-03-08T10:30:00.000Z')) === '2026-03-08');
+}
+{
+  const db = freshSqlite();
+  const { ctx } = makeCtx(db, { isOwner: true });
+  const D = '2026-10-18';
+  await impl.archiveReadiness(ctx, mkReadiness(D, 8.0), '2026-10-18T18:00:00.000Z', D);
+  await impl.archiveReadiness(ctx, mkReadiness(D, 3.0), '2026-10-18T16:00:00.000Z', D);
+  let rows = archiveRows(db);
+  check('archive-safe: a late-arriving OLDER version does not roll back the stored score',
+    rows.length === 1 && rows[0].score === 8.0 && rows[0].snapshot_version === '2026-10-18T18:00:00.000Z');
+  await impl.archiveReadiness(ctx, mkReadiness(D, 6.5), '2026-10-18T18:00:00.000Z', D);
+  rows = archiveRows(db);
+  check('archive-safe: the SAME version may overwrite (a morning check-in change recomputes the day)',
+    rows.length === 1 && rows[0].score === 6.5 && rows[0].snapshot_version === '2026-10-18T18:00:00.000Z');
+  await impl.archiveReadiness(ctx, mkReadiness(D, 9.9), null, D);
+  rows = archiveRows(db);
+  check('archive-safe: a null version never overwrites an existing row',
+    rows.length === 1 && rows[0].score === 6.5 && rows[0].snapshot_version === '2026-10-18T18:00:00.000Z');
+  const D2 = '2026-10-19';
+  await impl.archiveReadiness(ctx, mkReadiness(D2, 5.0), null, D2);
+  rows = archiveRows(db);
+  check('archive-safe: a null version may still be the FIRST insert for a date (next day adds normally)',
+    rows.length === 2 && rows[1].date === D2 && rows[1].score === 5.0 && rows[1].snapshot_version === null);
+  await impl.archiveReadiness(ctx, mkReadiness(D2, 7.0), null, D2);
+  rows = archiveRows(db);
+  check('archive-safe: a second null-version write does not overwrite the null-version row',
+    rows.length === 2 && rows[1].score === 5.0);
+  await impl.archiveReadiness(ctx, mkReadiness(D2, 7.5), '2026-10-19T15:00:00.000Z', D2);
+  rows = archiveRows(db);
+  check('archive-safe: a versioned write supersedes a null-version row',
+    rows.length === 2 && rows[1].score === 7.5 && rows[1].snapshot_version === '2026-10-19T15:00:00.000Z');
+}
+{
+  const db = freshSqlite();
+  const { ctx } = makeCtx(db, { isOwner: true });
+  await impl.archiveReadiness(ctx, mkReadiness('2000-01-01', 5.0), 'v1', '2026-10-19');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-20', 5.0), 'v1', '2026-10-19');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 5.0), 'v1', 'not-a-date');
+  check('archive-safe: old / future / malformed-today dates write ZERO rows', archiveRows(db).length === 0);
+  check('archive-safe: date-gate skips are silent — no failure ledger entry masquerades as a fault',
+    db.prepare("SELECT COUNT(*) AS n FROM sync_log WHERE status = 'failed'").get().n === 0);
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 5.0), 'v1', '2026-10-19');
+  check('archive-safe: the matching LA-today date archives normally', archiveRows(db).length === 1);
 }
 
 // getDashboard end-to-end: compute → archive → trend, through the real
@@ -502,35 +570,57 @@ function storeHealth(db, payload) {
   db.prepare('INSERT OR REPLACE INTO health_snapshot (id, payload, source_updated_at, created_at, updated_at) VALUES (1, ?, ?, ?, ?)')
     .run(JSON.stringify(payload), Date.parse(payload.updatedAt), Date.now(), Date.now());
 }
+// The dashboard fixtures anchor on the REAL LA today: since
+// H-ARCHIVE-SAFE-001, getDashboard archives only when the readiness date
+// is LA today, so a fixture pinned to a fixed past date would exercise
+// the skip path instead of the archive path.
+const LA_TODAY = (() => {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+  const part = (t) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+})();
+const dayShift = (date, days) => { const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); };
 {
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  storeHealth(db, healthSnapshotPayload('2026-10-17', '2026-10-18T15:00:00.000Z', '2026-10-18'));
+  storeHealth(db, healthSnapshotPayload(dayShift(LA_TODAY, -1), '2026-01-01T15:00:00.000Z', LA_TODAY));
   const res1 = await impl.getDashboardHandler(ctx, {});
   check('dashboard: first owner open computes readiness and returns it',
     res1.forbidden === false && res1.readiness !== null && typeof res1.readiness.score === 'number');
   let rows = archiveRows(db);
-  check('dashboard: the computed score is archived under the readiness date with the snapshot version',
-    rows.length === 1 && rows[0].date === '2026-10-18' && rows[0].score === res1.readiness.score
-    && rows[0].snapshot_version === '2026-10-18T15:00:00.000Z');
+  check('dashboard: the computed score is archived under the readiness date (LA today) with the snapshot version',
+    rows.length === 1 && rows[0].date === LA_TODAY && rows[0].score === res1.readiness.score
+    && rows[0].snapshot_version === '2026-01-01T15:00:00.000Z');
   check('dashboard: the returned trend ends at the readiness date with the archived score; earlier days are gaps',
-    res1.readinessHistory.length === 7 && res1.readinessHistory[6].date === '2026-10-18'
+    res1.readinessHistory.length === 7 && res1.readinessHistory[6].date === LA_TODAY
     && res1.readinessHistory[6].score === res1.readiness.score && res1.readinessHistory.slice(0, 6).every((p) => p.score === null));
   const res2 = await impl.getDashboardHandler(ctx, {});
   rows = archiveRows(db);
   check('dashboard: a second open the same day still leaves exactly one archive row',
     res2.forbidden === false && rows.length === 1);
-  storeHealth(db, healthSnapshotPayload('2026-10-18', '2026-10-19T15:00:00.000Z', '2026-10-19'));
-  const res3 = await impl.getDashboardHandler(ctx, {});
-  rows = archiveRows(db);
-  check('dashboard: the next day adds a second row and the trend carries both days\' own scores',
-    rows.length === 2 && res3.readinessHistory[5].date === '2026-10-18' && res3.readinessHistory[5].score === rows[0].score
-    && res3.readinessHistory[6].date === '2026-10-19' && res3.readinessHistory[6].score === res3.readiness.score);
+}
+{
+  // Stale snapshot opened today (H-ARCHIVE-SAFE-001): the readiness is
+  // still computed and returned, but its date is not LA today, so
+  // nothing is archived — past dates are never backfilled by opening an
+  // old snapshot, and the skip writes no failure ledger entry.
+  const db = freshSqlite();
+  const { ctx } = makeCtx(db, { isOwner: true });
+  storeHealth(db, healthSnapshotPayload(dayShift(LA_TODAY, -4), '2026-01-01T15:00:00.000Z', dayShift(LA_TODAY, -3)));
+  const res = await impl.getDashboardHandler(ctx, {});
+  check('dashboard: a stale snapshot still computes and returns its readiness (main response unaffected)',
+    res.forbidden === false && res.readiness !== null && res.readiness.date === dayShift(LA_TODAY, -3)
+    && typeof res.readiness.score === 'number');
+  check('dashboard: opening a stale snapshot archives NOTHING and writes no failure entry',
+    archiveRows(db).length === 0
+    && db.prepare("SELECT COUNT(*) AS n FROM sync_log WHERE status = 'failed'").get().n === 0);
+  check('dashboard: with nothing archived, the stale trend is all gaps (its score is not dressed up as history)',
+    res.readinessHistory.length === 7 && res.readinessHistory.every((p) => p.score === null));
 }
 {
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true }, new Set(['readiness_history']));
-  storeHealth(db, healthSnapshotPayload('2026-10-17', '2026-10-18T15:00:00.000Z', '2026-10-18'));
+  storeHealth(db, healthSnapshotPayload(dayShift(LA_TODAY, -1), '2026-01-01T15:00:00.000Z', LA_TODAY));
   const res = await impl.getDashboardHandler(ctx, {});
   check('dashboard: with the archive table failing, the main response still returns snapshot + readiness intact',
     res.forbidden === false && res.snapshot !== null && res.readiness !== null && typeof res.readiness.score === 'number');
@@ -541,7 +631,7 @@ function storeHealth(db, payload) {
 {
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: false });
-  storeHealth(db, healthSnapshotPayload('2026-10-17', '2026-10-18T15:00:00.000Z', '2026-10-18'));
+  storeHealth(db, healthSnapshotPayload(dayShift(LA_TODAY, -1), '2026-01-01T15:00:00.000Z', LA_TODAY));
   const res = await impl.getDashboardHandler(ctx, {});
   check('dashboard: non-owner stays forbidden with zero data and writes no archive row',
     res.forbidden === true && res.readiness === null && res.readinessHistory.length === 0 && archiveRows(db).length === 0);
@@ -575,12 +665,39 @@ function storeHealth(db, payload) {
   const mutImpl = buildServerImpl(mutated);
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1');
-  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), 'v2');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1', '2026-10-18');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), 'v2', '2026-10-18');
   const rows = archiveRows(db);
   check('mutation: without the date-key upsert the archive cannot hold the latest same-day score (upsert is load-bearing)',
     mutated !== actionsSrc && !(rows.length === 1 && rows[0].score === 8.0),
     `mutant rows: ${rows.length}, score: ${rows[0]?.score ?? 'none'}`);
+}
+{
+  // Remove the version guard (setWhere) from archiveReadiness: the
+  // mutated archive lets a late older version roll the stored score
+  // back — proving the production setWhere is load-bearing.
+  const start = actionsSrc.indexOf('setWhere: sql`excluded.snapshot_version');
+  const mutated = start < 0 ? actionsSrc : actionsSrc.slice(0, start) + actionsSrc.slice(start).replace(/setWhere: sql`[^`]*`,\n/, '');
+  const mutImpl = buildServerImpl(mutated);
+  const db = freshSqlite();
+  const { ctx } = makeCtx(db, { isOwner: true });
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), '2026-10-18T18:00:00.000Z', '2026-10-18');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 3.0), '2026-10-18T16:00:00.000Z', '2026-10-18');
+  const rows = archiveRows(db);
+  check('mutation: without the setWhere version guard a late OLDER version rolls the score back (guard is load-bearing)',
+    mutated !== actionsSrc && rows.length === 1 && rows[0].score === 3.0,
+    `mutant score: ${rows[0]?.score ?? 'none'}`);
+}
+{
+  // Remove the date gate: the mutated archive backfills a past date —
+  // proving the production todayLA gate is load-bearing.
+  const mutated = actionsSrc.replace('if (todayLA !== undefined && readiness.date !== todayLA) return;', '');
+  const mutImpl = buildServerImpl(mutated);
+  const db = freshSqlite();
+  const { ctx } = makeCtx(db, { isOwner: true });
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2000-01-01', 5.0), 'v1', '2026-10-19');
+  check('mutation: without the date gate a past date gets backfilled (gate is load-bearing)',
+    mutated !== actionsSrc && archiveRows(db).length === 1);
 }
 
 console.log(`\n${passed} passed, ${failures} failed (source root: ${ROOT})`);

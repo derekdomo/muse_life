@@ -355,6 +355,21 @@ function shiftDate(date: string, days: number): string {
   return parsed.toISOString().slice(0, 10);
 }
 
+// Today's America/Los_Angeles calendar date as YYYY-MM-DD
+// (H-ARCHIVE-SAFE-001): the only date an archive write may target —
+// readiness is archived only for the day it is actually displayed on.
+// Computed via Intl so the LA midnight boundary and DST transitions come
+// from the platform tz database. `now` is injectable for tests;
+// production callers use the default (the current instant).
+function laTodayString(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(now);
+  const part = (type: string): string => parts.find((entry) => entry.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 function stats(values: number[]): { mean: number; sd: number } | null {
   if (values.length < 8) return null;
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -988,14 +1003,28 @@ async function loadReadinessTrendPoints(ctx: Ctx, endDate: string): Promise<Read
 }
 
 // Archive one computed readiness under its date (H-LOAD-001, owner-
-// approved 2026-10-18). Upsert keyed by date: recomputing the same date
-// overwrites that date's row (the last successful computation wins) and
-// never creates a duplicate. Only dates actually computed from now on are
-// archived — no backfill, no recomputation of past dates. A write failure
-// must not block the dashboard's main response, so it is caught here and
-// surfaced in the sync ledger instead; the ledger note deliberately
-// carries no health values, only the fact and the date affected.
-async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion: string | null): Promise<void> {
+// approved 2026-10-18; H-ARCHIVE-SAFE-001 hardening). Two safety gates:
+// (1) Date gate: only LA today may be archived. `todayLA` is the caller's
+// America/Los_Angeles today (see laTodayString); when it is provided and
+// readiness.date differs — a stale snapshot opened days later, a future
+// or malformed date — the write is skipped silently: the dashboard
+// response is returned unchanged, the trend honestly shows a gap, and no
+// failure ledger entry is written (a skipped backfill is not a fault).
+// (2) Same-day version arbitration: the upsert is ONE atomic statement
+// whose ON CONFLICT … WHERE only applies the update when the incoming
+// snapshot_version is non-null and not older than the stored one, so a
+// late-finishing older computation can never roll today's archived score
+// back. The same version may overwrite (a same-version recomputation can
+// legitimately differ, e.g. after a morning check-in change); a null
+// incoming version may only ever be the first insert for its date and
+// never overwrites an existing row. Only dates actually computed from
+// now on are archived — no backfill, no recomputation of past dates. A
+// write failure must not block the dashboard's main response, so it is
+// caught here and surfaced in the sync ledger instead; the ledger note
+// deliberately carries no health values, only the fact and the date
+// affected.
+async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion: string | null, todayLA?: string): Promise<void> {
+  if (todayLA !== undefined && readiness.date !== todayLA) return;
   try {
     const db = ctx.db<typeof schema>();
     const now = new Date();
@@ -1011,6 +1040,7 @@ async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion:
     }).onConflictDoUpdate({
       target: schema.readinessHistory.date,
       set: { score: readiness.score, components, confidence: readiness.confidence, snapshotVersion, updatedAt: now },
+      setWhere: sql`excluded.snapshot_version IS NOT NULL AND (${schema.readinessHistory.snapshotVersion} IS NULL OR excluded.snapshot_version >= ${schema.readinessHistory.snapshotVersion})`,
     });
   } catch {
     await recordSyncLog(ctx, { source: "system", status: "failed", itemCount: 0, note: `readiness 评分存档写入失败 · 日期 ${readiness.date} · 趋势位可能缺当日分数`, sourceUpdatedAt: null });
@@ -1183,8 +1213,11 @@ export const Actions = {
       // archive write is failure-isolated (see archiveReadiness) — the
       // response below is returned regardless — and the trend is then
       // read back from the archive alone, so today's point is the
-      // archived value and every unarchived date stays a gap.
-      await archiveReadiness(ctx, readiness, health.updatedAt);
+      // archived value and every unarchived date stays a gap. The LA
+      // today gate (H-ARCHIVE-SAFE-001) means opening the dashboard on a
+      // stale snapshot archives nothing: only the readiness actually
+      // displayed for LA today is recorded.
+      await archiveReadiness(ctx, readiness, health.updatedAt, laTodayString());
       const readinessHistory = await loadReadinessTrendPoints(ctx, readinessDate);
       return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
     },

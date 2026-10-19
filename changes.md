@@ -678,6 +678,15 @@
 
 ## 2026-10-18（muse-life-plans-sync 23:13 轮次补证：W-MIG-004 线上未丢失结论）
 
-- space-6 构建回执在本轮提交后送达，补齐 W-MIG-004 的生产核查证据（上一节中「未取得生产脱敏计数」就此关闭）：只读核查生产 app.db——workouts 7 条、workout_sets 106 组、completed 7、initializing 0、孤儿子组 0、foreign_key_check 为空；7 个 workout 全部在 0004 的 journal 时间戳之前开始、合计持有全部 106 组（每个 10–20 组、无零组 workout）；迁移 journal 已应用至 0004（共 4 条）；当前 workouts 表 routine CHECK 已含五值。
+- space-6 构建回执在本轮提交后送达，补齐 W-MIG-004 的生产核查证据（上一节中「未取得生产脱敏计数」就此关闭）：构建方只读核查生产 app.db 后申报存档完整——父子计数一致、零孤儿、foreign_key_check 为空、全部 workout 均在 0004 journal 时间之前开始且无零组 workout、迁移 journal 已应用至 0004、当前 workouts 表 routine CHECK 已含五值。（2026-10-19 按 L0-TRAIN-DOC-001 脱敏：真实生产训练场次/组数等统计明细已从本节移除，仅保留不变量结论与核查方法；原始数值仅存于授权私有运行通道，不入仓。）
 - FK 执行证据：平台迁移器（ts-runtime migrate.js）对 libsql 的实际执行序列为 `PRAGMA foreign_keys=off → BEGIN → 全部语句 → COMMIT → finally PRAGMA foreign_keys=on`，即迁移在 FK OFF 的单一事务内执行——这是 0004 的 DROP 未级联删除子组的原因，与计数互相印证；中途失败整批回滚不损旧库。结论：**未发生线上数据丢失，无需恢复方案与所有者裁决**；0005 的子表保全模式仍已交付，作为此后任何父表重建的固定做法（验证脚本在 FK ON 下实测保全成立，见上一节 69/69）。
 - 安全评审附注：构建审计对 space-6 `getDashboard` 无身份只读通道给出 high finding——即所有者 2026-10-17 已知情拍板的 L0.1 例外本体（范围仅该只读入口、供 space-4 同步；面向真人读取保持严格 owner 校验）；本轮按简报未扩大、未改动，getPlan/updatePlan/toggleDailyItem 经脚本实测保持严格 owner-only。按既定裁决维持现状，所有者可随时撤销。
+
+## 2026-10-19（muse-life-plans-sync 01:13 轮次：H-ARCHIVE-SAFE-001 P0、H-LOAD weekLoad 余项、L0-TRAIN-DOC-001、三份规则/契约稿）
+
+- `H-ARCHIVE-SAFE-001`（P0/A，space-4，已上线并回灌）：`archiveReadiness` 增加 LA 今日日期门（新增纯函数 `laTodayString`，`getDashboard` 传入）——readiness.date 非 LA 今天（旧日/未来/异常）时跳过存档写入、主响应照常返回、不写失败台账；同日写入改为单语句原子条件 upsert（`setWhere`：excluded.snapshot_version 非 null 且（已存为 null 或 excluded >= 已存）），晚到旧版本不得回退当日分数、同版本可覆盖（晨检变化重算）、null 版本只许首次插入。不重算/不删除既有生产历史（本轮无证据表明已污染，未动）。改动文件：`health-dashboard/server/src/actions.ts`、仓库 `validate-routine-archive.mjs` 扩至 **73/73**（含 laTodayString 边界、旧版本晚到不回退、同版本覆盖、null 不覆盖、旧/未来日期零写入零台账、真实 getDashboard 旧快照开页零回补、写失败主响应保留，及删除 setWhere/日期门两项变异敏感性）。构建审计 verdict=pass。局限：所有者视角渲染未由审计环境取得（非所有者拦截页，与历轮一致），以源码＋真实 handler 脚本判定。回滚：revert 本提交即可，存档表无 schema 变更。
+- `H-LOAD-001＋H-SYNC-DIVERGE-001` 余项（P1/A+B，space-4，已上线并回灌）：`weekLoad` 在 coverageIncomplete 且无法定位缺口时一律保守降级（sufficient=false、环比置 null、文案改诚实表述、删除「不影响本周对比」断言）；`factsDetail` 恢复上周同窗绝对值 `previousDetail`（训练次数/时长/力量容量/运动分钟/步数＋窗口标注）于可展开详情区。新增 `validate-week-load-coverage.mjs` **21/21**（含变异敏感性）；既有 persist-race 42/42、units 25/25、week-comparison 25/25、week-coverage 23/23、steps-display PASS 不回归。validate-source/validate-steps-contract 崩溃在改前同样复现，属既有脚本问题。
+- `L0-TRAIN-DOC-001`（P0/A，文档脱敏）：`changes.md` W-MIG-004 补证节中的真实生产训练场次/组数等统计明细已移除，仅保留不变量结论、核查方法与私有通道引用；plans.md 对应段已由 PM 先行脱敏。本节当前跟踪文本对原数值语境零命中（提交前 grep 核验）；不改生产数据、不重写 Git 历史，历史提交中的既有暴露如实保留、是否治理历史由所有者决定。
+- `W6.2/H4.6` 规则稿（用户直提 P1，10-19 稿件目标）：新增 `workout-log/MUSCLE-MAP.md`——共用映射 v1 覆盖全部 31 个现有稳定 exercise_key（主要/次要肌群、词表、未知 key 与 coverage 口径、H4.6 计数与参考间隔计时规则）；素材 media 全部标 none（合规图源未核实前不配图）。首个两 app 共用闭环（W6.2 动作帮助 UI＋H4.6 肌群页）仍待后续轮次实现，目标 10-20。
+- `CWEB-SPIKE-001`（P1 用户直提，spike 首日稿）：新增 `health-dashboard/CWEB-DATA-CONTRACT.md`——同源读取能力源码核对（space-4 内复用 getDashboard 摘要即可、不跨 artifact、不扩大 L0.1）、字段 coverage 表、游戏侧独立持久化与幂等契约、合成测试矩阵；待核定项（同 artifact 加法迁移的 builder 确认、结算触发点）留待 10-21 前最终结论。
+- 顺延：`W-PLAN-SAFE-001` 余项（P0：getPlan 跨表读混版、晚到 seed 污染、0005 对旧重复键升级拒绝）未在本轮开工——本轮 space-4 构建已占满，space-6 需独立一次构建与真实 handler 验证，下轮 P0 首位推进；`F0.7` 升级要求（具体失败步骤/只读调用结果/最小观测方案）亦顺延下轮与 W-PLAN-SAFE 同轮交付。
