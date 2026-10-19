@@ -37,6 +37,14 @@ export const readinessHistory = sqliteTable("readiness_history", {
   components: text("components").notNull(),
   confidence: text("confidence", { enum: ["高", "中", "低"] }).notNull(),
   snapshotVersion: text("snapshot_version"),
+  // Morning check-in input version (H-ARCHIVE-SAFE-001 race fix): the
+  // morning_checkin.updated_at (ISO instant) of the check-in row the score
+  // was computed from, bound at read time. Null when no check-in existed
+  // for the date — and on every row archived before this column existed;
+  // a null stored checkin_version is treated as the OLDEST version by the
+  // archive arbitration, so legacy rows stay overwritable and are never
+  // deleted or recomputed.
+  checkinVersion: text("checkin_version"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

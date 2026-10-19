@@ -1010,20 +1010,32 @@ async function loadReadinessTrendPoints(ctx: Ctx, endDate: string): Promise<Read
 // or malformed date — the write is skipped silently: the dashboard
 // response is returned unchanged, the trend honestly shows a gap, and no
 // failure ledger entry is written (a skipped backfill is not a fault).
-// (2) Same-day version arbitration: the upsert is ONE atomic statement
-// whose ON CONFLICT … WHERE only applies the update when the incoming
-// snapshot_version is non-null and not older than the stored one, so a
-// late-finishing older computation can never roll today's archived score
-// back. The same version may overwrite (a same-version recomputation can
-// legitimately differ, e.g. after a morning check-in change); a null
-// incoming version may only ever be the first insert for its date and
-// never overwrites an existing row. Only dates actually computed from
-// now on are archived — no backfill, no recomputation of past dates. A
-// write failure must not block the dashboard's main response, so it is
-// caught here and surfaced in the sync ledger instead; the ledger note
-// deliberately carries no health values, only the fact and the date
-// affected.
-async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion: string | null, todayLA?: string): Promise<void> {
+// (2) Same-day version arbitration over BOTH inputs the score was
+// computed from — the health snapshot version AND the morning check-in
+// version (`checkinVersion`: the morning_checkin.updated_at the caller
+// read alongside the feeling, bound at read time, null when no check-in
+// row existed). The upsert is ONE atomic statement whose ON CONFLICT …
+// WHERE applies the update only when the incoming health version is
+// non-null AND (strictly newer than the stored one, OR equal to it while
+// the incoming check-in version is not older than the stored one). The
+// health version alone used to arbitrate with >=, which let a request
+// that had read an OLDER check-in (but paused before its archive write)
+// overwrite a score a newer request had already archived from a NEWER
+// check-in under the same health version. Equal check-in versions are
+// the same input replayed idempotently, so they may overwrite; an
+// incoming null check-in version never overwrites a stored non-null one
+// (the row was computed without an input the stored score had); a stored
+// null check-in version (rows archived before this arbitration existed)
+// counts as the oldest and may always be superseded at equal health
+// version. A null incoming health version may only ever be the first
+// insert for its date and never overwrites an existing row. Freshness is
+// judged ONLY by these input versions, never by the write instant. Only
+// dates actually computed from now on are archived — no backfill, no
+// recomputation of past dates. A write failure must not block the
+// dashboard's main response, so it is caught here and surfaced in the
+// sync ledger instead; the ledger note deliberately carries no health
+// values, only the fact and the date affected.
+async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion: string | null, checkinVersion: string | null, todayLA?: string): Promise<void> {
   if (todayLA !== undefined && readiness.date !== todayLA) return;
   try {
     const db = ctx.db<typeof schema>();
@@ -1035,12 +1047,13 @@ async function archiveReadiness(ctx: Ctx, readiness: Readiness, snapshotVersion:
       components,
       confidence: readiness.confidence,
       snapshotVersion,
+      checkinVersion,
       createdAt: now,
       updatedAt: now,
     }).onConflictDoUpdate({
       target: schema.readinessHistory.date,
-      set: { score: readiness.score, components, confidence: readiness.confidence, snapshotVersion, updatedAt: now },
-      setWhere: sql`excluded.snapshot_version IS NOT NULL AND (${schema.readinessHistory.snapshotVersion} IS NULL OR excluded.snapshot_version >= ${schema.readinessHistory.snapshotVersion})`,
+      set: { score: readiness.score, components, confidence: readiness.confidence, snapshotVersion, checkinVersion, updatedAt: now },
+      setWhere: sql`excluded.snapshot_version IS NOT NULL AND (${schema.readinessHistory.snapshotVersion} IS NULL OR excluded.snapshot_version > ${schema.readinessHistory.snapshotVersion} OR (excluded.snapshot_version = ${schema.readinessHistory.snapshotVersion} AND (${schema.readinessHistory.checkinVersion} IS NULL OR (excluded.checkin_version IS NOT NULL AND excluded.checkin_version >= ${schema.readinessHistory.checkinVersion}))))`,
     });
   } catch {
     await recordSyncLog(ctx, { source: "system", status: "failed", itemCount: 0, note: `readiness 评分存档写入失败 · 日期 ${readiness.date} · 趋势位可能缺当日分数`, sourceUpdatedAt: null });
@@ -1204,8 +1217,15 @@ export const Actions = {
       // Morning check-in is read only when the health snapshot is usable.
       const readinessDate = health.morningReference?.date ?? shiftDate(health.dataDate, 1);
       const db = ctx.db<typeof schema>();
-      const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
+      const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling, updatedAt: schema.morningCheckin.updatedAt }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
       const morningFeeling = checkinRows[0]?.feeling ?? null;
+      // Bind the check-in INPUT VERSION at the same read instant as the
+      // feeling (H-ARCHIVE-SAFE-001 race fix): the row's updated_at as
+      // read here travels with the computed score into the archive
+      // arbitration, so a request that read an older check-in can never
+      // overwrite a score archived from a newer one — even under the
+      // same health snapshot version. Null when no check-in row exists.
+      const checkinVersion = checkinRows[0] ? checkinRows[0].updatedAt.toISOString() : null;
       const readiness = calculateReadiness(snapshot, readinessDate, morningFeeling);
       // Archive the score exactly as computed now (H-LOAD-001): this is
       // the only place readiness is ever computed, so archiving here
@@ -1217,7 +1237,7 @@ export const Actions = {
       // today gate (H-ARCHIVE-SAFE-001) means opening the dashboard on a
       // stale snapshot archives nothing: only the readiness actually
       // displayed for LA today is recorded.
-      await archiveReadiness(ctx, readiness, health.updatedAt, laTodayString());
+      await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, laTodayString());
       const readinessHistory = await loadReadinessTrendPoints(ctx, readinessDate);
       return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
     },

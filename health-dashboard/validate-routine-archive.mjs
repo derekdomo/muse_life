@@ -21,6 +21,15 @@
 //     atomic version guard (a late older snapshot_version never rolls
 //     the stored score back; the same version may overwrite; a null
 //     version may only be the first insert).
+//     The check-in race fix (same ID) widens that arbitration to BOTH
+//     inputs: getDashboard binds the morning_checkin.updated_at it read
+//     alongside the feeling (the check-in version) and the archive
+//     upsert accepts a write only when the health version is strictly
+//     newer, or equal with a check-in version not older than the stored
+//     one — so a request that read an older check-in and paused before
+//     its archive write can no longer overwrite a score archived from a
+//     newer check-in under the same health version. Legacy rows whose
+//     checkin_version is null count as the oldest.
 //
 // Method (same as validate-persist-race.mjs): the REAL production code
 // is extracted verbatim from the artifact source and executed — the real
@@ -125,14 +134,25 @@ const archiveMigration = migrationFiles.map((f) => readFileSync(join(ROOT, 'driz
 check('source: an additive migration creates readiness_history', Boolean(archiveMigration) && archiveMigration.includes('CREATE TABLE'));
 check('source: getDashboard response carries readinessHistory and the handler archives + reads the archive',
   actionsSrc.includes('readinessHistory: z.array(readinessHistoryPointSchema).max(7)')
-  && actionsSrc.includes('await archiveReadiness(ctx, readiness, health.updatedAt, laTodayString())')
+  && actionsSrc.includes('await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, laTodayString())')
   && actionsSrc.includes('await loadReadinessTrendPoints(ctx, readinessDate)'));
+check('source: getDashboard binds the check-in version at the same read as the feeling',
+  actionsSrc.includes('updatedAt: schema.morningCheckin.updatedAt')
+  && actionsSrc.includes('checkinRows[0].updatedAt.toISOString()'));
+check('source: schema.ts declares the nullable checkin_version column and an additive migration adds it',
+  schemaSrc.includes('checkinVersion: text("checkin_version")')
+  && migrationFiles.some((f) => readFileSync(join(ROOT, 'drizzle', f), 'utf8').includes('ADD COLUMN `checkin_version`')));
 {
   const body = extractFunction(actionsSrc, 'archiveReadiness');
   check('source: archive upserts on the date key (same-day recompute overwrites, never duplicates)',
     body.includes('.onConflictDoUpdate(') && body.includes('target: schema.readinessHistory.date'));
-  check('source: archive upsert is version-guarded atomically (setWhere: excluded version non-null and >= stored)',
-    body.includes('setWhere:') && body.includes('excluded.snapshot_version IS NOT NULL') && body.includes('excluded.snapshot_version >='));
+  check('source: archive upsert is version-guarded atomically over BOTH input versions (strictly newer health, or equal health with check-in not older)',
+    body.includes('setWhere:') && body.includes('excluded.snapshot_version IS NOT NULL')
+    && body.includes('excluded.snapshot_version >') && body.includes('excluded.snapshot_version =')
+    && body.includes('excluded.checkin_version IS NOT NULL') && body.includes('excluded.checkin_version >=')
+    && body.includes('checkinVersion'));
+  check('source: archive persists the check-in version alongside the health version',
+    body.includes('checkinVersion,') && body.includes('checkinVersion,'));
   check('source: archive skips the write when readiness.date is not the caller-provided LA today',
     body.includes('readiness.date !== todayLA'));
   check('source: laTodayString computes the LA calendar date via Intl',
@@ -205,8 +225,8 @@ function colRef(table, col) { return { __colsql: `"${table}"."${col}"`, __colnam
 const schemaStub = {
   healthSnapshot: { __table: 'health_snapshot', __cols: { id: 'id', payload: 'payload', sourceUpdatedAt: 'source_updated_at', createdAt: 'created_at', updatedAt: 'updated_at' }, id: colRef('health_snapshot', 'id'), payload: colRef('health_snapshot', 'payload'), sourceUpdatedAt: colRef('health_snapshot', 'source_updated_at') },
   strengthTrainingSnapshot: { __table: 'strength_training_snapshot', __cols: { id: 'id', payload: 'payload', sourceUpdatedAt: 'source_updated_at', createdAt: 'created_at', updatedAt: 'updated_at' }, id: colRef('strength_training_snapshot', 'id'), payload: colRef('strength_training_snapshot', 'payload'), sourceUpdatedAt: colRef('strength_training_snapshot', 'source_updated_at') },
-  morningCheckin: { __table: 'morning_checkin', __cols: { date: 'date', feeling: 'feeling', createdAt: 'created_at', updatedAt: 'updated_at' }, date: colRef('morning_checkin', 'date'), feeling: colRef('morning_checkin', 'feeling') },
-  readinessHistory: { __table: 'readiness_history', __cols: { date: 'date', score: 'score', components: 'components', confidence: 'confidence', snapshotVersion: 'snapshot_version', createdAt: 'created_at', updatedAt: 'updated_at' }, date: colRef('readiness_history', 'date'), score: colRef('readiness_history', 'score'), snapshotVersion: colRef('readiness_history', 'snapshot_version') },
+  morningCheckin: { __table: 'morning_checkin', __cols: { date: 'date', feeling: 'feeling', createdAt: 'created_at', updatedAt: 'updated_at' }, date: colRef('morning_checkin', 'date'), feeling: colRef('morning_checkin', 'feeling'), updatedAt: colRef('morning_checkin', 'updated_at') },
+  readinessHistory: { __table: 'readiness_history', __cols: { date: 'date', score: 'score', components: 'components', confidence: 'confidence', snapshotVersion: 'snapshot_version', checkinVersion: 'checkin_version', createdAt: 'created_at', updatedAt: 'updated_at' }, date: colRef('readiness_history', 'date'), score: colRef('readiness_history', 'score'), snapshotVersion: colRef('readiness_history', 'snapshot_version'), checkinVersion: colRef('readiness_history', 'checkin_version') },
   syncLog: { __table: 'sync_log', __cols: { id: 'id', source: 'source', status: 'status', itemCount: 'item_count', note: 'note', sourceUpdatedAt: 'source_updated_at', createdAt: 'created_at' }, id: colRef('sync_log', 'id') },
 };
 function sqlTag(strings, ...values) {
@@ -298,7 +318,7 @@ function freshSqlite() {
     db.exec(`CREATE TABLE "${t}" (id INTEGER PRIMARY KEY, payload TEXT NOT NULL, source_updated_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
   }
   db.exec('CREATE TABLE "morning_checkin" (date TEXT PRIMARY KEY, feeling INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
-  db.exec('CREATE TABLE "readiness_history" (date TEXT PRIMARY KEY, score REAL, components TEXT NOT NULL, confidence TEXT NOT NULL, snapshot_version TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+  db.exec('CREATE TABLE "readiness_history" (date TEXT PRIMARY KEY, score REAL, components TEXT NOT NULL, confidence TEXT NOT NULL, snapshot_version TEXT, checkin_version TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
   db.exec('CREATE TABLE "sync_log" (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, status TEXT NOT NULL, item_count INTEGER NOT NULL, note TEXT NOT NULL, source_updated_at INTEGER, created_at INTEGER NOT NULL)');
   return db;
 }
@@ -439,20 +459,20 @@ const mkReadiness = (date, score) => ({
   ],
   radar: [],
 });
-const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot_version, components FROM readiness_history ORDER BY date').all();
+const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot_version, checkin_version, components FROM readiness_history ORDER BY date').all();
 {
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), '2026-10-18T15:00:00.000Z', '2026-10-18');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), '2026-10-18T15:00:00.000Z', null, '2026-10-18');
   let rows = archiveRows(db);
   check('archive: first computation lands exactly one row with score, confidence, snapshot version, components',
     rows.length === 1 && rows[0].score === 7.5 && rows[0].confidence === '中'
     && rows[0].snapshot_version === '2026-10-18T15:00:00.000Z' && JSON.parse(rows[0].components).length === 2);
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), '2026-10-18T16:00:00.000Z', '2026-10-18');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), '2026-10-18T16:00:00.000Z', null, '2026-10-18');
   rows = archiveRows(db);
   check('archive: same-day recomputation still leaves one row, holding the latest score',
     rows.length === 1 && rows[0].score === 8.0 && rows[0].snapshot_version === '2026-10-18T16:00:00.000Z');
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 6.0), '2026-10-19T15:00:00.000Z', '2026-10-19');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 6.0), '2026-10-19T15:00:00.000Z', null, '2026-10-19');
   rows = archiveRows(db);
   check('archive: the next day adds a second row', rows.length === 2 && rows[1].date === '2026-10-19' && rows[1].score === 6.0);
   const trend = await impl.loadReadinessTrendPoints(ctx, '2026-10-19');
@@ -462,7 +482,7 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
     trend[5].score === 8.0 && trend[6].score === 6.0);
   check('archive: unarchived dates stay gaps — never filled with today\'s or any other day\'s score',
     trend.slice(0, 5).every((p) => p.score === null));
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-20', null), '2026-10-20T15:00:00.000Z', '2026-10-20');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-20', null), '2026-10-20T15:00:00.000Z', null, '2026-10-20');
   const trend2 = await impl.loadReadinessTrendPoints(ctx, '2026-10-20');
   check('archive: a day archived with a null score （数据不足） still renders as a gap, not a number',
     trend2[6].date === '2026-10-20' && trend2[6].score === null && trend2[5].score === 6.0);
@@ -471,7 +491,7 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true }, new Set(['readiness_history']));
   let threw = false;
-  try { await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1', '2026-10-18'); } catch { threw = true; }
+  try { await impl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1', null, '2026-10-18'); } catch { threw = true; }
   const failed = db.prepare("SELECT note FROM sync_log WHERE status = 'failed'").all();
   check('archive: a write failure is swallowed by archiveReadiness (the dashboard response is not blocked)', !threw);
   check('archive: the failure is visible in the sync ledger, with no health values in the note',
@@ -497,29 +517,29 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
   const D = '2026-10-18';
-  await impl.archiveReadiness(ctx, mkReadiness(D, 8.0), '2026-10-18T18:00:00.000Z', D);
-  await impl.archiveReadiness(ctx, mkReadiness(D, 3.0), '2026-10-18T16:00:00.000Z', D);
+  await impl.archiveReadiness(ctx, mkReadiness(D, 8.0), '2026-10-18T18:00:00.000Z', null, D);
+  await impl.archiveReadiness(ctx, mkReadiness(D, 3.0), '2026-10-18T16:00:00.000Z', null, D);
   let rows = archiveRows(db);
   check('archive-safe: a late-arriving OLDER version does not roll back the stored score',
     rows.length === 1 && rows[0].score === 8.0 && rows[0].snapshot_version === '2026-10-18T18:00:00.000Z');
-  await impl.archiveReadiness(ctx, mkReadiness(D, 6.5), '2026-10-18T18:00:00.000Z', D);
+  await impl.archiveReadiness(ctx, mkReadiness(D, 6.5), '2026-10-18T18:00:00.000Z', null, D);
   rows = archiveRows(db);
-  check('archive-safe: the SAME version may overwrite (a morning check-in change recomputes the day)',
+  check('archive-safe: the SAME health version with no check-in on either side may overwrite (same-input recompute)',
     rows.length === 1 && rows[0].score === 6.5 && rows[0].snapshot_version === '2026-10-18T18:00:00.000Z');
-  await impl.archiveReadiness(ctx, mkReadiness(D, 9.9), null, D);
+  await impl.archiveReadiness(ctx, mkReadiness(D, 9.9), null, null, D);
   rows = archiveRows(db);
   check('archive-safe: a null version never overwrites an existing row',
     rows.length === 1 && rows[0].score === 6.5 && rows[0].snapshot_version === '2026-10-18T18:00:00.000Z');
   const D2 = '2026-10-19';
-  await impl.archiveReadiness(ctx, mkReadiness(D2, 5.0), null, D2);
+  await impl.archiveReadiness(ctx, mkReadiness(D2, 5.0), null, null, D2);
   rows = archiveRows(db);
   check('archive-safe: a null version may still be the FIRST insert for a date (next day adds normally)',
     rows.length === 2 && rows[1].date === D2 && rows[1].score === 5.0 && rows[1].snapshot_version === null);
-  await impl.archiveReadiness(ctx, mkReadiness(D2, 7.0), null, D2);
+  await impl.archiveReadiness(ctx, mkReadiness(D2, 7.0), null, null, D2);
   rows = archiveRows(db);
   check('archive-safe: a second null-version write does not overwrite the null-version row',
     rows.length === 2 && rows[1].score === 5.0);
-  await impl.archiveReadiness(ctx, mkReadiness(D2, 7.5), '2026-10-19T15:00:00.000Z', D2);
+  await impl.archiveReadiness(ctx, mkReadiness(D2, 7.5), '2026-10-19T15:00:00.000Z', null, D2);
   rows = archiveRows(db);
   check('archive-safe: a versioned write supersedes a null-version row',
     rows.length === 2 && rows[1].score === 7.5 && rows[1].snapshot_version === '2026-10-19T15:00:00.000Z');
@@ -527,14 +547,126 @@ const archiveRows = (db) => db.prepare('SELECT date, score, confidence, snapshot
 {
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  await impl.archiveReadiness(ctx, mkReadiness('2000-01-01', 5.0), 'v1', '2026-10-19');
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-20', 5.0), 'v1', '2026-10-19');
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 5.0), 'v1', 'not-a-date');
+  await impl.archiveReadiness(ctx, mkReadiness('2000-01-01', 5.0), 'v1', null, '2026-10-19');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-20', 5.0), 'v1', null, '2026-10-19');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 5.0), 'v1', null, 'not-a-date');
   check('archive-safe: old / future / malformed-today dates write ZERO rows', archiveRows(db).length === 0);
   check('archive-safe: date-gate skips are silent — no failure ledger entry masquerades as a fault',
     db.prepare("SELECT COUNT(*) AS n FROM sync_log WHERE status = 'failed'").get().n === 0);
-  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 5.0), 'v1', '2026-10-19');
+  await impl.archiveReadiness(ctx, mkReadiness('2026-10-19', 5.0), 'v1', null, '2026-10-19');
   check('archive-safe: the matching LA-today date archives normally', archiveRows(db).length === 1);
+}
+
+// ------------- (i) H-ARCHIVE-SAFE-001 check-in race: two-version matrix
+// The PM scenario: under ONE health snapshot version, request A reads
+// check-in v1 and pauses before its archive write; request B reads
+// check-in v2 (newer), computes, and archives; A then lands its stale
+// write. The trend must keep B's score. Versions below are synthetic
+// instants; scores are synthetic stand-ins for "computed from that
+// check-in" — what is under test is purely which write the atomic
+// arbitration accepts.
+{
+  const HV = '2026-10-19T14:00:00.000Z';       // the one health version both requests share
+  const HV_OLD = '2026-10-19T12:00:00.000Z';   // a strictly older health version
+  const HV_NEW = '2026-10-19T16:00:00.000Z';   // a strictly newer health version
+  const CV1 = '2026-10-19T13:05:00.000Z';      // check-in as first saved
+  const CV2 = '2026-10-19T13:20:00.000Z';      // check-in after the user edits it
+  const CV3 = '2026-10-19T13:40:00.000Z';      // an even newer check-in version
+  const D = '2026-10-19';
+  {
+    const db = freshSqlite();
+    const { ctx } = makeCtx(db, { isOwner: true });
+    // B (newer check-in) lands first.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 8.0), HV, CV2, D);
+    // A (older check-in, same health version) arrives late.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 3.0), HV, CV1, D);
+    const rows = archiveRows(db);
+    check('checkin-race: PM order — the late OLD-check-in write is rejected; the row keeps the new check-in score and version',
+      rows.length === 1 && rows[0].score === 8.0 && rows[0].checkin_version === CV2 && rows[0].snapshot_version === HV,
+      `score=${rows[0]?.score}, cv=${rows[0]?.checkin_version}`);
+    // Idempotent replay of the winning input: same health + same
+    // check-in version recomputes the same result and may overwrite.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 8.0), HV, CV2, D);
+    const rows2 = archiveRows(db);
+    check('checkin-race: identical input replayed (same health + same check-in version) does not regress the row',
+      rows2.length === 1 && rows2[0].score === 8.0 && rows2[0].checkin_version === CV2);
+    // A write computed with NO check-in must not displace a score that
+    // was computed WITH one, at equal health version.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 9.9), HV, null, D);
+    const rows3 = archiveRows(db);
+    check('checkin-race: incoming null check-in version never overwrites a stored non-null one at equal health version',
+      rows3.length === 1 && rows3[0].score === 8.0 && rows3[0].checkin_version === CV2);
+    // A strictly newer HEALTH version wins outright, whatever the
+    // check-in versions say.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 7.0), HV_NEW, null, D);
+    const rows4 = archiveRows(db);
+    check('checkin-race: a strictly newer health version is accepted even with a null check-in version',
+      rows4.length === 1 && rows4[0].score === 7.0 && rows4[0].snapshot_version === HV_NEW && rows4[0].checkin_version === null);
+  }
+  {
+    const db = freshSqlite();
+    const { ctx } = makeCtx(db, { isOwner: true });
+    // Reverse order: the older check-in lands first, the newer second.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 3.0), HV, CV1, D);
+    await impl.archiveReadiness(ctx, mkReadiness(D, 8.0), HV, CV2, D);
+    const rows = archiveRows(db);
+    check('checkin-race: reverse order — same health version + NEWER check-in version updates the row',
+      rows.length === 1 && rows[0].score === 8.0 && rows[0].checkin_version === CV2);
+    // An older HEALTH version is blocked even when it carries the
+    // newest check-in version of all.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 1.0), HV_OLD, CV3, D);
+    const rows2 = archiveRows(db);
+    check('checkin-race: an older health version is rejected even with a newer check-in version',
+      rows2.length === 1 && rows2[0].score === 8.0 && rows2[0].snapshot_version === HV);
+  }
+  {
+    const db = freshSqlite();
+    const { ctx } = makeCtx(db, { isOwner: true });
+    // Null check-in on both sides: first insert lands, and at equal
+    // health version a later no-check-in recompute may still overwrite
+    // (stored null = oldest), while a real check-in version then takes
+    // over and locks out further null-check-in writes.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 5.0), HV, null, D);
+    await impl.archiveReadiness(ctx, mkReadiness(D, 5.5), HV, null, D);
+    let rows = archiveRows(db);
+    check('checkin-race: null check-in first insert lands; equal health + stored-null check-in may be overwritten by another null',
+      rows.length === 1 && rows[0].score === 5.5 && rows[0].checkin_version === null);
+    await impl.archiveReadiness(ctx, mkReadiness(D, 6.5), HV, CV1, D);
+    rows = archiveRows(db);
+    check('checkin-race: a real check-in version supersedes the null-check-in row at equal health version',
+      rows.length === 1 && rows[0].score === 6.5 && rows[0].checkin_version === CV1);
+  }
+  {
+    // Legacy row: archived before checkin_version existed — the column
+    // is null while snapshot_version is set. It counts as the OLDEST
+    // check-in version: a same-health-version write carrying any real
+    // check-in version covers it, and the row is upgraded in place
+    // (never deleted, never recomputed by the migration).
+    const db = freshSqlite();
+    const { ctx } = makeCtx(db, { isOwner: true });
+    db.prepare('INSERT INTO readiness_history (date, score, components, confidence, snapshot_version, checkin_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)')
+      .run(D, 4.0, '[]', '中', HV, Date.now(), Date.now());
+    await impl.archiveReadiness(ctx, mkReadiness(D, 6.0), HV, CV1, D);
+    const rows = archiveRows(db);
+    check('checkin-race: a legacy row (checkin_version null) is covered by a same-health-version write with a check-in version',
+      rows.length === 1 && rows[0].score === 6.0 && rows[0].checkin_version === CV1 && rows[0].snapshot_version === HV);
+    // …but a legacy row still resists an older HEALTH version.
+    await impl.archiveReadiness(ctx, mkReadiness(D, 2.0), HV_OLD, CV3, D);
+    const rows2 = archiveRows(db);
+    check('checkin-race: the upgraded row still rejects an older health version',
+      rows2.length === 1 && rows2[0].score === 6.0);
+  }
+  {
+    // Null HEALTH version with a check-in version: first insert only,
+    // exactly like the pre-existing null-health rule.
+    const db = freshSqlite();
+    const { ctx } = makeCtx(db, { isOwner: true });
+    await impl.archiveReadiness(ctx, mkReadiness(D, 5.0), null, CV1, D);
+    await impl.archiveReadiness(ctx, mkReadiness(D, 9.0), null, CV2, D);
+    const rows = archiveRows(db);
+    check('checkin-race: a null health version may only be the first insert, even with a newer check-in version',
+      rows.length === 1 && rows[0].score === 5.0 && rows[0].checkin_version === CV1);
+  }
 }
 
 // getDashboard end-to-end: compute → archive → trend, through the real
@@ -598,6 +730,25 @@ const dayShift = (date, days) => { const d = new Date(`${date}T12:00:00Z`); d.se
   rows = archiveRows(db);
   check('dashboard: a second open the same day still leaves exactly one archive row',
     res2.forbidden === false && rows.length === 1);
+}
+{
+  // Check-in version binding (H-ARCHIVE-SAFE-001 race fix): the handler
+  // reads the morning check-in row for the readiness date and the
+  // archive row must carry THAT row's updated_at as its checkin_version
+  // — the version of the input the score was actually computed from.
+  const db = freshSqlite();
+  const { ctx } = makeCtx(db, { isOwner: true });
+  storeHealth(db, healthSnapshotPayload(dayShift(LA_TODAY, -1), '2026-01-01T15:00:00.000Z', LA_TODAY));
+  const checkinMs = Date.parse('2026-01-02T15:30:00.000Z');
+  db.prepare('INSERT INTO morning_checkin (date, feeling, created_at, updated_at) VALUES (?, ?, ?, ?)')
+    .run(LA_TODAY, 4, checkinMs, checkinMs);
+  const res = await impl.getDashboardHandler(ctx, {});
+  const rows = archiveRows(db);
+  check('dashboard: the readiness uses the stored check-in feeling',
+    res.forbidden === false && res.readiness !== null && res.readiness.morningFeeling === 4);
+  check('dashboard: the archive row binds the check-in version read with the feeling (updated_at, as an ISO instant)',
+    rows.length === 1 && rows[0].checkin_version === '2026-01-02T15:30:00.000Z',
+    `cv=${rows[0]?.checkin_version}`);
 }
 {
   // Stale snapshot opened today (H-ARCHIVE-SAFE-001): the readiness is
@@ -665,8 +816,8 @@ const dayShift = (date, days) => { const d = new Date(`${date}T12:00:00Z`); d.se
   const mutImpl = buildServerImpl(mutated);
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1', '2026-10-18');
-  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), 'v2', '2026-10-18');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 7.5), 'v1', null, '2026-10-18');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), 'v2', null, '2026-10-18');
   const rows = archiveRows(db);
   check('mutation: without the date-key upsert the archive cannot hold the latest same-day score (upsert is load-bearing)',
     mutated !== actionsSrc && !(rows.length === 1 && rows[0].score === 8.0),
@@ -681,8 +832,8 @@ const dayShift = (date, days) => { const d = new Date(`${date}T12:00:00Z`); d.se
   const mutImpl = buildServerImpl(mutated);
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), '2026-10-18T18:00:00.000Z', '2026-10-18');
-  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 3.0), '2026-10-18T16:00:00.000Z', '2026-10-18');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 8.0), '2026-10-18T18:00:00.000Z', null, '2026-10-18');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-18', 3.0), '2026-10-18T16:00:00.000Z', null, '2026-10-18');
   const rows = archiveRows(db);
   check('mutation: without the setWhere version guard a late OLDER version rolls the score back (guard is load-bearing)',
     mutated !== actionsSrc && rows.length === 1 && rows[0].score === 3.0,
@@ -695,9 +846,29 @@ const dayShift = (date, days) => { const d = new Date(`${date}T12:00:00Z`); d.se
   const mutImpl = buildServerImpl(mutated);
   const db = freshSqlite();
   const { ctx } = makeCtx(db, { isOwner: true });
-  await mutImpl.archiveReadiness(ctx, mkReadiness('2000-01-01', 5.0), 'v1', '2026-10-19');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2000-01-01', 5.0), 'v1', null, '2026-10-19');
   check('mutation: without the date gate a past date gets backfilled (gate is load-bearing)',
     mutated !== actionsSrc && archiveRows(db).length === 1);
+}
+{
+  // Revert the arbitration to the PRE-FIX health-only rule (>= on the
+  // health version alone): the PM race reappears — the late old-check-in
+  // write overwrites the new-check-in score — proving the production
+  // check-in term in setWhere is load-bearing.
+  const swStart = actionsSrc.indexOf('setWhere: sql`excluded.snapshot_version');
+  const swEnd = swStart < 0 ? -1 : actionsSrc.indexOf('`,', swStart);
+  const oldGuard = 'setWhere: sql`excluded.snapshot_version IS NOT NULL AND (${schema.readinessHistory.snapshotVersion} IS NULL OR excluded.snapshot_version >= ${schema.readinessHistory.snapshotVersion})`';
+  const mutated = swStart < 0 || swEnd < 0 ? actionsSrc : actionsSrc.slice(0, swStart) + oldGuard + actionsSrc.slice(swEnd + 1);
+  const mutImpl = buildServerImpl(mutated);
+  const db = freshSqlite();
+  const { ctx } = makeCtx(db, { isOwner: true });
+  const HV = '2026-10-19T14:00:00.000Z';
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-19', 8.0), HV, '2026-10-19T13:20:00.000Z', '2026-10-19');
+  await mutImpl.archiveReadiness(ctx, mkReadiness('2026-10-19', 3.0), HV, '2026-10-19T13:05:00.000Z', '2026-10-19');
+  const rows = archiveRows(db);
+  check('mutation: with health-only >= arbitration the PM race returns — the late old-check-in write wins (check-in term is load-bearing)',
+    mutated !== actionsSrc && rows.length === 1 && rows[0].score === 3.0,
+    `mutant score: ${rows[0]?.score ?? 'none'}`);
 }
 
 console.log(`\n${passed} passed, ${failures} failed (source root: ${ROOT})`);
