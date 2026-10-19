@@ -43,6 +43,13 @@
       "when": 1792390864398,
       "tag": "0006_add_readiness_history_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792412359033,
+      "tag": "0007_add_checkin_version_to_readiness_history",
+      "breakpoints": true
     }
   ]
 }
