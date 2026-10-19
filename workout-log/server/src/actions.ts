@@ -2,32 +2,82 @@ import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk"
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
-const routineSchema = z.enum(["push", "pull", "legs"]);
+const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
 
-const ROUTINES = {
+export const ROUTINE_KEYS = ["push", "pull", "legs", "home_posture", "home_snowboard"] as const;
+export type RoutineKey = (typeof ROUTINE_KEYS)[number];
+export const SCHEDULE_CODES = [...ROUTINE_KEYS, "swim", "rest"] as const;
+
+export type PlanExercise = { key: string; name: string; sets: number; target: string };
+export type PlanTemplateMap = Record<RoutineKey, PlanExercise[]>;
+
+// Default plan (2026-10-18 frequency sync, approved by the user):
+// gym Push/Pull/Legs stay the 3 heavy sessions with the posture and
+// snowboard upgrades applied; Home A posture runs 2x/week, Home B
+// snowboard 1x/week. These constants are ONLY the idempotent seed and
+// the fallback when the plan tables are unreadable — the live plan is
+// the persisted rows, editable through updatePlan.
+export const DEFAULT_PLAN_TEMPLATES: PlanTemplateMap = {
   push: [
     { key: "barbell-bench", name: "杠铃卧推", sets: 4, target: "6–8" },
     { key: "overhead-press", name: "站姿推举", sets: 3, target: "8–10" },
     { key: "incline-dumbbell-press", name: "上斜哑铃卧推", sets: 3, target: "8–12" },
     { key: "dips", name: "双杠臂屈伸", sets: 3, target: "10–12" },
     { key: "lateral-raise", name: "哑铃侧平举", sets: 3, target: "12–15" },
+    { key: "push-up-plus", name: "前锯肌 Push-up Plus", sets: 2, target: "12" },
   ],
   pull: [
     { key: "wide-lat-pulldown", name: "高位下拉 · 宽握", sets: 4, target: "8–12" },
     { key: "close-lat-pulldown", name: "高位下拉 · 窄握/反握", sets: 3, target: "10–12" },
     { key: "close-seated-row", name: "坐姿划船 · 窄距", sets: 4, target: "10–12" },
     { key: "wide-seated-row", name: "坐姿划船 · 宽距", sets: 3, target: "10–12" },
-    { key: "face-pull", name: "面拉", sets: 3, target: "12–15" },
+    { key: "face-pull", name: "面拉", sets: 3, target: "15–20" },
+    { key: "reverse-pec-deck", name: "反向蝴蝶机 · 后三角", sets: 3, target: "12–15" },
     { key: "rope-curl", name: "绳索弯举", sets: 3, target: "10–12" },
   ],
   legs: [
     { key: "back-squat", name: "深蹲", sets: 4, target: "6–8" },
     { key: "romanian-deadlift", name: "罗马尼亚硬拉", sets: 3, target: "8–10" },
-    { key: "bulgarian-split-squat", name: "保加利亚分腿蹲", sets: 3, target: "8–10" },
+    { key: "bulgarian-split-squat", name: "保加利亚分腿蹲 · 负重", sets: 3, target: "10" },
     { key: "lying-leg-curl", name: "俯卧腿弯举", sets: 3, target: "10–12" },
+    { key: "calf-raise", name: "提踵", sets: 3, target: "15–20" },
+    { key: "tibialis-raise", name: "靠墙胫骨前肌抬脚尖", sets: 2, target: "20" },
   ],
-} as const;
+  home_posture: [
+    { key: "supine-chin-tuck", name: "仰卧收下巴", sets: 3, target: "10" },
+    { key: "prone-ytw", name: "俯趴 Bench Y-T-W", sets: 2, target: "8" },
+    { key: "side-external-rotation", name: "侧卧外旋 · 小片", sets: 2, target: "12" },
+    { key: "thoracic-extension", name: "胸椎伸展 · Bench 边缘", sets: 2, target: "60秒" },
+  ],
+  home_snowboard: [
+    { key: "single-leg-balance", name: "单腿平衡触点", sets: 2, target: "60秒" },
+    { key: "home-bulgarian-split-squat", name: "保加利亚分腿蹲 · Bench 抱片", sets: 3, target: "12" },
+    { key: "bench-step-up", name: "Bench 登阶", sets: 2, target: "10" },
+    { key: "home-calf-raise", name: "提踵 · 抱片", sets: 3, target: "20" },
+    { key: "tibialis-raise", name: "靠墙胫骨前肌抬脚尖", sets: 2, target: "20" },
+    { key: "wall-sit", name: "靠墙静蹲", sets: 3, target: "45秒" },
+    { key: "dead-bug", name: "死虫", sets: 3, target: "10" },
+    { key: "side-plank", name: "侧平板", sets: 2, target: "40秒" },
+  ],
+};
+
+export const DEFAULT_PLAN_SCHEDULE: { day_index: number; routine_code: string; note: string }[] = [
+  { day_index: 0, routine_code: "home_posture", note: "在家 A · 体态 20 分钟" },
+  { day_index: 1, routine_code: "push", note: "健身房重练" },
+  { day_index: 2, routine_code: "home_snowboard", note: "在家 B · 单板 25 分钟，与腿日隔 48 小时以上" },
+  { day_index: 3, routine_code: "pull", note: "健身房重练" },
+  { day_index: 4, routine_code: "home_posture", note: "在家 A · 体态 20 分钟" },
+  { day_index: 5, routine_code: "swim", note: "游泳 1–2 次安排在本日或休息日" },
+  { day_index: 6, routine_code: "legs", note: "健身房重练" },
+];
+
+export const DEFAULT_DAILY_ITEMS: { key: string; title: string; detail: string }[] = [
+  { key: "daily-chin-tuck", title: "收下巴 Chin Tuck", detail: "10 次 · 每次停 5 秒" },
+  { key: "daily-wall-angels", title: "靠墙天使", detail: "10 次 · 后背贴墙慢速滑动" },
+  { key: "daily-doorway-stretch", title: "门框胸肌拉伸", detail: "30 秒 · 两侧都要" },
+  { key: "daily-monitor-height", title: "确认显示器高度", detail: "屏幕上沿与视线齐平 · 升降桌站姿检查" },
+];
 
 const setResponse = z.object({
   id: z.number(),
@@ -117,13 +167,213 @@ const comparableHistoryEntryResponse = z.object({
   sets: z.array(comparableHistorySetResponse),
 });
 
+// W4.3-D1 (additive): one exercise's previous-comparable entry for the
+// completion receipt — the most recent EARLIER completed workout of
+// the same routine that contains the same exercise key, with that
+// exercise's completed/total set counts there and the source
+// workout's completion time (its 来源日期）. Counts are the source
+// record's own: uncompleted sets stay uncompleted (never zero-filled)
+// and a real 0 completed count is reported as 0.
+const receiptPreviousEntryResponse = z.object({
+  exercise_key: z.string(),
+  source_completed_at: z.string(),
+  completed_sets: z.number(),
+  total_sets: z.number(),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
   recent_workouts: z.array(workoutResponse),
   week_summaries: z.array(weekSummaryResponse),
   comparable_history: z.array(comparableHistoryEntryResponse).optional(),
+  // W4.3-D1 (additive, optional): present ONLY when the caller passed
+  // receipt_workout_id — the completed workout read back by that exact
+  // id for the completion receipt. Null when the id is unknown or the
+  // workout is not completed; the client then shows its retryable
+  // not-read state and never substitutes a recent record. Callers that
+  // pass no id （健康看板 sync) receive neither field, exactly as
+  // before, and may ignore both.
+  receipt: workoutResponse.nullable().optional(),
+  receipt_previous: z.array(receiptPreviousEntryResponse).optional(),
 });
+
+const planExerciseResponse = z.object({
+  key: z.string(),
+  name: z.string(),
+  sets: z.number(),
+  target: z.string(),
+});
+const planRoutineResponse = z.object({
+  routine: routineSchema,
+  exercises: z.array(planExerciseResponse),
+});
+const planScheduleEntryResponse = z.object({
+  day_index: z.number(),
+  routine_code: z.string(),
+  note: z.string(),
+});
+const planDailyItemResponse = z.object({
+  key: z.string(),
+  title: z.string(),
+  detail: z.string(),
+});
+const planResponse = z.object({
+  forbidden: z.boolean(),
+  routines: z.array(planRoutineResponse),
+  schedule: z.array(planScheduleEntryResponse),
+  daily_items: z.array(planDailyItemResponse),
+  daily_date: z.string(),
+  daily_done: z.array(z.string()),
+});
+const updatePlanResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  error: z.string().nullable(),
+});
+
+// Idempotent plan seed: fills any empty plan table from the defaults
+// above. Runs before plan reads and before startWorkout builds a
+// session, so a database that predates the plan tables (or a partial
+// write) always ends up with a complete plan.
+async function ensurePlanSeeded(ctx: Ctx): Promise<void> {
+  const db = ctx.db<typeof schema>();
+  const exerciseRows = await db.select({ id: schema.planExercises.id }).from(schema.planExercises).limit(1);
+  if (exerciseRows.length === 0) {
+    const values = ROUTINE_KEYS.flatMap((routine) =>
+      DEFAULT_PLAN_TEMPLATES[routine].map((exercise, index) => ({
+        routine,
+        sortOrder: index,
+        exerciseKey: exercise.key,
+        exerciseName: exercise.name,
+        sets: exercise.sets,
+        targetReps: exercise.target,
+      })),
+    );
+    await db.insert(schema.planExercises).values(values);
+  }
+  const scheduleRows = await db.select({ id: schema.planSchedule.id }).from(schema.planSchedule).limit(1);
+  if (scheduleRows.length === 0) {
+    await db.insert(schema.planSchedule).values(
+      DEFAULT_PLAN_SCHEDULE.map((entry) => ({
+        dayIndex: entry.day_index,
+        routineCode: entry.routine_code,
+        note: entry.note,
+      })),
+    );
+  }
+  const dailyRows = await db.select({ id: schema.planDailyItems.id }).from(schema.planDailyItems).limit(1);
+  if (dailyRows.length === 0) {
+    await db.insert(schema.planDailyItems).values(
+      DEFAULT_DAILY_ITEMS.map((item, index) => ({
+        itemKey: item.key,
+        title: item.title,
+        detail: item.detail,
+        sortOrder: index,
+      })),
+    );
+  }
+}
+
+// The live templates: persisted rows in sort order, per routine. A
+// routine with no rows (should not happen after ensurePlanSeeded)
+// falls back to the default template for that routine.
+async function loadPlanTemplates(ctx: Ctx): Promise<PlanTemplateMap> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .select()
+    .from(schema.planExercises)
+    .orderBy(asc(schema.planExercises.sortOrder), asc(schema.planExercises.id));
+  const templates = {} as PlanTemplateMap;
+  for (const routine of ROUTINE_KEYS) templates[routine] = [];
+  for (const row of rows) {
+    if ((ROUTINE_KEYS as readonly string[]).includes(row.routine)) {
+      templates[row.routine as RoutineKey].push({
+        key: row.exerciseKey,
+        name: row.exerciseName,
+        sets: row.sets,
+        target: row.targetReps,
+      });
+    }
+  }
+  for (const routine of ROUTINE_KEYS) {
+    if (templates[routine].length === 0) templates[routine] = [...DEFAULT_PLAN_TEMPLATES[routine]];
+  }
+  return templates;
+}
+
+// Pure plan validation, shared by updatePlan (and validation scripts).
+// Returns a human-readable error string, or null when the plan is
+// saveable. Rules: every routine present exactly once with 1–15
+// exercises; exercise keys unique per routine and slug-shaped; sets
+// 1–10; names and targets non-empty; the schedule covers all 7 days
+// exactly once with known codes; daily items 1–10 with unique keys
+// and non-empty titles.
+export function validatePlanInput(input: {
+  routines: { routine: string; exercises: { key: string; name: string; sets: number; target: string }[] }[];
+  schedule: { day_index: number; routine_code: string; note: string }[];
+  daily_items: { key: string; title: string; detail: string }[];
+}): string | null {
+  const keyPattern = /^[a-z0-9][a-z0-9-]*$/;
+  if (input.routines.length !== ROUTINE_KEYS.length) return "训练日模板不完整";
+  const seenRoutines = new Set<string>();
+  for (const entry of input.routines) {
+    if (!(ROUTINE_KEYS as readonly string[]).includes(entry.routine)) return `未知训练日：${entry.routine}`;
+    if (seenRoutines.has(entry.routine)) return "训练日模板有重复";
+    seenRoutines.add(entry.routine);
+    if (entry.exercises.length < 1 || entry.exercises.length > 15) return "每个训练日需要 1–15 个动作";
+    const keys = new Set<string>();
+    for (const exercise of entry.exercises) {
+      if (!keyPattern.test(exercise.key)) return `动作标识不合法：${exercise.key}`;
+      if (keys.has(exercise.key)) return `同一训练日内动作重复：${exercise.name}`;
+      keys.add(exercise.key);
+      if (exercise.name.trim() === "" || exercise.name.length > 60) return "动作名称不能为空";
+      if (!Number.isInteger(exercise.sets) || exercise.sets < 1 || exercise.sets > 10) {
+        return `组数需要在 1–10 之间：${exercise.name}`;
+      }
+      if (exercise.target.trim() === "" || exercise.target.length > 30) return `目标次数不能为空：${exercise.name}`;
+    }
+  }
+  if (input.schedule.length !== 7) return "周安排需要正好 7 天";
+  const days = new Set<number>();
+  for (const entry of input.schedule) {
+    if (!Number.isInteger(entry.day_index) || entry.day_index < 0 || entry.day_index > 6) return "周安排日期不合法";
+    if (days.has(entry.day_index)) return "周安排有重复的日期";
+    days.add(entry.day_index);
+    if (!(SCHEDULE_CODES as readonly string[]).includes(entry.routine_code)) return "周安排里有未知安排";
+    if (entry.note.length > 120) return "周安排备注太长";
+  }
+  if (input.daily_items.length < 1 || input.daily_items.length > 10) return "每日微练需要 1–10 项";
+  const itemKeys = new Set<string>();
+  for (const item of input.daily_items) {
+    if (!keyPattern.test(item.key)) return `微练标识不合法：${item.key}`;
+    if (itemKeys.has(item.key)) return "每日微练有重复项";
+    itemKeys.add(item.key);
+    if (item.title.trim() === "" || item.title.length > 60) return "微练名称不能为空";
+    if (item.detail.length > 120) return "微练说明太长";
+  }
+  return null;
+}
+
+// The viewer's calendar date for the daily checklist, in the same
+// America/Los_Angeles frame the week summaries use.
+export function laDateKey(now: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  let year = "";
+  let month = "";
+  let day = "";
+  for (const part of parts) {
+    if (part.type === "year") year = part.value;
+    else if (part.type === "month") month = part.value;
+    else if (part.type === "day") day = part.value;
+  }
+  return `${year}-${month}-${day}`;
+}
 
 // Owner-only gate (AUDIT-02 / L0.1): every write, initialization, and
 // browser-facing action must verify this before touching the database. A
@@ -548,13 +798,10 @@ async function loadPreviousCompletedSets(
   ctx: Ctx,
   routine: z.infer<typeof routineSchema>,
   unit: z.infer<typeof unitSchema>,
+  exerciseKeys: string[],
 ): Promise<PreviousComparable> {
   const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
-  return selectPreviousSetsByExercise(
-    recentCompleted,
-    ROUTINES[routine].map((exercise) => exercise.key),
-    unit,
-  );
+  return selectPreviousSetsByExercise(recentCompleted, exerciseKeys, unit);
 }
 
 // W1-CONSISTENCY-001: the dashboard view of the same raw selection,
@@ -569,9 +816,10 @@ async function loadComparableHistory(
   ctx: Ctx,
 ): Promise<z.infer<typeof comparableHistoryEntryResponse>[]> {
   const entries: z.infer<typeof comparableHistoryEntryResponse>[] = [];
-  for (const routine of ["push", "pull", "legs"] as const) {
+  const templates = await loadPlanTemplates(ctx);
+  for (const routine of ROUTINE_KEYS) {
     const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
-    for (const raw of selectComparableHistory(recentCompleted, ROUTINES[routine].map((exercise) => exercise.key))) {
+    for (const raw of selectComparableHistory(recentCompleted, templates[routine].map((exercise) => exercise.key))) {
       entries.push({
         routine,
         exercise_key: raw.exerciseKey,
@@ -589,9 +837,105 @@ async function loadComparableHistory(
   return entries;
 }
 
+// W4.3-D1: the pure per-exercise previous-comparable selection behind
+// the completion receipt. `candidates` is the receipt workout's own
+// routine's completed workouts that finished strictly before it, most
+// recent first (the caller filters and orders). For each exercise key
+// (in the receipt workout's own order) the FIRST candidate containing
+// that key contributes the entry — matched by key only, so a
+// same-named exercise under a different key never counts as
+// comparable. Counts are that exercise's own sets in the source
+// workout: uncompleted sets are never zero-filled, and an exercise
+// whose source sets were all uncompleted reports a real
+// completed_sets of 0. Self-contained so validation scripts can run
+// it verbatim.
+export function selectReceiptPrevious(
+  candidates: { id: number; completed_at: string; sets: { exercise_key: string; completed: boolean }[] }[],
+  exerciseKeys: string[],
+): z.infer<typeof receiptPreviousEntryResponse>[] {
+  const entries: z.infer<typeof receiptPreviousEntryResponse>[] = [];
+  for (const key of exerciseKeys) {
+    for (const candidate of candidates) {
+      const sets = candidate.sets.filter((set) => set.exercise_key === key);
+      if (sets.length === 0) continue;
+      entries.push({
+        exercise_key: key,
+        source_completed_at: candidate.completed_at,
+        completed_sets: sets.filter((set) => set.completed).length,
+        total_sets: sets.length,
+      });
+      break;
+    }
+  }
+  return entries;
+}
+
+// W4.3-D1: load the receipt workout's previous-comparable candidates —
+// completed workouts of the SAME routine that finished strictly
+// before it ((completed_at, id) order, so a same-instant record with a
+// larger id never counts as "earlier"), most recent first, capped at
+// the same 20-workout window the comparable-history selection uses.
+async function loadReceiptPrevious(
+  ctx: Ctx,
+  receipt: z.infer<typeof workoutResponse>,
+): Promise<z.infer<typeof receiptPreviousEntryResponse>[]> {
+  if (!receipt.completed_at) return [];
+  const db = ctx.db<typeof schema>();
+  const completedAtMs = new Date(receipt.completed_at).getTime();
+  const rows = await db
+    .select({ id: schema.workouts.id, completedAt: schema.workouts.completedAt })
+    .from(schema.workouts)
+    .where(
+      and(
+        eq(schema.workouts.routine, receipt.routine),
+        isNotNull(schema.workouts.completedAt),
+        ne(schema.workouts.id, receipt.id),
+      ),
+    )
+    .orderBy(desc(schema.workouts.completedAt), desc(schema.workouts.id))
+    .limit(40);
+  const earlier: { id: number; completedAt: Date }[] = [];
+  for (const row of rows) {
+    if (!row.completedAt) continue;
+    const ms = row.completedAt.getTime();
+    if (ms < completedAtMs || (ms === completedAtMs && row.id < receipt.id)) {
+      earlier.push({ id: row.id, completedAt: row.completedAt });
+      if (earlier.length >= 20) break;
+    }
+  }
+  if (earlier.length === 0) return [];
+  const setRows = await db
+    .select({
+      workoutId: schema.workoutSets.workoutId,
+      exerciseKey: schema.workoutSets.exerciseKey,
+      completed: schema.workoutSets.completed,
+    })
+    .from(schema.workoutSets)
+    .where(inArray(schema.workoutSets.workoutId, earlier.map((row) => row.id)));
+  const setsByWorkout = new Map<number, { exercise_key: string; completed: boolean }[]>();
+  for (const row of setRows) {
+    const list = setsByWorkout.get(row.workoutId) ?? [];
+    list.push({ exercise_key: row.exerciseKey, completed: row.completed });
+    setsByWorkout.set(row.workoutId, list);
+  }
+  const candidates = earlier.map((row) => ({
+    id: row.id,
+    completed_at: row.completedAt.toISOString(),
+    sets: setsByWorkout.get(row.id) ?? [],
+  }));
+  const exerciseKeys = [...new Set(receipt.sets.map((set) => set.exercise_key))];
+  return selectReceiptPrevious(candidates, exerciseKeys);
+}
+
 export const Actions = {
   getDashboard: defineAction({
-    request: z.object({ recent_limit: z.number().int().min(1).max(20).default(8) }),
+    request: z.object({
+      recent_limit: z.number().int().min(1).max(20).default(8),
+      // W4.3-D1 (additive, optional): the id of the workout the caller
+      // just completed, to read back by id for the completion
+      // receipt. Omitted by every existing caller.
+      receipt_workout_id: z.number().int().positive().optional(),
+    }),
     response: dashboardResponse,
     async handler(ctx, args): Promise<z.infer<typeof dashboardResponse>> {
       // Read-only: also serves 健康看板's internal sync channel (see
@@ -667,12 +1011,38 @@ export const Actions = {
         })),
         now,
       );
+      // W4.3-D1 (additive): when the caller names the workout it just
+      // completed, read THAT record back by id for the completion
+      // receipt, together with its per-exercise previous-comparable
+      // entries. Located strictly by id — never by a "most recent"
+      // substitution: an unknown or not-yet-completed id answers
+      // receipt: null and the client shows its retryable not-read
+      // state instead of guessing. This runs only after the gate
+      // above passed, under the same owner / sync-channel rule as the
+      // rest of this action — nothing here widens access, and no
+      // write path is involved.
+      let receiptFields: {
+        receipt: z.infer<typeof workoutResponse> | null;
+        receipt_previous: z.infer<typeof receiptPreviousEntryResponse>[];
+      } | null = null;
+      if (args.receipt_workout_id != null) {
+        const located = await loadWorkout(ctx, args.receipt_workout_id);
+        if (located && located.completed_at != null) {
+          receiptFields = {
+            receipt: located,
+            receipt_previous: await loadReceiptPrevious(ctx, located),
+          };
+        } else {
+          receiptFields = { receipt: null, receipt_previous: [] };
+        }
+      }
       return {
         forbidden: false,
         active_workout: activeWorkout,
         recent_workouts: recentWorkouts,
         week_summaries: weekSummaries,
         comparable_history: await loadComparableHistory(ctx),
+        ...(receiptFields ?? {}),
       };
     },
   }),
@@ -743,8 +1113,16 @@ export const Actions = {
       };
 
       try {
-      const previous = await loadPreviousCompletedSets(ctx, args.routine, args.unit);
-      const values = ROUTINES[args.routine].flatMap((exercise) => {
+      await ensurePlanSeeded(ctx);
+      const templates = await loadPlanTemplates(ctx);
+      const template = templates[args.routine];
+      const previous = await loadPreviousCompletedSets(
+        ctx,
+        args.routine,
+        args.unit,
+        template.map((exercise) => exercise.key),
+      );
+      const values = template.flatMap((exercise) => {
         const history = previous.byExercise[exercise.key] ?? [];
         const { min: targetMin, max: targetMax } = targetRepRange(exercise.target);
         // W1.2: prefill comes from the same progressionDecision the
@@ -1156,6 +1534,163 @@ export const Actions = {
       `);
       if (deletedRows.length === 0) return { ok: false, forbidden: false };
       await db.delete(schema.workoutSets).where(eq(schema.workoutSets.workoutId, args.workout_id));
+      ctx.invalidateQueries();
+      return { ok: true, forbidden: false };
+    },
+  }),
+
+  getPlan: defineAction({
+    request: z.object({}),
+    response: planResponse,
+    async handler(ctx): Promise<z.infer<typeof planResponse>> {
+      const empty: z.infer<typeof planResponse> = {
+        forbidden: true,
+        routines: [],
+        schedule: [],
+        daily_items: [],
+        daily_date: laDateKey(new Date()),
+        daily_done: [],
+      };
+      // Strictly owner-only, unlike getDashboard: the L0.1 sync-channel
+      // exception the user accepted covers getDashboard's read for the
+      // 健康看板 sync, and the plan surface does not extend it.
+      if (!isOwner(ctx)) return empty;
+      await ensurePlanSeeded(ctx);
+      const db = ctx.db<typeof schema>();
+      const templates = await loadPlanTemplates(ctx);
+      const scheduleRows = await db
+        .select()
+        .from(schema.planSchedule)
+        .orderBy(asc(schema.planSchedule.dayIndex));
+      const dailyRows = await db
+        .select()
+        .from(schema.planDailyItems)
+        .orderBy(asc(schema.planDailyItems.sortOrder), asc(schema.planDailyItems.id));
+      const dateKey = laDateKey(new Date());
+      const doneRows = await db
+        .select()
+        .from(schema.dailyCompletions)
+        .where(eq(schema.dailyCompletions.dateKey, dateKey));
+      return {
+        forbidden: false,
+        routines: ROUTINE_KEYS.map((routine) => ({ routine, exercises: templates[routine] })),
+        schedule: scheduleRows.map((row) => ({
+          day_index: row.dayIndex,
+          routine_code: row.routineCode,
+          note: row.note,
+        })),
+        daily_items: dailyRows.map((row) => ({ key: row.itemKey, title: row.title, detail: row.detail })),
+        daily_date: dateKey,
+        daily_done: doneRows.filter((row) => row.done === 1).map((row) => row.itemKey),
+      };
+    },
+  }),
+
+  updatePlan: defineAction({
+    request: z.object({
+      routines: z.array(
+        z.object({
+          routine: z.string(),
+          exercises: z.array(
+            z.object({
+              key: z.string(),
+              name: z.string(),
+              sets: z.number(),
+              target: z.string(),
+            }),
+          ),
+        }),
+      ),
+      schedule: z.array(
+        z.object({ day_index: z.number(), routine_code: z.string(), note: z.string() }),
+      ),
+      daily_items: z.array(
+        z.object({ key: z.string(), title: z.string(), detail: z.string() }),
+      ),
+    }),
+    response: updatePlanResponse,
+    async handler(ctx, args): Promise<z.infer<typeof updatePlanResponse>> {
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true, error: null };
+      }
+      const error = validatePlanInput(args);
+      if (error) return { ok: false, forbidden: false, error };
+      const db = ctx.db<typeof schema>();
+      // Full replace of the three plan tables from the validated
+      // draft. Daily completions key off item keys, which the editor
+      // keeps stable across renames, so history survives a save.
+      await db.delete(schema.planExercises);
+      await db.delete(schema.planSchedule);
+      await db.delete(schema.planDailyItems);
+      await db.insert(schema.planExercises).values(
+        args.routines.flatMap((entry) =>
+          entry.exercises.map((exercise, index) => ({
+            routine: entry.routine,
+            sortOrder: index,
+            exerciseKey: exercise.key,
+            exerciseName: exercise.name.trim(),
+            sets: exercise.sets,
+            targetReps: exercise.target.trim(),
+          })),
+        ),
+      );
+      await db.insert(schema.planSchedule).values(
+        args.schedule.map((entry) => ({
+          dayIndex: entry.day_index,
+          routineCode: entry.routine_code,
+          note: entry.note,
+        })),
+      );
+      await db.insert(schema.planDailyItems).values(
+        args.daily_items.map((item, index) => ({
+          itemKey: item.key,
+          title: item.title.trim(),
+          detail: item.detail,
+          sortOrder: index,
+        })),
+      );
+      ctx.invalidateQueries();
+      return { ok: true, forbidden: false, error: null };
+    },
+  }),
+
+  toggleDailyItem: defineAction({
+    request: z.object({
+      date_key: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      item_key: z.string().min(1),
+      done: z.boolean(),
+    }),
+    response: doneResponse,
+    async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true };
+      }
+      const db = ctx.db<typeof schema>();
+      // Upsert the one (date, item) row. The checklist is purely
+      // informational — nothing here touches workout state.
+      const existing = await db
+        .select({ id: schema.dailyCompletions.id })
+        .from(schema.dailyCompletions)
+        .where(
+          and(
+            eq(schema.dailyCompletions.dateKey, args.date_key),
+            eq(schema.dailyCompletions.itemKey, args.item_key),
+          ),
+        )
+        .limit(1);
+      const existingId = existing[0]?.id;
+      if (existingId) {
+        await db
+          .update(schema.dailyCompletions)
+          .set({ done: args.done ? 1 : 0, updatedAt: new Date() })
+          .where(eq(schema.dailyCompletions.id, existingId));
+      } else {
+        await db.insert(schema.dailyCompletions).values({
+          dateKey: args.date_key,
+          itemKey: args.item_key,
+          done: args.done ? 1 : 0,
+        });
+      }
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },

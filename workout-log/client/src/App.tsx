@@ -9,26 +9,62 @@ type WorkoutSet = Workout["sets"][number];
 type Routine = Workout["routine"];
 type Unit = Workout["unit"];
 
-const ROUTINE_META: Record<Routine, { label: string; day: string; count: string; warmup: string }> = {
+const ROUTINE_META: Record<Routine, { label: string; title: string; day: string; count: string; warmup: string }> = {
   push: {
     label: "推",
+    title: "推日",
     day: "周二",
-    count: "5 个动作 · 16 组",
+    count: "6 个动作 · 18 组",
     warmup: "单车 5 分钟 · 弹力带绕肩 15 次 · 手臂绕环前后各 15 次 · 空杆卧推 2×12",
   },
   pull: {
     label: "拉",
+    title: "拉日",
     day: "周四",
-    count: "6 个动作 · 20 组",
+    count: "7 个动作 · 23 组",
     warmup: "划船机 5 分钟 · 死悬垂 30 秒×2 · 弹力带直臂下拉 15 次 · 轻重量高位下拉 2×12",
   },
   legs: {
     label: "腿",
+    title: "腿日",
     day: "周日",
-    count: "4 个动作 · 13 组",
+    count: "6 个动作 · 18 组",
     warmup: "单车 5 分钟 · 自重深蹲 15 次 · 前后腿摆动各 15 次 · 臀桥 15 次 · 空杆深蹲 2×10",
   },
+  home_posture: {
+    label: "在家 A",
+    title: "在家 A · 体态",
+    day: "周一 · 周五",
+    count: "4 个动作 · 9 组",
+    warmup: "颈部左右轻转各 5 次 · 肩部绕环前后各 10 次 · 猫牛式 8 次",
+  },
+  home_snowboard: {
+    label: "在家 B",
+    title: "在家 B · 单板",
+    day: "周三",
+    count: "8 个动作 · 20 组",
+    warmup: "原地慢跑 2 分钟 · 踝关节绕环各 10 次 · 自重深蹲 12 次 · 单腿站立各 20 秒",
+  },
 };
+
+// The weekly review's "完整一轮" still means the three gym sessions;
+// the home routines are tracked in history but never gate the review.
+const GYM_ROUTINES: Routine[] = ["push", "pull", "legs"];
+const ALL_ROUTINES: Routine[] = ["push", "pull", "legs", "home_posture", "home_snowboard"];
+const SCHEDULE_DAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const SCHEDULE_CODE_LABELS: Record<string, string> = {
+  push: "健身房 · 推",
+  pull: "健身房 · 拉",
+  legs: "健身房 · 腿",
+  home_posture: "在家 A · 体态",
+  home_snowboard: "在家 B · 单板",
+  swim: "游泳 / 休息",
+  rest: "休息",
+};
+
+type Plan = ApiResponse<typeof api, "getPlan">;
+type PlanRoutineEntry = Plan["routines"][number];
+type PlanExerciseDraft = { key: string; name: string; sets: number; target: string };
 
 type ExerciseGuide = {
   title: string;
@@ -36,8 +72,11 @@ type ExerciseGuide = {
   setup: string;
   cues: string[];
   mistakes: string[];
-  video: string;
-  source: string;
+  // Optional: only guides with a verified public demonstration carry
+  // a video link; newer exercises ship cues without one rather than
+  // linking an unchecked video.
+  video?: string;
+  source?: string;
 };
 
 const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
@@ -176,10 +215,119 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     video: "https://www.youtube.com/shorts/tLyA9uXn5Wo",
     source: "俯卧腿弯举示范",
   },
+  "push-up-plus": {
+    title: "前锯肌 Push-up Plus",
+    focus: "前锯肌 · 肩胛稳定",
+    setup: "高位平板支撑，手掌在肩膀正下方；手臂全程伸直，靠肩胛骨移动身体。",
+    cues: ["先让肩胛自然靠拢，背部微微下沉", "再主动把地面推远，上背顶起呈圆弧", "动作只发生在肩胛，不弯手肘"],
+    mistakes: ["变成普通俯卧撑弯手肘", "塌腰或撅臀", "耸肩贴近耳朵"],
+  },
+  "reverse-pec-deck": {
+    title: "反向蝴蝶机 · 后三角",
+    focus: "三角肌后束 · 菱形肌 · 中斜方肌",
+    setup: "面朝靠垫坐稳，胸口贴紧垫面；把手与肩同高，手臂近乎伸直。",
+    cues: ["由肘部带动向身体两侧打开", "末端夹紧肩胛并停 1 秒", "慢速回程，不让配重片落尽"],
+    mistakes: ["耸肩让上斜方代偿", "身体后仰借力", "手臂弯曲变成划船"],
+  },
+  "calf-raise": {
+    title: "提踵",
+    focus: "腓肠肌 · 比目鱼肌",
+    setup: "前脚掌踩稳台阶边缘，脚跟可低于台阶面；扶稳保持平衡。",
+    cues: ["脚跟下沉到充分拉伸", "由前脚掌主动蹬起至最高点并停 1 秒", "全程慢速，膝盖保持姿势不变"],
+    mistakes: ["借弹跳快速起落", "动作幅度只有一半", "脚踝内外翻"],
+  },
+  "tibialis-raise": {
+    title: "靠墙胫骨前肌抬脚尖",
+    focus: "胫骨前肌",
+    setup: "背靠墙站立，双脚向前离墙约一步，脚跟踩地。",
+    cues: ["脚尖尽量抬向小腿方向", "顶部停 1 秒再慢放", "脚跟不离地、身体不前倾"],
+    mistakes: ["抬得太快靠惯性", "膝盖大幅弯曲代偿", "脚尖外八"],
+  },
+  "supine-chin-tuck": {
+    title: "仰卧收下巴",
+    focus: "深层颈屈肌",
+    setup: "仰卧平躺，头下不垫高枕；后脑轻贴地面，眼睛看向天花板。",
+    cues: ["像做双下巴一样把下巴水平后收", "每次停 5 秒再完全放松", "后脑不离地、不用力压脖子"],
+    mistakes: ["低头把下巴压向胸口", "憋气耸肩", "速度太快不停顿"],
+  },
+  "prone-ytw": {
+    title: "俯趴 Bench Y-T-W",
+    focus: "下斜方肌 · 菱形肌 · 三角肌后束",
+    setup: "俯趴在 bench 上，胸口贴稳、脸朝下；双手各拿最小的片（2.5–5 lb 足够）。",
+    cues: ["Y：手臂向头顶斜上方举起，拇指朝上", "T：手臂向两侧平举，夹紧肩胛", "W：屈肘呈 W 形后收，肘部向后下方拉"],
+    mistakes: ["重量过大靠摆动", "抬头耸肩", "手臂举起时腰部反弓"],
+  },
+  "side-external-rotation": {
+    title: "侧卧外旋 · 小片",
+    focus: "肩袖外旋肌群",
+    setup: "侧卧，上方手肘夹一条毛巾贴住身体，手里拿最小的片。",
+    cues: ["肘部固定不动，只让前臂向外打开", "打开到舒适的最大角度后慢放", "全程保持肘部夹紧毛巾"],
+    mistakes: ["肘部离开身体", "身体向后翻转借力", "重量过大动作变形"],
+  },
+  "thoracic-extension": {
+    title: "胸椎伸展 · Bench 边缘",
+    focus: "胸椎活动度",
+    setup: "仰卧，上背靠在 bench 边缘，双手托住后脑，臀部贴地。",
+    cues: ["以 bench 边缘为支点慢慢向后伸展上背", "每个位置停留数次呼吸", "上下移动几厘米换一个节段"],
+    mistakes: ["用腰部后仰代替胸椎伸展", "臀部离地", "动作过猛或憋气"],
+  },
+  "single-leg-balance": {
+    title: "单腿平衡触点",
+    focus: "踝膝稳定 · 本体感觉",
+    setup: "单脚站稳，另一只脚悬空；先扶墙或椅背找平衡。",
+    cues: ["悬空脚依次轻触前、侧、后三个点", "支撑腿膝盖对准脚尖方向", "躯干保持直立，目光看前方固定点"],
+    mistakes: ["支撑脚脚踝左右晃动失控", "膝盖向内塌", "靠快速摆动保持平衡"],
+  },
+  "home-bulgarian-split-squat": {
+    title: "保加利亚分腿蹲 · Bench 抱片",
+    focus: "股四头肌 · 臀大肌 · 单腿稳定",
+    setup: "后脚脚背搭在 bench 上，双手抱一片杠铃片在胸前；这是耐力练法，次数优先。",
+    cues: ["绝大部分重量留在前脚", "前膝沿脚尖方向移动", "节奏均匀，不追求大重量"],
+    mistakes: ["前脚离凳太近导致脚跟抬起", "前膝向内塌", "后腿用力过多"],
+  },
+  "bench-step-up": {
+    title: "Bench 登阶",
+    focus: "股四头肌 · 臀大肌 · 单腿力量",
+    setup: "面对 bench 站立，一只脚整只踩上凳面；先确认 bench 稳定不滑动。",
+    cues: ["由踩上的腿主动发力站直", "下放时慢速控制 2–3 秒", "躯干保持直立，不用后脚蹬地"],
+    mistakes: ["后脚猛蹬借力", "膝盖向内塌", "下放直接掉落"],
+  },
+  "home-calf-raise": {
+    title: "提踵 · 抱片",
+    focus: "腓肠肌 · 比目鱼肌",
+    setup: "双手抱片于胸前，前脚掌踩稳台阶或地面边缘，另一手扶稳。",
+    cues: ["脚跟下沉到充分拉伸", "蹬起至最高点停 1 秒", "高次数慢节奏，练的是耐力"],
+    mistakes: ["借弹跳快速起落", "动作幅度不足", "身体前后摇晃"],
+  },
+  "wall-sit": {
+    title: "靠墙静蹲",
+    focus: "股四头肌耐力 · 单板半蹲姿势",
+    setup: "背部整片贴墙下滑，膝盖约 90°，双脚向前与肩同宽。",
+    cues: ["膝盖对准脚尖方向", "重量均匀落在全脚掌", "呼吸均匀，逐周把每组时间加上去（45 秒 → 90 秒）"],
+    mistakes: ["膝盖超过脚尖太多且内塌", "双手撑在大腿上卸力", "下滑角度太浅没有训练效果"],
+  },
+  "dead-bug": {
+    title: "死虫",
+    focus: "核心抗伸展",
+    setup: "仰卧，双臂伸向天花板，髋膝各屈 90°；下背主动压紧地面。",
+    cues: ["对侧手脚同时慢慢伸直，不碰地就收回", "下背全程贴地，肋骨收住", "呼气时移动，动作越慢越好"],
+    mistakes: ["下背离开地面弓起来", "速度太快靠惯性", "憋气"],
+  },
+  "side-plank": {
+    title: "侧平板",
+    focus: "腹斜肌 · 核心抗侧屈",
+    setup: "侧卧，前臂撑地，肘在肩正下方；双腿伸直叠放，髋部抬离地面。",
+    cues: ["身体从头到脚成一条直线", "髋部主动向前顶，不下沉", "保持均匀呼吸，先做到目标秒数"],
+    mistakes: ["髋部下沉或向后倒", "头部下垂", "肩膀耸起贴近耳朵"],
+  },
 };
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", weekday: "short" }).format(new Date(value));
+}
+
+function formatClock(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
 }
 
 function formatDuration(start: string, end?: string | null) {
@@ -384,6 +532,7 @@ function weightTrend(review: ExerciseReview) {
 }
 
 type ComparableHistoryEntry = NonNullable<Dashboard["comparable_history"]>[number];
+type ReceiptPreviousEntry = NonNullable<Dashboard["receipt_previous"]>[number];
 
 // Shared tail of reviewRecommendation: given ONE comparable candidate
 // (target string, source unit, and ALL of the exercise's sets from the
@@ -477,6 +626,92 @@ function reviewRecommendation(
   });
 }
 
+// --- W4.3-D1: completion receipt derivation (pure) ---
+// The receipt is built ONLY from the record read back by the finished
+// workout's own id (getDashboard's receipt / receipt_previous fields)
+// — never from the active workout's draft sets, and never from
+// whichever record happens to be most recent. Per exercise it shows
+// this workout's completed/total sets next to the most recent earlier
+// same-routine, same-key record (supplied by the server's
+// selectReceiptPrevious); a missing entry renders as 暂无可比记录.
+// Counts come straight from the stored sets: uncompleted sets are
+// counted as uncompleted, never zero-filled, and a real 0 completed
+// count stays 0. The next-time suggestion runs the SAME W1
+// progressionDecision (above) over THIS workout's own sets — no new
+// thresholds, no readiness input — and when the rule has no reliable
+// input (its "none" verdict) the line honestly reads 数据不足.
+export type ReceiptExerciseLine = {
+  key: string;
+  name: string;
+  completedSets: number;
+  totalSets: number;
+  incompleteSets: number;
+  previous: { sourceDate: string; completedSets: number; totalSets: number } | null;
+  suggestion: string;
+};
+
+export function receiptExerciseLines(
+  workout: Workout,
+  previous: ReceiptPreviousEntry[] | undefined,
+) {
+  const lines: ReceiptExerciseLine[] = groupSets(workout.sets).map((exercise) => {
+    const completedSets = exercise.sets.filter((set) => set.completed).length;
+    const totalSets = exercise.sets.length;
+    const entry = previous?.find((item) => item.exercise_key === exercise.key) ?? null;
+    const { min, max } = targetRange(exercise.target);
+    const decision = progressionDecision({
+      plannedSets: totalSets,
+      sets: exercise.sets,
+      targetMin: min,
+      targetMax: max,
+      unit: workout.unit,
+    });
+    let suggestion: string;
+    if (decision.action === "increase") {
+      suggestion = `下次增至 ${decision.suggestedWeight}${workout.unit}`;
+    } else if (decision.action === "reduce") {
+      suggestion = `下次降至 ${decision.suggestedWeight}${workout.unit}`;
+    } else if (decision.action === "hold") {
+      suggestion = completedSets < totalSets
+        ? `下次维持 ${decision.suggestedWeight}${workout.unit}，先完成全部 ${totalSets} 组`
+        : `下次维持 ${decision.suggestedWeight}${workout.unit}`;
+    } else {
+      suggestion = "数据不足";
+    }
+    return {
+      key: exercise.key,
+      name: exercise.name,
+      completedSets,
+      totalSets,
+      incompleteSets: totalSets - completedSets,
+      previous: entry
+        ? { sourceDate: entry.source_completed_at, completedSets: entry.completed_sets, totalSets: entry.total_sets }
+        : null,
+      suggestion,
+    };
+  });
+  return lines;
+}
+
+// W4.3-D1: the receipt's read-back phase. The read locates the record
+// strictly by the finished workout's id; while it is in flight the
+// receipt shows the intermediate 正在读取记录 state (draft set counts
+// are never presented as saved counts), and any failure — transport
+// error, or a successful response whose receipt is null — lands in
+// the retryable 记录暂未读出 state. Retrying re-runs ONLY this read:
+// it never calls completeWorkout again and never reactivates the
+// finished record.
+export type ReceiptReadPhase = "reading" | "unavailable" | "ready";
+
+export function receiptReadPhase(input: { isPending: boolean; isError: boolean; receiptFound: boolean }) {
+  const phase: ReceiptReadPhase = input.isPending
+    ? "reading"
+    : input.isError || !input.receiptFound
+      ? "unavailable"
+      : "ready";
+  return phase;
+}
+
 function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
   const { start, end } = previousCompleteWeek();
   const priorStart = new Date(start);
@@ -485,10 +720,10 @@ function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; co
   const priorWeek = workoutsInRange(workouts, priorStart, start);
   const sets = week.reduce((sum, workout) => sum + completedCount(workout), 0);
   const routines = new Set(week.map((workout) => workout.routine));
-  const completeRound = (Object.keys(ROUTINE_META) as Routine[]).every((routine) =>
+  const completeRound = GYM_ROUTINES.every((routine) =>
     week.some((workout) => workout.routine === routine && workout.sets.length > 0 && workout.sets.every((set) => set.completed)),
   );
-  const missing = (Object.keys(ROUTINE_META) as Routine[]).filter((routine) => !routines.has(routine));
+  const missing = GYM_ROUTINES.filter((routine) => !routines.has(routine));
   const reviews = exerciseReviews(week, priorWeek);
   const recommendations = reviews.map((review) => reviewRecommendation(review, workouts, comparableHistory));
   const endInclusive = new Date(end);
@@ -554,6 +789,111 @@ function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; co
   );
 }
 
+// --- W4.3-D1: completion receipt (start page, non-blocking) ---
+// Shown at the top of the start page after a workout finishes. Its
+// recovery strategy after a page refresh is deliberate and narrow:
+// the receipt exists only in App state, keyed by the exact workoutId
+// this session's completeWorkout finished — a refresh drops the
+// receipt entirely (the record itself stays in the history below),
+// and nothing ever reconstructs a receipt from "the most recent
+// record", which could silently be a different workout. Dismissing
+// the receipt writes no business data.
+function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
+  workoutId: number;
+  onClose: () => void;
+  onViewRecord: (workoutId: number) => void;
+}) {
+  // Read-back by id only (see receiptReadPhase): this query is the
+  // sole source of every number the receipt shows.
+  const query = useQuery({
+    queryKey: ["workout-receipt", workoutId],
+    queryFn: () => api.getDashboard({ recent_limit: 20, receipt_workout_id: workoutId }),
+    retry: false,
+  });
+  const receipt = query.data?.receipt ?? null;
+  const phase = receiptReadPhase({
+    isPending: query.isPending,
+    isError: query.isError,
+    receiptFound: receipt != null,
+  });
+
+  if (phase === "reading") {
+    return (
+      <section className="receipt-card" aria-label="训练完成回执">
+        <p className="receipt-status" role="status">训练已结束，正在读取记录…</p>
+        <p className="receipt-note">组数以读回的已存记录为准。</p>
+      </section>
+    );
+  }
+
+  if (phase === "unavailable" || !receipt) {
+    return (
+      <section className="receipt-card" aria-label="训练完成回执">
+        <p className="receipt-status" role="alert">记录暂未读出</p>
+        <p className="receipt-note">训练已结束。重新读取只会再读一次这次记录，不会再次结束训练，也不会把记录恢复为进行中。</p>
+        <div className="receipt-actions">
+          <button
+            type="button"
+            className="receipt-primary"
+            onClick={() => void query.refetch()}
+            disabled={query.isFetching}
+          >
+            {query.isFetching ? "正在重新读取…" : "重新读取"}
+          </button>
+          <button type="button" onClick={onClose}>关闭回执</button>
+        </div>
+      </section>
+    );
+  }
+
+  const workout = receipt;
+  const lines = receiptExerciseLines(workout, query.data?.receipt_previous);
+  const doneTotal = completedCount(workout);
+  const totalSets = workout.sets.length;
+  const incompleteTotal = totalSets - doneTotal;
+  const completedAt = workout.completed_at ?? workout.started_at;
+  return (
+    <section className="receipt-card" aria-labelledby="receipt-title">
+      <div className="receipt-head">
+        <div>
+          <p className="receipt-kicker">训练完成回执</p>
+          <h2 id="receipt-title">{ROUTINE_META[workout.routine].title}训练</h2>
+          <p className="receipt-dates">
+            训练日 {formatDate(workout.started_at)} · 实际完成 {formatDate(completedAt)} {formatClock(completedAt)}
+          </p>
+        </div>
+        <button type="button" className="receipt-close" aria-label="关闭回执" onClick={onClose}>关闭</button>
+      </div>
+      <p className="receipt-total">
+        已完成 {doneTotal} / {totalSets} 组
+        {incompleteTotal > 0 ? <span className="receipt-incomplete"> · {incompleteTotal} 组未完成</span> : null}
+      </p>
+      <ul className="receipt-lines">
+        {lines.map((line) => (
+          <li key={line.key}>
+            <strong>{line.name}</strong>
+            <span>
+              本次 {line.completedSets}/{line.totalSets} 组
+              {line.incompleteSets > 0 ? `（${line.incompleteSets} 组未完成）` : ""}
+            </span>
+            <span>
+              {line.previous
+                ? `上次 ${formatDate(line.previous.sourceDate)} · ${line.previous.completedSets}/${line.previous.totalSets} 组`
+                : "暂无可比记录"}
+            </span>
+            <span className="receipt-suggestion">建议：{line.suggestion}</span>
+          </li>
+        ))}
+      </ul>
+      <div className="receipt-actions">
+        <button type="button" className="receipt-primary" onClick={() => onViewRecord(workout.id)}>
+          查看本次记录
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ExerciseGuideDialog({ guide, onClose }: { guide: ExerciseGuide; onClose: () => void }) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -595,11 +935,13 @@ function ExerciseGuideDialog({ guide, onClose }: { guide: ExerciseGuide; onClose
             <ul>{guide.mistakes.map((mistake) => <li key={mistake}>{mistake}</li>)}</ul>
           </div>
         </div>
-        <a className="video-link" href={guide.video} target="_blank" rel="noreferrer">
-          <span aria-hidden="true">▶</span>
-          <span><strong>看真人教学视频</strong><small>{guide.source} · 在 YouTube 打开</small></span>
-          <i aria-hidden="true">↗</i>
-        </a>
+        {guide.video ? (
+          <a className="video-link" href={guide.video} target="_blank" rel="noreferrer">
+            <span aria-hidden="true">▶</span>
+            <span><strong>看真人教学视频</strong><small>{guide.source} · 在 YouTube 打开</small></span>
+            <i aria-hidden="true">↗</i>
+          </a>
+        ) : null}
         <p className="guide-safety">动作疼痛时立即停止；视频用于学习动作，不替代现场教练或医疗建议。</p>
       </section>
     </div>
@@ -714,11 +1056,117 @@ export function hasUnsavedSetStatus(statuses: SetSaveStatus[]): boolean {
   return statuses.some((status) => status !== "saved");
 }
 
+// --- W-UI-001-D1: top save aggregate (pure) ---
+// One line of text summarises every set's save state, kept separate
+// from the completion count: a finished set is not a saved set.
+// Priority is fixed: failed saves first (with a 查看 jump to the
+// first abnormal set), then blocked (completed but missing reps —
+// the same 需补次数 wording the card heads use) and dirty drafts,
+// then an in-flight save, then the two busy states that must never
+// read as 全部已保存 (a pending add the server has not confirmed
+// yet, and a finish in progress). Only a fully clean registry earns
+// 全部已保存.
+export type SetSaveSnapshot = {
+  id: number;
+  exerciseKey: string;
+  status: SetSaveStatus;
+  blocked: boolean;
+};
+
+export type SaveAggregateKind = "error" | "blocked" | "dirty" | "saving" | "adding" | "finishing" | "saved";
+
+export type SaveAggregate = {
+  kind: SaveAggregateKind;
+  label: string;
+  errorCount: number;
+  blockedCount: number;
+  firstAbnormal: { exerciseKey: string; setId: number; blocked: boolean } | null;
+};
+
+export function aggregateSaveStates(
+  snapshots: SetSaveSnapshot[],
+  flags: { pendingAdds: number; finishing: boolean },
+): SaveAggregate {
+  const errors = snapshots.filter((snapshot) => snapshot.status === "error");
+  const blockedList = snapshots.filter((snapshot) => snapshot.blocked);
+  const dirtyList = snapshots.filter((snapshot) => snapshot.status === "dirty");
+  const firstOf = (list: SetSaveSnapshot[]) => {
+    const first = list[0];
+    return first ? { exerciseKey: first.exerciseKey, setId: first.id, blocked: first.blocked } : null;
+  };
+  const counts = { errorCount: errors.length, blockedCount: blockedList.length };
+  if (errors.length > 0) {
+    return { ...counts, kind: "error", label: `有 ${errors.length} 组保存失败`, firstAbnormal: firstOf(errors) };
+  }
+  if (blockedList.length > 0) {
+    return { ...counts, kind: "blocked", label: `有 ${blockedList.length} 组需补次数`, firstAbnormal: firstOf(blockedList) };
+  }
+  if (dirtyList.length > 0) {
+    return { ...counts, kind: "dirty", label: "有未保存的修改", firstAbnormal: firstOf(dirtyList) };
+  }
+  if (snapshots.some((snapshot) => snapshot.status === "saving")) {
+    return { ...counts, kind: "saving", label: "正在保存", firstAbnormal: null };
+  }
+  if (flags.finishing) {
+    return { ...counts, kind: "finishing", label: "正在结束…", firstAbnormal: null };
+  }
+  if (flags.pendingAdds > 0) {
+    return { ...counts, kind: "adding", label: "正在添加一组", firstAbnormal: null };
+  }
+  return { ...counts, kind: "saved", label: "全部已保存", firstAbnormal: null };
+}
+
+// --- W-UI-001-D1: current exercise selection (pure) ---
+// The current exercise is the single expanded card and the rest
+// timer's anchor. A manual card-head selection always wins while
+// that exercise still exists; otherwise the first exercise with an
+// unfinished set; when everything is complete the most recent (last)
+// exercise stays current instead of collapsing the whole stack.
+export type ExerciseProgressSummary = { key: string; hasIncomplete: boolean };
+
+export function resolveCurrentExerciseKey(
+  groups: ExerciseProgressSummary[],
+  selectedKey: string | null,
+): string | null {
+  if (groups.length === 0) return null;
+  if (selectedKey != null && groups.some((group) => group.key === selectedKey)) return selectedKey;
+  const firstIncomplete = groups.find((group) => group.hasIncomplete);
+  if (firstIncomplete) return firstIncomplete.key;
+  const last = groups[groups.length - 1];
+  return last ? last.key : null;
+}
+
+// --- W-UI-001-D1: keyboard next-field order (pure) ---
+// Enter moves focus 重量 → 本组次数 → 下一组重量, crossing from an
+// exercise's last set into the next exercise's first input. The very
+// last input resolves to the finish button (keyboard dismissed, focus
+// returned there); an unknown current field resolves to null.
+export type FocusFieldRef = { exerciseKey: string; setId: number; field: "weight" | "reps" };
+export type FocusTarget = { kind: "field"; target: FocusFieldRef } | { kind: "finish" };
+
+export function buildFocusOrder(groups: { key: string; sets: { id: number }[] }[]): FocusFieldRef[] {
+  const order: FocusFieldRef[] = [];
+  for (const group of groups) {
+    for (const set of group.sets) {
+      order.push({ exerciseKey: group.key, setId: set.id, field: "weight" });
+      order.push({ exerciseKey: group.key, setId: set.id, field: "reps" });
+    }
+  }
+  return order;
+}
+
+export function nextFocusTarget(order: FocusFieldRef[], current: FocusFieldRef): FocusTarget | null {
+  const index = order.findIndex(
+    (item) => item.exerciseKey === current.exerciseKey && item.setId === current.setId && item.field === current.field,
+  );
+  if (index < 0) return null;
+  const next = order[index + 1];
+  if (!next) return { kind: "finish" };
+  return { kind: "field", target: next };
+}
+
 export type SetSaveHandle = {
   id: number;
-  // W-UI-001-D1: owning exercise, for the top save aggregate's
-  // first-abnormal jump and per-exercise head status.
-  exerciseKey: string;
   getStatus: () => SetSaveStatus;
   flush: () => Promise<boolean>;
   isBlocked: () => boolean;
@@ -987,133 +1435,6 @@ export function finishGateDecision(snapshots: FinishGateSnapshot[]): FinishGateD
   return { proceed: false, reason: "incomplete" };
 }
 
-// --- W-UI-001-D1: top save aggregate (pure) ---
-// The aggregate is a pure projection of the registered save handles:
-// it never becomes a save source of truth. Priority is fixed — a save
-// failure outranks a blocked (completed-but-missing-reps) set, which
-// outranks a dirty draft, then saving; a pending add or a finish in
-// progress must never read as "全部已保存".
-export type SetSaveSnapshot = {
-  id: number;
-  exerciseKey: string;
-  status: SetSaveStatus;
-  blocked: boolean;
-};
-export type SaveAggregateKind = "error" | "blocked" | "dirty" | "saving" | "adding" | "finishing" | "saved";
-export type SaveAggregate = {
-  kind: SaveAggregateKind;
-  label: string;
-  errorCount: number;
-  blockedCount: number;
-  firstAbnormal: { exerciseKey: string; setId: number; blocked: boolean } | null;
-};
-
-export function aggregateSaveStates(
-  snapshots: SetSaveSnapshot[],
-  flags: { pendingAdds: number; finishing: boolean },
-): SaveAggregate {
-  const errors = snapshots.filter((snapshot) => snapshot.status === "error");
-  const blockedList = snapshots.filter((snapshot) => snapshot.blocked);
-  const counts = { errorCount: errors.length, blockedCount: blockedList.length };
-  const abnormalOf = (snapshot: SetSaveSnapshot) => ({
-    exerciseKey: snapshot.exerciseKey,
-    setId: snapshot.id,
-    blocked: snapshot.blocked,
-  });
-  if (errors.length > 0) {
-    return { kind: "error", label: `有 ${errors.length} 组保存失败`, ...counts, firstAbnormal: abnormalOf(errors[0]) };
-  }
-  if (blockedList.length > 0) {
-    return { kind: "blocked", label: `有 ${blockedList.length} 组需补次数`, ...counts, firstAbnormal: abnormalOf(blockedList[0]) };
-  }
-  const dirty = snapshots.filter((snapshot) => snapshot.status === "dirty");
-  if (dirty.length > 0) {
-    return { kind: "dirty", label: "有未保存的修改", ...counts, firstAbnormal: abnormalOf(dirty[0]) };
-  }
-  if (snapshots.some((snapshot) => snapshot.status === "saving")) {
-    return { kind: "saving", label: "正在保存", ...counts, firstAbnormal: null };
-  }
-  if (flags.finishing) {
-    return { kind: "finishing", label: "正在结束…", ...counts, firstAbnormal: null };
-  }
-  if (flags.pendingAdds > 0) {
-    return { kind: "adding", label: "正在添加一组", ...counts, firstAbnormal: null };
-  }
-  return { kind: "saved", label: "全部已保存", ...counts, firstAbnormal: null };
-}
-
-// --- W-UI-001-D1: current exercise selection (pure) ---
-// A manual header selection wins while that exercise still exists and
-// is never stolen by save callbacks or timer ticks; otherwise the
-// first exercise with an incomplete set; when everything is complete
-// the last exercise stays current so the page never collapses to none.
-export type ExerciseProgressSummary = { key: string; hasIncomplete: boolean };
-
-export function resolveCurrentExerciseKey(
-  groups: ExerciseProgressSummary[],
-  selectedKey: string | null,
-): string | null {
-  if (groups.length === 0) return null;
-  if (selectedKey != null && groups.some((group) => group.key === selectedKey)) return selectedKey;
-  const firstIncomplete = groups.find((group) => group.hasIncomplete);
-  return (firstIncomplete ?? groups[groups.length - 1]).key;
-}
-
-export type ExerciseHeadInfo = {
-  doneCount: number;
-  statusText: string | null;
-  statusKind: SaveAggregateKind | null;
-};
-
-export function exerciseHeadInfo(doneCount: number, snapshots: SetSaveSnapshot[]): ExerciseHeadInfo {
-  const errors = snapshots.filter((snapshot) => snapshot.status === "error");
-  if (errors.length > 0) {
-    return { doneCount, statusText: `有 ${errors.length} 组保存失败`, statusKind: "error" };
-  }
-  const blockedList = snapshots.filter((snapshot) => snapshot.blocked);
-  if (blockedList.length > 0) {
-    return {
-      doneCount,
-      statusText: blockedList.length > 1 ? `${blockedList.length} 组需补次数` : "需补次数",
-      statusKind: "blocked",
-    };
-  }
-  if (snapshots.some((snapshot) => snapshot.status === "dirty")) {
-    return { doneCount, statusText: "有未保存修改", statusKind: "dirty" };
-  }
-  if (snapshots.some((snapshot) => snapshot.status === "saving")) {
-    return { doneCount, statusText: "保存中…", statusKind: "saving" };
-  }
-  return { doneCount, statusText: null, statusKind: null };
-}
-
-// --- W-UI-001-D1: keyboard next-field order (pure) ---
-// Enter moves weight -> this set's reps -> next set's weight, across
-// exercises in group order; the last field falls back to the finish
-// button. Enter never toggles completion.
-export type FocusFieldRef = { exerciseKey: string; setId: number; field: "weight" | "reps" };
-export type FocusTarget = { kind: "field"; target: FocusFieldRef } | { kind: "finish" };
-
-export function buildFocusOrder(groups: { key: string; sets: { id: number }[] }[]): FocusFieldRef[] {
-  const order: FocusFieldRef[] = [];
-  for (const group of groups) {
-    for (const set of group.sets) {
-      order.push({ exerciseKey: group.key, setId: set.id, field: "weight" });
-      order.push({ exerciseKey: group.key, setId: set.id, field: "reps" });
-    }
-  }
-  return order;
-}
-
-export function nextFocusTarget(order: FocusFieldRef[], current: FocusFieldRef): FocusTarget | null {
-  const index = order.findIndex(
-    (entry) => entry.exerciseKey === current.exerciseKey && entry.setId === current.setId && entry.field === current.field,
-  );
-  if (index < 0) return null;
-  if (index === order.length - 1) return { kind: "finish" };
-  return { kind: "field", target: order[index + 1] };
-}
-
 export type RestTimerState = {
   endsAt: number | null;
   durationSec: number;
@@ -1217,9 +1538,6 @@ function playRestBeep() {
 function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNext }: {
   set: WorkoutSet;
   unit: Unit;
-  // W-UI-001-D1: after Enter's blur-save, the owner moves focus along
-  // buildFocusOrder; Enter itself never toggles completion.
-  onEnterNext?: (field: "weight" | "reps") => void;
   // W-FINISH-001: while a finish flow owns the workout, entry is
   // locked — inputs, the completion toggle and retry are disabled so
   // no new edit can start behind the seal.
@@ -1227,6 +1545,9 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
   onSaved: () => void;
   onRegister: (id: number, handle: SetSaveHandle | null) => void;
   onCompleted?: () => void;
+  // W-UI-001-D1: after Enter's normal blur-save, the owner moves
+  // focus to the next field (see buildFocusOrder / nextFocusTarget).
+  onEnterNext?: (field: "weight" | "reps") => void;
 }) {
   const [machine, setMachineState] = useState<SetSaveMachine>(() => initSetSaveMachine(set));
   const machineRef = useRef(machine);
@@ -1283,7 +1604,6 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
   useEffect(() => {
     onRegister(set.id, {
       id: set.id,
-      exerciseKey: set.exercise_key,
       getStatus: () => machineRef.current.status,
       flush: flushSave,
       isBlocked: () => setSaveBlocked(machineRef.current),
@@ -1329,8 +1649,9 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
   function onEnterSave(event: ReactKeyboardEvent<HTMLInputElement>, field: "weight" | "reps") {
     if (event.key === "Enter") {
       event.preventDefault();
-      // Blur first: the normal blur-save path runs, then the owner
-      // moves focus along the D1 focus order.
+      // Blur first: the blur handler runs the normal save path.
+      // Enter never toggles completion — it only moves focus on,
+      // and an unfilled field may simply stay empty.
       event.currentTarget.blur();
       onEnterNext?.(field);
     }
@@ -1413,17 +1734,19 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
 // workout's unit when the source workout used the other unit.
 export type PreviousMark = { weight: number | null; reps: number | null; converted: boolean };
 
-function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, expanded, headInfo, onSelect, onEnterNextSet, onChanged, onSetCompleted, onOpenGuide, onRegisterSet, onRegisterPendingAdd }: {
+// W-UI-001-D1: what a collapsed card head still shows — the
+// exercise's own completion count plus its worst save state as text
+// (never colour alone), using the same wording as the top aggregate.
+export type ExerciseHeadInfo = {
+  doneCount: number;
+  statusText: string | null;
+  statusKind: "error" | "blocked" | "dirty" | "saving" | null;
+};
+
+function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, expanded, headInfo, onSelect, onChanged, onSetCompleted, onOpenGuide, onRegisterSet, onRegisterPendingAdd, onEnterNextSet }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
   previous?: PreviousMark;
-  // W-UI-001-D1: single-expand card. The body is only hidden with the
-  // `hidden` attribute — SetRows stay mounted and their save handles
-  // stay registered, so an in-flight draft survives a card switch.
-  expanded: boolean;
-  headInfo: ExerciseHeadInfo;
-  onSelect: () => void;
-  onEnterNextSet: (setId: number, field: "weight" | "reps") => void;
   // W-TIMER-001: the rest-timer UI (auto toggle + panel) injected by
   // ActiveWorkout into the current exercise's block only. Purely an
   // extra child node — SetRow mounting/registration is untouched.
@@ -1431,6 +1754,13 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
   // W-FINISH-001: entry lock while a finish flow owns the workout —
   // set rows render disabled and no new set can be added.
   entryLocked: boolean;
+  // W-UI-001-D1: only the current exercise is expanded. Collapsing
+  // hides the body with `hidden` — SetRows stay mounted and their
+  // save handles stay registered, so an in-flight draft survives a
+  // card switch untouched.
+  expanded: boolean;
+  headInfo: ExerciseHeadInfo;
+  onSelect: () => void;
   onChanged: () => void;
   onSetCompleted: () => void;
   onOpenGuide: (guide: ExerciseGuide) => void;
@@ -1440,6 +1770,7 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
   // ActiveWorkout's shared pending-add registry, so a finish flow
   // joins it before flushing or sealing anything.
   onRegisterPendingAdd: (promise: Promise<unknown>) => void;
+  onEnterNextSet: (setId: number, field: "weight" | "reps") => void;
 }) {
   const queryClient = useQueryClient();
   const addSet = useMutation({
@@ -1468,28 +1799,28 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
   return (
     <section className="exercise-block" aria-labelledby={`exercise-${exercise.key}`}>
       <div className="exercise-heading">
-        <div className="exercise-side">
-          <button
-            className="exercise-select"
-            type="button"
-            aria-expanded={expanded}
-            aria-label={`${exercise.name}，${headInfo.doneCount}/${exercise.sets.length} 组完成${headInfo.statusText ? `，${headInfo.statusText}` : ""}`}
-            onClick={onSelect}
-          >
-            <span className="exercise-title-line">
-              <h2 id={`exercise-${exercise.key}`}>{exercise.name}</h2>
-              <span className="exercise-chevron" aria-hidden="true">{expanded ? "收起 ▴" : "展开 ▾"}</span>
-            </span>
-            <span className="exercise-meta-line">
-              {headInfo.doneCount}/{exercise.sets.length} 组完成 · 每组 {exercise.target} 次
-              {previous && exercise.sets.some((set) => set.weight != null || set.reps != null) ? (
-                <span className="prefill-note"> · {workout.prefill_unit_converted ? "已按上次表现预填（含单位换算）" : "已按上次表现预填"}</span>
-              ) : null}
-            </span>
+        <button
+          type="button"
+          className="exercise-select"
+          aria-expanded={expanded}
+          aria-label={`${exercise.name}，已完成 ${headInfo.doneCount}/${exercise.sets.length} 组${headInfo.statusText ? `，${headInfo.statusText}` : ""}，${expanded ? "已展开" : "已折叠，点击展开"}`}
+          onClick={onSelect}
+        >
+          <span className="exercise-title-line">
+            <span className="exercise-name" id={`exercise-${exercise.key}`}>{exercise.name}</span>
+            <span className="exercise-chevron" aria-hidden="true">{expanded ? "收起 ▴" : "展开 ▾"}</span>
+          </span>
+          <span className="exercise-meta-line">
+            <span>{headInfo.doneCount}/{exercise.sets.length} 组完成 · 每组 {exercise.target} 次</span>
+            {previous && exercise.sets.some((set) => set.weight != null || set.reps != null) ? (
+              <span className="prefill-note">{workout.prefill_unit_converted ? "已按上次表现预填（含单位换算）" : "已按上次表现预填"}</span>
+            ) : null}
             {headInfo.statusText ? (
               <span className="exercise-head-status" data-kind={headInfo.statusKind ?? undefined}>{headInfo.statusText}</span>
             ) : null}
-          </button>
+          </span>
+        </button>
+        <div className="exercise-side">
           {guide ? (
             <button
               className="guide-trigger"
@@ -1498,10 +1829,10 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
               onClick={() => onOpenGuide(guide)}
             >要领</button>
           ) : null}
+          {previous && previous.weight != null ? (
+            <span className="previous-mark">上次 {previous.weight}{workout.unit} × {previous.reps ?? "—"}{previous.converted ? "（已换算）" : ""}</span>
+          ) : null}
         </div>
-        {previous && previous.weight != null ? (
-          <span className="previous-mark">上次 {previous.weight}{workout.unit} × {previous.reps ?? "—"}{previous.converted ? "（已换算）" : ""}</span>
-        ) : null}
       </div>
       <div className="exercise-body" hidden={!expanded}>
         <div className="set-columns" aria-hidden="true">
@@ -1509,7 +1840,16 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
         </div>
         <div className="set-list">
           {exercise.sets.map((set) => (
-            <SetRow key={set.id} set={set} unit={workout.unit} locked={entryLocked} onSaved={onChanged} onRegister={onRegisterSet} onCompleted={onSetCompleted} onEnterNext={(field) => onEnterNextSet(set.id, field)} />
+            <SetRow
+              key={set.id}
+              set={set}
+              unit={workout.unit}
+              locked={entryLocked}
+              onSaved={onChanged}
+              onRegister={onRegisterSet}
+              onCompleted={onSetCompleted}
+              onEnterNext={(field) => onEnterNextSet(set.id, field)}
+            />
           ))}
         </div>
         <button className="add-set" type="button" onClick={handleAddSet} disabled={addSet.isPending || entryLocked}>
@@ -1579,7 +1919,14 @@ function RestAutoToggle({ timer, onChange }: {
   );
 }
 
-function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[] }) {
+function ActiveWorkout({ workout, recent, onCompleted }: {
+  workout: Workout;
+  recent: Workout[];
+  // W4.3-D1: fired once with this workout's id when completeWorkout
+  // has genuinely succeeded, so App can show the completion receipt
+  // for exactly this record on the start page.
+  onCompleted: (workoutId: number) => void;
+}) {
   const queryClient = useQueryClient();
   const [, setClock] = useState(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -1587,23 +1934,20 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const [finishFailed, setFinishFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [unsavedPresent, setUnsavedPresent] = useState(false);
-  // W-UI-001-D1: manual current-exercise selection (null = automatic),
-  // a mirror of the registered save handles for the top aggregate and
-  // per-exercise head status (mirror only — the handles stay the save
-  // source of truth), the in-flight add count, and the finish button
-  // ref for the Enter focus chain's last step.
+  const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
+  // W-UI-001-D1: the exercise the user picked by tapping a card
+  // head. Null = no manual choice yet, so the first incomplete
+  // exercise is current. Once set it changes only on another
+  // card-head tap, a 查看 jump, or Enter-focus crossing into the
+  // next exercise — never on a save callback or a timer tick.
   const [selectedExerciseKey, setSelectedExerciseKey] = useState<string | null>(null);
-  const [handleMirror, setHandleMirror] = useState<{ snapshots: SetSaveSnapshot[]; completed: Record<number, boolean> }>({
-    snapshots: [],
-    completed: {},
-  });
+  // W-UI-001-D1: live per-set save state mirrored out of the handle
+  // registry on every registration/status change, so the top save
+  // aggregate and the card heads re-render with each row's status.
+  const [handleStates, setHandleStates] = useState<ReadonlyMap<number, { status: SetSaveStatus; blocked: boolean; completed: boolean }>>(new Map());
   const [pendingAddCount, setPendingAddCount] = useState(0);
   const finishButtonRef = useRef<HTMLButtonElement | null>(null);
-  // W-UI-001-D1: the element focused when a finish attempt started, so
-  // cancelling the finish confirmation restores the original focus
-  // and current exercise.
-  const preFinishFocusRef = useRef<Element | null>(null);
-  const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
+  const preFinishFocusRef = useRef<HTMLElement | null>(null);
   // Rest timer lives only in this component's memory: no server writes, no
   // localStorage, so a page refresh resets it (workout data itself is still
   // covered by the per-set autosave).
@@ -1651,10 +1995,13 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   const pendingAddsRef = useRef(new Set<Promise<unknown>>());
   const registerPendingAdd = useCallback((promise: Promise<unknown>) => {
     pendingAddsRef.current.add(promise);
-    setPendingAddCount((count) => count + 1);
+    // W-UI-001-D1: the pending-add count is rendered state too — the
+    // top aggregate shows 正在添加一组 until the add is confirmed
+    // and the new set has entered the current data version.
+    setPendingAddCount(pendingAddsRef.current.size);
     const unregister = () => {
       pendingAddsRef.current.delete(promise);
-      setPendingAddCount((count) => Math.max(0, count - 1));
+      setPendingAddCount(pendingAddsRef.current.size);
     };
     void promise.then(unregister, unregister);
   }, []);
@@ -1674,24 +2021,19 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [unsavedPresent]);
 
+  const refreshHandleStates = () => {
+    const next = new Map<number, { status: SetSaveStatus; blocked: boolean; completed: boolean }>();
+    for (const handle of setHandlesRef.current.values()) {
+      next.set(handle.id, { status: handle.getStatus(), blocked: handle.isBlocked(), completed: handle.isCompleted() });
+    }
+    setHandleStates(next);
+    setUnsavedPresent(hasUnsavedSetStatus([...next.values()].map((entry) => entry.status)));
+  };
+
   const registerSet = (id: number, handle: SetSaveHandle | null) => {
     if (handle) setHandlesRef.current.set(id, handle);
     else setHandlesRef.current.delete(id);
-    const handles = [...setHandlesRef.current.values()];
-    const statuses = handles.map((entry) => entry.getStatus());
-    setUnsavedPresent(hasUnsavedSetStatus(statuses));
-    // W-UI-001-D1: refresh the display mirror (aggregate + draft-aware
-    // completion) from the same handles; registration re-runs whenever
-    // a row's save machine changes, so the mirror tracks every save.
-    setHandleMirror({
-      snapshots: handles.map((entry) => ({
-        id: entry.id,
-        exerciseKey: entry.exerciseKey,
-        status: entry.getStatus(),
-        blocked: entry.isBlocked(),
-      })),
-      completed: Object.fromEntries(handles.map((entry) => [entry.id, entry.isCompleted()])),
-    });
+    refreshHandleStates();
   };
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -1712,7 +2054,10 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     } catch {
       result = null;
     }
-    if (result && result.ok === true) return true;
+    if (result && result.ok === true) {
+      onCompleted(workout.id);
+      return true;
+    }
     for (const handle of setHandlesRef.current.values()) handle.unseal();
     setFinishFailed(true);
     return false;
@@ -1760,10 +2105,9 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   // workout completes; anything else shows the confirmation for its
   // reason, because finishing would lose edits or skip sets.
   async function handleFinish() {
-    // W-UI-001-D1: remember where focus was, so cancelling the finish
-    // confirmation can restore it (and the current exercise, which the
-    // finish flow never changes).
-    preFinishFocusRef.current = document.activeElement;
+    // W-UI-001-D1: remember where focus was so cancelling the
+    // finish confirmation can restore the exact pre-finish state.
+    preFinishFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setFinishFailed(false);
     setFinishing(true);
     try {
@@ -1794,7 +2138,7 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
         blocked: handle.isBlocked(),
         completed: handle.isCompleted(),
       }));
-      setUnsavedPresent(hasUnsavedSetStatus(handles.map((handle) => handle.getStatus())));
+      refreshHandleStates();
       const decision = finishGateDecision(snapshots);
       if (decision.proceed) {
         // Seal the batch first: the save queues issue no new writes
@@ -1809,16 +2153,6 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
       setFinishBlock(decision.reason);
     } finally {
       setFinishing(false);
-    }
-  }
-
-  // W-UI-001-D1: cancelling the finish confirmation restores the
-  // focus the user had when the finish attempt started.
-  function cancelFinish() {
-    setFinishBlock(null);
-    const target = preFinishFocusRef.current;
-    if (target instanceof HTMLElement && target.isConnected) {
-      requestAnimationFrame(() => target.focus());
     }
   }
 
@@ -1897,59 +2231,67 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     return result;
   }, [recent, workout.unit]);
 
-  const done = completedCount(workout);
   const total = workout.sets.length;
   const meta = ROUTINE_META[workout.routine];
   const exerciseGroups = groupSets(workout.sets);
-  // W-UI-001-D1: draft-aware completion (a set toggled complete in its
-  // row counts before the dashboard refetch lands), the resolved
-  // current exercise (manual selection first, then first incomplete,
-  // then the last exercise), and the top save aggregate. The rest
-  // timer anchors to that same current exercise.
-  const isSetCompleted = (set: WorkoutSet) => handleMirror.completed[set.id] ?? set.completed;
-  const doneCount = exerciseGroups.length > 0 && Object.keys(handleMirror.completed).length > 0
-    ? workout.sets.filter(isSetCompleted).length
-    : done;
+  // W-UI-001-D1: per-set snapshots merge the live save-handle state
+  // (registered by each mounted SetRow) over the server data, so the
+  // top completion count, the save aggregate and the card heads all
+  // read one draft-aware picture. A pending add is not in
+  // workout.sets yet, so it never inflates the total — it surfaces
+  // separately through the aggregate's 正在添加一组 state, and only
+  // counts once the server confirms it into the current data.
+  const setSnapshots: (SetSaveSnapshot & { completed: boolean })[] = workout.sets.map((set) => {
+    const handle = handleStates.get(set.id);
+    return {
+      id: set.id,
+      exerciseKey: set.exercise_key,
+      status: handle?.status ?? "saved",
+      blocked: handle?.blocked ?? (set.completed && set.reps == null),
+      completed: handle?.completed ?? set.completed,
+    };
+  });
+  const doneCount = setSnapshots.filter((snapshot) => snapshot.completed).length;
+  const saveAggregate = aggregateSaveStates(setSnapshots, { pendingAdds: pendingAddCount, finishing });
+  const headInfoByKey: Record<string, ExerciseHeadInfo> = {};
+  for (const group of exerciseGroups) {
+    const list = setSnapshots.filter((snapshot) => snapshot.exerciseKey === group.key);
+    const errorCount = list.filter((snapshot) => snapshot.status === "error").length;
+    const blockedCount = list.filter((snapshot) => snapshot.blocked).length;
+    const dirtyCount = list.filter((snapshot) => snapshot.status === "dirty").length;
+    const savingCount = list.filter((snapshot) => snapshot.status === "saving").length;
+    let statusText: string | null = null;
+    let statusKind: ExerciseHeadInfo["statusKind"] = null;
+    if (errorCount > 0) {
+      statusText = `有 ${errorCount} 组保存失败`;
+      statusKind = "error";
+    } else if (blockedCount > 0) {
+      statusText = blockedCount > 1 ? `${blockedCount} 组需补次数` : "需补次数";
+      statusKind = "blocked";
+    } else if (dirtyCount > 0) {
+      statusText = "有未保存修改";
+      statusKind = "dirty";
+    } else if (savingCount > 0) {
+      statusText = "保存中…";
+      statusKind = "saving";
+    }
+    headInfoByKey[group.key] = {
+      doneCount: list.filter((snapshot) => snapshot.completed).length,
+      statusText,
+      statusKind,
+    };
+  }
+  // W-UI-001-D1 + W-TIMER-001: the current exercise anchors both the
+  // single expanded card and the rest-timer UI, and follows the same
+  // rule — a manual card-head selection wins over the first
+  // incomplete exercise.
   const currentKey = resolveCurrentExerciseKey(
     exerciseGroups.map((group) => ({
       key: group.key,
-      hasIncomplete: group.sets.some((set) => !isSetCompleted(set)),
+      hasIncomplete: setSnapshots.some((snapshot) => snapshot.exerciseKey === group.key && !snapshot.completed),
     })),
     selectedExerciseKey,
   );
-  const aggregate = aggregateSaveStates(handleMirror.snapshots, {
-    pendingAdds: pendingAddCount,
-    finishing,
-  });
-  const currentExercise = exerciseGroups.find((group) => group.key === currentKey) ?? null;
-
-  const focusSetInput = (setId: number, field: "weight" | "reps") => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        document
-          .querySelector<HTMLInputElement>(`input[data-focus-set="${setId}"][data-focus-field="${field}"]`)
-          ?.focus();
-      });
-    });
-  };
-
-  const handleEnterNext = (exerciseKey: string, setId: number, field: "weight" | "reps") => {
-    const target = nextFocusTarget(buildFocusOrder(exerciseGroups), { exerciseKey, setId, field });
-    if (!target) return;
-    if (target.kind === "finish") {
-      finishButtonRef.current?.focus();
-      return;
-    }
-    setSelectedExerciseKey(target.target.exerciseKey);
-    focusSetInput(target.target.setId, target.target.field);
-  };
-
-  const handleViewAbnormal = () => {
-    const abnormal = aggregate.firstAbnormal;
-    if (!abnormal) return;
-    setSelectedExerciseKey(abnormal.exerciseKey);
-    focusSetInput(abnormal.setId, abnormal.blocked ? "reps" : "weight");
-  };
   const restTimerUi = (
     <>
       <RestAutoToggle timer={restTimer} onChange={updateRestTimer} />
@@ -1959,31 +2301,82 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
     </>
   );
 
+  function focusSetInput(setId: number, field: "weight" | "reps") {
+    // Two frames: the target exercise may need one render to expand
+    // before its input becomes focusable.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLInputElement>(`input[data-focus-set="${setId}"][data-focus-field="${field}"]`)
+          ?.focus();
+      });
+    });
+  }
+
+  // W-UI-001-D1: the aggregate's 查看 — expand the first abnormal
+  // exercise (it becomes the current one) and focus its first
+  // abnormal set: the reps input when reps are what's missing, the
+  // weight input otherwise.
+  function handleViewAbnormal() {
+    const target = saveAggregate.firstAbnormal;
+    if (!target) return;
+    setSelectedExerciseKey(target.exerciseKey);
+    focusSetInput(target.setId, target.blocked ? "reps" : "weight");
+  }
+
+  // W-UI-001-D1: Enter in a set input has already saved through the
+  // normal blur path inside SetRow; here focus only moves on —
+  // within the set, to the next set, across into the next exercise
+  // (which becomes current and expands), or, after the very last
+  // input, back to the 结束训练 button with the keyboard dismissed
+  // by the blur.
+  function handleEnterNext(exerciseKey: string, setId: number, field: "weight" | "reps") {
+    const target = nextFocusTarget(buildFocusOrder(exerciseGroups), { exerciseKey, setId, field });
+    if (!target) return;
+    if (target.kind === "finish") {
+      finishButtonRef.current?.focus();
+      return;
+    }
+    setSelectedExerciseKey(target.target.exerciseKey);
+    focusSetInput(target.target.setId, target.target.field);
+  }
+
+  // W-UI-001-D1: cancelling the finish confirmation restores the
+  // pre-finish state — the current-exercise selection was never
+  // touched by the finish flow, and focus returns to the element
+  // that held it when 结束训练 was pressed.
+  function cancelFinish() {
+    setFinishBlock(null);
+    const target = preFinishFocusRef.current;
+    requestAnimationFrame(() => {
+      if (target && target.isConnected) target.focus();
+    });
+  }
+
   return (
     <main className="active-shell">
       <header className="active-header">
         <div>
           <p className="live-label"><span />训练中</p>
-          <h1>{meta.label}日</h1>
+          <h1>{meta.title}</h1>
         </div>
         <div className="timer" aria-label={`训练时长 ${formatDuration(workout.started_at)}`}>
           <strong>{formatDuration(workout.started_at)}</strong>
-          <span>{doneCount}/{total} 组</span>
         </div>
       </header>
 
+      <div className="progress-track" aria-label={`已完成 ${doneCount} 组，共 ${total} 组`}>
+        <span style={{ width: `${total ? (doneCount / total) * 100 : 0}%` }} />
+      </div>
+
       <div className="workout-status-bar">
         <span className="completion-count">已完成 {doneCount} / {total} 组</span>
-        <span className="save-aggregate" data-kind={aggregate.kind} role="status">
-          {aggregate.label}
-          {aggregate.kind === "error" || aggregate.kind === "blocked" ? (
+        <span className="save-aggregate" data-kind={saveAggregate.kind} role="status">
+          {saveAggregate.label}
+          {saveAggregate.firstAbnormal && (saveAggregate.kind === "error" || saveAggregate.kind === "blocked") ? (
             <button type="button" className="save-aggregate-view" onClick={handleViewAbnormal}>查看</button>
           ) : null}
         </span>
-      </div>
-
-      <div className="progress-track" aria-label={`已完成 ${doneCount} 组，共 ${total} 组`}>
-        <span style={{ width: `${total ? (doneCount / total) * 100 : 0}%` }} />
       </div>
 
       <details className="warmup-strip">
@@ -1998,25 +2391,22 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
             workout={workout}
             exercise={exercise}
             previous={previousByExercise.get(exercise.key)}
-            timerSlot={currentExercise != null && exercise.key === currentExercise.key ? restTimerUi : undefined}
+            timerSlot={currentKey != null && exercise.key === currentKey ? restTimerUi : undefined}
             entryLocked={finishing}
             expanded={exercise.key === currentKey}
-            headInfo={exerciseHeadInfo(
-              exercise.sets.filter(isSetCompleted).length,
-              handleMirror.snapshots.filter((snapshot) => snapshot.exerciseKey === exercise.key),
-            )}
+            headInfo={headInfoByKey[exercise.key] ?? { doneCount: 0, statusText: null, statusKind: null }}
             onSelect={() => setSelectedExerciseKey(exercise.key)}
-            onEnterNextSet={(setId, field) => handleEnterNext(exercise.key, setId, field)}
             onChanged={refresh}
             onSetCompleted={handleSetCompleted}
             onOpenGuide={setSelectedGuide}
             onRegisterSet={registerSet}
             onRegisterPendingAdd={registerPendingAdd}
+            onEnterNextSet={(setId, field) => handleEnterNext(exercise.key, setId, field)}
           />
         ))}
       </div>
 
-      {currentExercise == null ? <div className="rest-timer-fallback">{restTimerUi}</div> : null}
+      {currentKey == null ? <div className="rest-timer-fallback">{restTimerUi}</div> : null}
 
       <section className="finish-zone">
         <div>
@@ -2062,7 +2452,24 @@ function ActiveWorkout({ workout, recent }: { workout: Workout; recent: Workout[
   );
 }
 
-function History({ workouts }: { workouts: Workout[] }) {
+function History({ workouts, focus }: {
+  workouts: Workout[];
+  // W4.3-D1: the receipt's 查看本次记录 target — expand exactly this
+  // workout's row and scroll to it. A nonce makes repeat clicks on
+  // the same record re-run the effect.
+  focus: { id: number; n: number } | null;
+}) {
+  useEffect(() => {
+    if (!focus) return;
+    const el = document.getElementById(`history-workout-${focus.id}`);
+    if (el instanceof HTMLDetailsElement) {
+      el.open = true;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    } else {
+      document.querySelector(".history-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [focus]);
+
   if (workouts.length === 0) {
     return (
       <section className="history-section">
@@ -2076,7 +2483,7 @@ function History({ workouts }: { workouts: Workout[] }) {
       <div className="section-heading"><h2>最近训练</h2><span>{workouts.length} 次</span></div>
       <div className="history-list">
         {workouts.map((workout) => (
-          <details className="history-row" key={workout.id}>
+          <details className="history-row" key={workout.id} id={`history-workout-${workout.id}`}>
             <summary>
               <span className="history-date">{formatDate(workout.completed_at ?? workout.started_at)}</span>
               <strong>{ROUTINE_META[workout.routine].label}</strong>
@@ -2100,16 +2507,381 @@ function History({ workouts }: { workouts: Workout[] }) {
   );
 }
 
-function StartScreen({ recent, comparableHistory }: { recent: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
+// --- 2026-10-18 frequency sync: weekly schedule / daily micro-routine /
+// plan editor. All three read the persisted plan (getPlan); the editor
+// edits a local draft only — nothing is written until 保存计划 calls
+// updatePlan, and server validation errors render inline.
+
+function todayScheduleIndex(now = new Date()) {
+  // Monday = 0 … Sunday = 6, matching plan_schedule.day_index.
+  return (now.getDay() + 6) % 7;
+}
+
+function WeeklySchedule({ plan }: { plan: Plan }) {
+  const today = todayScheduleIndex();
+  const entries = [...plan.schedule].sort((a, b) => a.day_index - b.day_index);
+  if (entries.length === 0) return null;
+  return (
+    <section className="schedule-section" aria-labelledby="schedule-title">
+      <div className="section-heading">
+        <h2 id="schedule-title">本周安排</h2>
+        <span>今天 {SCHEDULE_DAY_LABELS[today]}</span>
+      </div>
+      <ol className="schedule-list">
+        {entries.map((entry) => {
+          const isToday = entry.day_index === today;
+          return (
+            <li key={entry.day_index} className={`schedule-row${isToday ? " is-today" : ""}`} aria-current={isToday ? "date" : undefined}>
+              <span className="schedule-day">{SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}</span>
+              <span className="schedule-what">
+                <strong>{SCHEDULE_CODE_LABELS[entry.routine_code] ?? entry.routine_code}</strong>
+                {entry.note ? <small>{entry.note}</small> : null}
+              </span>
+              {isToday ? <span className="today-badge">● 今天</span> : null}
+            </li>
+          );
+        })}
+      </ol>
+      <p className="schedule-note">出发周（12 月初）减量：在家 B 停掉，健身房腿日量减约三成。</p>
+    </section>
+  );
+}
+
+function DailyChecklist({ plan }: { plan: Plan }) {
+  const queryClient = useQueryClient();
+  const doneSet = new Set(plan.daily_done);
+  const toggle = useMutation({
+    mutationFn: (args: { item_key: string; done: boolean }) =>
+      api.toggleDailyItem({ date_key: plan.daily_date, item_key: args.item_key, done: args.done }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["plan"] }),
+  });
+  const doneCount = plan.daily_items.filter((item) => doneSet.has(item.key)).length;
+  return (
+    <section className="daily-section" aria-labelledby="daily-title">
+      <div className="section-heading">
+        <h2 id="daily-title">每日体态微练 · 5 分钟</h2>
+        <span>{doneCount}/{plan.daily_items.length} 已完成</span>
+      </div>
+      <div className="daily-list">
+        {plan.daily_items.map((item) => {
+          const done = doneSet.has(item.key);
+          return (
+            <button
+              key={item.key}
+              type="button"
+              className={`daily-item${done ? " is-done" : ""}`}
+              aria-pressed={done}
+              aria-label={`${item.title}，${done ? "已完成，点击取消" : "未完成，点击标记完成"}`}
+              disabled={toggle.isPending}
+              onClick={() => toggle.mutate({ item_key: item.key, done: !done })}
+            >
+              <span className="daily-check" aria-hidden="true">{done ? "✓" : "○"}</span>
+              <span className="daily-text">
+                <strong>{item.title}</strong>
+                {item.detail ? <small>{item.detail}</small> : null}
+              </span>
+              <span className="daily-state">{done ? "已完成" : "未完成"}</span>
+            </button>
+          );
+        })}
+      </div>
+      <p className="daily-note">工作日都做，起床或工间完成即可；打卡只是记录，不影响开始训练。</p>
+    </section>
+  );
+}
+
+function PlanEditor({ plan }: { plan: Plan }) {
+  const queryClient = useQueryClient();
+  const [draftRoutines, setDraftRoutines] = useState<PlanRoutineEntry[]>(() =>
+    plan.routines.map((entry) => ({ routine: entry.routine, exercises: entry.exercises.map((exercise) => ({ ...exercise })) })),
+  );
+  const [draftSchedule, setDraftSchedule] = useState(() => plan.schedule.map((entry) => ({ ...entry })));
+  const [draftDaily, setDraftDaily] = useState(() => plan.daily_items.map((item) => ({ ...item })));
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedNote, setSavedNote] = useState(false);
+
+  const save = useMutation({
+    mutationFn: () => api.updatePlan({ routines: draftRoutines, schedule: draftSchedule, daily_items: draftDaily }),
+    onSuccess: async (result) => {
+      if (result.ok) {
+        setSaveError(null);
+        setSavedNote(true);
+        await queryClient.invalidateQueries({ queryKey: ["plan"] });
+        await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else {
+        setSavedNote(false);
+        setSaveError(result.error ?? "保存失败，请检查内容后重试");
+      }
+    },
+    onError: () => {
+      setSavedNote(false);
+      setSaveError("保存失败，请再试一次");
+    },
+  });
+
+  function clientValidate(): string | null {
+    for (const entry of draftRoutines) {
+      if (entry.exercises.length === 0) return `${ROUTINE_META[entry.routine].title}至少保留 1 个动作`;
+      const keys = new Set<string>();
+      for (const exercise of entry.exercises) {
+        if (exercise.name.trim() === "") return "动作名称不能为空";
+        if (exercise.target.trim() === "") return `目标次数不能为空：${exercise.name}`;
+        if (!Number.isInteger(exercise.sets) || exercise.sets < 1 || exercise.sets > 10) return `组数需要在 1–10 之间：${exercise.name}`;
+        if (keys.has(exercise.key)) return `同一训练日内动作重复：${exercise.name}`;
+        keys.add(exercise.key);
+      }
+    }
+    if (draftSchedule.length !== 7) return "周安排需要正好 7 天";
+    if (draftDaily.length === 0) return "每日微练至少保留 1 项";
+    for (const item of draftDaily) {
+      if (item.title.trim() === "") return "微练名称不能为空";
+    }
+    return null;
+  }
+
+  function handleSave() {
+    const error = clientValidate();
+    if (error) {
+      setSavedNote(false);
+      setSaveError(error);
+      return;
+    }
+    setSaveError(null);
+    save.mutate();
+  }
+
+  function updateExercise(routine: Routine, index: number, patch: Partial<PlanExerciseDraft>) {
+    setSavedNote(false);
+    setDraftRoutines((prev) => prev.map((entry) => (entry.routine !== routine ? entry : {
+      ...entry,
+      exercises: entry.exercises.map((exercise, i) => (i === index ? { ...exercise, ...patch } : exercise)),
+    })));
+  }
+
+  function moveExercise(routine: Routine, index: number, delta: number) {
+    setSavedNote(false);
+    setDraftRoutines((prev) => prev.map((entry) => {
+      if (entry.routine !== routine) return entry;
+      const next = [...entry.exercises];
+      const target = index + delta;
+      if (target < 0 || target >= next.length) return entry;
+      const current = next[index];
+      const other = next[target];
+      if (!current || !other) return entry;
+      next[index] = other;
+      next[target] = current;
+      return { ...entry, exercises: next };
+    }));
+  }
+
+  function removeExercise(routine: Routine, index: number) {
+    setSavedNote(false);
+    setDraftRoutines((prev) => prev.map((entry) => (entry.routine !== routine ? entry : {
+      ...entry,
+      exercises: entry.exercises.filter((_, i) => i !== index),
+    })));
+  }
+
+  function addExercise(routine: Routine) {
+    setSavedNote(false);
+    setDraftRoutines((prev) => prev.map((entry) => {
+      if (entry.routine !== routine) return entry;
+      let suffix = entry.exercises.length + 1;
+      let key = `custom-${suffix}`;
+      while (entry.exercises.some((exercise) => exercise.key === key)) {
+        suffix += 1;
+        key = `custom-${suffix}`;
+      }
+      return { ...entry, exercises: [...entry.exercises, { key, name: "新动作", sets: 3, target: "10–12" }] };
+    }));
+  }
+
+  return (
+    <section className="plan-editor-section" aria-labelledby="plan-editor-title">
+      <details className="plan-editor">
+        <summary>
+          <span id="plan-editor-title">编辑训练计划</span>
+          <span>模板 · 周安排 · 每日微练</span>
+        </summary>
+        <div className="plan-editor-body">
+          {draftRoutines.map((entry) => (
+            <div key={entry.routine} className="plan-routine">
+              <h3>{ROUTINE_META[entry.routine].title}</h3>
+              {entry.exercises.map((exercise, index) => (
+                <div key={exercise.key} className="plan-exercise-row">
+                  <label className="plan-field plan-field-name">
+                    <span>动作名称</span>
+                    <input
+                      aria-label={`${ROUTINE_META[entry.routine].title}第 ${index + 1} 个动作名称`}
+                      value={exercise.name}
+                      onChange={(event) => updateExercise(entry.routine, index, { name: event.target.value })}
+                    />
+                  </label>
+                  <label className="plan-field plan-field-sets">
+                    <span>组数</span>
+                    <input
+                      aria-label={`${exercise.name}组数`}
+                      type="number"
+                      min="1"
+                      max="10"
+                      step="1"
+                      value={exercise.sets}
+                      onChange={(event) => updateExercise(entry.routine, index, { sets: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="plan-field plan-field-target">
+                    <span>目标次数</span>
+                    <input
+                      aria-label={`${exercise.name}目标次数`}
+                      value={exercise.target}
+                      onChange={(event) => updateExercise(entry.routine, index, { target: event.target.value })}
+                    />
+                  </label>
+                  <div className="plan-row-actions">
+                    <button type="button" aria-label={`上移${exercise.name}`} disabled={index === 0} onClick={() => moveExercise(entry.routine, index, -1)}>↑</button>
+                    <button type="button" aria-label={`下移${exercise.name}`} disabled={index === entry.exercises.length - 1} onClick={() => moveExercise(entry.routine, index, 1)}>↓</button>
+                    <button type="button" aria-label={`删除${exercise.name}`} onClick={() => removeExercise(entry.routine, index)}>删除</button>
+                  </div>
+                </div>
+              ))}
+              <button type="button" className="plan-add" onClick={() => addExercise(entry.routine)}>+ 加一个动作</button>
+            </div>
+          ))}
+
+          <div className="plan-routine">
+            <h3>周安排</h3>
+            {[...draftSchedule].sort((a, b) => a.day_index - b.day_index).map((entry) => (
+              <div key={entry.day_index} className="plan-schedule-row">
+                <span className="plan-schedule-day">{SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}</span>
+                <label className="plan-field">
+                  <span className="sr-only">{SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}安排</span>
+                  <select
+                    aria-label={`${SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}安排`}
+                    value={entry.routine_code}
+                    onChange={(event) => {
+                      setSavedNote(false);
+                      setDraftSchedule((prev) => prev.map((item) => (item.day_index === entry.day_index ? { ...item, routine_code: event.target.value } : item)));
+                    }}
+                  >
+                    {Object.entries(SCHEDULE_CODE_LABELS).map(([code, label]) => (
+                      <option key={code} value={code}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="plan-field plan-field-note">
+                  <span className="sr-only">{SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}备注</span>
+                  <input
+                    aria-label={`${SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}备注`}
+                    value={entry.note}
+                    placeholder="备注"
+                    onChange={(event) => {
+                      setSavedNote(false);
+                      setDraftSchedule((prev) => prev.map((item) => (item.day_index === entry.day_index ? { ...item, note: event.target.value } : item)));
+                    }}
+                  />
+                </label>
+              </div>
+            ))}
+          </div>
+
+          <div className="plan-routine">
+            <h3>每日体态微练</h3>
+            {draftDaily.map((item, index) => (
+              <div key={item.key} className="plan-exercise-row">
+                <label className="plan-field plan-field-name">
+                  <span>名称</span>
+                  <input
+                    aria-label={`微练第 ${index + 1} 项名称`}
+                    value={item.title}
+                    onChange={(event) => {
+                      setSavedNote(false);
+                      setDraftDaily((prev) => prev.map((row, i) => (i === index ? { ...row, title: event.target.value } : row)));
+                    }}
+                  />
+                </label>
+                <label className="plan-field plan-field-target">
+                  <span>说明</span>
+                  <input
+                    aria-label={`${item.title}说明`}
+                    value={item.detail}
+                    onChange={(event) => {
+                      setSavedNote(false);
+                      setDraftDaily((prev) => prev.map((row, i) => (i === index ? { ...row, detail: event.target.value } : row)));
+                    }}
+                  />
+                </label>
+                <div className="plan-row-actions">
+                  <button
+                    type="button"
+                    aria-label={`删除微练${item.title}`}
+                    onClick={() => {
+                      setSavedNote(false);
+                      setDraftDaily((prev) => prev.filter((_, i) => i !== index));
+                    }}
+                  >删除</button>
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="plan-add"
+              onClick={() => {
+                setSavedNote(false);
+                setDraftDaily((prev) => {
+                  let suffix = prev.length + 1;
+                  let key = `daily-custom-${suffix}`;
+                  while (prev.some((item) => item.key === key)) {
+                    suffix += 1;
+                    key = `daily-custom-${suffix}`;
+                  }
+                  return [...prev, { key, title: "新微练", detail: "" }];
+                });
+              }}
+            >+ 加一项微练</button>
+          </div>
+
+          {saveError ? <p className="error-banner" role="alert">{saveError}</p> : null}
+          {savedNote ? <p className="plan-saved" role="status">已保存，下次开始训练时生效</p> : null}
+          <button type="button" className="plan-save" onClick={handleSave} disabled={save.isPending}>
+            {save.isPending ? "正在保存…" : "保存计划"}
+          </button>
+          <p className="plan-editor-note">修改只保存在这里的草稿里，点保存后才生效；已完成的历史记录不会被改动。</p>
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function StartScreen({ recent, comparableHistory, receiptId, onCloseReceipt }: {
+  recent: Workout[];
+  comparableHistory?: ComparableHistoryEntry[];
+  // W4.3-D1: the workoutId this session just finished, or null. The
+  // receipt renders non-blockingly at the top of the start page.
+  receiptId: number | null;
+  onCloseReceipt: () => void;
+}) {
   const queryClient = useQueryClient();
   const [unit, setUnit] = useState<Unit>("lb");
+  const [historyFocus, setHistoryFocus] = useState<{ id: number; n: number } | null>(null);
+  const plan = useQuery({
+    queryKey: ["plan"],
+    queryFn: () => api.getPlan({}),
+  });
   const start = useMutation({
     mutationFn: (routine: Routine) => api.startWorkout({ routine, unit }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
   });
+  const planData = plan.data && !plan.data.forbidden ? plan.data : null;
 
   return (
     <main className="home-shell">
+      {receiptId != null ? (
+        <CompletionReceipt
+          workoutId={receiptId}
+          onClose={onCloseReceipt}
+          onViewRecord={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}
+        />
+      ) : null}
       <section className="start-hero">
         <div className="hero-copy">
           <p className="date-line">{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "long" }).format(new Date())}</p>
@@ -2125,13 +2897,21 @@ function StartScreen({ recent, comparableHistory }: { recent: Workout[]; compara
       <WeeklyReview workouts={recent} comparableHistory={comparableHistory} />
 
       <section className="routine-selector" aria-label="选择训练日">
-        {(Object.keys(ROUTINE_META) as Routine[]).map((routine, index) => {
+        {ALL_ROUTINES.map((routine, index) => {
           const meta = ROUTINE_META[routine];
+          const planEntry: PlanRoutineEntry | undefined = planData?.routines.find((entry) => entry.routine === routine);
+          const countText = planEntry
+            ? `${planEntry.exercises.length} 个动作 · ${planEntry.exercises.reduce((sum, exercise) => sum + exercise.sets, 0)} 组`
+            : meta.count;
+          const scheduledDays = planData
+            ? planData.schedule.filter((entry) => entry.routine_code === routine).map((entry) => SCHEDULE_DAY_LABELS[entry.day_index] ?? "")
+            : [];
+          const dayText = scheduledDays.length > 0 ? scheduledDays.join(" · ") : meta.day;
           return (
             <button key={routine} type="button" className={`routine-option routine-${routine}`} onClick={() => start.mutate(routine)} disabled={start.isPending}>
               <span className="routine-number">0{index + 1}</span>
-              <span className="routine-name">{meta.label}</span>
-              <span className="routine-detail"><b>{meta.day}</b>{meta.count}</span>
+              <span className={`routine-name${routine.startsWith("home") ? " routine-name-home" : ""}`}>{meta.label}</span>
+              <span className="routine-detail"><b>{dayText}</b>{countText}</span>
               <span className="routine-arrow" aria-hidden="true">→</span>
             </button>
           );
@@ -2139,7 +2919,17 @@ function StartScreen({ recent, comparableHistory }: { recent: Workout[]; compara
       </section>
 
       {start.isError ? <p className="error-banner">没能开始训练，请再试一次。</p> : null}
-      <History workouts={recent} />
+
+      {planData ? <WeeklySchedule key={`schedule-${planData.daily_date}`} plan={planData} /> : null}
+      {planData ? <DailyChecklist key={`daily-${planData.daily_date}`} plan={planData} /> : null}
+      {planData ? (
+        <PlanEditor
+          key={JSON.stringify([planData.routines, planData.schedule, planData.daily_items])}
+          plan={planData}
+        />
+      ) : null}
+
+      <History workouts={recent} focus={historyFocus} />
     </main>
   );
 }
@@ -2149,6 +2939,17 @@ export function App() {
     queryKey: ["dashboard"],
     queryFn: () => api.getDashboard({ recent_limit: 20 }),
   });
+  // W4.3-D1: the completion receipt's target — the exact workoutId
+  // this session's completeWorkout finished, held in memory only.
+  // Refresh strategy (see CompletionReceipt): a page refresh drops
+  // the receipt; it is never rebuilt from the most recent record.
+  const [receiptId, setReceiptId] = useState<number | null>(null);
+  const activeWorkoutId = dashboard.data?.active_workout?.id ?? null;
+  useEffect(() => {
+    // A (new) active workout supersedes any receipt: the start page
+    // is no longer what is on screen.
+    if (activeWorkoutId != null) setReceiptId(null);
+  }, [activeWorkoutId]);
 
   if (dashboard.isPending) {
     return <main className="loading-shell"><div className="loading-bar" /><p>正在打开训练表…</p></main>;
@@ -2176,9 +2977,18 @@ export function App() {
     <div className="app-root">
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
       {dashboard.data.active_workout ? (
-        <ActiveWorkout workout={dashboard.data.active_workout} recent={dashboard.data.recent_workouts} />
+        <ActiveWorkout
+          workout={dashboard.data.active_workout}
+          recent={dashboard.data.recent_workouts}
+          onCompleted={(workoutId) => setReceiptId(workoutId)}
+        />
       ) : (
-        <StartScreen recent={dashboard.data.recent_workouts} comparableHistory={dashboard.data.comparable_history} />
+        <StartScreen
+          recent={dashboard.data.recent_workouts}
+          comparableHistory={dashboard.data.comparable_history}
+          receiptId={receiptId}
+          onCloseReceipt={() => setReceiptId(null)}
+        />
       )}
     </div>
   );
