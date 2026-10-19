@@ -254,6 +254,17 @@ const accountSchema = z.object({
   // even when no boolean verified flag was stored. Null default
   // keeps legacy rows readable (status not provided).
   status: z.string().nullable().default(null),
+  // F1.1 conflict additive: true when this row's metadata could
+  // not be uniquely associated on the read path because duplicate
+  // same-snapshot, same-name, same-type entryMeta rows conflict
+  // on a field (see ensureAvailableCash). The conflicted field
+  // itself stays null — no winner is picked — and the flag keeps
+  // the conflict distinguishable from a legacy row that simply
+  // never carried metadata: a conflicted cash account is withheld
+  // from coverage and named as 元数据冲突待核对， while a truly
+  // metadata-free legacy row keeps the legacy caliber. Default
+  // false keeps pre-existing stored payloads readable.
+  metadataConflict: z.boolean().default(false),
 });
 
 const dashboardSchema = z.object({
@@ -285,6 +296,13 @@ const dashboardSchema = z.object({
     // (verified === false). Named so the UI can state the gap next
     // to the coverage figure instead of a generic shortage.
     availableCashUnverified: z.array(z.string()).default([]),
+    // F1.1 conflict additive: cash sources withheld from the
+    // numerator because their preserved metadata conflicts
+    // (duplicate same-name account entryMeta disagreeing on a
+    // field) and so cannot be uniquely associated — named
+    // separately from unverified cash so the UI can state
+    // 元数据冲突待核对 instead of a verification gap.
+    availableCashConflict: z.array(z.string()).default([]),
     availableCashAccountCount: z.number().int().nonnegative().default(0),
   }),
   holdings: z.array(holdingSchema),
@@ -1460,6 +1478,11 @@ function mergeLatestEntries(entries: SourceEntry[], plaidAccounts: PlaidAccount[
       // the row too, so a carried_forward_unverified balance is
       // recognisable as unverified on every read path.
       status: entry.type === "account" ? entry.status ?? null : null,
+      // Fresh ingest rows come from the single chosen snapshot's
+      // own entries — no duplicate-metadata association happens
+      // here, so there is never a conflict at ingest; conflicts
+      // are a read-path (legacy archive) verdict only.
+      metadataConflict: false,
     };
   });
 }
@@ -1494,12 +1517,21 @@ function mergeLatestEntries(entries: SourceEntry[], plaidAccounts: PlaidAccount[
 //   claimed on unverified cash. A null verification state
 //   (legacy / not provided) keeps the legacy caliber — the row
 //   still counts and is labelled 核实状态未提供 by the UI;
+// - F1.1 conflict rework: a cash row whose metadata CONFLICTS
+//   (metadataConflict — duplicate preserved entryMeta that
+//   cannot be uniquely associated) is withheld the same way and
+//   named in conflictSources. A conflict is NOT the legacy
+//   state: the archive DID carry metadata, it just disagrees
+//   with itself, so counting the balance on the legacy caliber
+//   would fabricate coverage from unresolved evidence. A row
+//   with no metadata at all (every field null, no conflict)
+//   keeps the legacy caliber unchanged;
 // - otherwise the amount is the plain sum of the cash rows'
 //   original balances (a true 0 stays a real 0).
 function summarizeAvailableCash(
   accounts: Dashboard["accounts"],
   sourceMonth: string,
-): { amount: number | null; staleSources: string[]; unverifiedSources: string[]; accountCount: number } {
+): { amount: number | null; staleSources: string[]; unverifiedSources: string[]; conflictSources: string[]; accountCount: number } {
   const cashAccounts = accounts.filter((account) => {
     if (account.type !== "account") return false;
     const role = account.cashflowRole
@@ -1507,7 +1539,7 @@ function summarizeAvailableCash(
     return role === "cash";
   });
   if (cashAccounts.length === 0) {
-    return { amount: null, staleSources: [], unverifiedSources: [], accountCount: 0 };
+    return { amount: null, staleSources: [], unverifiedSources: [], conflictSources: [], accountCount: 0 };
   }
   const staleSources = cashAccounts
     .filter((account) => account.balanceDate != null && normalizeBalanceDate(account.balanceDate) !== sourceMonth)
@@ -1515,13 +1547,17 @@ function summarizeAvailableCash(
   const unverifiedSources = cashAccounts
     .filter((account) => entryUnverified(account))
     .map((account) => account.source);
-  if (staleSources.length > 0 || unverifiedSources.length > 0) {
-    return { amount: null, staleSources, unverifiedSources, accountCount: cashAccounts.length };
+  const conflictSources = cashAccounts
+    .filter((account) => account.metadataConflict === true)
+    .map((account) => account.source);
+  if (staleSources.length > 0 || unverifiedSources.length > 0 || conflictSources.length > 0) {
+    return { amount: null, staleSources, unverifiedSources, conflictSources, accountCount: cashAccounts.length };
   }
   return {
     amount: cashAccounts.reduce((sum, account) => sum + account.value, 0),
     staleSources: [],
     unverifiedSources: [],
+    conflictSources: [],
     accountCount: cashAccounts.length,
   };
 }
@@ -1557,7 +1593,13 @@ function summarizeAvailableCash(
 //   stays out of the numerator).
 // - UNIQUE ASSOCIATION: duplicate account-type meta rows that
 //   agree on a value fill it; rows that conflict on a field
-//   leave that field missing rather than picking a winner.
+//   leave that field missing rather than picking a winner —
+//   and the row is stamped metadataConflict, because a conflict
+//   is evidence that exists but cannot be used, NOT the legacy
+//   absence of evidence: summarizeAvailableCash withholds a
+//   conflicted cash account from coverage and names it, while
+//   a row whose metadata was never saved at all keeps the
+//   legacy caliber.
 // The fill is read-path only: the stored payload is never
 // written back, so the blob stays byte-identical.
 function ensureAvailableCash(dashboard: Dashboard): Dashboard {
@@ -1570,7 +1612,18 @@ function ensureAvailableCash(dashboard: Dashboard): Dashboard {
     const candidates = snapshotMeta.filter(
       (entry) => entry.financeSource === account.source && entry.type === "account",
     );
-    const pick = <T,>(read: (entry: (typeof candidates)[number]) => T | null | undefined): T | null => {
+    // F1.1 conflict rework: pick reports a CONFLICT distinctly
+    // from a plain absence. Duplicate meta rows that disagree on
+    // a field make that field unassociable — it stays null (no
+    // winner is picked) — but the row is stamped
+    // metadataConflict so the summary and the UI can tell
+    // "metadata exists but conflicts" apart from "metadata was
+    // never saved" (the legacy state, which keeps its caliber).
+    // A field the row already carries is never re-associated, so
+    // its duplicates cannot conflict it either.
+    const pick = <T,>(
+      read: (entry: (typeof candidates)[number]) => T | null | undefined,
+    ): { value: T | null; conflict: boolean } => {
       let found: T | null = null;
       for (const entry of candidates) {
         const value = read(entry);
@@ -1580,18 +1633,30 @@ function ensureAvailableCash(dashboard: Dashboard): Dashboard {
         } else if (found !== value) {
           // Conflicting duplicate meta: ambiguous association —
           // degrade conservatively, fill nothing for this field.
-          return null;
+          return { value: null, conflict: true };
         }
       }
-      return found;
+      return { value: found, conflict: false };
     };
+    const fillField = <T,>(own: T | null | undefined, read: (entry: (typeof candidates)[number]) => T | null | undefined) => {
+      if (own != null) return { value: own, conflict: false };
+      return pick(read);
+    };
+    const verifiedFill = fillField(account.verified, (entry) => entry.verified);
+    const statusFill = fillField(account.status, (entry) => entry.status);
+    const balanceDateFill = fillField(account.balanceDate, (entry) => entry.balanceDate);
     return {
       ...account,
       cashflowRole: role,
       availableCash: role === "cash",
-      verified: account.verified ?? pick((entry) => entry.verified),
-      status: account.status ?? pick((entry) => entry.status),
-      balanceDate: account.balanceDate ?? pick((entry) => entry.balanceDate),
+      verified: verifiedFill.value,
+      status: statusFill.value,
+      balanceDate: balanceDateFill.value,
+      metadataConflict:
+        account.metadataConflict === true ||
+        verifiedFill.conflict ||
+        statusFill.conflict ||
+        balanceDateFill.conflict,
     };
   });
   const summary = summarizeAvailableCash(filledAccounts, dashboard.sourceMonth);
@@ -1603,6 +1668,7 @@ function ensureAvailableCash(dashboard: Dashboard): Dashboard {
       availableCash: summary.amount,
       availableCashStale: summary.staleSources,
       availableCashUnverified: summary.unverifiedSources,
+      availableCashConflict: summary.conflictSources,
       availableCashAccountCount: summary.accountCount,
     },
   };
@@ -1942,6 +2008,7 @@ function buildDashboard(
       availableCash: availableCashSummary.amount,
       availableCashStale: availableCashSummary.staleSources,
       availableCashUnverified: availableCashSummary.unverifiedSources,
+      availableCashConflict: availableCashSummary.conflictSources,
       availableCashAccountCount: availableCashSummary.accountCount,
     },
     holdings: normalized.holdings,
@@ -2237,6 +2304,15 @@ async function writeState(
 // never touches payload / generation / claimedGeneration /
 // startedAt, so an in-flight ingest claim of the same generation
 // is undisturbed.
+// F0.7 rework (claim guard): the match ALSO requires
+// claimedGeneration IS NULL. Once an ingest callback of this
+// generation has claimed the row (claim stamped, settle not yet
+// written), the spawn tail — the success taskId attach AND the
+// failure error settle alike — must not change the state at all:
+// flipping it to "error" here would make the claim holder's
+// settle (conditioned on the still-running status) match zero
+// rows and silently discard a legal save. An unattached tail
+// returns false and the caller answers from the current state.
 async function casSpawnTailState(
   ctx: Ctx,
   generation: string,
@@ -2251,6 +2327,7 @@ async function casSpawnTailState(
         eq(schema.financeState.id, 1),
         eq(schema.financeState.generation, generation),
         eq(schema.financeState.status, "running"),
+        isNull(schema.financeState.claimedGeneration),
       ),
     )
     .returning({ id: schema.financeState.id });
@@ -2316,8 +2393,27 @@ export const Actions = {
       if (!isOwner(ctx)) {
         return { ok: false, status: "forbidden", message: "财务数据仅所有者可更新" };
       }
-      const state = await getState(ctx);
-      if (state?.status === "running" && !isStaleRunningState(state.status, state.updatedAt, new Date())) {
+      // F0.7 rework: starting a refresh is an ATOMIC conditional
+      // claim, not a read-check-then-overwrite. The pre-fix path
+      // read the state, checked "running", then unconditionally
+      // overwrote the row with a new generation — two concurrent
+      // calls could both pass the check, each mint its own
+      // generation, and the later write silently replaced the
+      // earlier one, so the first task's legal callback was then
+      // rejected as a foreign generation. Now the start write is
+      // a single UPDATE conditioned on the exact snapshot this
+      // call read (status + updatedAt + generation): it lands
+      // only while the row is still that row. With no state row,
+      // a conflict-free insert plays the same role. A caller
+      // whose claim misses re-reads once per attempt: a fresh
+      // (non-stale) running state means another start won —
+      // answer already_running and NEVER spawn. Only the claim
+      // winner may spawn. The stale-running restart semantics are
+      // unchanged (isStaleRunningState decides, and a stale row
+      // is claimable exactly like an idle/error one).
+      const db = ctx.db<typeof schema>();
+      let snapshot = await getState(ctx);
+      if (snapshot?.status === "running" && !isStaleRunningState(snapshot.status, snapshot.updatedAt, new Date())) {
         return { ok: true, status: "already_running", message: "每周更新正在进行中" };
       }
       // F0.7 generation contract: mint this refresh's generation id
@@ -2332,13 +2428,65 @@ export const Actions = {
       // the old generation can no longer settle or save into this
       // one.
       const generation = newGenerationId();
-      await writeState(ctx, {
-        status: "running",
-        message: "正在同步 Firance 与 Plaid",
-        generation,
-        claimedGeneration: null,
-        startedAt: new Date(),
-      });
+      let claimed = false;
+      for (let attempt = 0; attempt < 3 && !claimed; attempt += 1) {
+        if (!snapshot) {
+          const inserted = await db
+            .insert(schema.financeState)
+            .values({
+              id: 1,
+              payload: null,
+              previousLiveNetWorth: null,
+              status: "running",
+              taskId: null,
+              message: "正在同步 Firance 与 Plaid",
+              generation,
+              claimedGeneration: null,
+              startedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .onConflictDoNothing()
+            .returning({ id: schema.financeState.id });
+          claimed = inserted.length === 1;
+        } else {
+          const rows = await db
+            .update(schema.financeState)
+            .set({
+              status: "running",
+              taskId: null,
+              message: "正在同步 Firance 与 Plaid",
+              generation,
+              claimedGeneration: null,
+              startedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.financeState.id, 1),
+                eq(schema.financeState.status, snapshot.status),
+                eq(schema.financeState.updatedAt, snapshot.updatedAt),
+                snapshot.generation == null
+                  ? isNull(schema.financeState.generation)
+                  : eq(schema.financeState.generation, snapshot.generation),
+              ),
+            )
+            .returning({ id: schema.financeState.id });
+          claimed = rows.length === 1;
+        }
+        if (!claimed) {
+          // Lost the start race: re-read once. A fresh running
+          // state is the winner's — report it and do not spawn.
+          // Anything else (a settle landed, the row only just
+          // appeared) is retried against the new snapshot.
+          snapshot = await getState(ctx);
+          if (snapshot?.status === "running" && !isStaleRunningState(snapshot.status, snapshot.updatedAt, new Date())) {
+            return { ok: true, status: "already_running", message: "每周更新正在进行中" };
+          }
+        }
+      }
+      if (!claimed) {
+        return { ok: false, status: "error", message: "刷新任务未能启动" };
+      }
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
         `刷新“每周财务总览”的真实数据。只读，不得写 Mac 文件，不得操作任何金融账户。\n\n1. 先定位目标设备：用设备列表工具列出当前可访问的设备，按设备名找到用户的 Mac mini（设备名含 “Mac mini” 的那台），本次刷新只使用这个运行时解析出的设备 ID。若按设备名找不到 Mac mini，或有多台候选无法唯一确定，不要猜测、不要用任何预置或写死的 ID 兜底，立即以 success:false 回调 ingestFinanceData 并在 error 中明确说明未能按设备名定位 Mac mini。在定位到的 Mac mini 上，先在运行时解析当前登录用户的主目录（home directory），再据此构造 Firance 数据目录为 <home>/Library/Application Support/Firance/FinanceData/（即 ~/Library/Application Support/Firance/FinanceData/）；不得使用任何写死的用户名或绝对用户路径。若无法解析主目录，不要猜测路径，立即以 success:false 回调 ingestFinanceData 并在 error 中说明无法解析主目录。然后用文件列表工具列出该目录，再读取全部文件名符合 YYYY-MM-DD 或 YYYY-MM 的无扩展名文件，月份键必须原样返回文件名、不要自行补成某一天（服务端会把 YYYY-MM 归一为该月月末估值）。每条记录是一组 key/value 行，至少含 finance_source、type、number；现行 Firance 记录还可能带 cashflow_role、balance_date、status、period_start、period_end、verified 等扩展行，且每条记录的行数不固定，必须按 key 解析、不得假定恰好三行或固定顺序。只保留 type 为 investment、investment_contribution、account、fixed_spend、transfer、income、flexible_spend、cashflow_adjustment、investment_external_adjustment 且 number 为有限数字的记录；扩展行按原 key 映射返回：cashflow_role→cashflowRole（cash/credit/debt/non_cash）、balance_date→balanceDate、status→status、period_start→periodStart、period_end→periodEnd、verified→verified，其余未知扩展 key 原样放入该记录的 extra 对象（值按数字/布尔/字符串原样保留）。其中 investment_period_start、investment_period_end、investment_flow_verified 是 Firance 原生 key：必须以原 key 原样放入该记录的 extra，不得改名或映射为 period_start/period_end/verified，也不得与通用 periodStart/periodEnd/verified 合并或互相覆盖（两套字段并存时以各自原值返回）；status 的值必须原样返回，不得改写、翻译或归一化。原始文件只读，不得回写，不得为历史记录补造核实标记。若 Mac 不在线或文件读取失败，不要伪造；用 success:false 回调并说明失败。\n2. 在 Muse runtime 依次运行只读命令 plaid accounts、plaid liabilities、plaid investments-holdings。将账户整理为 institution/name/type/subtype/mask/current。将 mortgage current 余额作为 loan 账户返回；不要返回内部 account_id 或 credential_id。将 holdings 按 security_id 与 securities 关联后逐条返回，不要预先截断为 Top 10（服务端会保留全量规范化集合）：每条返回 ticker/name/value（取 institution_value）/currency/institution，其中 currency 为该持仓的 iso_currency_code（确实无法确定时返回 null，不得默认填 USD）、institution 为持仓所在机构名称；institution_value 缺失时 value 返回 null，负值原样返回，不得丢弃、不得取绝对值；不要返回任何内部 ID、原始 JSON 或凭证。\n3. 再用 Plaid transactions 拉取 checking/savings 账户最多最近 730 天的交易，分页取全。只返回 date、amount、name、pending，以及根据 Plaid 类别和交易对手判断的 internalTransfer（自己名下账户互转）与 transferLike（疑似转账）布尔值；Plaid 正数表示流出。返回 transactionCoverage={start,end,complete}，只有覆盖区间内分页完整无缺失时 complete=true；交易读取失败时保留其他数据并将 transactionCoverage 设为 null、plaidTransactions 设为空数组。\n4. 完成后调用 ingestFinanceData。成功参数必须是：{success:true,asOf:<带时区ISO>,months:[{key,entries:[{financeSource,type,number,可选 cashflowRole/balanceDate/status/periodStart/periodEnd/verified/extra}]}],plaidAccounts:[{institution,name,type,subtype,mask,current}],holdings:[{ticker,name,value,currency,institution}],plaidTransactions:[{date,amount,name,pending,internalTransfer,transferLike}],transactionCoverage:{start,end,complete}|null}。Firance、账户余额或持仓任一步无法可靠完成时调用 {success:false,error:<简洁中文>}；只有交易读取失败按上述方式回退，不使整次刷新失败。回传 ingestFinanceData 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略，且不会改变刷新状态）。不要发送聊天消息。`,

@@ -293,14 +293,73 @@ check("ledger: an idle (saved) state states the saved range as the displayed ran
 const ledgerEmpty = sourceLedgerRows(null, { status: "idle" });
 check("ledger: no data -> every source date is 未知 and range 未取得 (nothing fabricated)",
   ledgerEmpty.every((row) => row.dataDate === "未知" && row.range === "未取得"));
+// --- F0.5 rework: per-source real dates + no false save claims ---
+check("ledger: no data + idle -> NO row claims a save (no 已落盘保存 / 已同步 wording anywhere)",
+  ledgerEmpty.every((row) => !row.result.includes("已落盘保存") && !row.result.includes("已同步"))
+  && ledgerEmpty.every((row) => row.result.includes("未取得") || row.result.includes("未知")));
+check("ledger: no data + idle -> results state 尚无成功快照",
+  ledgerEmpty[0].result.includes("尚无成功快照") && ledgerEmpty[1].result.includes("尚无成功快照")
+  && ledgerEmpty[3].result.includes("尚无成功快照"));
+check("ledger: no data + error/running -> still no save claim",
+  sourceLedgerRows(null, { status: "error" }).every((row) => !row.result.includes("已落盘保存"))
+  && sourceLedgerRows(null, { status: "running" }).every((row) => !row.result.includes("已落盘保存")));
+// PM counterexample: sourceMonth and asOf in DIFFERENT months —
+// the bank and holdings rows must not wear the asOf date as
+// their data date; with no balanceDate evidence they read 未知.
+const ledgerSplit = sourceLedgerRows({
+  asOf: "2099-10-18T12:00:00-07:00",
+  sourceMonth: "2099-09-30",
+  months: [bandMonth("2099-09-30", "unknown")],
+  accounts: [{ type: "account", live: false }],
+  holdings: [{ ticker: "VOO" }],
+  holdingsAll: [],
+  holdingsTotal: null,
+  holdingsComplete: false,
+}, { status: "idle" });
+check("ledger (PM case): bank + holdings rows never show the asOf date (2099-10-18) as their data date",
+  ledgerSplit[1].dataDate === "未知" && ledgerSplit[3].dataDate === "未知"
+  && !ledgerSplit[1].dataDate.includes("2099-10-18") && !ledgerSplit[3].dataDate.includes("2099-10-18"));
+check("ledger (PM case): the local monthly row keeps its real fact — sourceMonth + month range",
+  ledgerSplit[0].dataDate === "2099-09-30" && ledgerSplit[0].range.includes("2099-09-30"));
+// With real balanceDate evidence the bank row shows THAT date.
+const ledgerDated = sourceLedgerRows({
+  ...ledgerData,
+  accounts: [
+    { type: "account", live: false, balanceDate: "2026-09-30" },
+    { type: "income", live: false },
+  ],
+}, { status: "idle" });
+check("ledger: a retained balanceDate is the bank row's data date (the real per-source evidence)",
+  ledgerDated[1].dataDate === "2026-09-30");
+const ledgerDatedMixed = sourceLedgerRows({
+  ...ledgerData,
+  accounts: [
+    { type: "account", live: false, balanceDate: "2026-09-30" },
+    { type: "account", live: true, balanceDate: "2026-09-15" },
+    { type: "income", live: false },
+  ],
+}, { status: "idle" });
+check("ledger: differing balance dates are presented as a span AND named inconsistent (never collapsed to asOf or one day)",
+  ledgerDatedMixed[1].dataDate.includes("2026-09-15") && ledgerDatedMixed[1].dataDate.includes("2026-09-30")
+  && ledgerDatedMixed[1].dataDate.includes("不一致"));
+// Combination: bank facts saved, transactions failed/unknown —
+// the transaction row keeps its old coverage statement and its
+// unknown per-source result; the bank row's state never lends
+// the transaction row any coverage.
+check("ledger: bank saved + transaction unknown — transaction row keeps its provenance range and 未知 result",
+  ledgerError[2].range.includes("2026-09") && ledgerError[2].result === "未知（平台未提供逐源结果）"
+  && ledgerError[1].result.includes("未写入新数据"));
+check("ledger wiring: rows present the two groups separately (上次可用事实 vs 本次尝试）, asOf never a per-source date",
+  appSrc.includes("上次可用事实") && appSrc.includes("本次尝试：{row.result}")
+  && appSrc.includes("最后成功快照时间"));
 check("band wiring: rendered only after the access check, fed the sanitized message",
   appSrc.includes("!guestDenied && response") && appSrc.includes("<RefreshStatusBand") && appSrc.includes("message={visibleMessage}"));
 check("band wiring: the running copy is explicit （正在更新，当前显示上次成功数据）",
   appSrc.includes("正在更新，当前显示上次成功数据"));
 check("band wiring: updatedAt is labelled 状态写入时刻， never a heartbeat or data date",
   appSrc.includes("状态写入时刻") && !appSrc.includes("心跳"));
-check("band wiring: last-success date and attempt start are separate fields",
-  appSrc.includes("最后成功数据日期") && appSrc.includes("本次尝试开始") && appSrc.includes("最近一次尝试开始")
+check("band wiring: last-success snapshot time and attempt start are separate fields (asOf labelled as the snapshot time only)",
+  appSrc.includes("最后成功快照时间") && appSrc.includes("本次尝试开始") && appSrc.includes("最近一次尝试开始")
   && appSrc.includes("formatInstant(refresh.startedAt, false)"));
 check("band wiring: server stamps and returns the attempt start (startedAt), distinct from updatedAt",
   serverSrc.includes("startedAt: new Date()") && serverSrc.includes("startedAt: state?.startedAt?.toISOString() ?? null"));

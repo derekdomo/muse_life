@@ -418,5 +418,101 @@ async function waitFor(label: string, cond: () => boolean, ms = 5000) {
     view.access === "owner" && view.refresh.startedAt === null && view.refresh.status === "idle");
 }
 
+// =====================================================================
+// Group 11: F0.7 rework — atomic start claim + claim-guarded tail
+// =====================================================================
+{
+  // (a) Concurrent starts on an empty state table (insert path):
+  // exactly one generation is admitted, the other caller gets
+  // already_running, and spawnTask runs exactly once.
+  const { sqlite, db } = freshDb();
+  let spawnCalls = 0;
+  let releaseSpawn!: () => void;
+  const spawnGate = new Promise<void>((res) => { releaseSpawn = res; });
+  const countingSpawn = async () => {
+    spawnCalls += 1;
+    await spawnGate;
+    return { ok: true, taskId: "task-concurrent" };
+  };
+  const ctxC = ownerCtx(db, { spawnTask: countingSpawn });
+  const p1 = Actions.refreshFinanceData.handler(ctxC, {});
+  const p2 = Actions.refreshFinanceData.handler(ctxC, {});
+  await new Promise((r) => setTimeout(r, 50));
+  releaseSpawn();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  const statuses = [r1.status, r2.status].sort();
+  check("concurrent starts (no state row): exactly one started, the other already_running",
+    statuses[0] === "already_running" && statuses[1] === "started");
+  check("concurrent starts (no state row): spawnTask called exactly once", spawnCalls === 1);
+  check("concurrent starts (no state row): the row holds the single winning generation, running, task attached",
+    stateRow(sqlite).status === "running" && stateRow(sqlite).task_id === "task-concurrent"
+    && typeof stateRow(sqlite).generation === "string");
+  const genC: string = stateRow(sqlite).generation;
+  await Actions.ingestFinanceData.handler(ownerCtx(db), { success: false, error: "harness cleanup", generation: genC });
+
+  // (a2) Concurrent starts over an existing settled row (CAS
+  // update path): same verdict — one winner, one already_running,
+  // one spawn.
+  const { sqlite: sqliteB, db: dbB } = freshDb();
+  await Actions.refreshFinanceData.handler(ownerCtx(dbB), {});
+  const genB0: string = stateRow(sqliteB).generation;
+  await Actions.ingestFinanceData.handler(ownerCtx(dbB), successPayload(genB0, freshAsOf()));
+  check("concurrent-start setup: first generation settled idle", stateRow(sqliteB).status === "idle");
+  let spawnCallsB = 0;
+  let releaseSpawnB!: () => void;
+  const spawnGateB = new Promise<void>((res) => { releaseSpawnB = res; });
+  const countingSpawnB = async () => {
+    spawnCallsB += 1;
+    await spawnGateB;
+    return { ok: true, taskId: "task-concurrent-b" };
+  };
+  const ctxB = ownerCtx(dbB, { spawnTask: countingSpawnB });
+  const q1 = Actions.refreshFinanceData.handler(ctxB, {});
+  const q2 = Actions.refreshFinanceData.handler(ctxB, {});
+  await new Promise((r) => setTimeout(r, 50));
+  releaseSpawnB();
+  const [s1, s2] = await Promise.all([q1, q2]);
+  const statusesB = [s1.status, s2.status].sort();
+  check("concurrent starts (settled row): exactly one started, the other already_running",
+    statusesB[0] === "already_running" && statusesB[1] === "started");
+  check("concurrent starts (settled row): spawnTask called exactly once", spawnCallsB === 1);
+  check("concurrent starts (settled row): one new generation replaced the settled one",
+    stateRow(sqliteB).status === "running" && stateRow(sqliteB).generation !== genB0
+    && stateRow(sqliteB).task_id === "task-concurrent-b");
+  const genB: string = stateRow(sqliteB).generation;
+  await Actions.ingestFinanceData.handler(ownerCtx(dbB), { success: false, error: "harness cleanup", generation: genB });
+
+  // (b) Spawn tail while the same generation's callback holds
+  // the claim: BOTH tail outcomes (spawn ok:false and ok:true)
+  // must leave the state untouched, and the claim holder's legal
+  // save must still land and settle idle.
+  for (const outcome of ["failure", "success"] as const) {
+    const { sqlite: sqlite2, db: db2 } = freshDb();
+    let releaseSettle!: () => void;
+    const gate = new Promise<void>((res) => { releaseSettle = res; });
+    const wrapped = wrapDbPauseOnPayloadWrite(db2, gate);
+    let ingestPromise: Promise<any> | null = null;
+    const spawnWithClaim = async () => {
+      const gen: string = stateRow(sqlite2).generation;
+      ingestPromise = Actions.ingestFinanceData.handler(ownerCtx(wrapped.db), successPayload(gen, freshAsOf()));
+      await waitFor("ingest claimed and paused at its settle write", () => wrapped.intercepted());
+      return outcome === "failure" ? { ok: false } : { ok: true, taskId: "tail-task" };
+    };
+    const refreshRes: any = await Actions.refreshFinanceData.handler(
+      ownerCtx(wrapped.db, { spawnTask: spawnWithClaim }), {},
+    );
+    const stMid = stateRow(sqlite2);
+    check(`spawn tail ${outcome} during an in-flight claim: state untouched (running, claim held, no task attached, no error)`,
+      stMid.status === "running" && stMid.claimed_generation != null && stMid.task_id == null);
+    check(`spawn tail ${outcome} during an in-flight claim: refresh answers from the current state (already_running)`,
+      refreshRes.ok === true && refreshRes.status === "already_running");
+    releaseSettle();
+    const ingestRes = await ingestPromise!;
+    const stEnd = stateRow(sqlite2);
+    check(`spawn tail ${outcome} during an in-flight claim: the legal callback still saves (savedMonths=2), settles idle, payload stored`,
+      ingestRes.savedMonths === 2 && stEnd.status === "idle" && payloadAsOf(sqlite2) != null && stEnd.claimed_generation == null);
+  }
+}
+
 console.log(`validate-refresh-chain: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

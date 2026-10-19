@@ -174,6 +174,18 @@ check("wiring: claim loser re-reads once and an already-claimed generation is a 
 check("wiring: settle is bound to the claim token + generation, payload written in the same write",
   src.includes("eq(schema.financeState.claimedGeneration, claimToken)")
   && ingestSection.includes("const published = await settleClaimed({"));
+check("wiring: refresh start is an atomic conditional claim on the read snapshot (status + updatedAt + generation), insert-if-absent otherwise",
+  refreshSection.includes("eq(schema.financeState.updatedAt, snapshot.updatedAt)")
+  && refreshSection.includes("eq(schema.financeState.status, snapshot.status)")
+  && refreshSection.includes(".onConflictDoNothing()")
+  && !refreshSection.includes("writeState"));
+check("wiring: only the start-claim winner spawns (claim failure re-reads and answers already_running before any spawn)",
+  refreshSection.indexOf("if (!claimed)") > -1
+  && refreshSection.indexOf("if (!claimed)") < refreshSection.indexOf("ctx.agent.spawnTask")
+  && refreshSection.includes('return { ok: true, status: "already_running", message: "每周更新正在进行中" };'));
+check("wiring: spawn-tail CAS additionally requires claimedGeneration IS NULL (an in-flight claim is never stolen)",
+  src.includes("isNull(schema.financeState.claimedGeneration)")
+  && src.slice(src.indexOf("async function casSpawnTailState"), src.indexOf("export const Actions")).includes("isNull(schema.financeState.claimedGeneration)"));
 check("wiring: identity unchanged — finance stays strictly owner, no viewer-less channel admitted",
   (src.match(/if \(!isOwner\(ctx\)\)/g) ?? []).length >= 3
   && !src.includes("space-task-return") && !src.includes("isTaskReturnCallback") && !src.includes("isScheduledPlatformCall"));
