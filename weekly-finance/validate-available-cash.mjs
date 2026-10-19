@@ -559,5 +559,47 @@ check("client: conflict blocks coverage with the same verdict and the panel name
   appSrc.includes("account.metadataConflict === true") && appSrc.includes("元数据冲突待核对")
   && appSrc.includes("现金账户元数据冲突待核对") && appSrc.includes("已在本页试算中排除"));
 
+// --- date-validation fix (PM 2026-10-19): an illegal YYYY-MM
+// balance month must NOT roll into a legal balance date ---
+// "2025-13" used to roll through the shared normalization to
+// 2026-01-31 and compare EQUAL to a January source snapshot, so
+// the cash counted as fresh and coverage was claimed on a date
+// that never existed. Fixed in the shared normalizeBalanceDate:
+// coverage is null and the source is named stale (the invalid
+// date is the reason it cannot match). The recorded balance and
+// the raw bad value stay on the row as facts — nothing is
+// repaired, backfilled or rewritten. Synthetic values only.
+const rolledCash = build([{ key: "2026-01-31", entries: [E("bank_1234", "account", 10000, { balanceDate: "2025-13" })] }]);
+check("illegal month: balanceDate 2025-13 does not roll into the 2026-01-31 snapshot — coverage null, source named stale",
+  rolledCash.live.availableCash === null && (rolledCash.live.availableCashStale ?? []).join() === "bank_1234"
+  && rolledCash.live.availableCashAccountCount === 1);
+check("illegal month: the row keeps its recorded balance AND its raw bad date (read-path verdict only, no rewrite)",
+  rowOf(rolledCash, "bank_1234").value === 10000 && rowOf(rolledCash, "bank_1234").balanceDate === "2025-13");
+const rolledCash14 = build([{ key: "2026-02-28", entries: [E("bank_1234", "account", 10000, { balanceDate: "2025-14" })] }]);
+check("illegal month: balanceDate 2025-14 does not roll into the 2026-02-28 snapshot either",
+  rolledCash14.live.availableCash === null && (rolledCash14.live.availableCashStale ?? []).join() === "bank_1234");
+const illegalCash99 = build([{ key: "2026-09-30", entries: [E("bank_1234", "account", 10000, { balanceDate: "2025-99" })] }]);
+check("illegal month: balanceDate 2025-99 is stale against any snapshot",
+  illegalCash99.live.availableCash === null && (illegalCash99.live.availableCashStale ?? []).join() === "bank_1234");
+const garbageDatedCash = latestEntries([E("bank_1234", "account", 10000, { balanceDate: "nonsense" })]);
+check("illegal format: a non-date balanceDate string never equals the snapshot date — stale, named",
+  garbageDatedCash.live.availableCash === null && (garbageDatedCash.live.availableCashStale ?? []).join() === "bank_1234");
+const legalMonthFormCash = build([{ key: "2026-01-31", entries: [E("bank_1234", "account", 10000, { balanceDate: "2026-01" })] }]);
+check("illegal month sensitivity: the legal YYYY-MM form 2026-01 still equals the January snapshot — cash counts (10000)",
+  legalMonthFormCash.live.availableCash === 10000 && (legalMonthFormCash.live.availableCashStale ?? []).length === 0);
+const crossYearFormCash = build([{ key: "2025-12-31", entries: [E("bank_1234", "account", 10000, { balanceDate: "2025-12" })] }]);
+check("legal dates unchanged: YYYY-MM across the year boundary (2025-12) still equals its month-end snapshot",
+  crossYearFormCash.live.availableCash === 10000 && (crossYearFormCash.live.availableCashStale ?? []).length === 0);
+const leapFormCash = build([{ key: "2024-02-29", entries: [E("bank_1234", "account", 10000, { balanceDate: "2024-02" })] }]);
+check("legal dates unchanged: leap-year February YYYY-MM (2024-02) still equals the 02-29 snapshot",
+  leapFormCash.live.availableCash === 10000 && (leapFormCash.live.availableCashStale ?? []).length === 0);
+const trueZeroIllegal = build([{ key: "2026-01-31", entries: [E("bank_1234", "account", 0, { balanceDate: "2025-13" })] }]);
+check("illegal month: a real 0 balance with an illegal month is withheld too (0 is a fact, not fresh evidence)",
+  trueZeroIllegal.live.availableCash === null && (trueZeroIllegal.live.availableCashStale ?? []).join() === "bank_1234"
+  && rowOf(trueZeroIllegal, "bank_1234").value === 0);
+const noDateLegacyCash = latestEntries([E("bank_1234", "account", 10000)]);
+check("legacy compatibility unchanged: a cash row with NO balance date at all still counts on the snapshot caliber (not stale, not invalid)",
+  noDateLegacyCash.live.availableCash === 10000 && (noDateLegacyCash.live.availableCashStale ?? []).length === 0);
+
 console.log(`validate-available-cash: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

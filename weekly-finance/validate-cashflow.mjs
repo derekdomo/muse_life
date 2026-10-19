@@ -440,5 +440,90 @@ check("UI: estimate drawer reuses the dual-end presentation (start/end rows with
   appSrc.includes("现金流反推双端核对") && appSrc.includes("期初 · {entry.financeSource}")
   && appSrc.includes("期末 · {entry.financeSource}") && appSrc.includes("verificationText(entry.verified)"));
 
+// --- date-validation fix (PM 2026-10-19): an illegal YYYY-MM
+// month must NOT roll into a legal balance date ---
+// The shared normalizeBalanceDate used to pass "2025-13"
+// straight into monthEnd, whose Date arithmetic rolled it to
+// 2026-01-31 — a legal month-end — so an endpoint carrying the
+// bad value compared EQUAL to a January snapshot and the
+// back-calculation ran on a date that never existed. The month
+// is now validated (01..12) before any Date is constructed, in
+// the ONE shared normalization every gate consumes. Synthetic
+// values only.
+const nbd = api.normalizeBalanceDate;
+check("normalize: illegal YYYY-MM months (00/13/14/99) have no date eligibility",
+  nbd("2025-00") === null && nbd("2025-13") === null && nbd("2025-14") === null && nbd("2025-99") === null);
+check("normalize: malformed strings and illegal explicit dates are ineligible too",
+  nbd("nonsense") === null && nbd("2025-1") === null && nbd("2025-13-01") === null
+  && nbd("2026-02-30") === null && nbd("2026-09-31") === null && nbd("") === null && nbd(null) === null);
+check("normalize: legal YYYY-MM months still denote their month end (01/12, leap and non-leap February)",
+  nbd("2025-01") === "2025-01-31" && nbd("2025-12") === "2025-12-31"
+  && nbd("2024-02") === "2024-02-29" && nbd("2025-02") === "2025-02-28" && nbd("2026-02") === "2026-02-28");
+check("normalize: YYYY-MM stays equivalent to its explicit month-end date, across the year boundary",
+  nbd("2026-09") === "2026-09-30" && nbd("2026-09") === nbd("2026-09-30") && nbd("2026-01-31") === "2026-01-31");
+check("normalize: the shared monthEnd helper itself refuses to roll an illegal month",
+  api.monthEnd("2025-13") === "" && api.monthEnd("2025-14") === "" && api.monthEnd("2025-00") === ""
+  && api.monthEnd("2026-02") === "2026-02-28");
+// mutation sensitivity: the pre-fix pair (monthEnd via raw Date
+// roll, no month range check) DID mint 2026-01-31 out of
+// "2025-13" — this matrix fails against it.
+const oldMonthEnd = (monthKey) => {
+  const [y = 0, m = 0] = monthKey.slice(0, 7).split("-").map(Number);
+  if (!y || !m) return "";
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+};
+check("mutation: the old rolling monthEnd turns 2025-13 into 2026-01-31; the fixed normalization returns null",
+  oldMonthEnd("2025-13") === "2026-01-31" && nbd("2025-13") === null);
+// End-to-end, cash side: a Dec -> Jan pair whose END balance
+// date is "2025-13". Rolled, it equals the 2026-01-31 snapshot
+// and the old gate computed the estimate; fixed, the spend is
+// null and the reason names the endpoint, the account and the
+// recorded bad date. Nothing is auto-repaired or backfilled.
+const rollPair = (decFields, janFields) => agg([
+  { key: "2025-12-31", entries: [E("bank_1234", "account", 1000, decFields)] },
+  {
+    key: "2026-01-31",
+    entries: [
+      E("bank_1234", "account", 1200, janFields),
+      E("salary", "income", 1000),
+      E("rent", "fixed_spend", 300),
+      E("broker", "investment_contribution", 100),
+    ],
+  },
+]);
+const endRolledMonth = rollPair({}, { balanceDate: "2025-13" });
+check("illegal month (end): balanceDate 2025-13 does not roll into the 2026-01-31 snapshot — spend null, date problem named",
+  endRolledMonth[1].flexibleSpend === null
+  && (endRolledMonth[1].anomalyReason ?? "").includes("期末账户 bank_1234 沿用旧余额日期 2025-13"));
+check("illegal month (end): recorded balances stay facts while the estimate is withheld",
+  endRolledMonth[1].cashCreditNet === 1200 && endRolledMonth[0].cashCreditNet === 1000
+  && endRolledMonth[1].flexibleSpendSource === "missing");
+const endLegalMonth = rollPair({}, { balanceDate: "2026-01" });
+check("illegal month sensitivity (end): the legal YYYY-MM form 2026-01 still equals the January snapshot — estimate restored (400)",
+  endLegalMonth[1].flexibleSpend === 400);
+// Start side: a Feb -> Mar pair whose START balance date is
+// "2025-14" (rolled to 2026-02-28 under the old code).
+const startRolledMonth = agg([
+  { key: "2026-02-28", entries: [E("bank_1234", "account", 1000, { balanceDate: "2025-14" })] },
+  {
+    key: "2026-03-31",
+    entries: [
+      E("bank_1234", "account", 1200),
+      E("salary", "income", 1000),
+      E("rent", "fixed_spend", 300),
+      E("broker", "investment_contribution", 100),
+    ],
+  },
+]);
+check("illegal month (start): balanceDate 2025-14 does not roll into the 2026-02-28 snapshot — spend null, date problem named",
+  startRolledMonth[1].flexibleSpend === null
+  && (startRolledMonth[1].anomalyReason ?? "").includes("期初账户 bank_1234 沿用旧余额日期 2025-14"));
+// Wiring: the month range is validated in the shared
+// normalization itself, before monthEnd is reached — not in any
+// single consumer.
+check("wiring: normalizeBalanceDate validates the YYYY-MM month before calling monthEnd",
+  extractFn("normalizeBalanceDate").includes("month < 1 || month > 12")
+  && extractFn("monthEnd").includes("month < 1 || month > 12"));
+
 console.log(`validate-cashflow: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
