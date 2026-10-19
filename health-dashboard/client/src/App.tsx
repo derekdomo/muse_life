@@ -588,7 +588,7 @@ interface WeekLoad {
   detail: string;
   sufficient: boolean;
   reasons: string[];
-  coverageNote: string | null;
+  previousDetail: string;
   current: WeekLoadWindow;
   previous: WeekLoadWindow;
   sessionsChangePct: number | null;
@@ -618,7 +618,11 @@ function volumeInDisplayUnit(volume: number, unit: "lb" | "kg", displayUnit: "lb
 // duplicated daily row, an unsynced or partially measured strength week, a
 // session without a duration — means no percentage and no verdict, never
 // a guessed one. Percentages are only computed per metric when both
-// windows are complete and last week's value is above zero.
+// windows are complete and last week's value is above zero. The
+// snapshot-level coverageIncomplete flag has no locatable detail (no
+// query, no date), so when it is set and no concrete window gap was
+// found it still downgrades the comparison conservatively — an
+// unlocated gap must never be asserted to sit outside the windows.
 function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const weekStart = mondayOf(snapshot.dataDate);
   const prevStart = shiftDateStr(weekStart, -7);
@@ -629,16 +633,15 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const reasons: string[] = [];
   const addReason = (reason: string) => { if (!reasons.includes(reason)) reasons.push(reason); };
 
-  // The snapshot-level coverageIncomplete flag is NOT a veto on its own:
-  // it is set whenever any source query reports incomplete coverage,
-  // which routinely means this morning's partial day is still syncing —
-  // while the completed days this comparison actually uses are all
-  // present (the hero can simultaneously show same-day data with high
-  // confidence). Only gaps inside the two comparison windows count, and
-  // they are named concretely below: which dates lack a daily row, which
-  // window metric is null, which strength week lacks whole-week
-  // coverage. The flag survives only as a scoped note (coverageNote)
-  // when every window check passes.
+  // The snapshot-level coverageIncomplete flag carries no locatable
+  // detail: it does not say which query or which day is incomplete.
+  // Concrete gaps inside the two comparison windows are named below —
+  // which dates lack a daily row, which window metric is null, which
+  // strength week lacks whole-week coverage. The flag itself is applied
+  // after every window check (see the coverage downgrade next to the
+  // sufficiency gate): with no verifiable way to place the gap outside
+  // the windows, it downgrades the comparison instead of being waved
+  // through as irrelevant.
 
   // Daily coverage: every enumerated date in both windows must appear in
   // historyDaily exactly once.
@@ -723,6 +726,15 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
   const current = windowFacts(currentDates, "本周");
   const previous = windowFacts(previousDates, "上周同期");
 
+  // Coverage downgrade (H-LOAD-001 / H-SYNC-DIVERGE-001): every concrete
+  // check above passed, yet the source still reports incomplete coverage
+  // somewhere unlocatable. The comparison is downgraded — no percentage,
+  // no verdict — with the reason stated plainly, instead of claiming the
+  // gap lies outside the windows when nothing can prove that.
+  if (snapshot.coverageIncomplete && reasons.length === 0) {
+    addReason("来源覆盖不完整且无法定位缺口日期，无法确认本周对比");
+  }
+
   const sufficient = reasons.length === 0;
   const pctChange = (now: number, before: number): number | null => (sufficient && before > 0 ? ((now - before) / before) * 100 : null);
   const sessionsChangePct = pctChange(current.sessions, previous.sessions);
@@ -751,24 +763,40 @@ function weekLoad(snapshot: Snapshot, readiness: Readiness | null): WeekLoad {
       sessions,
     };
   });
-  // Scoped coverage note: the snapshot flag may still be set (e.g. this
-  // morning's partial day is still syncing) even when both comparison
-  // windows are complete. It is reported once, as a note about coverage
-  // outside the comparison — never as the panel's verdict.
-  const coverageNote = snapshot.coverageIncomplete && sufficient
-    ? "窗口外有日期覆盖不完整，不影响本周对比。"
-    : null;
-  const facts = { sufficient, reasons, coverageNote, current, previous, sessionsChangePct, durationChangePct, volumeChangePct, dayFacts };
+  // Previous-week absolutes (H-LOAD-001 / H-SYNC-DIVERGE-001): the
+  // first-screen detail line stays compact (this week + percentages),
+  // while last week's same-span values — sessions, duration, strength
+  // volume from the session windows, plus exercise minutes and steps
+  // summed from the daily rows — are carried here for the expandable
+  // detail area, labelled with their exact window. A metric whose daily
+  // rows are missing or null in that window is "未记录", never summed
+  // over the days that happen to exist.
+  const dailySums = (dates: string[]): { exerciseMinutes: number | null; steps: number | null } => {
+    let exerciseMinutes: number | null = 0;
+    let steps: number | null = 0;
+    for (const date of dates) {
+      const row = snapshot.historyDaily.find((daily) => daily.date === date);
+      if (!row || row.exerciseMinutes === null) exerciseMinutes = null;
+      else if (exerciseMinutes !== null) exerciseMinutes += row.exerciseMinutes;
+      if (!row || row.steps === null) steps = null;
+      else if (steps !== null) steps += row.steps;
+    }
+    return { exerciseMinutes, steps };
+  };
+  const previousDaily = dailySums(previousDates);
+  const previousDetail = `上周同期（${dateLabel(prevStart)}–${dateLabel(shiftDateStr(snapshot.dataDate, -7))}）：训练 ${previous.sessions} 次 · 时长 ${previous.durationMinutes === null ? "不完整" : `${Math.round(previous.durationMinutes)} 分钟`} · 力量 ${previous.strengthSessions} 次 · 容量 ${volumeLabel(previous.strengthVolume)} ${strength.displayUnit} · 运动 ${previousDaily.exerciseMinutes === null ? "未记录" : `${Math.round(previousDaily.exerciseMinutes)} 分钟`} · 步数 ${previousDaily.steps === null ? "未记录" : `${volumeLabel(previousDaily.steps)} 步`}`;
+  const facts = { sufficient, reasons, previousDetail, current, previous, sessionsChangePct, durationChangePct, volumeChangePct, dayFacts };
 
   const hrvZ = readiness?.components.find((component) => component.key === "hrv")?.zScore ?? null;
   const restingZ = readiness?.components.find((component) => component.key === "restingHr")?.zScore ?? null;
   const debt = readiness?.sleepDebtHours ?? null;
   const pctText = (value: number) => `${value > 0 ? "+" : ""}${Math.round(value)}%`;
   // One compact line: this week's numbers, then the week-over-week
-  // deltas. The previous week's absolutes and the recovery figure are
-  // not restated here — recovery already headlines the hero, and the
-  // deltas carry the comparison. A metric whose previous window is a
-  // genuine zero gets "无基数" instead of an invented percentage.
+  // deltas. The previous week's absolutes live in previousDetail (the
+  // expandable area under this line) and the recovery figure already
+  // headlines the hero, so neither is restated here. A metric whose
+  // previous window is a genuine zero gets "无基数" instead of an
+  // invented percentage.
   const factsDetail = (withPct: boolean): string => {
     const main = `本周 ${current.sessions} 次 · ${current.durationMinutes === null ? "时长不完整" : `${Math.round(current.durationMinutes)} 分钟`} · 力量 ${current.strengthSessions} 次 · 容量 ${volumeLabel(current.strengthVolume)} ${strength.displayUnit}`;
     if (!withPct) return main;
@@ -1109,7 +1137,10 @@ function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, onSyncHe
       <div className={`whoop-load whoop-${load.band}`}>
         <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong><span className="band-symbol" aria-hidden="true">{bandSymbol(load.band)}</span> {load.verdict}</strong></div>
         <p>{load.detail}</p>
-        {load.coverageNote ? <p className="whoop-load-note">{load.coverageNote}</p> : null}
+        <details>
+          <summary className="whoop-load-note">上周同期数据</summary>
+          <p>{load.previousDetail}</p>
+        </details>
         {readinessHistory.length ? (
           <>
             <div className="whoop-readiness-trend" aria-label="readiness 近 7 天趋势">
