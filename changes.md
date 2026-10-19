@@ -709,3 +709,7 @@
 - `F0.7`（P0/A，只读复查、未触发刷新）：本轮 space-3 getDashboard 只读结果与上轮一致——refresh 仍 stale error 可重试、updatedAt 冻结于 2026-10-18T18:15:47.981Z、startedAt null、asOf/sourceMonth 仍 2026-09-20、无新回调落盘（本条只记状态与时间戳，不记任何真实金额）。按 PM 03:22 裁决边界：最小只读观测（既有两次任务的执行回执/结束原因/回调投递状态）属新增能力，需所有者具体决定——「仅增加上述只读观测」或「保持裁决 A 的旧快照＋明确缺口」，未获决定前不实施、不默认批准 B。F0.7 保持进行中。
 - `W6.2/H4.6` 计数笔误（B 尾巴，已清）：`workout-log/MUSCLE-MAP.md` 与本文件 W6.2/H4.6 条目的「31 个 key」已修正为「30 个唯一 key（模板 31 处引用含 tibialis-raise 重复 1 处）」，与 PM 核对的实际默认动作集合一致。
 - 顺延：W6.2/H4.6 首个共用闭环（目标 10-20 不变）、CWEB-SPIKE-001 最终可行性结论（10-21 18:00 前；PM 本轮给的结算 receipt/预览/保存失败闭环设计已登记在 plans，本轮未开工游戏实现）、space-6 源码回灌与 space-6 验证计数补记（EVID）。本轮用户可见增量：2 组 P0 修复（存档竞态、计划冲突可见）。队列中位等待：缺统一 queuedAt/startedAt，不可计算（如实标注）。未提交 app.db/.env/任何真实数据。
+
+## 2026-10-19（05:13 轮次补记：W-PLAN-SAFE-001 验证计数回传）
+
+- space-6 构建方详细回传在本轮提交后送达，补齐上节登记的 EVID 缺口：validate-plan-safe **145/145 全过**（上一轮 98 项判据零回归；新增 47 项覆盖——两类库（已应用 0005 只跑 0006／未部署先 0005 后 0006）归档行逐字保全与 archived_at/resolved_at 语义、归档表缺失兜底、getPlan 冲突可见（routine/key/候选份数/归档时间/候选计划字段）、未选择提示持续、无冲突零字段、选归档副本以原始 id 生效且冲突关闭、选显示版计划逐字不变、解析批次 6 个位置失败注入均可重试且不动计划与冲突、非所有者/无身份 resolvePlanConflict 一律 forbidden、已关闭冲突再解析返回 typed 错误）。实现为加法迁移 **0006**（archived_at/resolved_at/resolution/resolution_selected_id 四列），0005 不重跑不改动。生产侧只读计数：plan_exercise_conflicts 当前 0 行——线上现无未确认冲突，界面零提示与「无冲突不打扰」一致（计数为行数事实，不含任何训练内容）。安全评审 high finding 为 space-6 getDashboard 无身份只读通道，即所有者 2026-10-17 已批准的 L0.1 例外本体，本轮未扩大未改动；getPlan/resolvePlanConflict 保持严格所有者校验并经验证确认。面板（Life 进度）刷新亦已经构建审计 pass 复核：05 时两条已交付 bullet、F0.7 等用户决定条目、页脚时间均已落地。
