@@ -90,6 +90,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .routine-arrow { justify-self: end; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; font-size: 17px; transition: transform .18s ease, background .18s ease; }
 .routine-option:active .routine-arrow { transform: translateX(3px); background: var(--accent); color: var(--accent-ink); }
 .error-banner { padding: 12px; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); font-weight: 700; font-size: 13px; }
+.plan-read-retry { margin-left: 10px; padding: 4px 12px; border: 1px solid currentColor; border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 
 .weekly-review { margin: 18px 0 8px; padding: 18px; background: var(--text); color: var(--bg); border-radius: var(--radius); }
 .review-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

@@ -66,6 +66,23 @@
 //       resolution batch returns a retryable ok:false and changes
 //       nothing; resolving an already-closed group is an error,
 //       never a silent success.
+//  E. W-PLAN-SAFE-001 P0 tail (1) — getPlan retry exhaustion: a
+//     legal updatePlan landing between EVERY pair of plan-table
+//     reads (0/1/4 raced attempts) still yields one whole saved
+//     version; a save landing on EVERY attempt (5 = the bound, and
+//     persistent contention) yields the typed retryable read_error
+//     with NO plan body — never a successful mixed version.
+//  F. W-PLAN-SAFE-001 P0 tail (2) — resolvePlanConflict decision
+//     binding + atomic claim: a confirmation bound (candidate ids +
+//     plan version) to what getPlan displayed cannot confirm a newer
+//     plan it never saw when an updatePlan interleaves between the
+//     handler's pre-read and its batch (both branches); two racing
+//     confirmations — identical and opposite, in both orders —
+//     leave exactly the winner's decision, the loser getting a
+//     typed stale / already_resolved answer and changing nothing;
+//     sequential duplicate submissions get the already_resolved
+//     idempotent receipt; unbound (older-client) requests still
+//     resolve normally.
 // Synthetic data only.
 import { readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -75,7 +92,7 @@ const { createClient } = require('@libsql/client');
 const { drizzle } = require('drizzle-orm/libsql');
 const { sql } = require('drizzle-orm');
 
-const { Actions, DEFAULT_PLAN_TEMPLATES, DEFAULT_PLAN_SCHEDULE, DEFAULT_DAILY_ITEMS } =
+const { Actions, DEFAULT_PLAN_TEMPLATES, DEFAULT_PLAN_SCHEDULE, DEFAULT_DAILY_ITEMS, PLAN_READ_MAX_ATTEMPTS, conflictVersionStamp } =
   await import('./server/src/actions.ts');
 const schema = await import('./server/src/schema.ts');
 
@@ -739,10 +756,11 @@ function variantOf(plan, tag) {
     && (await Actions.getPlan.handler(owner(), {})).conflict_count === 1);
 
   // Failure injection: poison the resolution batch — every position
-  // it can take (insert displaced, delete live, insert restored,
-  // stamp selected, version increment = 5 statements + tail).
+  // it can take (claim, insert displaced, delete live, insert
+  // restored, stamp selected, version increment = 6 statements +
+  // tail).
   const planBeforeFail = planPayload(await Actions.getPlan.handler(owner(), {}));
-  for (let failAt = 0; failAt <= 5; failAt++) {
+  for (let failAt = 0; failAt <= 6; failAt++) {
     hook.failAt = failAt;
     const res = await Actions.resolvePlanConflict.handler(owner(), { routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId });
     hook.failAt = null;
@@ -802,6 +820,347 @@ function variantOf(plan, tag) {
     (await scalar(client, `SELECT id FROM plan_exercises WHERE exercise_key='dup-move'`)) === liveId
     && (await scalar(client, `SELECT exercise_name FROM plan_exercises WHERE exercise_key='dup-move'`)) === '当前显示版');
   client.close();
+}
+
+
+// ---------- E. W-PLAN-SAFE-001 P0 tail (1): getPlan must never
+// return a mixed version; bounded retry exhaustion is an explicit
+// retryable failure (read_error, no plan body). ----------
+{
+  // E1: a legal save lands after EACH plan-table read in turn —
+  // the raced read must still return one whole saved version.
+  const tableCases = [
+    ['plan_exercises', schema.planExercises],
+    ['plan_schedule', schema.planSchedule],
+    ['plan_daily_items', schema.planDailyItems],
+    ['plan_exercise_conflicts', schema.planExerciseConflicts],
+  ];
+  for (const [label, table] of tableCases) {
+    const { hook, owner } = await freshHandlerDb();
+    const base = await Actions.getPlan.handler(owner(), {});
+    const basePayload = planPayload(base);
+    const planNew = variantOf(base, `插${label}`);
+    let fired = false;
+    let saveResult = null;
+    hook.onSelect = ({ table: t }) => {
+      if (!fired && t === table) {
+        fired = true;
+        return (async () => { saveResult = await Actions.updatePlan.handler(owner(), asUpdateArgs(planNew)); })();
+      }
+      return undefined;
+    };
+    const raced = await Actions.getPlan.handler(owner(), {});
+    hook.onSelect = null;
+    check(`E1: save landing after the ${label} read — raced getPlan is one whole version`,
+      fired && saveResult !== null && saveResult.ok === true
+      && raced.read_error === undefined
+      && (planPayload(raced) === basePayload || planPayload(raced) === planPayload(planNew)),
+      `raced=${planPayload(raced) === basePayload ? 'old' : planPayload(raced) === planPayload(planNew) ? 'new' : 'MIXED'}`);
+  }
+
+  // E2: saves land on the first K attempts (K = 0, 1, 4): with the
+  // bound at 5 attempts the read still succeeds, returning the
+  // newest whole saved version.
+  for (const k of [0, 1, 4]) {
+    const { hook, owner } = await freshHandlerDb();
+    const base = await Actions.getPlan.handler(owner(), {});
+    let firedCount = 0;
+    let lastSavePayload = planPayload(base);
+    hook.onSelect = ({ table }) => {
+      if (table === schema.planExercises && firedCount < k) {
+        const tag = `竞${firedCount}`;
+        firedCount++;
+        return (async () => {
+          const res = await Actions.updatePlan.handler(owner(), asUpdateArgs(variantOf(base, tag)));
+          if (res.ok) lastSavePayload = planPayload(variantOf(base, tag));
+        })();
+      }
+      return undefined;
+    };
+    const raced = await Actions.getPlan.handler(owner(), {});
+    hook.onSelect = null;
+    check(`E2: ${k} raced attempt(s) then quiet — getPlan succeeds with the newest whole version`,
+      firedCount === k && raced.read_error === undefined && planPayload(raced) === lastSavePayload);
+  }
+
+  // E3: a save lands on EVERY attempt — at the bound (5) and beyond
+  // (persistent contention): the answer is the typed retryable
+  // failure with no plan body, and a later quiet read recovers.
+  for (const cap of [PLAN_READ_MAX_ATTEMPTS, PLAN_READ_MAX_ATTEMPTS + 3]) {
+    const { hook, owner } = await freshHandlerDb();
+    const base = await Actions.getPlan.handler(owner(), {});
+    let firedCount = 0;
+    hook.onSelect = ({ table }) => {
+      if (table === schema.planExercises && firedCount < cap) {
+        const tag = `耗${firedCount}`;
+        firedCount++;
+        return (async () => {
+          await Actions.updatePlan.handler(owner(), asUpdateArgs(variantOf(base, tag)));
+        })();
+      }
+      return undefined;
+    };
+    const raced = await Actions.getPlan.handler(owner(), {});
+    hook.onSelect = null;
+    check(`E3: saves on every attempt (cap ${cap}) — getPlan fails explicitly, never a mixed success`,
+      raced.forbidden === false
+      && typeof raced.read_error === 'string' && raced.read_error.length > 0
+      && raced.routines.length === 0 && raced.schedule.length === 0 && raced.daily_items.length === 0
+      && !('conflicts' in raced),
+      `read_error=${JSON.stringify(raced.read_error)} attempts-raced=${firedCount}`);
+    check(`E3: the bound held — exactly ${PLAN_READ_MAX_ATTEMPTS} attempts were raced, no unbounded retry`,
+      firedCount === PLAN_READ_MAX_ATTEMPTS, `fired=${firedCount}`);
+    const recovered = await Actions.getPlan.handler(owner(), {});
+    check('E3: once the writer quiets, getPlan recovers the newest whole saved version',
+      recovered.read_error === undefined
+      && planPayload(recovered) === planPayload(variantOf(base, `耗${PLAN_READ_MAX_ATTEMPTS - 1}`)));
+  }
+
+  // E4: the decision-binding stamp is a pure function of the full
+  // decision state (version, live copy, archived copies).
+  const stampBase = {
+    planVersion: '3',
+    live: { id: 1, sortOrder: 0, exerciseName: '甲', sets: 3, targetReps: '8' },
+    archived: [{ id: 2, sortOrder: 1, exerciseName: '乙', sets: 5, targetReps: '12', archivedAtMs: 1000 }],
+  };
+  check('E4: conflictVersionStamp is deterministic for identical state',
+    conflictVersionStamp(stampBase) === conflictVersionStamp(JSON.parse(JSON.stringify(stampBase))));
+  check('E4: conflictVersionStamp changes with the plan version',
+    conflictVersionStamp({ ...stampBase, planVersion: '4' }) !== conflictVersionStamp(stampBase));
+  check('E4: conflictVersionStamp changes with any candidate content',
+    conflictVersionStamp({ ...stampBase, live: { ...stampBase.live, sets: 4 } }) !== conflictVersionStamp(stampBase)
+    && conflictVersionStamp({ ...stampBase, archived: [{ ...stampBase.archived[0], exerciseName: '丙' }] }) !== conflictVersionStamp(stampBase));
+}
+
+// ---------- F. W-PLAN-SAFE-001 P0 tail (2): resolvePlanConflict
+// binds the decision to the displayed candidates + plan version
+// and claims the group atomically inside its batch. ----------
+{
+  // Helpers local to this section: displayed-binding from getPlan,
+  // and a full-plan variant for conflict databases (whose schedule /
+  // daily tables are empty until the first save fills them).
+  const bindingOf = (plan) => {
+    const conflict = plan.conflicts[0];
+    return {
+      expected_candidate_ids: conflict.candidates.map((c) => c.id),
+      expected_plan_version: conflict.plan_version,
+    };
+  };
+  const fullVariantOf = (plan, tag) => {
+    const copy = JSON.parse(planPayload(plan));
+    if (copy.schedule.length === 0) {
+      copy.schedule = DEFAULT_PLAN_SCHEDULE.map((e) => ({ day_index: e.day_index, routine_code: e.routine_code, note: e.note }));
+    }
+    if (copy.daily_items.length === 0) {
+      copy.daily_items = DEFAULT_DAILY_ITEMS.map((d) => ({ key: d.key, title: d.title, detail: d.detail }));
+    }
+    return variantOf(copy, tag);
+  };
+
+  // F1: confirm-LIVE bound to the displayed candidates; a legal
+  // updatePlan lands between the handler's pre-read and its batch
+  // (the batch gate). The old confirmation must NOT confirm the
+  // unseen new plan: typed stale, the new plan untouched, the
+  // conflict still open with every candidate preserved.
+  {
+    const { client, hook, owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    const planNew = fullVariantOf(shown, '新窗');
+    let gateUsed = false;
+    let saveResult = null;
+    hook.seedBatchGate = async () => {
+      if (gateUsed) return;
+      gateUsed = true;
+      saveResult = await Actions.updatePlan.handler(owner(), asUpdateArgs(planNew));
+    };
+    const res = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: null, ...bindingOf(shown),
+    });
+    hook.seedBatchGate = null;
+    check('F1: the interleaved legal save landed inside the confirm',
+      gateUsed && saveResult !== null && saveResult.ok === true);
+    check('F1: the stale live-confirmation is a typed stale failure, not a success',
+      res.ok === false && res.forbidden === false && res.outcome === 'stale'
+      && typeof res.error === 'string' && res.error.length > 0);
+    const after = await Actions.getPlan.handler(owner(), {});
+    check('F1: the newer plan was NOT overwritten or confirmed away',
+      planPayload(after) === planPayload(planNew));
+    check('F1: the conflict is still open and no candidate was lost',
+      after.conflict_count === 1
+      && after.conflicts[0].candidate_count === 2
+      && after.conflicts[0].candidates.some((c) => c.source === 'archived' && c.archive_id === archiveId && c.name === '归档版')
+      && (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts WHERE resolved_at IS NULL')) === 1);
+    check('F1: the version token is exactly the interleaved save\u2019s (the stale decision added nothing)',
+      (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '1');
+  }
+
+  // F2: confirm-ARCHIVE with the same interleave: same guarantees,
+  // through the restore branch.
+  {
+    const { client, hook, owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    const planNew = fullVariantOf(shown, '新窗');
+    let gateUsed = false;
+    let saveResult = null;
+    hook.seedBatchGate = async () => {
+      if (gateUsed) return;
+      gateUsed = true;
+      saveResult = await Actions.updatePlan.handler(owner(), asUpdateArgs(planNew));
+    };
+    const res = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...bindingOf(shown),
+    });
+    hook.seedBatchGate = null;
+    check('F2: the interleaved legal save landed inside the restore-confirm',
+      gateUsed && saveResult !== null && saveResult.ok === true);
+    check('F2: the stale archive-confirmation is a typed stale failure, not a success',
+      res.ok === false && res.forbidden === false && res.outcome === 'stale');
+    const after = await Actions.getPlan.handler(owner(), {});
+    check('F2: the newer plan stands and the conflict is still open with all candidates',
+      planPayload(after) === planPayload(planNew)
+      && after.conflict_count === 1 && after.conflicts[0].candidate_count === 2
+      && (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts WHERE resolved_at IS NULL')) === 1);
+    check('F2: the version token is exactly the interleaved save\u2019s',
+      (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '1');
+  }
+
+  // F3: two confirmations race (both bound to the same displayed
+  // state), in both orders and with identical + opposite choices.
+  // Exactly the winner's decision is recorded; the loser changes
+  // nothing and gets already_resolved (identical) or a typed
+  // failure (opposite).
+  async function raceScenario(firstChoice, secondChoice, label) {
+    const { client, hook, owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    const pick = (choice) => (choice === 'archived' ? archiveId : null);
+    let gateUsed = false;
+    let secondResult = null;
+    hook.seedBatchGate = async () => {
+      if (gateUsed) return;
+      gateUsed = true;
+      secondResult = await Actions.resolvePlanConflict.handler(owner(), {
+        routine: 'push', exercise_key: 'dup-move', selected_archive_id: pick(secondChoice), ...bindingOf(shown),
+      });
+    };
+    const firstResult = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: pick(firstChoice), ...bindingOf(shown),
+    });
+    hook.seedBatchGate = null;
+    check(`${label}: both confirmations ran (the second interleaved into the first\u2019s batch window)`,
+      gateUsed && secondResult !== null);
+    check(`${label}: the interleaved (second) confirmation won with outcome resolved`,
+      secondResult.ok === true && secondResult.outcome === 'resolved');
+    const after = await Actions.getPlan.handler(owner(), {});
+    const winnerName = secondChoice === 'archived' ? '归档版' : '当前显示版';
+    check(`${label}: the effective plan is exactly the winner\u2019s decision`,
+      !('conflicts' in after)
+      && after.routines.find((r) => r.routine === 'push').exercises.some((e) => e.key === 'dup-move' && e.name === winnerName));
+    check(`${label}: the version token advanced exactly once (the loser wrote nothing)`,
+      (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '1');
+    if (firstChoice === secondChoice) {
+      check(`${label}: the identical loser gets the already_resolved idempotent receipt`,
+        firstResult.ok === true && firstResult.outcome === 'already_resolved');
+    } else {
+      check(`${label}: the opposite loser gets a typed failure and did NOT claim the unseen version`,
+        firstResult.ok === false && firstResult.forbidden === false
+        && typeof firstResult.error === 'string' && firstResult.error.length > 0);
+    }
+    check(`${label}: no candidate was lost in the race`,
+      (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts')) === (secondChoice === 'archived' ? 2 : 1),
+      'archive rows: winner-archived adds the displaced live copy, winner-live adds none');
+  }
+  await raceScenario('live', 'archived', 'F3a live-then-archived(interleaved)');
+  await raceScenario('archived', 'live', 'F3b archived-then-live(interleaved)');
+  await raceScenario('archived', 'archived', 'F3c archived-vs-archived(interleaved)');
+  await raceScenario('live', 'live', 'F3d live-vs-live(interleaved)');
+
+  // F4: sequential duplicates — the same decision submitted twice
+  // (double tap / retry after success) gets the idempotent receipt;
+  // a different decision against the closed group stays an error.
+  {
+    const { owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    const args = { routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...bindingOf(shown) };
+    const first = await Actions.resolvePlanConflict.handler(owner(), args);
+    check('F4: the first archive confirmation resolves with outcome resolved',
+      first.ok === true && first.outcome === 'resolved');
+    const dup = await Actions.resolvePlanConflict.handler(owner(), args);
+    check('F4: the identical repeat is the already_resolved idempotent receipt',
+      dup.ok === true && dup.outcome === 'already_resolved');
+    const other = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: null,
+    });
+    check('F4: a different decision against the closed group is still a typed error',
+      other.ok === false && other.outcome === undefined);
+  }
+  {
+    const { owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const args = { routine: 'push', exercise_key: 'dup-move', selected_archive_id: null, ...bindingOf(shown) };
+    const first = await Actions.resolvePlanConflict.handler(owner(), args);
+    const dup = await Actions.resolvePlanConflict.handler(owner(), args);
+    check('F4b: a repeated live confirmation is also the already_resolved receipt',
+      first.ok === true && first.outcome === 'resolved'
+      && dup.ok === true && dup.outcome === 'already_resolved');
+  }
+
+  // F5: bound confirmation against a QUIET state whose version has
+  // simply moved on (sequential save after display) — typed stale
+  // from the pre-check, zero writes; and a confirmation carrying a
+  // forged candidate set is stale too.
+  {
+    const { client, owner } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    await Actions.updatePlan.handler(owner(), asUpdateArgs(fullVariantOf(shown, '新')));
+    const stale = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...bindingOf(shown),
+    });
+    check('F5: confirming displayed candidates after a later save is typed stale, zero writes',
+      stale.ok === false && stale.outcome === 'stale'
+      && (await scalar(client, `SELECT value FROM plan_meta WHERE key='version'`)) === '1'
+      && (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts WHERE resolved_at IS NULL')) === 1);
+    const fresh = await Actions.getPlan.handler(owner(), {});
+    const forged = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId,
+      expected_candidate_ids: [999999], expected_plan_version: fresh.conflicts[0].plan_version,
+    });
+    check('F5: a candidate set that was never displayed is typed stale too',
+      forged.ok === false && forged.outcome === 'stale');
+    const proper = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...bindingOf(fresh),
+    });
+    check('F5: the refreshed binding confirms normally afterwards',
+      proper.ok === true && proper.outcome === 'resolved');
+  }
+
+  // F6: additive compatibility — a request WITHOUT the binding
+  // fields (older client) still resolves, and forbidden callers
+  // carrying binding fields write nothing at all.
+  {
+    const { client, owner, guest, anon } = await freshHandlerDb({ withDuplicates: true });
+    const shown = await Actions.getPlan.handler(owner(), {});
+    const archiveId = shown.conflicts[0].candidates.find((c) => c.source === 'archived').archive_id;
+    const g = await Actions.resolvePlanConflict.handler(guest(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId, ...bindingOf(shown),
+    });
+    const a = await Actions.resolvePlanConflict.handler(anon(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: null, ...bindingOf(shown),
+    });
+    check('F6: guest/viewer-less confirmations with binding fields are forbidden, zero writes',
+      g.ok === false && g.forbidden === true && a.ok === false && a.forbidden === true
+      && (await scalar(client, 'SELECT COUNT(*) FROM plan_exercise_conflicts WHERE resolved_at IS NULL')) === 1
+      && (await scalar(client, `SELECT COUNT(*) FROM plan_meta WHERE key='version'`)) === 0);
+    const unbound = await Actions.resolvePlanConflict.handler(owner(), {
+      routine: 'push', exercise_key: 'dup-move', selected_archive_id: archiveId,
+    });
+    check('F6: an unbound (older-client) confirmation still resolves normally',
+      unbound.ok === true && unbound.outcome === 'resolved');
+  }
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);
