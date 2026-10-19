@@ -84,4 +84,36 @@ WHERE EXISTS (SELECT 1 FROM plan_exercises)
    OR EXISTS (SELECT 1 FROM plan_schedule)
    OR EXISTS (SELECT 1 FROM plan_daily_items);
 --> statement-breakpoint
+-- W-PLAN-SAFE-001 (duplicate-key upgrade path): a database that ran
+-- 0001–0004 can legally hold two rows with the same
+-- (routine, exercise_key) — nothing forbade it before this migration —
+-- and the unique index below would reject the whole upgrade. So
+-- BEFORE creating the index: copy every duplicate row except the
+-- smallest id of its (routine, exercise_key) group, verbatim and in
+-- full, into the plan_exercise_conflicts archive table (all
+-- plan_exercises columns plus an archived_note), then delete the
+-- archived copies from plan_exercises. Nothing is silently dropped:
+-- every removed row survives in the archive, queryable afterwards.
+-- Databases without duplicates archive zero rows and behave exactly
+-- as before; databases that already applied 0005 never re-run this.
+CREATE TABLE IF NOT EXISTS plan_exercise_conflicts (
+  id INTEGER PRIMARY KEY,
+  routine TEXT NOT NULL,
+  sort_order INTEGER NOT NULL,
+  exercise_key TEXT NOT NULL,
+  exercise_name TEXT NOT NULL,
+  sets INTEGER NOT NULL,
+  target_reps TEXT NOT NULL,
+  archived_note TEXT NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO plan_exercise_conflicts (id, routine, sort_order, exercise_key, exercise_name, sets, target_reps, archived_note)
+SELECT id, routine, sort_order, exercise_key, exercise_name, sets, target_reps,
+       'duplicate (routine, exercise_key) row archived by migration 0005 before creating plan_exercises_routine_key_idx; the smallest id of the group was kept in plan_exercises'
+FROM plan_exercises
+WHERE id NOT IN (SELECT MIN(id) FROM plan_exercises GROUP BY routine, exercise_key);
+--> statement-breakpoint
+DELETE FROM plan_exercises
+WHERE id NOT IN (SELECT MIN(id) FROM plan_exercises GROUP BY routine, exercise_key);
+--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS plan_exercises_routine_key_idx ON plan_exercises(routine, exercise_key);
