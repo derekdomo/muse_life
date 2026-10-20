@@ -9,10 +9,24 @@
 // it, and Muse calls it directly when delivering a research report, an
 // idea scan, or a Xiaohongshu digest, so those inputs land in the ledger
 // without the owner re-typing them.
+//
+// ACL (CMP-LEARN-ACL-001): every action below is owner-only. Each handler
+// runs the strict isOwner gate BEFORE any database read/write and before
+// seed initialization; refused calls return a typed rejection and touch
+// zero rows. There is deliberately no anonymous or sync-channel exception
+// in this app — the L0.1 exception covers only the named space-4/space-6
+// entry points. recordLearningInput therefore fails honestly (ok:false)
+// whenever it is called without a verifiable owner identity.
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { asc, eq } from "drizzle-orm";
 import * as schema from "./schema";
+
+// Strict owner gate: only a verified owner viewer passes. Identified
+// non-owners and anonymous calls (no viewer at all) are both refused.
+function isOwner(ctx: Ctx): boolean {
+  return ctx.viewer?.isOwner === true;
+}
 
 const TZ = "America/Los_Angeles";
 
@@ -131,6 +145,9 @@ const inputRowSchema = z.object({
 });
 
 const dashboardResponse = z.object({
+  // Repo-standard refusal flag: true means the caller is not the owner
+  // and every data field below is empty (no learning data is returned).
+  forbidden: z.boolean(),
   today: z.string(),
   skills: z.array(skillStatSchema),
   inputs: z.array(inputRowSchema),
@@ -148,7 +165,44 @@ const dashboardResponse = z.object({
 
 type Dashboard = z.infer<typeof dashboardResponse>;
 
-const okResponse = z.object({ ok: z.literal(true) });
+// The dashboard a refused caller gets: forbidden flag set, and every
+// data field empty/zero. Built without touching the database.
+function forbiddenDashboard(): Dashboard {
+  return {
+    forbidden: true,
+    today: todayKey(),
+    skills: [],
+    inputs: [],
+    totals: {
+      totalInputs: 0,
+      totalConverted: 0,
+      totalMinutes: 0,
+      conversionRate: null,
+      streakDays: 0,
+      activeDays: 0,
+      unconvertedCount: 0,
+    },
+    series: [],
+  };
+}
+
+// Mutation responses: ok reports whether the write happened; forbidden
+// reports an owner-gate refusal (ok is then false and nothing was
+// written). Matches the { ok, forbidden } shape used across the repo.
+const okResponse = z.object({ ok: z.boolean(), forbidden: z.boolean() });
+
+const addSkillResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  id: z.number().nullable(),
+  name: z.string().nullable(),
+});
+
+const recordInputResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  id: z.number().nullable(),
+});
 
 function buildSeries(
   rows: Array<{ date: string; convertedAt: Date | null; minutes: number }>,
@@ -193,6 +247,7 @@ export const Actions = {
     request: z.object({}),
     response: dashboardResponse,
     async handler(ctx): Promise<Dashboard> {
+      if (!isOwner(ctx)) return forbiddenDashboard();
       await ensureSeeded(ctx);
       const db = ctx.db<typeof schema>();
       const today = todayKey();
@@ -250,6 +305,7 @@ export const Actions = {
 
       const totalConverted = inputRows.filter((r) => r.convertedAt).length;
       return {
+        forbidden: false,
         today,
         skills,
         inputs,
@@ -273,8 +329,9 @@ export const Actions = {
       name: z.string().trim().min(1).max(80),
       note: z.string().trim().max(200).optional(),
     }),
-    response: z.object({ id: z.number(), name: z.string() }),
-    async handler(ctx, args) {
+    response: addSkillResponse,
+    async handler(ctx, args): Promise<z.infer<typeof addSkillResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, id: null, name: null };
       const db = ctx.db<typeof schema>();
       const inserted = await db
         .insert(schema.skills)
@@ -283,7 +340,7 @@ export const Actions = {
       const row = inserted[0];
       if (!row) throw new Error("addSkill: insert returned no rows");
       ctx.invalidateQueries();
-      return { id: row.id, name: args.name };
+      return { ok: true, forbidden: false, id: row.id, name: args.name };
     },
   }),
 
@@ -295,13 +352,14 @@ export const Actions = {
     }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
       await db
         .update(schema.skills)
         .set({ name: args.name, note: args.note ? args.note : null })
         .where(eq(schema.skills.id, args.id));
       ctx.invalidateQueries();
-      return { ok: true as const };
+      return { ok: true, forbidden: false };
     },
   }),
 
@@ -309,6 +367,7 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
       // Ledger rows survive a deleted skill; they just lose the link.
       await db
@@ -317,7 +376,7 @@ export const Actions = {
         .where(eq(schema.learningInputs.skillId, args.id));
       await db.delete(schema.skills).where(eq(schema.skills.id, args.id));
       ctx.invalidateQueries();
-      return { ok: true as const };
+      return { ok: true, forbidden: false };
     },
   }),
 
@@ -338,8 +397,12 @@ export const Actions = {
       outputType: z.enum(OUTPUT_TYPES).optional(),
       outputNote: z.string().trim().max(500).optional(),
     }),
-    response: z.object({ id: z.number() }),
-    async handler(ctx, args) {
+    response: recordInputResponse,
+    async handler(ctx, args): Promise<z.infer<typeof recordInputResponse>> {
+      // No identity exception for this shared write path: without a
+      // verifiable owner viewer the call fails honestly and writes
+      // nothing (no row, and no skill auto-created from skillName).
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, id: null };
       const db = ctx.db<typeof schema>();
       let skillId: number | null = args.skillId ?? null;
       if (skillId == null && args.skillName) {
@@ -383,7 +446,7 @@ export const Actions = {
       const row = inserted[0];
       if (!row) throw new Error("recordLearningInput: insert returned no rows");
       ctx.invalidateQueries();
-      return { id: row.id };
+      return { ok: true, forbidden: false, id: row.id };
     },
   }),
 
@@ -395,6 +458,7 @@ export const Actions = {
     }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
       await db
         .update(schema.learningInputs)
@@ -405,7 +469,7 @@ export const Actions = {
         })
         .where(eq(schema.learningInputs.id, args.id));
       ctx.invalidateQueries();
-      return { ok: true as const };
+      return { ok: true, forbidden: false };
     },
   }),
 
@@ -413,13 +477,14 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
       await db
         .update(schema.learningInputs)
         .set({ convertedAt: null, outputType: null, outputNote: null })
         .where(eq(schema.learningInputs.id, args.id));
       ctx.invalidateQueries();
-      return { ok: true as const };
+      return { ok: true, forbidden: false };
     },
   }),
 
@@ -427,12 +492,13 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
       await db
         .delete(schema.learningInputs)
         .where(eq(schema.learningInputs.id, args.id));
       ctx.invalidateQueries();
-      return { ok: true as const };
+      return { ok: true, forbidden: false };
     },
   }),
 } satisfies ActionsModule;

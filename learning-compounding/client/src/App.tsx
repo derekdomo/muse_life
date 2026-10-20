@@ -216,7 +216,11 @@ function QuickAdd({ data }: { data: Dashboard }) {
         minutes: minutes === "" ? 0 : Number(minutes),
         converted: false,
       }),
-    onSuccess: () => {
+    onSuccess: (res) => {
+      if (res.forbidden || !res.ok) {
+        setError("当前身份无权记录：学习数据仅所有者可写。");
+        return;
+      }
       setTopic("");
       setMinutes("");
       setError(null);
@@ -296,7 +300,8 @@ function ConvertForm({ row, onDone }: { row: InputRow; onDone: () => void }) {
   const mark = useMutation({
     mutationFn: () =>
       api.markConverted({ id: row.id, outputType, outputNote: note.trim() || undefined }),
-    onSuccess: () => {
+    onSuccess: (res) => {
+      if (res.forbidden || !res.ok) return;
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       onDone();
     },
@@ -342,6 +347,8 @@ function LedgerRow({ row, today }: { row: InputRow; today: string }) {
   const [converting, setConverting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+  // Even a refused write invalidates: the refetched dashboard carries
+  // the forbidden flag and the app switches to the permission page.
   const unmark = useMutation({ mutationFn: () => api.unmarkConverted({ id: row.id }), onSuccess: invalidate });
   const del = useMutation({ mutationFn: () => api.deleteInput({ id: row.id }), onSuccess: invalidate });
 
@@ -527,23 +534,27 @@ function SkillManager({ data }: { data: Dashboard }) {
 
   const addSkill = useMutation({
     mutationFn: () => api.addSkill({ name: newName.trim(), note: newNote.trim() || undefined }),
-    onSuccess: () => {
-      setNewName("");
-      setNewNote("");
+    onSuccess: (res) => {
+      // On a refused write keep the typed text; the refetch below
+      // switches the app to the permission page.
+      if (!res.forbidden && res.ok) {
+        setNewName("");
+        setNewNote("");
+      }
       invalidate();
     },
   });
   const updateSkill = useMutation({
     mutationFn: (id: number) => api.updateSkill({ id, name: editName.trim(), note: editNote.trim() || null }),
-    onSuccess: () => {
-      setEditingId(null);
+    onSuccess: (res) => {
+      if (!res.forbidden && res.ok) setEditingId(null);
       invalidate();
     },
   });
   const deleteSkill = useMutation({
     mutationFn: (id: number) => api.deleteSkill({ id }),
-    onSuccess: () => {
-      setConfirmDeleteId(null);
+    onSuccess: (res) => {
+      if (!res.forbidden && res.ok) setConfirmDeleteId(null);
       invalidate();
     },
   });
@@ -679,6 +690,24 @@ export function App() {
   ];
 
   const loggedToday = data ? data.inputs.some((r) => r.date === data.today) : false;
+
+  // Owner-only data: a refused dashboard renders no learning data and
+  // no write entry points at all — just the permission notice.
+  if (data?.forbidden) {
+    return (
+      <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
+        <SafeAreaTopScrim backgroundColor="var(--bg)" />
+        <main className="mx-auto w-full max-w-3xl px-4 pb-10">
+          <div className="py-16 text-center">
+            <h1 className="font-display text-xl font-bold">学习数据仅所有者可查看</h1>
+            <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-[var(--dim)]">
+              这里记录的是所有者的个人学习账本与技能资产，当前访问身份无权查看，也不能写入或删除任何记录。
+            </p>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
