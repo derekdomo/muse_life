@@ -895,3 +895,7 @@
 - `F0.7` 受控手动刷新（所有者 8821b9c 批准的一次）：本轮经 cron 手动触发 space-3-weekly-refresh（run bf16dbd0，13:15 PDT，调度层 succeeded、直接 invoke refreshfinancedata）；只读核对发现所有者本人已于 11:27 PDT 先行触发同一次批准的 run（run 9dc192b0）——两次 invoke 未产生第二代次：getrefreshobservations 显示 currentAttempt=1、startedAt=2026-10-20T18:27:22Z（11:27 PDT）、事件 refresh_started（claimed）＋spawn_attached（task_attached）在位，证明触发→认领→spawn 链路已通、断点在其后。截至本轮只读复核（约 13:2x PDT）：status=running、diagnosis=awaiting_callback，本代 callback_received 尚未到达、无终态、未核实新快照落盘——**不冒称刷新已恢复**；按交接规则不自动再 run，后续以观测终态与落盘事实为准（成功落盘后再私下对账，不入仓）。脱敏：本条只记状态与事件类型，不记金额/文件标识。
 - 仍（需用户确认）：`CWEB-LEVEL-001` 路径/四参数裁决（原 10-20 18:00 材料节点，候选包已备、生产过渡 XP 等级未动）；`H4.6` 恢复参考 T 未定，事实片已交、不冒称恢复进度已实现。
 - 本轮用户可见增量：2 组修复（学习 P0 余项、创造 P1 余项）＋2 组呈现增量（训练帮助层级、健康来源可读性）＋F0.7 首次真实刷新尝试进入 running（终态未定）。顺延（逐条）：四项交付的仓库源码回灌（EVID 尾巴，下轮首位补齐）；CWEB S3 首片 10-22、CMP-FAMILY 10-22、CMP-TIME 10-23、完整养成 10-26 沿原日期。未提交 app.db/.env/任何真实数据。
+
+## 2026-10-20（13:13 轮次计数更正：以构建方全量实跑为准）
+
+- 更正上一节三处验证计数（原登记取自先行回传口径，与构建方全量实跑不符，现按实跑更正）：(1) `CMP-LEARN-SAVE-001`：validate-conversion **53/53**（原 40 项全过＋新增 13 项：带键旧档 unmark 物化 revoked 回执、迟到 save/mark 双路被拒且事实不复活、无键旧档零伪造、新键重标成功、失败注入保全；实跑输出已归档工件内 VALIDATION-LOG.md）；acl 82/82、metrics 34/34 不变。(2) `CMP-CREATE-SAVE-001`：validate-save-integrity **102/102**（新增交错用例等共 +9 净增至 102：RETURNING 原子取 id、typed project_deleted、确定性交错 typed 拒绝/无孤儿/删除后新建数据完好）。(3) 训练帮助层级（space-6）：validate-muscle-diagram **36/36**（含新增 D6 顺序/折叠接线 13 项）；回归 muscle-receipt 30/30、receipt 36/36、start 66/66、plan-safe 226/226。修复内容与结论不变，仅计数更正；面板已同步修正。
