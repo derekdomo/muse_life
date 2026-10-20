@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
+import { EXERCISE_DEMOS, ExerciseDemoView, type ExerciseDemo } from "./ExerciseDemo";
 
 type Dashboard = ApiResponse<typeof api, "getDashboard">;
 type Workout = NonNullable<Dashboard["active_workout"]>;
@@ -77,6 +78,12 @@ type ExerciseGuide = {
   // linking an unchecked video.
   video?: string;
   source?: string;
+  // Looping in-dialog demonstration: a start/end photo pair —
+  // either a verified open-license real photo pair or an AI-generated
+  // photorealistic pair that passed frame-by-frame review against
+  // the guide's cues. A guide whose movement has no verified pair
+  // (calf raises) ships text cues only rather than a wrong demo.
+  demo?: ExerciseDemo;
 };
 
 const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
@@ -88,6 +95,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["肘部横向张到 90°", "杠铃在胸口反弹", "手腕向后折、肩胛失去固定"],
     video: "https://www.youtube.com/watch?v=CjHIKDQ4RQo",
     source: "PureGym 教练示范",
+    demo: EXERCISE_DEMOS["barbell-bench"],
   },
   "overhead-press": {
     title: "站姿推举",
@@ -97,6 +105,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["腰椎过度反弓", "杠铃绕出很大的弧线", "用腿蹬起变成借力推举"],
     video: "https://www.youtube.com/watch?v=EK511FpyDEg",
     source: "站姿杠铃推举示范",
+    demo: EXERCISE_DEMOS["overhead-press"],
   },
   "incline-dumbbell-press": {
     title: "上斜哑铃卧推",
@@ -106,6 +115,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["凳背太陡变成肩推", "底部肩膀向前卷", "两只哑铃在顶部撞击"],
     video: "https://www.youtube.com/watch?v=oZVCBM9f8Eo",
     source: "PureGym 教练示范",
+    demo: EXERCISE_DEMOS["incline-dumbbell-press"],
   },
   dips: {
     title: "双杠臂屈伸",
@@ -115,6 +125,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["追求过深导致肩前侧不适", "下放时肩膀耸向耳朵", "摆腿或反弹借力"],
     video: "https://www.youtube.com/watch?v=2HYAeF6o7Bc",
     source: "PureGym 教练示范",
+    demo: EXERCISE_DEMOS.dips,
   },
   "lateral-raise": {
     title: "哑铃侧平举",
@@ -124,6 +135,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["重量过大导致摆动", "耸肩让斜方肌代偿", "手臂抬得明显高于肩膀"],
     video: "https://www.youtube.com/watch?v=z-kOn7flIZg",
     source: "PureGym 教练示范",
+    demo: EXERCISE_DEMOS["lateral-raise"],
   },
   "wide-lat-pulldown": {
     title: "高位下拉 · 宽握",
@@ -133,6 +145,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["大幅后仰把动作变成划船", "用手臂猛拽或借惯性", "握得过宽导致动作幅度太短"],
     video: "https://www.youtube.com/shorts/UAlGHwshYBM",
     source: "高位下拉真人示范",
+    demo: EXERCISE_DEMOS["wide-lat-pulldown"],
   },
   "close-lat-pulldown": {
     title: "高位下拉 · 窄握/反握",
@@ -142,6 +155,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["手腕折叠或握距过窄", "身体后仰过多", "只用肱二头肌屈肘"],
     video: "https://www.youtube.com/watch?v=UkgDc61gRcM",
     source: "反握高位下拉示范",
+    demo: EXERCISE_DEMOS["close-lat-pulldown"],
   },
   "close-seated-row": {
     title: "坐姿划船 · 窄距",
@@ -151,6 +165,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["身体前后大幅摇摆", "用下背甩起重量", "耸肩并只用手臂拉"],
     video: "https://www.youtube.com/watch?v=O9nVMz5osqY",
     source: "坐姿绳索划船示范",
+    demo: EXERCISE_DEMOS["close-seated-row"],
   },
   "wide-seated-row": {
     title: "坐姿划船 · 宽距",
@@ -160,6 +175,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["把宽距划船拉到肚脐", "肩膀耸起", "为了加重量缩短动作幅度"],
     video: "https://www.youtube.com/shorts/mJLT0tChvFM",
     source: "窄距与宽距划船对比示范",
+    demo: EXERCISE_DEMOS["wide-seated-row"],
   },
   "face-pull": {
     title: "面拉",
@@ -169,6 +185,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["拉向胸口变成普通划船", "重量过大导致身体后仰", "肩膀耸起、肘部掉得太低"],
     video: "https://www.youtube.com/watch?v=4UhV4cCkugM",
     source: "坐姿绳索面拉示范",
+    demo: EXERCISE_DEMOS["face-pull"],
   },
   "rope-curl": {
     title: "绳索弯举",
@@ -178,6 +195,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["躯干前后摆动", "肘部向前漂移", "回程直接让配重砸下"],
     video: "https://www.youtube.com/watch?v=dLRVpRC4L3Y",
     source: "绳索锤式弯举示范",
+    demo: EXERCISE_DEMOS["rope-curl"],
   },
   "back-squat": {
     title: "深蹲",
@@ -187,6 +205,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["膝盖向内塌", "脚跟或大脚趾离地", "为了追求深度而失去腰背中立"],
     video: "https://www.youtube.com/watch?v=nEQQle9-0NA",
     source: "深蹲动作解析",
+    demo: EXERCISE_DEMOS["back-squat"],
   },
   "romanian-deadlift": {
     title: "罗马尼亚硬拉",
@@ -196,6 +215,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["膝盖越弯越多变成深蹲", "为了下得更低而弓背", "顶部过度后仰挤压腰椎"],
     video: "https://www.youtube.com/watch?v=aa57T45iFSE",
     source: "NASM 哑铃 RDL 示范",
+    demo: EXERCISE_DEMOS["romanian-deadlift"],
   },
   "bulgarian-split-squat": {
     title: "保加利亚分腿蹲",
@@ -205,6 +225,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["前脚离凳太近导致脚跟抬起", "前膝向内塌", "后腿用力过多或左右摇晃"],
     video: "https://www.youtube.com/watch?v=DeCnHqrN22U",
     source: "Buff Dudes 真人示范",
+    demo: EXERCISE_DEMOS["bulgarian-split-squat"],
   },
   "lying-leg-curl": {
     title: "俯卧腿弯举",
@@ -214,6 +235,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["髋部离开垫面", "借助下背拱起重量", "回程过快、配重片撞击"],
     video: "https://www.youtube.com/shorts/tLyA9uXn5Wo",
     source: "俯卧腿弯举示范",
+    demo: EXERCISE_DEMOS["lying-leg-curl"],
   },
   "push-up-plus": {
     title: "前锯肌 Push-up Plus",
@@ -221,6 +243,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "高位平板支撑，手掌在肩膀正下方；手臂全程伸直，靠肩胛骨移动身体。",
     cues: ["先让肩胛自然靠拢，背部微微下沉", "再主动把地面推远，上背顶起呈圆弧", "动作只发生在肩胛，不弯手肘"],
     mistakes: ["变成普通俯卧撑弯手肘", "塌腰或撅臀", "耸肩贴近耳朵"],
+    demo: EXERCISE_DEMOS["push-up-plus"],
   },
   "reverse-pec-deck": {
     title: "反向蝴蝶机 · 后三角",
@@ -228,6 +251,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "面朝靠垫坐稳，胸口贴紧垫面；把手与肩同高，手臂近乎伸直。",
     cues: ["由肘部带动向身体两侧打开", "末端夹紧肩胛并停 1 秒", "慢速回程，不让配重片落尽"],
     mistakes: ["耸肩让上斜方代偿", "身体后仰借力", "手臂弯曲变成划船"],
+    demo: EXERCISE_DEMOS["reverse-pec-deck"],
   },
   "calf-raise": {
     title: "提踵",
@@ -235,6 +259,8 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "前脚掌踩稳台阶边缘，脚跟可低于台阶面；扶稳保持平衡。",
     cues: ["脚跟下沉到充分拉伸", "由前脚掌主动蹬起至最高点并停 1 秒", "全程慢速，膝盖保持姿势不变"],
     mistakes: ["借弹跳快速起落", "动作幅度只有一半", "脚踝内外翻"],
+    // No demo image: no AI-generated calf-raise pair passed
+    // frame-by-frame review (see ExerciseDemo.tsx header note).
   },
   "tibialis-raise": {
     title: "靠墙胫骨前肌抬脚尖",
@@ -242,6 +268,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "背靠墙站立，双脚向前离墙约一步，脚跟踩地。",
     cues: ["脚尖尽量抬向小腿方向", "顶部停 1 秒再慢放", "脚跟不离地、身体不前倾"],
     mistakes: ["抬得太快靠惯性", "膝盖大幅弯曲代偿", "脚尖外八"],
+    demo: EXERCISE_DEMOS["tibialis-raise"],
   },
   "supine-chin-tuck": {
     title: "仰卧收下巴",
@@ -249,6 +276,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "仰卧平躺，头下不垫高枕；后脑轻贴地面，眼睛看向天花板。",
     cues: ["像做双下巴一样把下巴水平后收", "每次停 5 秒再完全放松", "后脑不离地、不用力压脖子"],
     mistakes: ["低头把下巴压向胸口", "憋气耸肩", "速度太快不停顿"],
+    demo: EXERCISE_DEMOS["supine-chin-tuck"],
   },
   "prone-ytw": {
     title: "俯趴 Bench Y-T-W",
@@ -256,6 +284,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "俯趴在 bench 上，胸口贴稳、脸朝下；双手各拿最小的片（2.5–5 lb 足够）。",
     cues: ["Y：手臂向头顶斜上方举起，拇指朝上", "T：手臂向两侧平举，夹紧肩胛", "W：屈肘呈 W 形后收，肘部向后下方拉"],
     mistakes: ["重量过大靠摆动", "抬头耸肩", "手臂举起时腰部反弓"],
+    demo: EXERCISE_DEMOS["prone-ytw"],
   },
   "side-external-rotation": {
     title: "侧卧外旋 · 小片",
@@ -263,6 +292,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "侧卧，上方手肘夹一条毛巾贴住身体，手里拿最小的片。",
     cues: ["肘部固定不动，只让前臂向外打开", "打开到舒适的最大角度后慢放", "全程保持肘部夹紧毛巾"],
     mistakes: ["肘部离开身体", "身体向后翻转借力", "重量过大动作变形"],
+    demo: EXERCISE_DEMOS["side-external-rotation"],
   },
   "thoracic-extension": {
     title: "胸椎伸展 · Bench 边缘",
@@ -270,6 +300,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "仰卧，上背靠在 bench 边缘，双手托住后脑，臀部贴地。",
     cues: ["以 bench 边缘为支点慢慢向后伸展上背", "每个位置停留数次呼吸", "上下移动几厘米换一个节段"],
     mistakes: ["用腰部后仰代替胸椎伸展", "臀部离地", "动作过猛或憋气"],
+    demo: EXERCISE_DEMOS["thoracic-extension"],
   },
   "single-leg-balance": {
     title: "单腿平衡触点",
@@ -277,6 +308,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "单脚站稳，另一只脚悬空；先扶墙或椅背找平衡。",
     cues: ["悬空脚依次轻触前、侧、后三个点", "支撑腿膝盖对准脚尖方向", "躯干保持直立，目光看前方固定点"],
     mistakes: ["支撑脚脚踝左右晃动失控", "膝盖向内塌", "靠快速摆动保持平衡"],
+    demo: EXERCISE_DEMOS["single-leg-balance"],
   },
   "home-bulgarian-split-squat": {
     title: "保加利亚分腿蹲 · Bench 抱片",
@@ -284,6 +316,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "后脚脚背搭在 bench 上，双手抱一片杠铃片在胸前；这是耐力练法，次数优先。",
     cues: ["绝大部分重量留在前脚", "前膝沿脚尖方向移动", "节奏均匀，不追求大重量"],
     mistakes: ["前脚离凳太近导致脚跟抬起", "前膝向内塌", "后腿用力过多"],
+    demo: EXERCISE_DEMOS["home-bulgarian-split-squat"],
   },
   "bench-step-up": {
     title: "Bench 登阶",
@@ -291,6 +324,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "面对 bench 站立，一只脚整只踩上凳面；先确认 bench 稳定不滑动。",
     cues: ["由踩上的腿主动发力站直", "下放时慢速控制 2–3 秒", "躯干保持直立，不用后脚蹬地"],
     mistakes: ["后脚猛蹬借力", "膝盖向内塌", "下放直接掉落"],
+    demo: EXERCISE_DEMOS["bench-step-up"],
   },
   "home-calf-raise": {
     title: "提踵 · 抱片",
@@ -298,6 +332,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "双手抱片于胸前，前脚掌踩稳台阶或地面边缘，另一手扶稳。",
     cues: ["脚跟下沉到充分拉伸", "蹬起至最高点停 1 秒", "高次数慢节奏，练的是耐力"],
     mistakes: ["借弹跳快速起落", "动作幅度不足", "身体前后摇晃"],
+    // No demo image: same calf-raise review outcome as the gym guide.
   },
   "wall-sit": {
     title: "靠墙静蹲",
@@ -305,6 +340,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "背部整片贴墙下滑，膝盖约 90°，双脚向前与肩同宽。",
     cues: ["膝盖对准脚尖方向", "重量均匀落在全脚掌", "呼吸均匀，逐周把每组时间加上去（45 秒 → 90 秒）"],
     mistakes: ["膝盖超过脚尖太多且内塌", "双手撑在大腿上卸力", "下滑角度太浅没有训练效果"],
+    demo: EXERCISE_DEMOS["wall-sit"],
   },
   "dead-bug": {
     title: "死虫",
@@ -312,6 +348,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "仰卧，双臂伸向天花板，髋膝各屈 90°；下背主动压紧地面。",
     cues: ["对侧手脚同时慢慢伸直，不碰地就收回", "下背全程贴地，肋骨收住", "呼气时移动，动作越慢越好"],
     mistakes: ["下背离开地面弓起来", "速度太快靠惯性", "憋气"],
+    demo: EXERCISE_DEMOS["dead-bug"],
   },
   "side-plank": {
     title: "侧平板",
@@ -319,6 +356,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "侧卧，前臂撑地，肘在肩正下方；双腿伸直叠放，髋部抬离地面。",
     cues: ["身体从头到脚成一条直线", "髋部主动向前顶，不下沉", "保持均匀呼吸，先做到目标秒数"],
     mistakes: ["髋部下沉或向后倒", "头部下垂", "肩膀耸起贴近耳朵"],
+    demo: EXERCISE_DEMOS["side-plank"],
   },
 };
 
@@ -921,6 +959,7 @@ function ExerciseGuideDialog({ guide, onClose }: { guide: ExerciseGuide; onClose
           <button type="button" aria-label="关闭动作要领" onClick={onClose}>×</button>
         </div>
         <p className="guide-focus">{guide.focus}</p>
+        {guide.demo ? <ExerciseDemoView demo={guide.demo} name={guide.title} /> : null}
         <div className="guide-section">
           <h3>起始位置</h3>
           <p>{guide.setup}</p>
