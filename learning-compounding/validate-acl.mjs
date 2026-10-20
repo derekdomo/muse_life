@@ -1,4 +1,5 @@
-// CMP-LEARN-ACL-001 validation — strict owner gate on all 8 actions.
+// CMP-LEARN-ACL-001 validation — strict owner gate on all 10 actions
+// (the original 8 plus startAttempt / saveOutput from CMP-LEARN-001).
 //
 // Two layers:
 //  1. Source wiring: in server/src/actions.ts, every action handler's
@@ -52,6 +53,8 @@ const ACTION_NAMES = [
   "markConverted",
   "unmarkConverted",
   "deleteInput",
+  "startAttempt",
+  "saveOutput",
 ];
 function actionSlice(src, name) {
   const start = src.indexOf(`  ${name}: defineAction({`);
@@ -177,7 +180,21 @@ for (const [label, viewer] of [["non-owner", NON_OWNER], ["anonymous", ANON]]) {
   const delInput = await call("deleteInput", ctx, { id: 1 });
   check(`${label}: deleteInput refused`, delInput.ok === false && delInput.forbidden === true);
 
-  check(`${label}: zero database access across all 8 actions`, state.dbCalls === 0, `dbCalls=${state.dbCalls}`);
+  const attempt = await call("startAttempt", ctx, { inputId: 1 });
+  check(
+    `${label}: startAttempt refused`,
+    attempt.ok === false && attempt.forbidden === true && attempt.attemptStartedAt === null,
+  );
+
+  const save = await call("saveOutput", ctx, {
+    inputId: 1, requestId: "refused-req", outputType: "note", outputNote: "不应保存的产出",
+  });
+  check(
+    `${label}: saveOutput refused`,
+    save.ok === false && save.forbidden === true && save.convertedAt === null,
+  );
+
+  check(`${label}: zero database access across all 10 actions`, state.dbCalls === 0, `dbCalls=${state.dbCalls}`);
   const counts = await tableCounts();
   check(
     `${label}: zero writes — no seed rows, no skills, no inputs`,
@@ -265,6 +282,29 @@ for (const [label, viewer] of [["non-owner", NON_OWNER], ["anonymous", ANON]]) {
     dash4.inputs.find((r) => r.id === inputId)?.converted === false && dash4.totals.totalConverted === 1,
   );
 
+  const attempt = await call("startAttempt", ctx, { inputId });
+  check(
+    "owner: startAttempt ok, attempt alone does not convert",
+    attempt.ok === true && attempt.forbidden === false && typeof attempt.attemptStartedAt === "string",
+  );
+  const save = await call("saveOutput", ctx, {
+    inputId, requestId: "validate-acl-req-1", outputType: "note", outputNote: "合成产出",
+  });
+  check(
+    "owner: saveOutput converts the attempted input",
+    save.ok === true && save.forbidden === false && save.alreadyConverted === false &&
+      typeof save.convertedAt === "string",
+  );
+  const saveRetry = await call("saveOutput", ctx, {
+    inputId, requestId: "validate-acl-req-1", outputType: "note", outputNote: "合成产出",
+  });
+  check(
+    "owner: saveOutput retry with same requestId is idempotent",
+    saveRetry.ok === true && saveRetry.alreadyConverted === true && saveRetry.convertedAt === save.convertedAt,
+  );
+  const unmark2 = await call("unmarkConverted", ctx, { id: inputId });
+  check("owner: unmark after saveOutput ok (cleanup for delete checks)", unmark2.ok === true);
+
   const delInput = await call("deleteInput", ctx, { id: inputId });
   check("owner: deleteInput ok", delInput.ok === true && delInput.forbidden === false);
   const dash5 = await call("getDashboard", ctx, {});
@@ -301,6 +341,14 @@ for (const [label, viewer] of [["non-owner", NON_OWNER], ["anonymous", ANON]]) {
   check(
     `${label}: populated DB deletes refused`,
     delInput.ok === false && delSkill.ok === false && delInput.forbidden === true && delSkill.forbidden === true,
+  );
+  const attempt = await call("startAttempt", ctx, { inputId: 1 });
+  const save = await call("saveOutput", ctx, {
+    inputId: 1, requestId: "refused-req", outputType: "note", outputNote: "越权产出",
+  });
+  check(
+    `${label}: populated DB attempt/save refused`,
+    attempt.ok === false && save.ok === false && attempt.forbidden === true && save.forbidden === true,
   );
   check(`${label}: populated DB — zero database access`, state.dbCalls === 0, `dbCalls=${state.dbCalls}`);
   const after = await tableCounts();

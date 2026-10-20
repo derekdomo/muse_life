@@ -25,13 +25,29 @@ export const learningInputs = sqliteTable("learning_inputs", {
   }).notNull(),
   topic: text("topic").notNull(),
   skillId: integer("skill_id").references(() => skills.id),
-  minutes: integer("minutes").notNull().default(0),
+  // Minutes are nullable since migration 0003: NULL means "duration
+  // unknown" (the field was left blank). Rows written before that keep
+  // their stored value untouched — a legacy 0 stays 0 and is displayed
+  // as 来源不明 (provenance unknown); it is never bulk-rewritten to NULL.
+  minutes: integer("minutes"),
   // Conversion: when set, this input has been turned into an output.
+  // This is the FIRST conversion instant: re-marking never overwrites
+  // it, and the accumulation curve buckets the output on the
+  // America/Los_Angeles calendar day of this instant — never on the
+  // input's own date.
   convertedAt: integer("converted_at", { mode: "timestamp_ms" }),
   outputType: text("output_type", {
     enum: ["note", "experiment", "project", "decision"],
   }),
   outputNote: text("output_note"),
+  // 「挑一条去用」 attempt state: set when the owner starts trying to
+  // apply this input. An attempt is NOT a conversion and never touches
+  // convertedAt. NULL for rows that predate the feature (no fabricated
+  // attempts).
+  attemptStartedAt: integer("attempt_started_at", { mode: "timestamp_ms" }),
+  // Idempotency key of the saveOutput call that performed the current
+  // conversion; a retry carrying the same requestId is a no-op.
+  conversionRequestId: text("conversion_request_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

@@ -6,6 +6,7 @@
   "scripts": {
     "typecheck": "bun x tsc --noEmit -p client/tsconfig.json && bun x tsc --noEmit -p server/tsconfig.json",
     "validate": "bun validate-acl.mjs",
+    "validate:metrics": "bun validate-metrics.mjs",
     "build": "bun run build:server && bun run build:client",
     "build:server": "cd server && bun build ./src/actions.ts --target=bun --outfile=./dist/actions.js",
     "build:client": "bun ./client/build.mjs"

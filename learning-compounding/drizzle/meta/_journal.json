@@ -15,6 +15,13 @@
       "when": 1792451960266,
       "tag": "0002_learning_compounding_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792499112623,
+      "tag": "0003_conversion_metrics_and_attempts",
+      "breakpoints": true
     }
   ]
 }
