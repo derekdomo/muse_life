@@ -78,6 +78,13 @@
       "when": 1792484757389,
       "tag": "0011_add_game_profile_revision_and_gold_watermark",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1792499400028,
+      "tag": "0012_add_game_gold_adoption_boundary",
+      "breakpoints": true
     }
   ]
 }
