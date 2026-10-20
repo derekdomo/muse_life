@@ -64,6 +64,13 @@
       "when": 1792428284627,
       "tag": "0009_add_game_state_and_settlements",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1792451011806,
+      "tag": "0010_add_game_character_system",
+      "breakpoints": true
     }
   ]
 }

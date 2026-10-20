@@ -1583,21 +1583,58 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
   );
 }
 
-// LIFE-C1 人生游戏 (CWEB-MVP-001·S1) 角色 view. It reads ONLY the
-// getGameState action — its own query, fully separate from getDashboard —
-// so a game-layer failure renders as a note inside this view and can
-// never take the health views down with it. Status is always text +
-// symbol, never color alone (owner is color-vision deficient); category
-// symbols differ in shape: ▲ steps, ◑ sleep, ■ strength, ★ quest.
+// LIFE-C1 人生游戏 (CWEB-MVP-001·S1 + S2) 角色 view: Diablo-style
+// character sheet — level/XP/gold header, attribute list with加点
+// controls, equipment slots + shop, daily tasks, main quest, ledger.
+// It reads ONLY the getGameState action — its own query, fully separate
+// from getDashboard — so a game-layer failure renders as a note inside
+// this view and can never take the health views down with it. Mutations
+// (allocate/buy/equip/unequip) are owner-only server actions; this view
+// just calls them and invalidates the game query. Status is always text
+// + symbol, never color alone (owner is color-vision deficient);
+// category symbols differ in shape: ▲ steps, ◑ sleep, ■ strength,
+// ★ quest, ✦ daily task.
 const GAME_CATEGORY_META: Record<GameCategory, { label: string; symbol: string }> = {
   steps: { label: "步行", symbol: "▲" },
   sleep: { label: "主睡眠", symbol: "◑" },
   strength: { label: "力量训练", symbol: "■" },
   quest_steps: { label: "主任务 · 步行达标", symbol: "★" },
+  daily_task: { label: "每日任务", symbol: "✦" },
 };
 
+const GAME_TASK_LABELS: Record<string, string> = {
+  steps_10000: "每日任务 · 步行 10,000 步",
+  strength_1: "每日任务 · 力量训练 1 次",
+  sleep_7h30: "每日任务 · 主睡眠 ≥ 7.5 小时",
+};
+
+type GameAttributeKey = "strength" | "endurance" | "spirit" | "stamina";
+const GAME_ATTRIBUTE_META: { key: GameAttributeKey; label: string; symbol: string; domain: GameState["domainBonuses"][number]["domain"]; domainLabel: string }[] = [
+  { key: "strength", label: "力量", symbol: "◆", domain: "strength", domainLabel: "力量训练经验" },
+  { key: "endurance", label: "耐力", symbol: "▲", domain: "steps", domainLabel: "步行经验" },
+  { key: "spirit", label: "精神", symbol: "◑", domain: "sleep", domainLabel: "睡眠经验" },
+  { key: "stamina", label: "体力", symbol: "●", domain: "quest_steps", domainLabel: "主任务经验" },
+];
+
+const GAME_SLOT_META: { slot: "weapon" | "armor" | "accessory"; label: string; symbol: string }[] = [
+  { slot: "weapon", label: "武器", symbol: "▸" },
+  { slot: "armor", label: "护甲", symbol: "▣" },
+  { slot: "accessory", label: "饰品", symbol: "◎" },
+];
+
 function GameView() {
+  const queryClient = useQueryClient();
   const game = useQuery({ queryKey: ["game"], queryFn: () => api.getGameState({}) });
+  const [actionNote, setActionNote] = useState<string | null>(null);
+  const onMutationDone = (result: { ok: boolean; message: string }) => {
+    setActionNote(result.message);
+    if (result.ok) void queryClient.invalidateQueries({ queryKey: ["game"] });
+  };
+  const allocate = useMutation({ mutationFn: (args: { attribute: GameAttributeKey; count: number }) => api.allocateAttribute(args), onSuccess: onMutationDone });
+  const buy = useMutation({ mutationFn: (itemId: string) => api.buyEquipment({ itemId }), onSuccess: onMutationDone });
+  const equip = useMutation({ mutationFn: (itemId: string) => api.equipItem({ itemId }), onSuccess: onMutationDone });
+  const unequip = useMutation({ mutationFn: (slot: "weapon" | "armor" | "accessory") => api.unequipItem({ slot }), onSuccess: onMutationDone });
+  const mutating = allocate.isPending || buy.isPending || equip.isPending || unequip.isPending;
   if (game.isPending) {
     return <div className="loading" role="status"><span /><p>正在读取角色数据…</p></div>;
   }
@@ -1621,6 +1658,7 @@ function GameView() {
       : quest.state === "in_progress"
         ? { symbol: "●", text: `进行中 · 还差 ${numberLabel(quest.targetSteps - (quest.steps ?? 0))} 步`, cls: "status-watch" }
         : { symbol: "—", text: "今日步数尚未同步", cls: "status-missing" };
+  const bonusFor = (domain: GameState["domainBonuses"][number]["domain"]) => data.domainBonuses.find((bonus) => bonus.domain === domain);
   return (
     <div className="game-view">
       <section className="game-panel" aria-labelledby="game-character-title">
@@ -1628,13 +1666,114 @@ function GameView() {
         <div className="game-level-row">
           <strong className="game-level">Lv {data.level}</strong>
           <span className="game-total">总经验 {numberLabel(data.totalXp)} XP</span>
+          <span className="game-gold"><span aria-hidden="true">◉</span> 金币 {numberLabel(data.gold)}</span>
         </div>
         <div className="game-progress" role="progressbar" aria-label={`距 Lv ${data.level + 1} 进度`} aria-valuemin={0} aria-valuemax={data.xpPerLevel} aria-valuenow={data.xpIntoLevel}>
           <i style={{ width: `${levelPct}%` }} />
         </div>
         <p className="game-progress-text">本级 {data.xpIntoLevel} / {data.xpPerLevel} XP · 距 Lv {data.level + 1} 还差 {data.xpToNextLevel} XP{data.settledThroughDate ? ` · 已结算至 ${fullDateLabel(data.settledThroughDate)}` : " · 尚无结算记录"}</p>
-        <p className="game-rules">经验规则 v{data.ruleVersion}：步数每 1000 步 1 XP（单日封顶 20）；主睡眠满 7 小时 10 XP，不足按比例向下取整；力量训练每完成一场 10 XP；主任务达标另 +10 XP。等级每 100 XP 一级。打开页面时按洛杉矶本地日结算，只结算数据完整的日期；缺失数据如实显示、不发经验；同一天同一类别只结算一次。</p>
-        {data.healthState !== "ok" ? <p className="game-note">健康数据{data.healthState === "corrupt" ? "快照损坏" : "尚未同步"}：步行与睡眠经验暂时无法结算，已入账的经验不受影响。</p> : null}
+        {data.unspentPoints > 0 ? <p className="game-points-note"><span aria-hidden="true">✚</span> 有 {data.unspentPoints} 点未分配属性点，去下方属性区加点。</p> : null}
+        <p className="game-rules">经验规则 v{data.ruleVersion}：步数每 1000 步 1 XP（单日封顶 20）；主睡眠满 7 小时 10 XP，不足按比例向下取整；力量训练每完成一场 10 XP；主任务达标另 +10 XP。等级每 100 XP 一级，每升一级得 3 点属性点。属性每点使对应领域结算经验 +2%（属性部分单领域封顶 +50%），装备效果叠加在属性之上；加成只对分配 / 装备之后的新结算生效，旧账本不重算（v1 账本保持原样）。金币：余额最初按累计 XP 一次性 1:1 折算，此后每次经验结算按实得 XP 1:1 增发（装备金币加成会放大增发）。每日任务奖励固定 XP 与金币，不吃领域加成，每任务每日限领一次。打开页面时按洛杉矶本地日结算，只结算数据完整的日期；缺失数据如实显示、不发经验；同一天同一类别只结算一次。</p>
+        <p className="game-rules">数据完整后才结算；来源修订会自动按差额修正账本。</p>
+        {data.healthState !== "ok" ? <p className="game-note">健康数据{data.healthState === "corrupt" ? "快照损坏" : "尚未同步"}：步行与睡眠经验暂时无法结算，已入账的经验与金币不受影响。</p> : null}
+        {actionNote ? <p className="game-action-note" role="status">{actionNote}</p> : null}
+      </section>
+
+      <section className="game-panel" aria-labelledby="game-attrs-title">
+        <div className="section-line"><h3 id="game-attrs-title">属性</h3><span>未分配 {data.unspentPoints} 点 · 每级 +3 点</span></div>
+        <div className="game-attrs">
+          {GAME_ATTRIBUTE_META.map((meta) => {
+            const value = data.attributes[meta.key];
+            const bonus = bonusFor(meta.domain);
+            const totalPct = (bonus?.attrPct ?? 0) + (bonus?.equipPct ?? 0);
+            return (
+              <div className="game-attr-row" key={meta.key}>
+                <div className="game-attr-main">
+                  <strong><span aria-hidden="true">{meta.symbol}</span> {meta.label}</strong>
+                  <small>对应{meta.domainLabel} · 属性 +{bonus?.attrPct ?? 0}%{bonus && bonus.equipPct > 0 ? ` · 装备 +${bonus.equipPct}%` : ""} · 合计 +{totalPct}%</small>
+                </div>
+                <span className="game-attr-value">{value}</span>
+                <button type="button" className="game-btn" aria-label={`给${meta.label}加 1 点`} disabled={data.unspentPoints <= 0 || mutating} onClick={() => allocate.mutate({ attribute: meta.key, count: 1 })}>+1</button>
+              </div>
+            );
+          })}
+        </div>
+        <p className="game-note">每点 +2% 对应领域经验，属性部分单领域封顶 +50%（25 点）；分配后不可撤销（v1 无洗点），只影响之后的新结算。</p>
+      </section>
+
+      <section className="game-panel" aria-labelledby="game-equip-title">
+        <div className="section-line"><h3 id="game-equip-title">装备与商店</h3><span>金币 {numberLabel(data.gold)}{data.goldBonusPct > 0 ? ` · 金币加成 +${data.goldBonusPct}%` : ""}</span></div>
+        <div className="game-slots">
+          {GAME_SLOT_META.map((slotMeta) => {
+            const equippedItem = data.equipment.find((item) => item.slot === slotMeta.slot && item.equipped);
+            return (
+              <div className="game-slot" key={slotMeta.slot}>
+                <span className="game-slot-label"><span aria-hidden="true">{slotMeta.symbol}</span> {slotMeta.label}</span>
+                {equippedItem ? (
+                  <>
+                    <strong>{equippedItem.name}</strong>
+                    <small>{equippedItem.effectLabel}</small>
+                    <button type="button" className="game-btn game-btn-ghost" aria-label={`卸下${slotMeta.label} ${equippedItem.name}`} disabled={mutating} onClick={() => unequip.mutate(slotMeta.slot)}>卸下</button>
+                  </>
+                ) : (
+                  <small className="game-slot-empty">空 · 未装备</small>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="game-shop">
+          {data.equipment.map((item) => {
+            const slotLabel = GAME_SLOT_META.find((slotMeta) => slotMeta.slot === item.slot)?.label ?? item.slot;
+            return (
+              <div className="game-item" key={item.id}>
+                <div className="game-item-main">
+                  <strong>{item.name}</strong>
+                  <small>{slotLabel} · {item.effectLabel}</small>
+                  <small>{item.obtain === "task" ? item.obtainNote : item.price !== null ? `价格 ${numberLabel(item.price)} 金币` : item.obtainNote}</small>
+                </div>
+                {item.equipped ? (
+                  <span className="status-chip status-ok"><span aria-hidden="true">✓</span> 已装备</span>
+                ) : item.owned ? (
+                  <button type="button" className="game-btn" aria-label={`装备 ${item.name}`} disabled={mutating} onClick={() => equip.mutate(item.id)}>装备</button>
+                ) : item.obtain === "task" ? (
+                  <span className="game-item-locked">任务获得</span>
+                ) : (
+                  <button type="button" className="game-btn" aria-label={`购买 ${item.name}，${item.price ?? 0} 金币`} disabled={mutating || item.price === null || data.gold < item.price} onClick={() => buy.mutate(item.id)}>购买</button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <p className="game-note">每槽位只能装备一件，换装直接替换；装备效果与属性加成叠加，只对之后的新结算生效。无抽卡、无随机词缀、无真实付费。</p>
+      </section>
+
+      <section className="game-panel" aria-labelledby="game-daily-title">
+        <div className="section-line"><h3 id="game-daily-title">每日额外任务</h3><span>每日 3 个 · 达标自动入账</span></div>
+        <div className="game-tasks">
+          {data.dailyTasks.map((task) => {
+            const chip = task.state === "claimed"
+              ? { symbol: "✓", text: "已完成 · 奖励已入账", cls: "status-ok" }
+              : task.state === "completed"
+                ? { symbol: "✓", text: "已达标", cls: "status-ok" }
+                : task.state === "in_progress"
+                  ? { symbol: "●", text: "进行中", cls: "status-watch" }
+                  : { symbol: "—", text: "数据未同步", cls: "status-missing" };
+            const pct = task.progress === null ? 0 : Math.min(100, Math.round((task.progress / task.target) * 100));
+            return (
+              <div className="game-task" key={task.id}>
+                <div className="section-line">
+                  <strong>{task.label}</strong>
+                  <span className={`status-chip ${chip.cls}`}><span aria-hidden="true">{chip.symbol}</span> {chip.text}</span>
+                </div>
+                <div className="game-progress" role="progressbar" aria-label={`${task.label}进度`} aria-valuemin={0} aria-valuemax={task.target} aria-valuenow={task.progress ?? 0}>
+                  <i style={{ width: `${pct}%` }} />
+                </div>
+                <p className="game-progress-text">{task.progressLabel} · 奖励 +{task.rewardXp} XP · +{task.rewardGold} 金币</p>
+              </div>
+            );
+          })}
+        </div>
       </section>
 
       <section className="game-panel" aria-labelledby="game-quest-title">
@@ -1656,7 +1795,7 @@ function GameView() {
       <section className="game-panel game-camp" aria-labelledby="game-camp-title">
         <p className="section-kicker">营地</p>
         <h3 id="game-camp-title">营地建设中</h3>
-        <p className="game-note">营地是后续切片的内容：将来可以用经验在这里安顿角色。当前先积累经验——账本里的每一笔都不会丢失。</p>
+        <p className="game-note">营地是后续切片的内容。当前先积累经验与金币——账本里的每一笔都不会丢失。</p>
       </section>
 
       {data.previews.length ? (
@@ -1686,14 +1825,15 @@ function GameView() {
           <div className="game-ledger">
             {data.settlements.map((entry) => {
               const meta = GAME_CATEGORY_META[entry.category];
+              const label = entry.category === "daily_task" ? (GAME_TASK_LABELS[entry.detail] ?? meta.label) : meta.label;
               return (
-                <div className="game-ledger-row" key={`${entry.localDate}-${entry.category}`}>
+                <div className="game-ledger-row" key={`${entry.localDate}-${entry.category}-${entry.detail}`}>
                   <span className="unified-date">{dateLabel(entry.localDate)}</span>
                   <div className="unified-main">
-                    <strong><span aria-hidden="true">{meta.symbol}</span> {meta.label}</strong>
-                    <small>{fullDateLabel(entry.localDate)} · 已结算</small>
+                    <strong><span aria-hidden="true">{meta.symbol}</span> {label}</strong>
+                    <small>{fullDateLabel(entry.localDate)} · 已结算 · 规则 v{entry.ruleVersion}</small>
                   </div>
-                  <span className="game-xp">+{entry.xp} XP</span>
+                  <span className="game-xp">+{entry.xp} XP{entry.gold > 0 ? ` · +${entry.gold} 金币` : ""}</span>
                 </div>
               );
             })}
@@ -1742,10 +1882,10 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button className="sync-button" type="button" aria-label="同步 Apple 健康和训练记录" onClick={() => refresh.mutate()} disabled={isSyncing}>{isSyncing ? "同步中…" : snapshot.coverageIncomplete ? "待补全 · 全部同步" : "全部同步"}</button>
       </header>
       <nav className="view-tabs" aria-label="健康看板视图">
-        <button type="button" className={tab === "today" ? "selected" : ""} onClick={() => setTab("today")}>今日</button>
-        <button type="button" className={tab === "trends" ? "selected" : ""} onClick={() => setTab("trends")}>趋势</button>
-        <button type="button" className={tab === "history" ? "selected" : ""} onClick={() => setTab("history")}>历史</button>
-        <button type="button" className={tab === "game" ? "selected" : ""} onClick={() => setTab("game")}>角色</button>
+        <button type="button" className={tab === "today" ? "selected" : ""} aria-current={tab === "today" ? "page" : undefined} onClick={() => setTab("today")}>今日</button>
+        <button type="button" className={tab === "trends" ? "selected" : ""} aria-current={tab === "trends" ? "page" : undefined} onClick={() => setTab("trends")}>趋势</button>
+        <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
+        <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
       {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
@@ -1761,19 +1901,30 @@ function StrengthOnlyView({ strength, healthState, dataStatus, unifiedTimeline, 
   onSyncHealth: () => void; healthSyncing: boolean; onSyncStrength: () => void; strengthSyncing: boolean;
 }) {
   const corrupt = healthState === "corrupt";
+  // The game lives behind the same 角色 tab as in the main dashboard nav —
+  // never embedded at the bottom of this view — so the owner reaches it
+  // with one tap in every data state.
+  const [view, setView] = useState<"health" | "game">("health");
   return (
     <div className="strength-only-view">
-      <section className="source-notice" aria-labelledby="strength-only-title">
-        <p className="section-kicker">只有训练数据</p>
-        <h1 id="strength-only-title">{corrupt ? "健康快照损坏" : "健康数据尚未同步"}</h1>
-        <p>{corrupt
-          ? "保存的健康快照已损坏，暂时读不出来；训练记录是独立保存的，不受影响，照常显示在下面。重新同步 Apple 健康后健康数据会恢复。"
-          : "还没有同步过 Apple 健康，所以步数、心率与睡眠暂时看不到；训练记录是独立同步的，已有训练照常显示在下面。"}</p>
-        <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={onSyncHealth} disabled={healthSyncing}>{healthSyncing ? "同步中…" : "同步 Apple 健康"}</button>
-      </section>
-      <StrengthPanel strength={strength} onSync={onSyncStrength} syncing={strengthSyncing} />
-      <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={strength.displayUnit} />
-      <GameView />
+      <nav className="view-tabs view-tabs-2" aria-label="健康看板视图">
+        <button type="button" className={view === "health" ? "selected" : ""} aria-current={view === "health" ? "page" : undefined} onClick={() => setView("health")}>总览</button>
+        <button type="button" className={view === "game" ? "selected" : ""} aria-current={view === "game" ? "page" : undefined} onClick={() => setView("game")}>角色</button>
+      </nav>
+      {view === "game" ? <GameView /> : (
+        <>
+          <section className="source-notice" aria-labelledby="strength-only-title">
+            <p className="section-kicker">只有训练数据</p>
+            <h1 id="strength-only-title">{corrupt ? "健康快照损坏" : "健康数据尚未同步"}</h1>
+            <p>{corrupt
+              ? "保存的健康快照已损坏，暂时读不出来；训练记录是独立保存的，不受影响，照常显示在下面。重新同步 Apple 健康后健康数据会恢复。"
+              : "还没有同步过 Apple 健康，所以步数、心率与睡眠暂时看不到；训练记录是独立同步的，已有训练照常显示在下面。"}</p>
+            <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={onSyncHealth} disabled={healthSyncing}>{healthSyncing ? "同步中…" : "同步 Apple 健康"}</button>
+          </section>
+          <StrengthPanel strength={strength} onSync={onSyncStrength} syncing={strengthSyncing} />
+          <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={strength.displayUnit} />
+        </>
+      )}
     </div>
   );
 }
@@ -1813,6 +1964,10 @@ export function App() {
 
   const firstSyncing = firstSync.isPending || polling.syncing;
   const strengthSyncing = strengthRefresh.isPending || polling.syncing;
+  // Empty-state shell tab: even before the first health sync, the 角色
+  // tab stays visible and reachable next to the 总览 empty state, the
+  // same independent tab the main dashboard nav carries.
+  const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
       {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} /> : dashboard.data.strength ? (
@@ -1822,13 +1977,21 @@ export function App() {
         </>
       ) : (
         <>
-          <div className="empty-state">
-            <h1>还没有健康数据</h1>
-            <p>尚未同步过 Apple 健康。点击下方按钮，从 HealthKit 同步最近的完整日数据后，这里会显示步数、心率、HRV 与睡眠。</p>
-            <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={() => firstSync.mutate()} disabled={firstSyncing}>{firstSyncing ? "同步中…" : "同步 Apple 健康"}</button>
-            {polling.failureNote ? <p role="status">{polling.failureNote}</p> : firstSync.data ? <p role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
-          </div>
-          {dashboard.data.dataStatus ? <DataStatusPanel dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} displayUnit="lb" /> : null}
+          <nav className="view-tabs view-tabs-2" aria-label="健康看板视图">
+            <button type="button" className={emptyView === "health" ? "selected" : ""} aria-current={emptyView === "health" ? "page" : undefined} onClick={() => setEmptyView("health")}>总览</button>
+            <button type="button" className={emptyView === "game" ? "selected" : ""} aria-current={emptyView === "game" ? "page" : undefined} onClick={() => setEmptyView("game")}>角色</button>
+          </nav>
+          {emptyView === "game" ? <GameView /> : (
+            <>
+              <div className="empty-state">
+                <h1>还没有健康数据</h1>
+                <p>尚未同步过 Apple 健康。点击下方按钮，从 HealthKit 同步最近的完整日数据后，这里会显示步数、心率、HRV 与睡眠。</p>
+                <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={() => firstSync.mutate()} disabled={firstSyncing}>{firstSyncing ? "同步中…" : "同步 Apple 健康"}</button>
+                {polling.failureNote ? <p role="status">{polling.failureNote}</p> : firstSync.data ? <p role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
+              </div>
+              {dashboard.data.dataStatus ? <DataStatusPanel dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} displayUnit="lb" /> : null}
+            </>
+          )}
         </>
       )}
       <footer>仅供健康参考，不做医疗诊断；身体不适请及时看医生。</footer>

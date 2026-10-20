@@ -22,7 +22,7 @@ const APP_DIR = new URL(".", import.meta.url).pathname;
 const appRequire = createRequire(join(APP_DIR, "package.json"));
 const { drizzle } = appRequire("drizzle-orm/bun-sqlite");
 const schema = await import(join(APP_DIR, "server/src/schema.ts"));
-const { Actions } = await import(join(APP_DIR, "server/src/actions.ts"));
+const { Actions, deriveRefreshDiagnosis } = await import(join(APP_DIR, "server/src/actions.ts"));
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -538,6 +538,9 @@ function obsEvents(sqlite: Database): string[] {
     && viewA.state?.status === "running" && viewA.state?.hasTaskId === true && viewA.state?.hasGeneration === true);
   check("obs: running with no callback yet diagnoses awaiting_callback",
     viewA.diagnosis?.code === "awaiting_callback");
+  check("obs: the first attempt is numbered #1 across state / diagnosis / rows",
+    viewA.currentAttempt === 1 && viewA.state?.attempt === 1 && viewA.diagnosis?.attempt === 1
+    && viewA.observations.every((row: any) => row.attempt === 1 && row.relation === "current"));
   check("obs: the view never leaks the full generation or task id values",
     !JSON.stringify(viewA).includes(genA) && !JSON.stringify(viewA).includes("task-harness"));
 
@@ -554,8 +557,15 @@ function obsEvents(sqlite: Database): string[] {
     rowsB[0]?.event === "callback_received" && rowsB[0]?.outcome === "success_flag"
     && rowsB[1]?.event === "callback_ignored" && rowsB[1]?.detail === "generation_gate");
   const viewB = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
-  check("obs: an arrived-but-ignored callback diagnoses callback_ignored",
-    viewB.diagnosis?.code === "callback_ignored");
+  // F0.7-OBS-001 (the PM bug): the ignored callback belongs to a
+  // FOREIGN generation that never started here. It must NOT be
+  // diagnosed as the current attempt's outcome — the current
+  // attempt is still simply waiting for its own callback.
+  check("obs: a foreign ignored callback does NOT diagnose the current attempt (still awaiting its own callback)",
+    viewB.diagnosis?.code === "awaiting_callback" && viewB.diagnosis?.attempt === 1);
+  check("obs: the foreign callback rows are attributed unknown (no attempt ordinal), the current rows stay current #1",
+    viewB.observations.slice(0, 2).every((row: any) => row.relation === "unknown" && row.attempt === null)
+    && viewB.observations.slice(2).every((row: any) => row.relation === "current" && row.attempt === 1));
 
   // (c) a legal success callback records applied_success with the
   // saved-month count, and the diagnosis settles to success.
@@ -567,7 +577,8 @@ function obsEvents(sqlite: Database): string[] {
     rowsC[0]?.event === "callback_received"
     && rowsC[1]?.event === "callback_applied_success" && rowsC[1]?.detail === "saved_months:2");
   const viewC = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
-  check("obs: settled success diagnoses settled_success", viewC.diagnosis?.code === "settled_success");
+  check("obs: settled success diagnoses settled_success for attempt #1",
+    viewC.diagnosis?.code === "settled_success" && viewC.diagnosis?.attempt === 1);
 
   // (d) a legal failure callback records applied_failure and the
   // diagnosis settles to failure.
@@ -580,7 +591,8 @@ function obsEvents(sqlite: Database): string[] {
     rowsD[0]?.event === "callback_received" && rowsD[0]?.outcome === "failure_flag"
     && rowsD[1]?.event === "callback_applied_failure");
   const viewD = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
-  check("obs: settled failure diagnoses settled_failure", viewD.diagnosis?.code === "settled_failure");
+  check("obs: settled failure diagnoses settled_failure for attempt #2",
+    viewD.diagnosis?.code === "settled_failure" && viewD.diagnosis?.attempt === 2 && viewD.currentAttempt === 2);
 
   // (e) spawn failure records spawn_failed and diagnoses spawn_failed.
   const { sqlite: sqliteE, db: dbE } = freshDb();
@@ -596,7 +608,8 @@ function obsEvents(sqlite: Database): string[] {
   const guestView = await Actions.getRefreshObservations.handler(guestCtx(db), {});
   const anonView = await Actions.getRefreshObservations.handler(anonCtx(db), {});
   check("obs: guest/anonymous get guest_denied with zero data",
-    guestView.access === "guest_denied" && guestView.state === null && guestView.observations.length === 0 && guestView.diagnosis === null
+    guestView.access === "guest_denied" && guestView.state === null && guestView.currentAttempt === null
+    && guestView.observations.length === 0 && guestView.diagnosis === null
     && anonView.access === "guest_denied" && anonView.state === null && anonView.observations.length === 0);
 
   // (g) a fresh artifact has no observations: the honest empty
@@ -604,7 +617,8 @@ function obsEvents(sqlite: Database): string[] {
   const { db: dbG } = freshDb();
   const viewG = await Actions.getRefreshObservations.handler(ownerCtx(dbG), {});
   check("obs: no records yet -> empty stream + no_attempt diagnosis",
-    viewG.access === "owner" && viewG.observations.length === 0 && viewG.diagnosis?.code === "no_attempt");
+    viewG.access === "owner" && viewG.observations.length === 0 && viewG.diagnosis?.code === "no_attempt"
+    && viewG.diagnosis?.attempt === null && viewG.currentAttempt === null);
 
   // (h) detail hygiene across every recorded row in every stream
   // above: only short codes / counts — no amounts, payload
@@ -617,6 +631,201 @@ function obsEvents(sqlite: Database): string[] {
   check("obs: no financial values / payload fragments / raw errors in the stream",
     !streamText.includes("100000") && !streamText.includes("115000") && !streamText.includes("broker_1234")
     && !streamText.includes("boom") && !streamText.includes("asOf") && !streamText.includes("payload"));
+}
+
+// =====================================================================
+// Group 13: F0.7-OBS-001 — per-attempt diagnosis (synthetic matrix)
+// The diagnosis must be a function of the CURRENT attempt's own
+// event chain only. Old-generation or unattributed events are
+// history, never evidence — in either arrival order.
+// =====================================================================
+{
+  type ObsRow = { event: string; outcome: string; detail: string | null; generation: string | null };
+  const row = (event: string, generation: string | null, detail: string | null = null): ObsRow =>
+    ({ event, outcome: "success_flag", detail, generation });
+  const ORDER = ["gen-1", "gen-2"];
+  const diag = (status: "idle" | "running" | "error" | null, currentGeneration: string | null, observations: ObsRow[]) =>
+    deriveRefreshDiagnosis({ status, currentGeneration, attemptOrder: ORDER, observations });
+
+  // (a) Two generations, settle order: gen-1 settled success, gen-2
+  // running and attached. Diagnosis: gen-2 awaiting, attempt 2.
+  check("obs001: gen-2 running after gen-1 settled success -> awaiting_callback #2",
+    diag("running", "gen-2", [
+      row("spawn_attached", "gen-2"), row("refresh_started", "gen-2"),
+      row("callback_applied_success", "gen-1"), row("callback_received", "gen-1"),
+      row("spawn_attached", "gen-1"), row("refresh_started", "gen-1"),
+    ]).code === "awaiting_callback"
+    && diag("running", "gen-2", [
+      row("spawn_attached", "gen-2"), row("refresh_started", "gen-2"),
+      row("callback_applied_success", "gen-1"), row("refresh_started", "gen-1"),
+    ]).attempt === 2);
+
+  // (b) PM repro order: gen-2 running + attached, then gen-1's
+  // late FAILURE callback arrives (received + ignored) — the
+  // globally newest events. Diagnosis must stay gen-2 awaiting.
+  const pmRepro = diag("running", "gen-2", [
+    row("callback_ignored", "gen-1", "generation_gate"), row("callback_received", "gen-1"),
+    row("spawn_attached", "gen-2"), row("refresh_started", "gen-2"),
+    row("spawn_attached", "gen-1"), row("refresh_started", "gen-1"),
+  ]);
+  check("obs001: PM repro — old-gen ignored failure arriving last does NOT pollute the current diagnosis",
+    pmRepro.code === "awaiting_callback" && pmRepro.attempt === 2);
+  check("obs001: awaiting text is the honest unknown form (等待当前代回调，执行终态未知）, no task-executed claim",
+    pmRepro.text.includes("等待当前代回调") && pmRepro.text.includes("终态未知") && !pmRepro.text.includes("执行过"));
+
+  // (c) Old-gen SUCCESS arriving late (ignored) while the current
+  // attempt already settled failure on its own chain: the current
+  // diagnosis stays settled_failure.
+  check("obs001: old-gen ignored success late vs current own failure -> settled_failure #2",
+    diag("error", "gen-2", [
+      row("callback_ignored", "gen-1", "generation_gate"), row("callback_received", "gen-1"),
+      row("callback_applied_failure", "gen-2"), row("callback_received", "gen-2"),
+      row("refresh_started", "gen-2"), row("refresh_started", "gen-1"),
+    ]).code === "settled_failure");
+
+  // (d) Old-gen ignored failure arriving after the current attempt
+  // settled success: diagnosis stays settled_success.
+  check("obs001: old-gen ignored failure late vs current own success -> settled_success #2",
+    diag("idle", "gen-2", [
+      row("callback_ignored", "gen-1", "generation_gate"), row("callback_received", "gen-1"),
+      row("callback_applied_success", "gen-2"), row("callback_received", "gen-2"),
+      row("refresh_started", "gen-2"), row("refresh_started", "gen-1"),
+    ]).code === "settled_success");
+
+  // (e) Callback BEFORE the spawn tail: the own chain's newest row
+  // is the unattached tail, recorded after the applied result.
+  // The applied result still decides, both ways.
+  check("obs001: callback applied before spawn tail (success) -> settled_success despite the newer tail row",
+    diag("idle", "gen-1", [
+      row("spawn_tail_unattached", "gen-1", "status_idle"),
+      row("callback_applied_success", "gen-1"), row("callback_received", "gen-1"),
+      row("refresh_started", "gen-1"),
+    ]).code === "settled_success");
+  check("obs001: callback applied before spawn tail (failure) -> settled_failure despite the newer tail row",
+    diag("error", "gen-1", [
+      row("spawn_tail_unattached", "gen-1", "status_error"),
+      row("callback_applied_failure", "gen-1"), row("callback_received", "gen-1"),
+      row("refresh_started", "gen-1"),
+    ]).code === "settled_failure");
+
+  // (f) The current attempt's OWN ignored callback (e.g. claim
+  // lost) still diagnoses callback_ignored — only foreign ignored
+  // callbacks lost that power.
+  check("obs001: current attempt's own ignored callback -> callback_ignored #2",
+    diag("running", "gen-2", [
+      row("callback_ignored", "gen-2", "claim_lost"), row("callback_received", "gen-2"),
+      row("spawn_attached", "gen-2"), row("refresh_started", "gen-2"),
+      row("refresh_started", "gen-1"),
+    ]).code === "callback_ignored");
+
+  // (g) Own spawn failure still diagnoses spawn_failed.
+  check("obs001: current attempt's own spawn failure -> spawn_failed #1",
+    diag("error", "gen-1", [
+      row("spawn_failed", "gen-1", "spawn_error"), row("refresh_started", "gen-1"),
+    ]).code === "spawn_failed");
+
+  // (h) No telemetry at all -> no_attempt, no ordinal.
+  const none = diag(null, null, []);
+  check("obs001: no history telemetry -> no_attempt with no attempt ordinal",
+    none.code === "no_attempt" && none.attempt === null);
+
+  // (i) History exists but no current attempt is bound -> the
+  // rows are stated as unattributed history, never as a current
+  // verdict.
+  check("obs001: history without a bound current attempt -> unattributed_history",
+    diag("running", null, [row("callback_received", "gen-1"), row("refresh_started", "gen-1")]).code
+      === "unattributed_history");
+
+  // (j) The current attempt's own rows fell outside the returned
+  // window (truncation): other generations' rows are not evidence;
+  // the diagnosis falls back to the attempt's own state status.
+  const flood = Array.from({ length: 20 }, () => row("callback_received", "gen-1"));
+  check("obs001: truncated stream, current attempt running -> awaiting_callback (not gen-1 noise)",
+    diag("running", "gen-2", flood).code === "awaiting_callback");
+  check("obs001: truncated stream, current attempt errored -> settled_failure",
+    diag("error", "gen-2", flood).code === "settled_failure");
+}
+
+// ---------- Group 13b: real handlers, two generations ----------
+{
+  const { sqlite, db } = freshDb();
+  // Attempt #1 settles success.
+  await Actions.refreshFinanceData.handler(ownerCtx(db), {});
+  const gen1: string = stateRow(sqlite).generation;
+  await Actions.ingestFinanceData.handler(ownerCtx(db), successPayload(gen1, freshAsOf()));
+  // Attempt #2 starts and attaches.
+  await Actions.refreshFinanceData.handler(ownerCtx(db), {});
+  const gen2: string = stateRow(sqlite).generation;
+  check("obs001: second attempt minted", gen2 !== gen1 && stateRow(sqlite).status === "running");
+  // Gen-1's late failure callback arrives now (PM repro, live).
+  const late = await Actions.ingestFinanceData.handler(ownerCtx(db), { success: false, error: "old gen late failure", generation: gen1 });
+  check("obs001: late old-gen failure still ignored by ingest", late.savedMonths === 0 && stateRow(sqlite).status === "running");
+  const view = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs001: diagnosis after the late old-gen failure is awaiting_callback for attempt #2",
+    view.diagnosis?.code === "awaiting_callback" && view.diagnosis?.attempt === 2 && view.currentAttempt === 2);
+  const lateRows = view.observations.slice(0, 2);
+  check("obs001: the late old-gen rows are labeled history attempt #1",
+    lateRows.every((r: any) => r.relation === "history" && r.attempt === 1));
+  check("obs001: attempt #2 rows are labeled current, attempt #1 settled rows labeled history",
+    view.observations.filter((r: any) => r.attempt === 2).every((r: any) => r.relation === "current")
+    && view.observations.filter((r: any) => r.attempt === 1 && r.relation !== "history").length === 0);
+  // Gen-2 settles success; another late gen-1 event afterwards
+  // must not move the settled diagnosis either.
+  await Actions.ingestFinanceData.handler(ownerCtx(db), successPayload(gen2, freshAsOf()));
+  await Actions.ingestFinanceData.handler(ownerCtx(db), { success: false, error: "old gen even later failure", generation: gen1 });
+  const view2 = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs001: after gen-2 settles, a later old-gen event leaves settled_success #2 untouched",
+    view2.diagnosis?.code === "settled_success" && view2.diagnosis?.attempt === 2);
+  check("obs001: the raw generation values never leak into the observation view",
+    !JSON.stringify(view2).includes(gen1) && !JSON.stringify(view2).includes(gen2));
+}
+
+// ---------- Group 13c: real handlers, 20-row display truncation ----------
+{
+  const { sqlite, db } = freshDb();
+  await Actions.refreshFinanceData.handler(ownerCtx(db), {});
+  const gen: string = stateRow(sqlite).generation;
+  // 12 foreign callbacks -> 24 rows (received + ignored), pushing
+  // the current attempt's own 2 rows out of the 20-row window.
+  for (let i = 0; i < 12; i++) {
+    await Actions.ingestFinanceData.handler(ownerCtx(db), { success: false, error: `foreign ${i}`, generation: `gen-FOREIGN-${i}` });
+  }
+  const view = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs001: display stream is capped at 20 rows", view.observations.length === 20);
+  check("obs001: every displayed row is the foreign noise (unknown attribution, no ordinal)",
+    view.observations.every((r: any) => r.relation === "unknown" && r.attempt === null));
+  check("obs001: diagnosis still reads the current attempt's own chain (awaiting #1), unpolluted by the flood",
+    view.diagnosis?.code === "awaiting_callback" && view.diagnosis?.attempt === 1 && view.currentAttempt === 1);
+  check("obs001: the flood never touched the running state",
+    stateRow(sqlite).status === "running" && stateRow(sqlite).generation === gen);
+  await Actions.ingestFinanceData.handler(ownerCtx(db), { success: false, error: "harness cleanup", generation: gen });
+}
+
+// ---------- Group 13d: recording-failure isolation ----------
+{
+  const { sqlite, db } = freshDb();
+  // Every observation INSERT aborts; selects still work. The
+  // refresh chain must proceed exactly as if observability were
+  // healthy, and the diagnosis must degrade to the attempt's own
+  // state status — never borrow another generation's events
+  // (there are none recorded) and never fabricate rows.
+  sqlite.exec(`CREATE TRIGGER obs_insert_fail BEFORE INSERT ON refresh_observations
+    BEGIN SELECT RAISE(ABORT, 'obs write disabled'); END`);
+  const started = await Actions.refreshFinanceData.handler(ownerCtx(db), {});
+  check("obs001: refresh starts normally while observation writes fail",
+    started.ok && started.status === "started" && stateRow(sqlite).status === "running");
+  const viewRun = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs001: with recording down, a running attempt diagnoses awaiting_callback from its own state",
+    viewRun.access === "owner" && viewRun.observations.length === 0 && viewRun.diagnosis?.code === "awaiting_callback");
+  const gen: string = stateRow(sqlite).generation;
+  const saved = await Actions.ingestFinanceData.handler(ownerCtx(db), successPayload(gen, freshAsOf()));
+  check("obs001: ingest still saves and settles while observation writes fail",
+    saved.savedMonths === 2 && stateRow(sqlite).status === "idle");
+  const viewDone = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs001: with recording down, the settled attempt diagnoses settled_success from its own state",
+    viewDone.observations.length === 0 && viewDone.diagnosis?.code === "settled_success");
+  sqlite.exec("DROP TRIGGER obs_insert_fail");
+  check("obs001: no observation rows were recorded during the outage", obsRows(sqlite).length === 0);
 }
 
 console.log(`validate-refresh-chain: ${passed} passed, ${failed} failed`);

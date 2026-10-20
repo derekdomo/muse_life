@@ -1,0 +1,8 @@
+{
+  "runtime": "typescript",
+  "platformVersion": 25,
+  "entry": "client/dist/index.html",
+  "name": "学习复利",
+  "slug": "space-10",
+  "managedCronJobs": []
+}

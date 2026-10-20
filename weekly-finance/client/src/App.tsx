@@ -1633,12 +1633,29 @@ export function refreshDiagnosisSymbol(code: string): string {
   }
 }
 
+// F0.7-OBS-001: per-row attempt attribution as a plain text tag —
+// the row's relation to the current attempt rides on words, never
+// on color alone. History rows name their own attempt ordinal;
+// unattributable rows say so.
+export function observationRelationText(relation: string, attempt: number | null): string {
+  if (relation === "current") return attempt != null ? `当前尝试 #${attempt}` : "当前尝试";
+  if (relation === "history") return attempt != null ? `历史尝试 #${attempt}` : "历史尝试";
+  return "归属未知";
+}
+
 // F0.7 observability panel: an expandable, read-only view of the
 // refresh chain's recorded events, rendered inside the status
 // band. It distinguishes the three failures the band alone cannot
 // tell apart — task never ran, callback never arrived, callback
 // arrived but was ignored. With no recorded rows it says so
 // plainly; it never fabricates history.
+//
+// F0.7-OBS-001: the diagnosis line is the CURRENT attempt's
+// conclusion (with its attempt ordinal), and the event list is
+// split into the current attempt's own events vs history /
+// unrelated events, each row carrying a text relation tag —
+// older generations' events are never presented as evidence
+// about the current attempt.
 function RefreshObservationsPanel() {
   const observations = useQuery({
     queryKey: ["finance-refresh-observations"],
@@ -1664,29 +1681,53 @@ function RefreshObservationsPanel() {
           {result.diagnosis ? (
             <p className="refresh-band__note">
               <span aria-hidden="true">{refreshDiagnosisSymbol(result.diagnosis.code)}</span>
-              {" "}链路诊断：{result.diagnosis.text}
+              {" "}当前尝试诊断{result.diagnosis.attempt != null ? `（尝试 #${result.diagnosis.attempt}）` : "（尝试序号未知）"}：{result.diagnosis.text}
             </p>
           ) : null}
           {result.state ? (
             <p className="refresh-band__note">
               当前状态：{result.state.status === "running" ? "进行中" : result.state.status === "error" ? "失败" : "空闲"}
+              {" · "}当前尝试：{result.state.attempt != null ? `#${result.state.attempt}` : "未知"}
               {" · "}任务标识：{result.state.hasTaskId ? "有" : "无"}
               {" · "}代次标识：{result.state.hasGeneration ? "有" : "无"}
             </p>
           ) : null}
-          <div className="refresh-band__ledger-rows">
-            {result.observations.map((row, index) => {
+          {(() => {
+            const currentRows = result.observations.filter((row) => row.relation === "current");
+            const otherRows = result.observations.filter((row) => row.relation !== "current");
+            const renderRow = (row: (typeof result.observations)[number], index: number) => {
               const detailText = observationDetailText(row.detail);
               return (
                 <p key={`${row.createdAt}-${index}`}>
                   <strong>{formatInstant(row.createdAt)}</strong>
+                  {" · "}【{observationRelationText(row.relation, row.attempt)}】
                   {" · "}{observationEventText(row.event)}
                   {" · "}{observationOutcomeText(row.outcome)}
                   {detailText ? ` · ${detailText}` : ""}
                 </p>
               );
-            })}
-          </div>
+            };
+            return (
+              <>
+                <p className="refresh-band__note"><strong>当前尝试事件</strong></p>
+                {currentRows.length > 0 ? (
+                  <div className="refresh-band__ledger-rows">
+                    {currentRows.map(renderRow)}
+                  </div>
+                ) : (
+                  <p className="refresh-band__note">当前尝试尚无自身事件记录（下方历史事件不作为当前尝试的证据）</p>
+                )}
+                {otherRows.length > 0 ? (
+                  <>
+                    <p className="refresh-band__note"><strong>历史 / 无关事件（不属于当前尝试）</strong></p>
+                    <div className="refresh-band__ledger-rows">
+                      {otherRows.map(renderRow)}
+                    </div>
+                  </>
+                ) : null}
+              </>
+            );
+          })()}
         </>
       )}
     </details>
