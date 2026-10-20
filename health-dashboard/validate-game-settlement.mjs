@@ -1,5 +1,7 @@
 // CWEB-SETTLE-001 (P0) + CWEB-SLEEP-001 (P1) + CWEB-PROFILE-SAFE-001
-// (P0) validation.
+// (P0) validation, extended for the CWEB-SETTLE-001 PM follow-up round
+// (insert-conflict re-read, immutable adoption boundary, same-instant
+// format idempotency).
 // PM repro on the old settlement (version 64b8b68): the ledger booked
 // with ON CONFLICT DO NOTHING and skipped existing (date, category)
 // keys, so a partial snapshot froze forever — coverageIncomplete=true
@@ -25,7 +27,7 @@
 // reconciliation model that mirrors settleGame's gold arithmetic step
 // for step (balance + watermark advance in one write; a failed write
 // leaves both untouched).
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
 const serverSrc = readFileSync(new URL('./server/src/actions.ts', import.meta.url), 'utf8');
@@ -94,7 +96,23 @@ check('source: no unconditional game_state upsert remains',
 check('source: settlement reconciles gold against the persisted ledger watermark',
   serverSrc.includes('ledgerGoldSum - baseline') && serverSrc.includes('profile.goldLedgerSum = ledgerGoldSum'));
 check('source: ledger row updates repeat the monotonic guard at write time',
-  serverSrc.includes('sourceUpdatedAt} IS NULL OR ${schema.gameSettlements.sourceUpdatedAt} < ${candidate.sourceUpdatedAt}'));
+  serverSrc.includes('sourceVersionSqlBefore(schema.gameSettlements.sourceUpdatedAt, candidateVersion)'));
+check('source: write-time guard compares normalized instants (unixepoch subsec) with the lexicographic fallback, not raw strings',
+  serverSrc.includes("unixepoch(${stored}, 'subsec')") && serverSrc.includes('ELSE ${stored} < ${candidate} END'));
+check('source: ledger insert verifies the landed row via RETURNING and re-reads the winner on conflict',
+  serverSrc.includes('.returning({ localDate: schema.gameSettlements.localDate })')
+  && serverSrc.includes('const winnerRows = await db.select().from(schema.gameSettlements).where(key).limit(1);'));
+check('source: baseline adoption reads the immutable migration boundary, not the live updatedAt',
+  serverSrc.includes('const boundary = row.exists ? (row.goldAdoptionBoundary ?? row.updatedAt) : null;'));
+check('source: compareSourceVersions returns 0 for equal parsed instants',
+  serverSrc.includes('if (timeA === timeB) return 0;'));
+const migration0012Src = readFileSync(new URL('./drizzle/0012_add_game_gold_adoption_boundary.sql', import.meta.url), 'utf8');
+check('source: migration 0012 adds the adoption boundary and backfills it from updated_at for null-watermark rows',
+  migration0012Src.includes('ADD COLUMN `gold_adoption_boundary`')
+  && migration0012Src.includes('SET `gold_adoption_boundary` = `updated_at`')
+  && migration0012Src.includes('`gold_ledger_sum` IS NULL'));
+check('source: schema carries the adoption boundary column',
+  readFileSync(new URL('./server/src/schema.ts', import.meta.url), 'utf8').includes('goldAdoptionBoundary: integer("gold_adoption_boundary"'));
 check('source: planLedgerAction orders source versions monotonically',
   serverSrc.includes('compareSourceVersions(candidate.sourceUpdatedAt, existing.sourceUpdatedAt) <= 0'));
 check('source: all four profile mutations route through the CAS retry helper',
@@ -614,6 +632,85 @@ function reconcileSettle(state, bookedRows, { failSave = false } = {}) {
     state.ledger.size === 1 && state.profile.gold === 40);
 }
 
+// ------------------------------------------------------------ same-instant format variants (CWEB-SETTLE-001 item 3)
+// PM repro: the same instant written `2026-10-02T01:00:00.000Z` and
+// `2026-10-02T01:00:00Z` parses equal, but the old compareSourceVersions
+// returned 1, so a same-version candidate re-priced a booked row
+// (xp 5 -> 9). Equal instants are one version in both orders; strict
+// sub-second order still resolves across formats; null stays oldest.
+{
+  const MS = '2026-10-02T01:00:00.000Z';
+  const S = '2026-10-02T01:00:00Z';
+  check('compareSourceVersions: same instant in millisecond vs second format is equal (0), both orders',
+    compareSourceVersions(MS, S) === 0 && compareSourceVersions(S, MS) === 0);
+  check('compareSourceVersions: sub-second strict order across formats, both directions',
+    compareSourceVersions('2026-10-02T01:00:00.500Z', S) > 0 && compareSourceVersions(S, '2026-10-02T01:00:00.500Z') < 0
+    && compareSourceVersions('2026-10-02T01:00:01.000Z', '2026-10-02T01:00:00.999Z') > 0
+    && compareSourceVersions('2026-10-02T01:00:00.999Z', '2026-10-02T01:00:01.000Z') < 0);
+  check('compareSourceVersions: null controls unchanged with format variants in play',
+    compareSourceVersions(null, MS) < 0 && compareSourceVersions(MS, null) > 0 && compareSourceVersions(null, null) === 0);
+  const bookedMs = { localDate: DAY, category: 'steps', detail: '', xp: 5, gold: 5, ruleVersion: GAME_RULE_VERSION, sourceDate: DAY, sourceUpdatedAt: MS };
+  const bookedS = { ...bookedMs, sourceUpdatedAt: S };
+  check('planLedgerAction: same-instant candidate in the other format skips even with a different value (no re-price), both stored formats',
+    planLedgerAction(bookedMs, { localDate: DAY, category: 'steps', detail: '', xp: 9, gold: 9, sourceDate: DAY, sourceUpdatedAt: S }).kind === 'skip'
+    && planLedgerAction(bookedS, { localDate: DAY, category: 'steps', detail: '', xp: 9, gold: 9, sourceDate: DAY, sourceUpdatedAt: MS }).kind === 'skip');
+  // Model-level repeat open: the snapshot's updatedAt string changes
+  // format but not instant — nothing re-prices, nothing double-mints.
+  const ledger = new Map();
+  const goldBox = { gold: 0 };
+  settleCandidates(ledger, goldBox, buildGamePlan(makeHealth({ updatedAt: MS, daily: [{ date: DAY, steps: 5000 }] }), null, TODAY, makeProfile()).candidates);
+  settleCandidates(ledger, goldBox, buildGamePlan(makeHealth({ updatedAt: S, daily: [{ date: DAY, steps: 6000 }] }), null, TODAY, makeProfile()).candidates);
+  check('same-instant re-open in the other format: steps row stays 5 (not re-priced to 6), gold stays 5 (no double mint)',
+    rowXp(ledger, DAY, 'steps') === 5 && goldBox.gold === 5);
+  const noEqualInstant = buildFns(serverSrc.replace('if (timeA === timeB) return 0;', ''));
+  check('mutation: dropping the equal-instant return restores the format bug (compares 1, not 0)',
+    noEqualInstant.compareSourceVersions(MS, S) === 1 && compareSourceVersions(MS, S) === 0);
+}
+
+// ------------------------------------------------------------ adoption boundary model (CWEB-SETTLE-001 item 2, arithmetic)
+// Same reconciliation shape as reconcileSettle above, but the baseline
+// adoption reads the IMMUTABLE boundary (the profile's last successful
+// save as captured by migration 0012) instead of the live updatedAt:
+// a purchase landing between the failed save and the retry advances
+// updatedAt and spends gold, yet cannot absorb the stranded row into
+// the baseline. Run against the old updatedAt adoption (reconcileSettle
+// itself), the identical interleave reproduces PM's lost 5 (700, not
+// 705) — the sensitivity control for this section.
+function reconcileBoundary(state, bookedRows, { failSave = false } = {}) {
+  for (const row of bookedRows) state.ledger.set(row.key, row);
+  const ledgerGoldSum = [...state.ledger.values()].reduce((sum, row) => sum + row.gold, 0);
+  const baseline = state.profile.goldLedgerSum !== null
+    ? state.profile.goldLedgerSum
+    : [...state.ledger.values()].filter((row) => row.createdAt <= state.profile.boundary).reduce((sum, row) => sum + row.gold, 0);
+  if (failSave) return false;
+  state.profile.gold = Math.max(0, state.profile.gold + (ledgerGoldSum - baseline));
+  state.profile.goldLedgerSum = ledgerGoldSum;
+  return true;
+}
+{
+  const state = { ledger: new Map(), profile: { gold: 1000, goldLedgerSum: null, boundary: T1, updatedAt: T1 } };
+  const failed = reconcileBoundary(state, [{ key: `${DAY}|steps|`, gold: 5, createdAt: T2 }], { failSave: true });
+  check('boundary model: failed save leaves balance and watermark untouched, ledger keeps the row',
+    failed === false && state.profile.gold === 1000 && state.profile.goldLedgerSum === null && state.ledger.size === 1);
+  // The purchase lands: 300 spent, updatedAt advances to T3 — the
+  // boundary stays at T1 because no profile write can move it.
+  state.profile.gold -= 300;
+  state.profile.updatedAt = T3;
+  reconcileBoundary(state, []);
+  check('boundary model: purchase preserved and stranded 5 credited exactly once (1000 - 300 + 5 = 705)',
+    state.profile.gold === 705 && state.profile.goldLedgerSum === 5);
+  reconcileBoundary(state, []);
+  check('boundary model: a further open credits nothing twice (705 stable)',
+    state.profile.gold === 705);
+  const legacy = { ledger: new Map(), profile: { gold: 1000, goldLedgerSum: null, updatedAt: T1 } };
+  reconcileSettle(legacy, [{ key: `${DAY}|steps|`, gold: 5, createdAt: T2 }], { failSave: true });
+  legacy.profile.gold = 700;
+  legacy.profile.updatedAt = T3;
+  reconcileSettle(legacy, []);
+  check('sensitivity: the pre-fix updatedAt adoption absorbs the stranded row after the same purchase (700, not 705)',
+    legacy.profile.gold === 700);
+}
+
 // ------------------------------------------------------------ mutation sensitivity
 {
   const noGate = buildFns(serverSrc.replace(
@@ -663,6 +760,419 @@ function reconcileSettle(state, bookedRows, { failSave = false } = {}) {
   settleWith(noRevise, ledger, goldBox, noRevise.buildGamePlan(makeHealth({ updatedAt: T2, daily: [{ date: DAY, steps: 12000 }] }), null, TODAY, profile).candidates);
   check('mutation: disabling revision freezes steps at 2 (total 12, not 22)',
     totalXp(ledger) === 12 && rowXp(ledger, DAY, 'steps') === 2);
+}
+
+// ------------------------------------------------------------ real handlers on a controlled store (CWEB-SETTLE-001 follow-up)
+// The sections above mirror settleGame's decision flow in memory. This
+// section runs the PRODUCTION handlers themselves — settleLedgerRow,
+// settleGame, updateGameProfile and their callees, extracted verbatim
+// from server/src/actions.ts — against a real in-memory SQLite database
+// built by applying this artifact's own migrations in order, with the
+// production schema evaluated from server/src/schema.ts. Concurrency
+// interleaves are controlled at the db seam: a gated insert/update
+// parks one settlement between its read and its write while a second
+// completes, and a failing game_state save is injected the same way —
+// the shapes PM reproduced against the handlers, not pure-function
+// stand-ins.
+function findBodyStart(source, closeParen) {
+  let angle = 0, paren = 0, bracket = 0;
+  for (let i = closeParen + 1; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '=' && source[i + 1] === '>') { i++; continue; }
+    if (ch === '<') angle++;
+    else if (ch === '>') angle--;
+    else if (ch === '(') paren++;
+    else if (ch === ')') paren--;
+    else if (ch === '[') bracket++;
+    else if (ch === ']') bracket--;
+    else if (ch === '{' && angle === 0 && paren === 0 && bracket === 0) {
+      let prev = i - 1;
+      while (prev > closeParen && /\s/.test(source[prev])) prev--;
+      if (source[prev] === ':') { i = matchDelim(source, i, '{', '}'); continue; }
+      return i;
+    }
+  }
+  throw new Error('handler body not found');
+}
+function extractHandlerFunction(source, name) {
+  const match = new RegExp(`(async )?function ${name}\\(`).exec(source);
+  if (!match) throw new Error(`handler function ${name} not found`);
+  const openParen = source.indexOf('(', match.index);
+  const closeParen = matchDelim(source, openParen, '(', ')');
+  const bodyStart = findBodyStart(source, closeParen);
+  const bodyEnd = matchDelim(source, bodyStart, '{', '}');
+  return source.slice(match.index, bodyEnd + 1);
+}
+
+async function loadHarnessDeps() {
+  try {
+    return {
+      orm: await import('drizzle-orm'),
+      libsql: await import('drizzle-orm/libsql'),
+      client: await import('@libsql/client'),
+      core: await import('drizzle-orm/sqlite-core'),
+    };
+  } catch { /* not resolvable from here — fall back to the sibling artifact's install */ }
+  // The repo copy of this script has no node_modules of its own; the
+  // artifact it validates (ts-spaces/space-4, the same root the other
+  // health-dashboard suites resolve) carries the drizzle/libsql
+  // install. Anchor a require there so both copies run the full
+  // handler section.
+  const artifactPkg = new URL('../../../ts-spaces/space-4/package.json', import.meta.url);
+  if (!existsSync(artifactPkg)) throw new Error('drizzle-orm / @libsql/client are not resolvable from this location');
+  const { createRequire } = await import('node:module');
+  const req = createRequire(artifactPkg);
+  return { orm: req('drizzle-orm'), libsql: req('drizzle-orm/libsql'), client: req('@libsql/client'), core: req('drizzle-orm/sqlite-core') };
+}
+
+async function buildHandlerHarness() {
+  const deps = await loadHarnessDeps();
+  const { eq, and, sql, desc, asc, lte } = deps.orm;
+  const { drizzle } = deps.libsql;
+  const { createClient } = deps.client;
+  const core = deps.core;
+  const schemaSrc = readFileSync(new URL('./server/src/schema.ts', import.meta.url), 'utf8');
+  const schemaCode = schemaSrc.replace(/^import[^;]+;/m, '').replace(/export const /g, 'const ');
+  const schema = new Function('sqliteTable', 'integer', 'text', 'real', 'primaryKey',
+    `${stripTypeScriptTypes(schemaCode)}\nreturn { healthSnapshot, strengthTrainingSnapshot, morningCheckin, readinessHistory, gameState, gameSettlements, syncLog };`)
+    (core.sqliteTable, core.integer, core.text, core.real, core.primaryKey);
+  const constNames = [...CONST_NAMES, 'GAME_XP_PER_LEVEL', 'GAME_POINTS_PER_LEVEL', 'GAME_DAILY_TASKS', 'PROFILE_CAS_ATTEMPTS'];
+  const fnNames = [
+    'timeInBedHours', 'totalSleepHours', 'shiftDate', 'sleepStartOrderKey',
+    'selectMainSleep', 'stepsXpFor', 'sleepXpFor', 'attrBonusPct', 'equippedDefs',
+    'equipBonusPct', 'boostedXp', 'compareSourceVersions', 'sourceVersionSqlBefore',
+    'planLedgerAction', 'buildGamePlan', 'defaultGameProfile', 'parseGameProfile',
+    'allocatedPoints', 'unspentPoints', 'applyAllocation', 'applyPurchase',
+    'applyEquip', 'applyUnequip', 'loadGameStateRow', 'saveGameProfile',
+    'updateGameProfile', 'bookLedgerRow', 'settleLedgerRow', 'evaluateDailyTasks',
+    'settleGame',
+  ];
+  const code = [
+    ...constNames.map((n) => extractConst(serverSrc, n)),
+    ...fnNames.map((n) => extractHandlerFunction(serverSrc, n)),
+  ].join('\n');
+  const fns = new Function('schema', 'eq', 'and', 'sql', 'desc', 'asc', 'lte',
+    `${stripTypeScriptTypes(code)}\nreturn { settleLedgerRow, settleGame, updateGameProfile, loadGameStateRow, applyPurchase, applyAllocation, applyEquip, applyUnequip, GAME_EQUIPMENT_BY_ID, GAME_RULE_VERSION };`)
+    (schema, eq, and, sql, desc, asc, lte);
+  const migrationFiles = readdirSync(new URL('./drizzle/', import.meta.url)).filter((f) => f.endsWith('.sql')).sort();
+  async function makeDb(migrationCount) {
+    const client = createClient({ url: ':memory:' });
+    for (const file of migrationFiles.slice(0, migrationCount)) {
+      await client.executeMultiple(readFileSync(new URL(`./drizzle/${file}`, import.meta.url), 'utf8'));
+    }
+    return { client, db: drizzle(client) };
+  }
+  return { ...fns, schema, makeDb, migrationFiles };
+}
+
+function wrapDb(db, hooks) {
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === 'insert' && hooks.insert) return hooks.insert((table) => target.insert(table));
+      if (prop === 'update' && hooks.update) return hooks.update((table) => target.update(table));
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+// Park the first game_settlements INSERT between the handler's read and
+// its write: the parked call signals, then executes the real insert
+// only once released — the losing side of the first-insert race.
+function parkFirstLedgerInsert(db, schema) {
+  let release = () => {};
+  let signalParked = () => {};
+  const gate = new Promise((resolve) => { release = resolve; });
+  const parked = new Promise((resolve) => { signalParked = resolve; });
+  let used = false;
+  const wrapped = wrapDb(db, {
+    insert: (realInsert) => (table) => {
+      if (used || table !== schema.gameSettlements) return realInsert(table);
+      const builder = realInsert(table);
+      return {
+        values: (values) => ({
+          onConflictDoNothing: () => ({
+            returning: (cols) => ({
+              then: (onFulfilled, onRejected) => {
+                used = true;
+                signalParked();
+                return gate.then(() => builder.values(values).onConflictDoNothing().returning(cols)).then(onFulfilled, onRejected);
+              },
+            }),
+          }),
+        }),
+      };
+    },
+  });
+  return { db: wrapped, parked, release: () => release() };
+}
+// Same parking seam for the first game_settlements UPDATE (the
+// write-time guard race).
+function parkFirstLedgerUpdate(db, schema) {
+  let release = () => {};
+  let signalParked = () => {};
+  const gate = new Promise((resolve) => { release = resolve; });
+  const parked = new Promise((resolve) => { signalParked = resolve; });
+  let used = false;
+  const wrapped = wrapDb(db, {
+    update: (realUpdate) => (table) => {
+      if (used || table !== schema.gameSettlements) return realUpdate(table);
+      const builder = realUpdate(table);
+      return {
+        set: (values) => ({
+          where: (cond) => ({
+            then: (onFulfilled, onRejected) => {
+              used = true;
+              signalParked();
+              return gate.then(() => builder.set(values).where(cond)).then(onFulfilled, onRejected);
+            },
+          }),
+        }),
+      };
+    },
+  });
+  return { db: wrapped, parked, release: () => release() };
+}
+// Every game_state UPDATE throws: a profile save that fails after the
+// ledger rows were booked (PM's injected failure).
+function failProfileSaves(db, schema) {
+  return wrapDb(db, {
+    update: (realUpdate) => (table) => {
+      if (table !== schema.gameState) return realUpdate(table);
+      return { set: () => ({ where: () => ({ returning: () => { throw new Error('injected profile save failure'); } }) }) };
+    },
+  });
+}
+
+let H = null;
+let harnessError = null;
+try {
+  H = await buildHandlerHarness();
+} catch (error) {
+  harnessError = error;
+}
+check('handler harness: production settleLedgerRow/settleGame/updateGameProfile extracted and bound to a controlled store',
+  H !== null, harnessError ? String(harnessError?.message ?? harnessError) : '');
+
+if (H) {
+  const ctxFor = (db) => ({ db: () => db });
+  const EARLY = new Date('2026-09-01T00:00:00.000Z');
+  const HEALTH_5000 = {
+    dataDate: '2026-10-01', updatedAt: '2026-10-02T01:00:00.000Z', coverageIncomplete: false,
+    morningReference: { date: '2026-10-02', hrvMs: null, avgHrBpm: null },
+    historyDaily: [{ date: '2026-10-01', steps: 5000 }],
+    historySleeps: [],
+  };
+  const swordDef = H.GAME_EQUIPMENT_BY_ID.get('iron_sword');
+  async function scenario(name, fn) {
+    try { await fn(); }
+    catch (error) { check(`handler scenario ${name}: runs to completion`, false, error instanceof Error ? error.message : String(error)); }
+  }
+  async function waitParked(parked, label) {
+    await Promise.race([
+      parked,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} never parked`)), 5000)),
+    ]);
+  }
+  // Raw-SQL seed (parameterized): the evaluated schema always carries
+  // the 0012 column, but a store built through migration 0011 does not
+  // have it yet — the seed must be able to write the pre-0012 row shape
+  // exactly, so it names its columns explicitly instead of going
+  // through the (newer) drizzle table definition.
+  async function seedGameState(client, overrides = {}) {
+    const values = {
+      id: 1, totalXp: 0, settledThroughDate: null, gold: 0, goldInitialized: 1, goldLedgerSum: 0,
+      attrsJson: JSON.stringify({ strength: 0, endurance: 0, spirit: 0, stamina: 0 }),
+      attrPointsEarned: 0,
+      equipmentJson: JSON.stringify({ owned: [], equipped: { weapon: null, armor: null, accessory: null } }),
+      revision: 1, createdAt: new Date(), updatedAt: new Date(),
+      ...overrides,
+    };
+    await client.execute({
+      sql: 'INSERT INTO game_state (id, total_xp, settled_through_date, gold, gold_initialized, attrs_json, attr_points_earned, equipment_json, revision, gold_ledger_sum, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [values.id, values.totalXp, values.settledThroughDate, values.gold, values.goldInitialized, values.attrsJson, values.attrPointsEarned, values.equipmentJson, values.revision, values.goldLedgerSum, values.createdAt.getTime(), values.updatedAt.getTime()],
+    });
+  }
+  async function ledgerFind(db, date, category, detail = '') {
+    const rows = await db.select().from(H.schema.gameSettlements);
+    return rows.find((row) => row.localDate === date && row.category === category && row.detail === detail);
+  }
+  async function seedLedgerRow(db, values) {
+    await db.insert(H.schema.gameSettlements).values({
+      localDate: '2026-10-01', category: 'steps', detail: '', xp: 5, gold: 5,
+      ruleVersion: H.GAME_RULE_VERSION, sourceDate: '2026-10-01',
+      sourceUpdatedAt: '2026-10-02T01:00:00.000Z', createdAt: new Date(),
+      ...values,
+    });
+  }
+
+  // ---- item 1: first-insert conflict, both completion orders
+  await scenario('insert race, older completes first', async () => {
+    const { client, db } = await H.makeDb(12);
+    await seedGameState(client, { gold: 0, goldLedgerSum: 0 });
+    const gate = parkFirstLedgerInsert(db, H.schema);
+    const candNew = { localDate: '2026-10-01', category: 'steps', detail: '', xp: 10, gold: 10, sourceDate: '2026-10-01', sourceUpdatedAt: '2026-10-02T02:00:00Z' };
+    const candOld = { ...candNew, xp: 5, gold: 5, sourceUpdatedAt: '2026-10-02T01:00:00Z' };
+    // The newer candidate reads the key as missing and parks at its
+    // insert; the older candidate then inserts and completes; the
+    // newer resumes into the conflict.
+    const pending = H.settleLedgerRow(ctxFor(gate.db), candNew);
+    await waitParked(gate.parked, 'newer insert');
+    await H.settleLedgerRow(ctxFor(db), candOld);
+    gate.release();
+    await pending;
+    const row = await ledgerFind(db, '2026-10-01', 'steps');
+    check('handler insert race (newer reads first, older inserts first): re-read keeps the newer source T2 (xp/gold 10)',
+      row?.xp === 10 && row?.gold === 10 && row?.sourceUpdatedAt === '2026-10-02T02:00:00Z');
+    const settled = await H.settleGame(ctxFor(db), null, null, '2026-10-02');
+    check('handler insert race: balance and watermark reconcile to the ledger SUM (gold 10, watermark 10)',
+      settled.profile.gold === 10 && settled.profile.goldLedgerSum === 10);
+  });
+  await scenario('insert order, newer completes first', async () => {
+    const { client, db } = await H.makeDb(12);
+    await seedGameState(client, { gold: 0, goldLedgerSum: 0 });
+    const candNew = { localDate: '2026-10-01', category: 'steps', detail: '', xp: 10, gold: 10, sourceDate: '2026-10-01', sourceUpdatedAt: '2026-10-02T02:00:00Z' };
+    const candOld = { ...candNew, xp: 5, gold: 5, sourceUpdatedAt: '2026-10-02T01:00:00Z' };
+    await H.settleLedgerRow(ctxFor(db), candNew);
+    await H.settleLedgerRow(ctxFor(db), candOld);
+    const row = await ledgerFind(db, '2026-10-01', 'steps');
+    check('handler insert order (newer first): the older T1 candidate is rejected, row stays T2 (xp/gold 10)',
+      row?.xp === 10 && row?.gold === 10 && row?.sourceUpdatedAt === '2026-10-02T02:00:00Z');
+    const first = await H.settleGame(ctxFor(db), null, null, '2026-10-02');
+    const second = await H.settleGame(ctxFor(db), null, null, '2026-10-02');
+    check('handler insert order: same-version repeats never double-mint (gold 10 after both opens, watermark 10)',
+      first.profile.gold === 10 && second.profile.gold === 10 && second.profile.goldLedgerSum === 10);
+  });
+
+  // ---- item 3: same-instant format variants through the real handler
+  await scenario('same-instant format variants', async () => {
+    for (const [storedFmt, candFmt] of [['2026-10-02T01:00:00.000Z', '2026-10-02T01:00:00Z'], ['2026-10-02T01:00:00Z', '2026-10-02T01:00:00.000Z']]) {
+      const { db } = await H.makeDb(12);
+      await seedLedgerRow(db, { xp: 5, gold: 5, sourceUpdatedAt: storedFmt });
+      await H.settleLedgerRow(ctxFor(db), { localDate: '2026-10-01', category: 'steps', detail: '', xp: 9, gold: 9, sourceDate: '2026-10-01', sourceUpdatedAt: candFmt });
+      const row = await ledgerFind(db, '2026-10-01', 'steps');
+      check(`handler same-instant (stored ${storedFmt.includes('.000') ? 'millis' : 'seconds'}, candidate ${candFmt.includes('.000') ? 'millis' : 'seconds'}): no re-price, row stays xp 5 with its original source string`,
+        row?.xp === 5 && row?.gold === 5 && row?.sourceUpdatedAt === storedFmt);
+    }
+  });
+  await scenario('write-time guard race at an equal instant', async () => {
+    const { db } = await H.makeDb(12);
+    await seedLedgerRow(db, { xp: 3, gold: 3, sourceUpdatedAt: '2026-10-02T00:00:00.000Z' });
+    const gate = parkFirstLedgerUpdate(db, H.schema);
+    // Candidate in the seconds format plans a revise against the older
+    // row and parks at its UPDATE; a concurrent writer moves the row
+    // to the candidate's own instant in the millisecond format (xp 7).
+    const pending = H.settleLedgerRow(ctxFor(gate.db), { localDate: '2026-10-01', category: 'steps', detail: '', xp: 9, gold: 9, sourceDate: '2026-10-01', sourceUpdatedAt: '2026-10-02T01:00:00Z' });
+    await waitParked(gate.parked, 'guarded update');
+    await db.update(H.schema.gameSettlements).set({ xp: 7, gold: 7, sourceUpdatedAt: '2026-10-02T01:00:00.000Z' });
+    gate.release();
+    await pending;
+    const row = await ledgerFind(db, '2026-10-01', 'steps');
+    check('handler write-time guard: an equal instant in the other format blocks the parked revise (row stays xp 7)',
+      row?.xp === 7 && row?.gold === 7 && row?.sourceUpdatedAt === '2026-10-02T01:00:00.000Z');
+  });
+  await scenario('write-time guard admits a sub-second revision', async () => {
+    const { db } = await H.makeDb(12);
+    await seedLedgerRow(db, { xp: 5, gold: 5, sourceUpdatedAt: '2026-10-02T01:00:00Z' });
+    await H.settleLedgerRow(ctxFor(db), { localDate: '2026-10-01', category: 'steps', detail: '', xp: 9, gold: 9, sourceDate: '2026-10-01', sourceUpdatedAt: '2026-10-02T01:00:00.500Z' });
+    const row = await ledgerFind(db, '2026-10-01', 'steps');
+    check('handler write-time guard: candidate 500ms newer across formats revises (xp 5 -> 9); a raw string guard would have blocked it',
+      row?.xp === 9 && row?.gold === 9 && row?.sourceUpdatedAt === '2026-10-02T01:00:00.500Z');
+  });
+
+  // ---- item 2: legacy null-watermark profile, failed settle x four
+  // profile mutations x two orders, through the real handlers. The DB
+  // is built through migration 0011, the legacy row is inserted in its
+  // pre-0012 shape, and migration 0012 is applied on top — the exact
+  // production upgrade path.
+  async function legacyInterleave(label, seedOverrides, mutate, expectedGold, mutationKept) {
+    for (const order of ['settle-fail-first', 'mutate-first']) {
+      await scenario(`${label} (${order})`, async () => {
+        const { client, db } = await H.makeDb(11);
+        await seedGameState(client, {
+          gold: 1000, goldInitialized: 1, goldLedgerSum: null,
+          createdAt: EARLY, updatedAt: EARLY, ...seedOverrides,
+        });
+        await client.executeMultiple(readFileSync(new URL(`./drizzle/${H.migrationFiles[11]}`, import.meta.url), 'utf8'));
+        const ctx = ctxFor(db);
+        const stamped = await H.loadGameStateRow(ctx);
+        check(`legacy ${label} (${order}): migration 0012 stamps the adoption boundary at the last pre-migration save`,
+          stamped.goldAdoptionBoundary?.getTime() === EARLY.getTime());
+        const runMutation = async () => {
+          const result = await mutate(ctx);
+          check(`legacy ${label} (${order}): profile mutation accepted`, result.ok === true);
+        };
+        const settleExpectFail = async () => {
+          const before = await H.loadGameStateRow(ctx);
+          let threw = false;
+          try { await H.settleGame(ctxFor(failProfileSaves(db, H.schema)), HEALTH_5000, null, '2026-10-02'); }
+          catch { threw = true; }
+          const afterFail = await H.loadGameStateRow(ctx);
+          const booked = await ledgerFind(db, '2026-10-01', 'steps');
+          check(`legacy ${label} (${order}): injected save failure books the ledger row (gold 5) but leaves balance and watermark untouched`,
+            threw && booked?.gold === 5 && afterFail.profile.gold === before.profile.gold && afterFail.profile.goldLedgerSum === null);
+        };
+        if (order === 'settle-fail-first') {
+          await settleExpectFail();
+          await runMutation();
+        } else {
+          await runMutation();
+          const moved = await H.loadGameStateRow(ctx);
+          check(`legacy ${label} (${order}): the profile write advances updatedAt but cannot move the adoption boundary`,
+            moved.updatedAt?.getTime() !== EARLY.getTime() && moved.goldAdoptionBoundary?.getTime() === EARLY.getTime());
+          await settleExpectFail();
+        }
+        const settled = await H.settleGame(ctx, HEALTH_5000, null, '2026-10-02');
+        const after = await H.loadGameStateRow(ctx);
+        check(`legacy ${label} (${order}): retry credits the stranded 5 exactly once (gold ${expectedGold}, watermark = ledger SUM 5)`,
+          settled.profile.gold === expectedGold && after.profile.gold === expectedGold && after.profile.goldLedgerSum === 5);
+        check(`legacy ${label} (${order}): the profile change and its spent gold survive the retry`,
+          mutationKept(after.profile));
+        const again = await H.settleGame(ctx, HEALTH_5000, null, '2026-10-02');
+        check(`legacy ${label} (${order}): a further open changes nothing (no double credit)`,
+          again.profile.gold === expectedGold);
+      });
+    }
+  }
+  await legacyInterleave('purchase',
+    {},
+    (ctx) => H.updateGameProfile(ctx, (p) => H.applyPurchase(p, swordDef)),
+    705,
+    (profile) => profile.owned.includes('iron_sword'));
+  await legacyInterleave('allocation',
+    { attrPointsEarned: 3 },
+    (ctx) => H.updateGameProfile(ctx, (p) => H.applyAllocation(p, 'strength', 1)),
+    1005,
+    (profile) => profile.attributes.strength === 1);
+  await legacyInterleave('equip',
+    { equipmentJson: JSON.stringify({ owned: ['iron_sword'], equipped: { weapon: null, armor: null, accessory: null } }) },
+    (ctx) => H.updateGameProfile(ctx, (p) => H.applyEquip(p, swordDef)),
+    1005,
+    (profile) => profile.equipped.weapon === 'iron_sword');
+  await legacyInterleave('unequip',
+    { equipmentJson: JSON.stringify({ owned: ['iron_sword'], equipped: { weapon: 'iron_sword', armor: null, accessory: null } }) },
+    (ctx) => H.updateGameProfile(ctx, (p) => H.applyUnequip(p, 'weapon')),
+    1005,
+    (profile) => profile.equipped.weapon === null && profile.owned.includes('iron_sword'));
+
+  // ---- item 2 controls: first open without failure, and a profile
+  // whose watermark is already non-null (behavior unchanged).
+  await scenario('legacy first open without failure', async () => {
+    const { client, db } = await H.makeDb(11);
+    await seedGameState(client, { gold: 1000, goldInitialized: 1, goldLedgerSum: null, createdAt: EARLY, updatedAt: EARLY });
+    await client.executeMultiple(readFileSync(new URL(`./drizzle/${H.migrationFiles[11]}`, import.meta.url), 'utf8'));
+    const first = await H.settleGame(ctxFor(db), HEALTH_5000, null, '2026-10-02');
+    const second = await H.settleGame(ctxFor(db), HEALTH_5000, null, '2026-10-02');
+    check('legacy control: first open settles normally (gold 1005, watermark adopted to 5) and stays stable',
+      first.profile.gold === 1005 && first.profile.goldLedgerSum === 5 && second.profile.gold === 1005);
+  });
+  await scenario('watermark non-null control', async () => {
+    const { client, db } = await H.makeDb(12);
+    await seedGameState(client, { gold: 1005, goldInitialized: 1, goldLedgerSum: 5 });
+    await seedLedgerRow(db, { xp: 5, gold: 5, sourceUpdatedAt: '2026-10-02T01:00:00.000Z' });
+    const settled = await H.settleGame(ctxFor(db), HEALTH_5000, null, '2026-10-02');
+    check('watermark control: a non-null watermark profile is untouched by the boundary path (gold 1005, no re-mint)',
+      settled.profile.gold === 1005 && settled.profile.goldLedgerSum === 5);
+  });
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);
