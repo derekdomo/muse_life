@@ -71,6 +71,13 @@
       "when": 1792451011806,
       "tag": "0010_add_game_character_system",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792484757389,
+      "tag": "0011_add_game_profile_revision_and_gold_watermark",
+      "breakpoints": true
     }
   ]
 }

@@ -911,10 +911,12 @@ const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(
 //
 // Revision settlement (CWEB-SETTLE-001): a booked row may be corrected
 // by a newer snapshot of the SAME rule version — when the candidate's
-// sourceUpdatedAt differs from the stored row's and the value differs,
-// the row is updated in place (xp, gold, source reference in one atomic
-// UPDATE) and the ledger SUM total moves by the delta automatically.
-// The same sourceUpdatedAt re-opened changes nothing; a row booked
+// sourceUpdatedAt is strictly newer than the stored row's and the value
+// differs, the row is updated in place (xp, gold, source reference in
+// one atomic UPDATE) and the ledger SUM total moves by the delta
+// automatically. A candidate from the same or an OLDER source version
+// changes nothing (source versions are monotonic — see planLedgerAction);
+// a row booked
 // under a different rule version is never recomputed or re-awarded;
 // rows are never deleted and unlocked content is never revoked (the
 // level simply presents from the new total). When the recomputed value
@@ -934,6 +936,39 @@ const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(
 // Daily tasks book flat XP+gold under category daily_task (detail = task
 // id, at most once per task per day) the moment the health summary shows
 // the target met.
+//
+// Profile atomicity (CWEB-PROFILE-SAFE-001): the profile is NEVER written
+// back unconditionally. Every write is a compare-and-swap on the
+// game_state.revision the writer read (the revision advances inside the
+// write statement itself); when the CAS misses, the writer re-reads the
+// latest persisted profile, re-applies ONLY its own change on top of it,
+// and retries — so a settlement pass that read the profile before a
+// concurrent purchase can no longer erase that purchase (or an attribute
+// allocation / equip) when it saves. Mutations validate against the
+// freshly read profile inside the retry loop: insufficient gold or an
+// already-owned item is a typed rejection with ZERO writes, and the
+// balance deduction + ownership land in the same single CAS write.
+//
+// Settlement atomicity (CWEB-SETTLE-001): the gold balance is derived,
+// never incremented blind. game_state.gold_ledger_sum is the watermark —
+// the ledger gold SUM the stored balance already accounts for — and it
+// is persisted in the SAME CAS statement as the balance. A settlement
+// books/revises ledger rows first, then sets balance = stored balance +
+// (ledger gold SUM − watermark) and watermark = ledger gold SUM. If the
+// profile save fails after rows were booked, the watermark stays behind,
+// so the next open credits exactly the stranded delta — no leak, no
+// double mint; if the save lands, the delta is zero on re-open. Source
+// versions are MONOTONIC: a candidate whose sourceUpdatedAt is not
+// strictly newer than the stored row's never touches the row (xp, gold
+// and the source reference never roll back to an older source), and the
+// row UPDATEs carry the same guard in their WHERE clause so the decision
+// holds at write time, not just at read time.
+// Limitation: for profiles written before the watermark existed, the
+// first settlement adopts as its baseline the gold of rows booked at or
+// before the profile's last successful save (rows a failed pre-fix save
+// stranded after that save are still recovered); gold from before that
+// point is indistinguishable from gold already spent, so it is adopted
+// as accounted rather than re-minted.
 // ---------------------------------------------------------------------------
 const GAME_RULE_VERSION = 2;
 const GAME_XP_PER_LEVEL = 100;
@@ -992,6 +1027,10 @@ const GAME_DAILY_TASKS: DailyTaskDef[] = [
 interface GameProfile {
   gold: number;
   goldInitialized: boolean;
+  // Ledger gold SUM the stored balance already accounts for (the
+  // reconciliation watermark); null until the first settlement under the
+  // watermark scheme persists one.
+  goldLedgerSum: number | null;
   attributes: Record<GameAttribute, number>;
   attrPointsEarned: number;
   owned: string[];
@@ -1002,6 +1041,7 @@ function defaultGameProfile(): GameProfile {
   return {
     gold: 0,
     goldInitialized: false,
+    goldLedgerSum: null,
     attributes: { strength: 0, endurance: 0, spirit: 0, stamina: 0 },
     attrPointsEarned: 0,
     owned: [],
@@ -1009,11 +1049,12 @@ function defaultGameProfile(): GameProfile {
   };
 }
 
-function parseGameProfile(row: { gold: number; goldInitialized: number; attrsJson: string | null; attrPointsEarned: number; equipmentJson: string | null } | undefined): GameProfile {
+function parseGameProfile(row: { gold: number; goldInitialized: number; goldLedgerSum?: number | null; attrsJson: string | null; attrPointsEarned: number; equipmentJson: string | null } | undefined): GameProfile {
   const profile = defaultGameProfile();
   if (!row) return profile;
   profile.gold = row.gold;
   profile.goldInitialized = row.goldInitialized === 1;
+  profile.goldLedgerSum = typeof row.goldLedgerSum === "number" ? row.goldLedgerSum : null;
   profile.attrPointsEarned = row.attrPointsEarned;
   try {
     if (row.attrsJson) {
@@ -1040,29 +1081,135 @@ function parseGameProfile(row: { gold: number; goldInitialized: number; attrsJso
   return profile;
 }
 
-async function loadGameProfile(ctx: Ctx): Promise<GameProfile> {
-  const db = ctx.db<typeof schema>();
-  const rows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
-  return parseGameProfile(rows[0]);
+// One persisted game_state row, decomposed: the profile, the totals the
+// settlement maintains alongside it, the write revision (CAS token), and
+// the row's last successful save instant (used only by the one-time
+// watermark baseline adoption in settleGame).
+interface GameStateRow {
+  exists: boolean;
+  revision: number;
+  updatedAt: Date | null;
+  totalXp: number;
+  settledThroughDate: string | null;
+  profile: GameProfile;
 }
 
-async function saveGameProfile(ctx: Ctx, profile: GameProfile, totalXp: number, settledThroughDate: string | null): Promise<void> {
+async function loadGameStateRow(ctx: Ctx): Promise<GameStateRow> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
+  const row = rows[0];
+  if (!row) return { exists: false, revision: 0, updatedAt: null, totalXp: 0, settledThroughDate: null, profile: defaultGameProfile() };
+  return {
+    exists: true,
+    revision: row.revision ?? 0,
+    updatedAt: row.updatedAt,
+    totalXp: row.totalXp,
+    settledThroughDate: row.settledThroughDate,
+    profile: parseGameProfile(row),
+  };
+}
+
+// Compare-and-swap profile write (CWEB-PROFILE-SAFE-001): the row is
+// updated ONLY when its stored revision still equals the revision the
+// caller read (a legacy null revision counts as 0); the revision itself
+// advances inside the same statement (COALESCE(revision, 0) + 1), so two
+// writers that read the same revision cannot both land — the loser's
+// UPDATE matches no row, RETURNING stays empty, and the caller re-reads
+// and retries on top of the winner's state instead of overwriting it.
+// When no row exists yet, the first write is an INSERT … ON CONFLICT DO
+// NOTHING at revision 1 with the same contract (false = someone else
+// created the row first; retry as an update). Returns whether THIS write
+// landed. totalXp / settledThroughDate are written through unchanged
+// from the caller's read — settlement owns them, mutations preserve
+// them; the gold balance and the goldLedgerSum watermark always move
+// together inside this one statement.
+async function saveGameProfile(ctx: Ctx, profile: GameProfile, totalXp: number, settledThroughDate: string | null, expectedRevision: number | null): Promise<boolean> {
   const db = ctx.db<typeof schema>();
   const now = new Date();
-  const values = {
-    id: 1,
+  const fields = {
     totalXp,
     settledThroughDate,
     gold: profile.gold,
     goldInitialized: profile.goldInitialized ? 1 : 0,
+    goldLedgerSum: profile.goldLedgerSum,
     attrsJson: JSON.stringify(profile.attributes),
     attrPointsEarned: profile.attrPointsEarned,
     equipmentJson: JSON.stringify({ owned: profile.owned, equipped: profile.equipped }),
-    createdAt: now,
     updatedAt: now,
   };
-  await db.insert(schema.gameState).values(values)
-    .onConflictDoUpdate({ target: schema.gameState.id, set: { totalXp: values.totalXp, settledThroughDate: values.settledThroughDate, gold: values.gold, goldInitialized: values.goldInitialized, attrsJson: values.attrsJson, attrPointsEarned: values.attrPointsEarned, equipmentJson: values.equipmentJson, updatedAt: now } });
+  if (expectedRevision === null) {
+    const written = await db.insert(schema.gameState).values({ id: 1, ...fields, revision: 1, createdAt: now })
+      .onConflictDoNothing()
+      .returning({ id: schema.gameState.id });
+    return written.length > 0;
+  }
+  const written = await db.update(schema.gameState)
+    .set({ ...fields, revision: sql`COALESCE(${schema.gameState.revision}, 0) + 1` })
+    .where(and(eq(schema.gameState.id, 1), sql`COALESCE(${schema.gameState.revision}, 0) = ${expectedRevision}`))
+    .returning({ id: schema.gameState.id });
+  return written.length > 0;
+}
+
+const PROFILE_CAS_ATTEMPTS = 5;
+
+// Serialized profile mutation (CWEB-PROFILE-SAFE-001): read the latest
+// persisted profile, let `apply` validate and mutate a draft of it, then
+// CAS-write. A CAS miss re-reads and re-applies against the winner's
+// state, so concurrent mutations compose exactly like serial ones
+// (read×write and write×write orders agree). A typed rejection from
+// `apply` (insufficient gold, already owned, nothing to unequip, …)
+// returns immediately with ZERO writes performed. Exhausting the retry
+// budget under pathological contention returns a busy rejection —
+// nothing was written by the losing attempts, so the caller can retry
+// the whole action safely.
+type ProfileApplyResult = { ok: true } | { ok: false; message: string };
+
+async function updateGameProfile(
+  ctx: Ctx,
+  apply: (profile: GameProfile) => ProfileApplyResult,
+): Promise<{ ok: true; profile: GameProfile } | { ok: false; message: string }> {
+  for (let attempt = 0; attempt < PROFILE_CAS_ATTEMPTS; attempt++) {
+    const row = await loadGameStateRow(ctx);
+    const draft = row.profile;
+    const result = apply(draft);
+    if (!result.ok) return result;
+    if (await saveGameProfile(ctx, draft, row.totalXp, row.settledThroughDate, row.exists ? row.revision : null)) {
+      return { ok: true, profile: draft };
+    }
+  }
+  return { ok: false, message: "存档正忙，请稍后重试" };
+}
+
+// Pure profile mutations, shared verbatim by the actions (through
+// updateGameProfile) and the validation script: each validates against
+// the profile it is given and mutates it in place on success only. The
+// balance deduction and the ownership change happen together in the
+// draft, so the single CAS write that persists the draft is the whole
+// purchase — there is no intermediate state to strand.
+function applyAllocation(profile: GameProfile, attribute: GameAttribute, count: number): ProfileApplyResult {
+  if (count > unspentPoints(profile)) return { ok: false, message: `未分配点数不足：当前剩余 ${unspentPoints(profile)} 点` };
+  profile.attributes[attribute] += count;
+  return { ok: true };
+}
+
+function applyPurchase(profile: GameProfile, def: EquipmentDef): ProfileApplyResult {
+  if (profile.owned.includes(def.id)) return { ok: false, message: `已经拥有${def.name}` };
+  if (def.price === null || profile.gold < def.price) return { ok: false, message: `金币不足：${def.name} 需要 ${def.price ?? 0} 金币，当前余额 ${profile.gold}` };
+  profile.gold -= def.price;
+  profile.owned.push(def.id);
+  return { ok: true };
+}
+
+function applyEquip(profile: GameProfile, def: EquipmentDef): ProfileApplyResult {
+  if (!profile.owned.includes(def.id)) return { ok: false, message: `尚未拥有${def.name}` };
+  profile.equipped[def.slot] = def.id;
+  return { ok: true };
+}
+
+function applyUnequip(profile: GameProfile, slot: GameSlot): ProfileApplyResult {
+  if (!profile.equipped[slot]) return { ok: false, message: `${GAME_SLOT_LABELS[slot]}槽位本来就是空的` };
+  profile.equipped[slot] = null;
+  return { ok: true };
 }
 
 function allocatedPoints(profile: GameProfile): number {
@@ -1275,22 +1422,44 @@ type LedgerAction =
   | { kind: "refresh_source_ref" }
   | { kind: "revise"; goldDelta: number };
 
+// Monotonic source-version ordering (CWEB-SETTLE-001): an unversioned
+// source (null) is the OLDEST version — it never supersedes a versioned
+// row; two versioned sources order by their instants (unparseable values
+// fall back to lexicographic order, which agrees with chronological
+// order for the canonical ISO strings the snapshots carry). Returns a
+// negative number when a is older than b, 0 when equal, positive when a
+// is newer.
+function compareSourceVersions(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return -1;
+  if (b === null) return 1;
+  const timeA = Date.parse(a);
+  const timeB = Date.parse(b);
+  if (!Number.isNaN(timeA) && !Number.isNaN(timeB)) return timeA < timeB ? -1 : 1;
+  return a < b ? -1 : 1;
+}
+
 // Pure settlement decision for one candidate against its stored row
 // (CWEB-SETTLE-001 revision rules):
 // - no stored row -> insert;
 // - stored row under a different rule version -> skip (never recomputed,
 //   never re-awarded);
-// - same sourceUpdatedAt -> skip (re-opening with the same source
-//   version changes nothing, even if a recomputed value would differ);
-// - newer source version but the value already matches -> refresh only
-//   the source reference, xp/gold untouched;
-// - newer source version and a different value -> revise the row in
-//   place; the gold balance follows by goldDelta and the XP total (the
-//   ledger SUM) moves by the xp delta on its own.
+// - candidate source version is the same as OR OLDER than the stored
+//   row's -> skip: source versions are monotonic, so an older source
+//   never rolls a settled row back (xp, gold and the source reference
+//   all stay at the newer settlement), and re-opening with the same
+//   source version changes nothing, even if a recomputed value would
+//   differ;
+// - strictly newer source version but the value already matches ->
+//   refresh only the source reference, xp/gold untouched;
+// - strictly newer source version and a different value -> revise the
+//   row in place; the XP total (the ledger SUM) moves by the xp delta
+//   on its own, and the gold balance follows through the watermark
+//   reconciliation in settleGame.
 function planLedgerAction(existing: LedgerRowLike | undefined, candidate: GameCandidate): LedgerAction {
   if (!existing) return { kind: "insert" };
   if (existing.ruleVersion !== GAME_RULE_VERSION) return { kind: "skip" };
-  if (existing.sourceUpdatedAt === candidate.sourceUpdatedAt) return { kind: "skip" };
+  if (compareSourceVersions(candidate.sourceUpdatedAt, existing.sourceUpdatedAt) <= 0) return { kind: "skip" };
   if (existing.xp === candidate.xp && existing.gold === candidate.gold) return { kind: "refresh_source_ref" };
   return { kind: "revise", goldDelta: candidate.gold - existing.gold };
 }
@@ -1396,18 +1565,17 @@ function buildGamePlan(health: Snapshot | null, strength: StrengthTraining | nul
   return { candidates, previews: previews.slice(0, 60) };
 }
 
-// Insert one ledger row if its (date, category, detail) is not booked
-// yet; returns true when the row was actually inserted (so the caller
-// credits gold exactly once). Used for daily_task rows only: a met daily
-// target cannot un-happen and its reward is flat, so those rows never
-// revise. Domain candidates go through settleLedgerRow below.
-async function bookLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<boolean> {
+// Book one daily_task ledger row atomically: a single INSERT … ON
+// CONFLICT DO NOTHING against the (date, category, detail) primary key,
+// so two concurrent settlements can never book the same task twice —
+// exactly one insert lands and the other is a no-op (CWEB-SETTLE-001
+// atomicity, same caliber as the domain path). Whether the task counts
+// as claimed is always read back from the ledger afterwards, never from
+// an in-memory claim set that a concurrent writer could have changed.
+// A met daily target cannot un-happen and its reward is flat, so these
+// rows never revise. Domain candidates go through settleLedgerRow below.
+async function bookLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<void> {
   const db = ctx.db<typeof schema>();
-  const existing = await db.select({ localDate: schema.gameSettlements.localDate })
-    .from(schema.gameSettlements)
-    .where(and(eq(schema.gameSettlements.localDate, candidate.localDate), eq(schema.gameSettlements.category, candidate.category), eq(schema.gameSettlements.detail, candidate.detail)))
-    .limit(1);
-  if (existing.length) return false;
   await db.insert(schema.gameSettlements).values({
     localDate: candidate.localDate,
     category: candidate.category,
@@ -1419,23 +1587,29 @@ async function bookLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<boolea
     sourceUpdatedAt: candidate.sourceUpdatedAt,
     createdAt: new Date(),
   }).onConflictDoNothing();
-  return true;
 }
 
 // Settle one domain candidate against the ledger, applying the
-// planLedgerAction decision (CWEB-SETTLE-001): insert when unbooked;
-// on a same-rule-version source revision, update the stored row in
+// planLedgerAction decision (CWEB-SETTLE-001): insert when unbooked
+// (ON CONFLICT DO NOTHING — a concurrent insert of the same key wins
+// and this one becomes a no-op, never a duplicate); on a same-rule-
+// version, strictly-newer source revision, update the stored row in
 // place — xp, gold and the source reference in a single UPDATE, so the
 // row is never half-revised — or refresh only the source reference when
-// the value already matches. Returns the gold delta to apply to the
-// profile balance (the full mint on insert, the signed delta on revise,
-// 0 otherwise), so gold always follows the XP actually awarded.
-async function settleLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<number> {
+// the value already matches. The UPDATEs repeat the monotonic guard in
+// their WHERE clause (stored source version is null or strictly older
+// than the candidate's, under the current rule version), so the
+// decision planLedgerAction made at read time is re enforced at write
+// time: a row settled from a newer source in between is never rolled
+// back by this older candidate. Gold is NOT adjusted here — the balance
+// follows the ledger gold SUM through the watermark reconciliation in
+// settleGame, which is what makes a stranded booking recoverable.
+async function settleLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<void> {
   const db = ctx.db<typeof schema>();
   const key = and(eq(schema.gameSettlements.localDate, candidate.localDate), eq(schema.gameSettlements.category, candidate.category), eq(schema.gameSettlements.detail, candidate.detail));
   const existingRows = await db.select().from(schema.gameSettlements).where(key).limit(1);
   const action = planLedgerAction(existingRows[0], candidate);
-  if (action.kind === "skip") return 0;
+  if (action.kind === "skip") return;
   if (action.kind === "insert") {
     await db.insert(schema.gameSettlements).values({
       localDate: candidate.localDate,
@@ -1448,18 +1622,22 @@ async function settleLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<numb
       sourceUpdatedAt: candidate.sourceUpdatedAt,
       createdAt: new Date(),
     }).onConflictDoNothing();
-    return candidate.gold;
+    return;
   }
+  // Write-time monotonic guard: only a row still booked under the
+  // current rule version from an older (or unversioned) source may be
+  // refreshed/revised by this candidate.
+  const guard = and(key, eq(schema.gameSettlements.ruleVersion, GAME_RULE_VERSION),
+    sql`(${schema.gameSettlements.sourceUpdatedAt} IS NULL OR ${schema.gameSettlements.sourceUpdatedAt} < ${candidate.sourceUpdatedAt})`);
   if (action.kind === "refresh_source_ref") {
     await db.update(schema.gameSettlements)
       .set({ sourceDate: candidate.sourceDate, sourceUpdatedAt: candidate.sourceUpdatedAt })
-      .where(key);
-    return 0;
+      .where(guard);
+    return;
   }
   await db.update(schema.gameSettlements)
     .set({ xp: candidate.xp, gold: candidate.gold, sourceDate: candidate.sourceDate, sourceUpdatedAt: candidate.sourceUpdatedAt })
-    .where(key);
-  return action.goldDelta;
+    .where(guard);
 }
 
 // Today's three daily tasks, evaluated against the same health summary
@@ -1488,89 +1666,147 @@ function evaluateDailyTasks(health: Snapshot | null, strength: StrengthTraining 
   });
 }
 
-// Settle every candidate and today's daily tasks against the profile,
-// then read back totals and persist the profile. The ledger table is
-// the source of truth for total XP (summed, never incremented by hand);
-// game_state carries the gold balance and the S2 character state.
-// Re-running with the same source versions changes nothing; a newer
-// source version corrects already-booked rows in place (revision
-// settlement — see planLedgerAction), so totals always reflect the
-// latest source, never a frozen first read.
-async function settleGame(ctx: Ctx, candidates: GameCandidate[], profile: GameProfile, health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[]; dailyTasks: z.infer<typeof gameDailyTaskSchema>[] }> {
+// Settle every candidate and today's daily tasks, then persist the
+// profile. The ledger table is the source of truth for total XP
+// (summed, never incremented by hand); game_state carries the gold
+// balance and the S2 character state. Re-running with the same source
+// versions changes nothing; a newer source version corrects
+// already-booked rows in place (revision settlement — see
+// planLedgerAction), so totals always reflect the latest source, never
+// a frozen first read.
+//
+// Atomicity (CWEB-PROFILE-SAFE-001 + CWEB-SETTLE-001): the whole pass
+// runs inside the profile CAS retry loop. Each attempt re-reads the
+// persisted profile, rebuilds the plan from THAT profile (boosts follow
+// the latest attributes/equipment), books/revises ledger rows, derives
+// the gold balance from the ledger gold SUM against the persisted
+// watermark (profile.goldLedgerSum — see the schema note), and
+// CAS-writes balance + watermark + character state in one statement. A
+// CAS miss means a concurrent mutation or settlement landed first; the
+// attempt's ledger writes are idempotent (same keys, monotonic source
+// versions), so retrying on top of the winner's profile converges to
+// the serial result — a purchase is never erased and gold is credited
+// exactly once. If every attempt misses, this throws and getGameState
+// reports ok:false; nothing is lost, because any rows booked stay
+// booked and the un-advanced watermark makes the next open credit
+// their gold then. The same reconciliation is the failure boundary for
+// a save that throws mid-pass: rows booked, watermark not advanced →
+// the next open pays the stranded delta, never twice.
+async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[]; dailyTasks: z.infer<typeof gameDailyTaskSchema>[]; profile: GameProfile }> {
   const db = ctx.db<typeof schema>();
-  // One-time gold initialization (S2): the balance starts at the
-  // cumulative XP booked before S2 existed. This must run BEFORE any new
-  // settlement mints gold in this call, and exactly once ever
-  // (goldInitialized persists in game_state).
-  if (!profile.goldInitialized) {
-    const totals = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)` }).from(schema.gameSettlements);
-    profile.gold = Number(totals[0]?.total ?? 0);
-    profile.goldInitialized = true;
-  }
-  const unique = [...new Map(candidates.map((candidate) => [`${candidate.localDate}|${candidate.category}|${candidate.detail}`, candidate])).values()];
-  for (const candidate of unique) {
-    // Gold follows the awarded XP by the signed delta; the balance is
-    // floored at 0 so a downward source revision after gold was spent
-    // can never drive it negative.
-    profile.gold = Math.max(0, profile.gold + await settleLedgerRow(ctx, candidate));
-  }
-  // Daily tasks: book each met-and-unclaimed task once for today.
-  const evaluated = evaluateDailyTasks(health, strength, todayLA);
-  const claimedRows = await db.select({ detail: schema.gameSettlements.detail }).from(schema.gameSettlements)
-    .where(and(eq(schema.gameSettlements.localDate, todayLA), eq(schema.gameSettlements.category, "daily_task")));
-  const claimed = new Set(claimedRows.map((row) => row.detail));
-  const dailyTasks: z.infer<typeof gameDailyTaskSchema>[] = [];
-  for (const entry of evaluated) {
-    let state: z.infer<typeof gameDailyTaskSchema>["state"];
-    if (claimed.has(entry.def.id)) {
-      state = "claimed";
-    } else if (entry.progress === null) {
-      state = "missing";
-    } else if (entry.progress >= entry.def.target) {
-      const booked = await bookLedgerRow(ctx, { localDate: todayLA, category: "daily_task", detail: entry.def.id, xp: entry.def.rewardXp, gold: entry.def.rewardGold, sourceDate: todayLA, sourceUpdatedAt: health?.updatedAt ?? null });
-      if (booked) {
-        profile.gold += entry.def.rewardGold;
-        claimed.add(entry.def.id);
-        // Task-granted equipment: the first sleep-task completion ever
-        // grants the dawn charm (owned forever after).
-        if (entry.def.id === "sleep_7h30" && !profile.owned.includes("dawn_charm")) {
-          profile.owned.push("dawn_charm");
-        }
-      }
-      state = "claimed";
+  for (let attempt = 0; attempt < PROFILE_CAS_ATTEMPTS; attempt++) {
+    const row = await loadGameStateRow(ctx);
+    const profile = row.profile;
+    // Gold baseline for this attempt: the ledger gold SUM the balance
+    // being carried already accounts for.
+    // - Not yet initialized (S2 one-time conversion): the balance starts
+    //   at the cumulative XP booked so far, and the baseline is the
+    //   ledger gold SUM at this moment (pre-S2 rows carry gold 0; their
+    //   value entered through the XP conversion, never through gold).
+    // - Watermark present: it IS the baseline, by construction.
+    // - Watermark missing (profile predates the watermark column):
+    //   adopt as baseline the gold of rows booked at or before the
+    //   profile's last successful save — those rows' gold entered the
+    //   balance through that save or an earlier one. Rows booked AFTER
+    //   that save (a pre-fix save failure stranded them: the ledger has
+    //   their gold, the balance does not) stay outside the baseline, so
+    //   the reconciliation below credits them now. Gold older than the
+    //   last save cannot be told apart from gold already spent, so it
+    //   is adopted as accounted rather than re-minted — see the section
+    //   header's limitation note.
+    let baseline: number;
+    if (!profile.goldInitialized) {
+      const totals = await db.select({ xpTotal: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)`, goldTotal: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)` }).from(schema.gameSettlements);
+      profile.gold = Number(totals[0]?.xpTotal ?? 0);
+      profile.goldInitialized = true;
+      baseline = Number(totals[0]?.goldTotal ?? 0);
+    } else if (profile.goldLedgerSum !== null) {
+      baseline = profile.goldLedgerSum;
+    } else if (row.exists && row.updatedAt) {
+      const adopted = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)` }).from(schema.gameSettlements)
+        .where(lte(schema.gameSettlements.createdAt, row.updatedAt));
+      baseline = Number(adopted[0]?.total ?? 0);
     } else {
-      state = "in_progress";
+      baseline = 0;
     }
-    dailyTasks.push({ id: entry.def.id, label: entry.def.label, targetLabel: entry.def.targetLabel, progress: entry.progress, progressLabel: entry.progressLabel, target: entry.def.target, state, rewardXp: entry.def.rewardXp, rewardGold: entry.def.rewardGold });
+    const plan = buildGamePlan(health, strength, todayLA, profile);
+    const unique = [...new Map(plan.candidates.map((candidate) => [`${candidate.localDate}|${candidate.category}|${candidate.detail}`, candidate])).values()];
+    for (const candidate of unique) {
+      await settleLedgerRow(ctx, candidate);
+    }
+    // Daily tasks: atomically book each met task for today (the ledger
+    // PK caps it at once per task per day, across any number of
+    // concurrent passes); claim state is read back from the ledger
+    // below, never trusted from a pre-insert check.
+    const evaluated = evaluateDailyTasks(health, strength, todayLA);
+    for (const entry of evaluated) {
+      if (entry.progress !== null && entry.progress >= entry.def.target) {
+        await bookLedgerRow(ctx, { localDate: todayLA, category: "daily_task", detail: entry.def.id, xp: entry.def.rewardXp, gold: entry.def.rewardGold, sourceDate: todayLA, sourceUpdatedAt: health?.updatedAt ?? null });
+      }
+    }
+    // Task-granted equipment: the first sleep-task completion ever
+    // grants the dawn charm (owned forever after). Judged from the
+    // ledger itself — any booked sleep task, any date — so the grant
+    // survives a failed profile save and lands with the next one.
+    if (!profile.owned.includes("dawn_charm")) {
+      const charmRows = await db.select({ localDate: schema.gameSettlements.localDate }).from(schema.gameSettlements)
+        .where(and(eq(schema.gameSettlements.category, "daily_task"), eq(schema.gameSettlements.detail, "sleep_7h30"))).limit(1);
+      if (charmRows.length) profile.owned.push("dawn_charm");
+    }
+    const totals = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)`, goldTotal: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)`, through: sql`MAX(${schema.gameSettlements.localDate})` }).from(schema.gameSettlements);
+    const totalRow = totals[0];
+    const totalXp = Number(totalRow?.total ?? 0);
+    const ledgerGoldSum = Number(totalRow?.goldTotal ?? 0);
+    const settledThroughDate = typeof totalRow?.through === "string" ? totalRow.through : null;
+    // Reconcile the balance against the ledger and advance the
+    // watermark to the sum just read; both persist in the CAS write
+    // below, so a failed write leaves the watermark behind and the
+    // delta is re-derived (and paid exactly once) next time. The
+    // balance is floored at 0 so a downward source revision after gold
+    // was spent can never drive it negative (the watermark still
+    // advances — the floor absorbs the difference once, it is not a
+    // debt carried forward).
+    profile.gold = Math.max(0, profile.gold + (ledgerGoldSum - baseline));
+    profile.goldLedgerSum = ledgerGoldSum;
+    // Attribute points: 3 per level gained, backfilled once from the
+    // current level (level derives from total XP, so this is exact,
+    // never speculative) and never revoked.
+    const level = Math.floor(totalXp / GAME_XP_PER_LEVEL) + 1;
+    const earned = (level - 1) * GAME_POINTS_PER_LEVEL;
+    if (earned > profile.attrPointsEarned) profile.attrPointsEarned = earned;
+    const saved = await saveGameProfile(ctx, profile, totalXp, settledThroughDate, row.exists ? row.revision : null);
+    if (!saved) continue;
+    // Read back today's claim state from the ledger (post-save, so the
+    // response reflects what actually persisted).
+    const claimedRows = await db.select({ detail: schema.gameSettlements.detail }).from(schema.gameSettlements)
+      .where(and(eq(schema.gameSettlements.localDate, todayLA), eq(schema.gameSettlements.category, "daily_task")));
+    const claimed = new Set(claimedRows.map((claimedRow) => claimedRow.detail));
+    const dailyTasks: z.infer<typeof gameDailyTaskSchema>[] = evaluated.map((entry) => {
+      const state: z.infer<typeof gameDailyTaskSchema>["state"] = claimed.has(entry.def.id)
+        ? "claimed"
+        : entry.progress === null ? "missing" : entry.progress >= entry.def.target ? "claimed" : "in_progress";
+      return { id: entry.def.id, label: entry.def.label, targetLabel: entry.def.targetLabel, progress: entry.progress, progressLabel: entry.progressLabel, target: entry.def.target, state, rewardXp: entry.def.rewardXp, rewardGold: entry.def.rewardGold };
+    });
+    const ledgerRows = await db.select().from(schema.gameSettlements).orderBy(desc(schema.gameSettlements.localDate), asc(schema.gameSettlements.category), asc(schema.gameSettlements.detail)).limit(90);
+    return {
+      totalXp,
+      settledThroughDate,
+      dailyTasks,
+      profile,
+      ledger: ledgerRows.map((ledgerRow) => ({
+        localDate: ledgerRow.localDate,
+        category: ledgerRow.category,
+        detail: ledgerRow.detail,
+        xp: ledgerRow.xp,
+        gold: ledgerRow.gold,
+        ruleVersion: ledgerRow.ruleVersion,
+        sourceDate: ledgerRow.sourceDate,
+        sourceUpdatedAt: ledgerRow.sourceUpdatedAt,
+        settledAt: ledgerRow.createdAt.toISOString(),
+      })),
+    };
   }
-  const totals = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)`, through: sql`MAX(${schema.gameSettlements.localDate})` }).from(schema.gameSettlements);
-  const totalRow = totals[0];
-  const totalXp = Number(totalRow?.total ?? 0);
-  const settledThroughDate = typeof totalRow?.through === "string" ? totalRow.through : null;
-  // Attribute points: 3 per level gained, backfilled once from the
-  // current level (level derives from total XP, so this is exact, never
-  // speculative) and never revoked.
-  const level = Math.floor(totalXp / GAME_XP_PER_LEVEL) + 1;
-  const earned = (level - 1) * GAME_POINTS_PER_LEVEL;
-  if (earned > profile.attrPointsEarned) profile.attrPointsEarned = earned;
-  await saveGameProfile(ctx, profile, totalXp, settledThroughDate);
-  const ledgerRows = await db.select().from(schema.gameSettlements).orderBy(desc(schema.gameSettlements.localDate), asc(schema.gameSettlements.category), asc(schema.gameSettlements.detail)).limit(90);
-  return {
-    totalXp,
-    settledThroughDate,
-    dailyTasks,
-    ledger: ledgerRows.map((row) => ({
-      localDate: row.localDate,
-      category: row.category,
-      detail: row.detail,
-      xp: row.xp,
-      gold: row.gold,
-      ruleVersion: row.ruleVersion,
-      sourceDate: row.sourceDate,
-      sourceUpdatedAt: row.sourceUpdatedAt,
-      settledAt: row.createdAt.toISOString(),
-    })),
-  };
+  throw new Error("game profile contention: settlement could not persist after repeated CAS retries");
 }
 
 // The strength source (训练记录, space-6) is local data in a sibling artifact:
@@ -1969,9 +2205,14 @@ export const Actions = {
         const strengthLoad = await loadStrengthSnapshot(ctx);
         const strength = effectiveStrength(healthLoad, strengthLoad);
         const health = healthLoad.state === "ok" ? healthLoad.snapshot : null;
-        const profile = await loadGameProfile(ctx);
+        // Settlement owns the profile read/write cycle (CAS + watermark
+        // reconciliation, see settleGame); the response below is built
+        // from the profile exactly as persisted by the winning attempt,
+        // and the preview plan is computed from that same profile, so
+        // what the page shows is always re-readable state.
+        const settled = await settleGame(ctx, health, strength, todayLA);
+        const profile = settled.profile;
         const plan = buildGamePlan(health, strength, todayLA, profile);
-        const settled = await settleGame(ctx, plan.candidates, profile, health, strength, todayLA);
         const db = ctx.db<typeof schema>();
         // A preview whose (date, category) is already booked — possible
         // when a later snapshot's complete window moved backwards — is
@@ -2035,15 +2276,10 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可分配属性点" };
       try {
-        const db = ctx.db<typeof schema>();
-        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
-        const stored = stateRows[0];
-        const profile = parseGameProfile(stored);
-        if (args.count > unspentPoints(profile)) return { ok: false, forbidden: false, message: `未分配点数不足：当前剩余 ${unspentPoints(profile)} 点` };
-        profile.attributes[args.attribute] += args.count;
-        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        const result = await updateGameProfile(ctx, (profile) => applyAllocation(profile, args.attribute, args.count));
+        if (!result.ok) return { ok: false, forbidden: false, message: result.message };
         ctx.invalidateQueries(["game"]);
-        return { ok: true, forbidden: false, message: `已分配 ${args.count} 点到${GAME_ATTRIBUTE_LABELS[args.attribute]}，剩余 ${unspentPoints(profile)} 点` };
+        return { ok: true, forbidden: false, message: `已分配 ${args.count} 点到${GAME_ATTRIBUTE_LABELS[args.attribute]}，剩余 ${unspentPoints(result.profile)} 点` };
       } catch {
         return { ok: false, forbidden: false, message: "分配失败，请稍后再试" };
       }
@@ -2062,15 +2298,12 @@ export const Actions = {
         const def = GAME_EQUIPMENT_BY_ID.get(args.itemId);
         if (!def) return { ok: false, forbidden: false, message: "没有这件装备" };
         if (def.obtain === "task" || def.price === null) return { ok: false, forbidden: false, message: `${def.name} 不能购买：${def.obtain === "task" ? "完成每日任务「主睡眠 ≥ 7.5 小时」即可获得" : "只能通过其他方式获得"}` };
-        const db = ctx.db<typeof schema>();
-        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
-        const stored = stateRows[0];
-        const profile = parseGameProfile(stored);
-        if (profile.owned.includes(def.id)) return { ok: false, forbidden: false, message: `已经拥有${def.name}` };
-        if (profile.gold < def.price) return { ok: false, forbidden: false, message: `金币不足：${def.name} 需要 ${def.price} 金币，当前余额 ${profile.gold}` };
-        profile.gold -= def.price;
-        profile.owned.push(def.id);
-        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        // Balance check, deduction and ownership all happen inside one
+        // CAS-retried draft (applyPurchase), so the charge and the item
+        // land in the same single write — or, on insufficient gold /
+        // already owned, in no write at all.
+        const result = await updateGameProfile(ctx, (profile) => applyPurchase(profile, def));
+        if (!result.ok) return { ok: false, forbidden: false, message: result.message };
         ctx.invalidateQueries(["game"]);
         return { ok: true, forbidden: false, message: `已购买${def.name}，花费 ${def.price} 金币` };
       } catch {
@@ -2089,13 +2322,8 @@ export const Actions = {
       try {
         const def = GAME_EQUIPMENT_BY_ID.get(args.itemId);
         if (!def) return { ok: false, forbidden: false, message: "没有这件装备" };
-        const db = ctx.db<typeof schema>();
-        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
-        const stored = stateRows[0];
-        const profile = parseGameProfile(stored);
-        if (!profile.owned.includes(def.id)) return { ok: false, forbidden: false, message: `尚未拥有${def.name}` };
-        profile.equipped[def.slot] = def.id;
-        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        const result = await updateGameProfile(ctx, (profile) => applyEquip(profile, def));
+        if (!result.ok) return { ok: false, forbidden: false, message: result.message };
         ctx.invalidateQueries(["game"]);
         return { ok: true, forbidden: false, message: `已装备${def.name}（${GAME_SLOT_LABELS[def.slot]}）` };
       } catch {
@@ -2111,13 +2339,8 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可卸下装备" };
       try {
-        const db = ctx.db<typeof schema>();
-        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
-        const stored = stateRows[0];
-        const profile = parseGameProfile(stored);
-        if (!profile.equipped[args.slot]) return { ok: false, forbidden: false, message: `${GAME_SLOT_LABELS[args.slot]}槽位本来就是空的` };
-        profile.equipped[args.slot] = null;
-        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        const result = await updateGameProfile(ctx, (profile) => applyUnequip(profile, args.slot));
+        if (!result.ok) return { ok: false, forbidden: false, message: result.message };
         ctx.invalidateQueries(["game"]);
         return { ok: true, forbidden: false, message: `已卸下${GAME_SLOT_LABELS[args.slot]}` };
       } catch {

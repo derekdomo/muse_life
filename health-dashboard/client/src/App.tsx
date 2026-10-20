@@ -331,6 +331,175 @@ function weekComparisonLabel(current: StrengthWeek | undefined, previous: Streng
   return `${delta > 0 ? "+" : ""}${delta}%`;
 }
 
+// ---------------------------------------------------------------------------
+// H4.6 肌群视图：动作→肌群映射与聚合（MUSCLE-MAP v1）
+//
+// The mapping below is the shared W6.2/H4.6 table whose single source of
+// truth is workout-log/MUSCLE-MAP.md (map_version 1, maintained with
+// 训练记录 space-6). This is a verbatim copy of that version — space-4
+// consumes the same table and must not grow a divergent hand-made one;
+// when the source table bumps its version, this copy is updated to match.
+// Keys are the stable exercise_key values the strength snapshot already
+// carries. An unknown key is NEVER mapped by name similarity: it is
+// reported separately as 尚无映射.
+//
+// Recovery progress (H4.6 定案): the reference interval T has no decided
+// rule source yet, so this section shows NO percentage and NO recovery
+// conclusion — only the last trained date and the rule-undefined note.
+// It is a distribution of training facts, unrelated to the readiness
+// score, and not a medical recovery measurement.
+
+export const MUSCLE_GROUPS = [
+  "胸", "肩前束", "肩中束", "肩后束", "背阔肌", "斜方肌", "菱形肌",
+  "肱二头肌", "肱三头肌", "前锯肌", "核心", "腹斜肌", "股四头肌",
+  "腘绳肌", "臀大肌", "小腿", "胫骨前肌", "颈深屈肌", "胸椎伸展肌群",
+] as const;
+
+export type MuscleGroup = (typeof MUSCLE_GROUPS)[number];
+
+export interface MuscleMapEntry {
+  primary: MuscleGroup[];
+  secondary: MuscleGroup[];
+}
+
+export const MUSCLE_MAP_V1: Record<string, MuscleMapEntry> = {
+  "barbell-bench": { primary: ["胸"], secondary: ["肱三头肌", "肩前束"] },
+  "overhead-press": { primary: ["肩前束", "肩中束"], secondary: ["肱三头肌", "核心"] },
+  "incline-dumbbell-press": { primary: ["胸"], secondary: ["肩前束", "肱三头肌"] },
+  "dips": { primary: ["胸", "肱三头肌"], secondary: ["肩前束"] },
+  "lateral-raise": { primary: ["肩中束"], secondary: ["斜方肌"] },
+  "push-up-plus": { primary: ["前锯肌"], secondary: ["胸", "核心"] },
+  "wide-lat-pulldown": { primary: ["背阔肌"], secondary: ["肱二头肌", "肩后束"] },
+  "close-lat-pulldown": { primary: ["背阔肌"], secondary: ["肱二头肌"] },
+  "close-seated-row": { primary: ["背阔肌", "菱形肌"], secondary: ["肱二头肌", "斜方肌"] },
+  "wide-seated-row": { primary: ["菱形肌", "肩后束"], secondary: ["背阔肌", "斜方肌"] },
+  "face-pull": { primary: ["肩后束"], secondary: ["斜方肌", "菱形肌"] },
+  "reverse-pec-deck": { primary: ["肩后束"], secondary: ["斜方肌"] },
+  "rope-curl": { primary: ["肱二头肌"], secondary: [] },
+  "back-squat": { primary: ["股四头肌", "臀大肌"], secondary: ["核心", "腘绳肌"] },
+  "romanian-deadlift": { primary: ["腘绳肌", "臀大肌"], secondary: ["斜方肌", "核心"] },
+  "bulgarian-split-squat": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿", "核心"] },
+  "lying-leg-curl": { primary: ["腘绳肌"], secondary: ["小腿"] },
+  "calf-raise": { primary: ["小腿"], secondary: [] },
+  "tibialis-raise": { primary: ["胫骨前肌"], secondary: [] },
+  "supine-chin-tuck": { primary: ["颈深屈肌"], secondary: [] },
+  "prone-ytw": { primary: ["斜方肌", "肩后束"], secondary: ["菱形肌", "胸椎伸展肌群"] },
+  "side-external-rotation": { primary: ["肩后束"], secondary: [] },
+  "thoracic-extension": { primary: ["胸椎伸展肌群"], secondary: [] },
+  "single-leg-balance": { primary: ["小腿", "臀大肌"], secondary: ["核心"] },
+  "home-bulgarian-split-squat": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿", "核心"] },
+  "bench-step-up": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿"] },
+  "home-calf-raise": { primary: ["小腿"], secondary: [] },
+  "wall-sit": { primary: ["股四头肌"], secondary: ["臀大肌"] },
+  "dead-bug": { primary: ["核心"], secondary: [] },
+  "side-plank": { primary: ["腹斜肌", "核心"], secondary: ["臀大肌"] },
+};
+
+export interface MuscleGroupStatus {
+  muscle: MuscleGroup;
+  // Latest date (<= today) of a completed workout in which an exercise
+  // mapping to this muscle had at least one completed set; null when the
+  // snapshot holds no such training — never backfilled with a fake date.
+  lastDate: string | null;
+  // Whole calendar days from lastDate to today; null exactly when
+  // lastDate is null.
+  daysSince: number | null;
+  // Completed sets in the 7-day window [today-6, today], counted from
+  // the per-set completed flags only, primary and secondary kept apart.
+  primarySets7d: number;
+  secondarySets7d: number;
+}
+
+export interface MuscleStatus {
+  // True when at least one completed workout contributed at least one
+  // completed set (mapped or not). False drives the honest empty state
+  // instead of a table of zeros.
+  hasCompletedTraining: boolean;
+  groups: MuscleGroupStatus[];
+  // Distinct exercise keys with completed sets in completed workouts
+  // that MUSCLE-MAP v1 does not cover, sorted; never guessed into a
+  // muscle.
+  unmappedKeys: string[];
+  mappedKeyCount: number;
+  seenKeyCount: number;
+  windowStart: string;
+  windowEnd: string;
+}
+
+// Pure aggregation over the strength snapshot's workouts (H4.6). Only
+// workouts with status "completed" count, and only sets whose completed
+// flag is set — an exercise with zero completed sets trained nothing and
+// sets no last date. Workouts dated after today are ignored entirely (a
+// future-dated record cannot be "days since"). Self-contained (own date
+// math, own map) so validate-muscle-status.mjs can extract it by name
+// and run it standalone over synthetic fixtures.
+export function muscleStatus(
+  workouts: Array<Pick<StrengthWorkout, "date" | "status" | "exercises">> | null | undefined,
+  today: string,
+): MuscleStatus {
+  const shift = (date: string, days: number): string => {
+    const shifted = new Date(`${date}T12:00:00Z`);
+    shifted.setUTCDate(shifted.getUTCDate() + days);
+    return shifted.toISOString().slice(0, 10);
+  };
+  const dayDiff = (from: string, to: string): number =>
+    Math.round((new Date(`${to}T12:00:00Z`).getTime() - new Date(`${from}T12:00:00Z`).getTime()) / 86400000);
+  const windowStart = shift(today, -6);
+  const stats = new Map<MuscleGroup, { lastDate: string | null; primarySets7d: number; secondarySets7d: number }>();
+  for (const muscle of MUSCLE_GROUPS) stats.set(muscle, { lastDate: null, primarySets7d: 0, secondarySets7d: 0 });
+  const seenKeys = new Set<string>();
+  const unmapped = new Set<string>();
+  let hasCompletedTraining = false;
+  for (const workout of workouts ?? []) {
+    if (workout.status !== "completed") continue;
+    if (workout.date > today) continue;
+    const inWindow = workout.date >= windowStart;
+    for (const exercise of workout.exercises) {
+      const completedSets = exercise.sets.filter((set) => set.completed).length;
+      if (completedSets === 0) continue;
+      hasCompletedTraining = true;
+      seenKeys.add(exercise.key);
+      const entry = MUSCLE_MAP_V1[exercise.key];
+      if (!entry) {
+        unmapped.add(exercise.key);
+        continue;
+      }
+      for (const muscle of entry.primary) {
+        const stat = stats.get(muscle);
+        if (!stat) continue;
+        if (stat.lastDate === null || workout.date > stat.lastDate) stat.lastDate = workout.date;
+        if (inWindow) stat.primarySets7d += completedSets;
+      }
+      for (const muscle of entry.secondary) {
+        const stat = stats.get(muscle);
+        if (!stat) continue;
+        if (stat.lastDate === null || workout.date > stat.lastDate) stat.lastDate = workout.date;
+        if (inWindow) stat.secondarySets7d += completedSets;
+      }
+    }
+  }
+  const groups: MuscleGroupStatus[] = MUSCLE_GROUPS.map((muscle) => {
+    const stat = stats.get(muscle) ?? { lastDate: null, primarySets7d: 0, secondarySets7d: 0 };
+    return {
+      muscle,
+      lastDate: stat.lastDate,
+      daysSince: stat.lastDate === null ? null : dayDiff(stat.lastDate, today),
+      primarySets7d: stat.primarySets7d,
+      secondarySets7d: stat.secondarySets7d,
+    };
+  });
+  const unmappedKeys = [...unmapped].sort();
+  return {
+    hasCompletedTraining,
+    groups,
+    unmappedKeys,
+    mappedKeyCount: seenKeys.size - unmappedKeys.length,
+    seenKeyCount: seenKeys.size,
+    windowStart,
+    windowEnd: today,
+  };
+}
+
 function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["strengthTraining"]; onSync: () => void; syncing: boolean }) {
   const workouts = [...strength.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const latest = workouts[0];
@@ -368,6 +537,63 @@ function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["stre
           <p className="strength-note">{comparisonReason ?? "仅计算已完成且同时填写重量与次数的组。"}</p>
         </>
       ) : <p className="empty-inline">{strength.note}</p>}
+    </section>
+  );
+}
+
+// H4.6 肌群区：per-muscle training facts from the strength snapshot.
+// Status rides on text, position and ordering (trained groups first,
+// least-recent first), never on color alone — the owner is color-vision
+// deficient. No recovery percentage or conclusion is rendered anywhere:
+// the reference-interval rule is undecided (see muscleStatus).
+function MuscleStatusPanel({ strength }: { strength: StrengthTraining }) {
+  const status = muscleStatus(strength.workouts, laTodayDateString());
+  const orderedGroups = [...status.groups].sort((a, b) => {
+    if (a.daysSince === null && b.daysSince === null) return 0;
+    if (a.daysSince === null) return 1;
+    if (b.daysSince === null) return -1;
+    return b.daysSince - a.daysSince;
+  });
+  return (
+    <section className="history-section muscle-section" aria-labelledby="muscle-status-title">
+      <div className="section-heading">
+        <div><p className="section-kicker">训练记录 · 映射 v1</p><h2 id="muscle-status-title">肌群</h2></div>
+        <span className="record-count">近7天 {dateLabel(status.windowStart)}–{dateLabel(status.windowEnd)}</span>
+      </div>
+      <p className="muscle-note">本区只汇总训练事实：练过哪个肌群、最近一次何时、近 7 天完成了多少组（主要与次要分开计，只计已完成组）。与 readiness 恢复分数无关，不是医学恢复测量。</p>
+      <p className="muscle-note">数据来自最近同步的力量快照{strength.updatedAt ? `（更新于 ${updatedLabel(strength.updatedAt)}）` : ""}，只含快照内的训练记录，可能不完整。</p>
+      {status.hasCompletedTraining ? (
+        <>
+          <div className="muscle-list">
+            {orderedGroups.map((group) => (
+              <div className="muscle-row" key={group.muscle}>
+                <div className="muscle-main">
+                  <strong>{group.muscle}</strong>
+                  {group.lastDate !== null ? (
+                    <span>最近训练 {dateLabel(group.lastDate)} · {group.daysSince === 0 ? "今天" : group.daysSince === 1 ? "昨天" : `${group.daysSince} 天前`}</span>
+                  ) : <span>尚无已完成训练记录</span>}
+                </div>
+                <div className="muscle-facts">
+                  {group.lastDate !== null ? (
+                    <span>近7天 主要 {group.primarySets7d} 组 · 次要 {group.secondarySets7d} 组</span>
+                  ) : <span>近7天 —</span>}
+                  <small>修复进度：参考间隔规则未定，无法判断恢复进度</small>
+                </div>
+              </div>
+            ))}
+          </div>
+          {status.seenKeyCount > 0 ? (
+            <p className="muscle-note">
+              动作映射覆盖 {status.mappedKeyCount}/{status.seenKeyCount}（映射表 v1）。
+              {status.unmappedKeys.length > 0 ? <> 其中尚无映射的动作 {status.unmappedKeys.length} 个：{status.unmappedKeys.join("、")}——未猜测归属，不计入任何肌群。</> : null}
+            </p>
+          ) : null}
+        </>
+      ) : strength.workouts.length === 0 ? (
+        <p className="empty-inline">尚无力量训练记录。完成训练并同步后，这里会按肌群显示最近训练日期与近 7 天完成组数。</p>
+      ) : (
+        <p className="empty-inline">快照中尚无已完成的训练（进行中的训练与没有完成组的动作不计入）。完成一次训练并同步后，这里会显示各肌群的训练分布。</p>
+      )}
     </section>
   );
 }
@@ -1560,6 +1786,8 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
         ))}</div> : <p className="empty-inline">{snapshot.strengthTraining.note}</p>}
       </section>
 
+      <MuscleStatusPanel strength={snapshot.strengthTraining} />
+
       <section className="history-section" aria-labelledby="swim-history-title">
         <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="swim-history-title">游泳记录</h2></div><span className="record-count">{swims.length} 次</span></div>
         {swims.length ? <div className="record-list">{swims.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)} · 游泳</strong><span>{numberLabel(workout.distanceMeters)} 米</span></div><dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有游泳 workout 记录。</p>}
@@ -1922,6 +2150,7 @@ function StrengthOnlyView({ strength, healthState, dataStatus, unifiedTimeline, 
             <button className="sync-button" type="button" aria-label="同步 Apple 健康数据" onClick={onSyncHealth} disabled={healthSyncing}>{healthSyncing ? "同步中…" : "同步 Apple 健康"}</button>
           </section>
           <StrengthPanel strength={strength} onSync={onSyncStrength} syncing={strengthSyncing} />
+          <MuscleStatusPanel strength={strength} />
           <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={strength.displayUnit} />
         </>
       )}
