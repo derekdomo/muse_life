@@ -109,7 +109,15 @@ function reachableIndexRange() {
 }
 
 function requiredForStep(k, ageBand) {
-  return 20 + 2 * k * AGE_BAND_MULTIPLIER[ageBand];
+  // Fixed-point discipline (PM 2026-10-20 09:29 float-boundary bug): the raw
+  // product 20 + 2k*0.92 yields e.g. 29.200000000000003 for k=5 in the 50s
+  // band, while referenceIndex rounds its output to one decimal (29.2) — an
+  // index that theoretically meets the threshold then compared BELOW it and
+  // lost a step. Normalise the requirement to 4 decimal places so the
+  // threshold and the index live at a consistent, stable precision; the
+  // comparison in realmStep additionally tolerates 1e-9 of representation
+  // noise. No proposal parameter (multiplier/floor/scale) is changed.
+  return Math.round((20 + 2 * k * AGE_BAND_MULTIPLIER[ageBand]) * 10000) / 10000;
 }
 
 // Highest step (0..39) whose requirement the index meets; -1 below step 0.
@@ -117,7 +125,7 @@ function realmStep(index, ageBand) {
   if (index === null) return null;
   let step = -1;
   for (let k = 0; k < 40; k++) {
-    if (index >= requiredForStep(k, ageBand)) step = k; else break;
+    if (index >= requiredForStep(k, ageBand) - 1e-9) step = k; else break;
   }
   return step;
 }
@@ -212,6 +220,50 @@ check("age grading: same index reaches an equal-or-higher step in an older band"
 check("unevaluable maps to no realm change (label asks for evaluation)",
   realmLabel(realmStep(null, "40s")) === "当前未能评估");
 check("labels use the owner-decided realm names", realmLabel(0).startsWith("凡人") && realmLabel(39).startsWith("渡劫飞升"));
+
+// --- v1.1: float-boundary matrix (PM 2026-10-20 09:29) ---
+// For every band and every step k: the normalised requirement itself must
+// map to exactly k, and a value a hair below must not. Where the requirement
+// is representable at the index's one-decimal precision, the check goes
+// through the REAL referenceIndex output (PM recipe: five baselines
+// mean=10/sd=2/validDays=28, z=(q-50)/20, rhr=10-2z, other four=10+2z),
+// not just a direct realmStep call.
+const UNIFORM_BASELINE = {
+  rhr: { mean: 10, sd: 2, validDays: 28 },
+  hrv: { mean: 10, sd: 2, validDays: 28 },
+  sleepHours: { mean: 10, sd: 2, validDays: 28 },
+  steps: { mean: 10, sd: 2, validDays: 28 },
+  strength: { mean: 10, sd: 2, validDays: 28 },
+};
+const signalsForIndex = (q) => {
+  const z = (q - 50) / 20;
+  return { rhr: 10 - 2 * z, hrv: 10 + 2 * z, sleepHours: 10 + 2 * z, steps: 10 + 2 * z, strengthSessions7d: 10 + 2 * z };
+};
+for (const band of Object.keys(AGE_BAND_MULTIPLIER)) {
+  let directOk = true, viaIndexOk = true, belowOk = true, representable = 0;
+  for (let k = 0; k < 40; k++) {
+    const q = requiredForStep(k, band);
+    if (realmStep(q, band) !== k) directOk = false;
+    if (realmStep(q - 0.01, band) !== k - 1 && !(k === 0 && realmStep(q - 0.01, band) === -1)) belowOk = false;
+    if (Math.abs(q * 10 - Math.round(q * 10)) < 1e-9) {
+      representable++;
+      const out = referenceIndex(signalsForIndex(q), UNIFORM_BASELINE, true);
+      if (!(out.status === "ok" && out.index === q && realmStep(out.index, band) === k)) viaIndexOk = false;
+    }
+  }
+  check(`float boundary: band ${band} all 40 requirements map to their exact step`, directOk);
+  check(`float boundary: band ${band} just-below each requirement stays one step lower`, belowOk);
+  check(`float boundary: band ${band} ${representable} one-decimal-representable thresholds pass via real referenceIndex output`, viaIndexOk && representable > 0);
+}
+check("float boundary: PM counterexample 50s k=5/10/20 now reach steps 5/10/20 via referenceIndex",
+  [5, 10, 20].every((k) => {
+    const q = requiredForStep(k, "50s");
+    const out = referenceIndex(signalsForIndex(q), UNIFORM_BASELINE, true);
+    return out.index === q && realmStep(out.index, "50s") === k;
+  }),
+  [5, 10, 20].map((k) => `${k}:${requiredForStep(k, "50s")}`).join(","));
+check("float boundary: index 0 and 100 and null behave (0 -> below step 0 in 40s is -1 or step0 by band, 100 -> 39, null -> null)",
+  realmStep(100, "40s") === 39 && realmStep(null, "40s") === null && realmStep(0, "70+") === -1);
 
 console.log(`\nsample: baseline index=${base.index} (${realmLabel(realmStep(base.index, "40s"))}), better index=${better.index} (${realmLabel(realmStep(better.index, "40s"))}), worse index=${worse.index} (${realmLabel(realmStep(worse.index, "40s"))})`);
 console.log("per-band sensitivity (step at index 50 / step at reachable max 100):");

@@ -18,8 +18,8 @@
 // entry points. recordLearningInput therefore fails honestly (ok:false)
 // whenever it is called without a verifiable owner identity.
 
-import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { asc, eq } from "drizzle-orm";
+import { defineAction, z, type ActionsModule, type Ctx, type SpaceDb } from "@hatch/space-sdk";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import * as schema from "./schema";
 
 // Strict owner gate: only a verified owner viewer passes. Identified
@@ -262,11 +262,51 @@ const startAttemptResponse = z.object({
 const saveOutputResponse = z.object({
   ok: z.boolean(),
   forbidden: z.boolean(),
+  // How this call resolved (CMP-LEARN-SAVE-001):
+  //   "converted"        — this call performed the first conversion;
+  //   "alreadyConverted" — the input was already converted (same-key
+  //                        retry, or another conversion won the race);
+  //                        nothing was written or re-counted;
+  //   "revoked"          — this requestId's conversion was revoked; a
+  //                        late retry with the same key must not
+  //                        resurrect it (nothing written);
+  //   "conflict"         — the requestId (or input) is bound to a
+  //                        different payload; rejected, nothing written;
+  //   "notFound"         — no such input;
+  //   "refused"          — owner gate refused (forbidden=true);
+  //   "error"            — a write failed; nothing was applied.
+  status: z.enum([
+    "converted",
+    "alreadyConverted",
+    "revoked",
+    "conflict",
+    "notFound",
+    "refused",
+    "error",
+  ]),
   // true when the input was already converted before this call (a
   // same-requestId retry, or a conversion recorded another way): the
   // call changed nothing and counted nothing new.
   alreadyConverted: z.boolean(),
   convertedAt: z.string().nullable(),
+  // The winner's output, echoed on alreadyConverted so a losing caller
+  // can show what the input actually converted into.
+  outputType: z.enum(OUTPUT_TYPES).nullable(),
+  outputNote: z.string().nullable(),
+});
+
+const markConvertedResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  status: z.enum([
+    "converted",
+    "alreadyConverted",
+    "revoked",
+    "conflict",
+    "notFound",
+    "refused",
+    "error",
+  ]),
 });
 
 // Occurrence-time accumulation. Inputs accumulate on their inputDate;
@@ -356,6 +396,292 @@ function buildCohorts(
   return {
     all: buildCohort(rows, firstDate, today),
     days30: buildCohort(rows, shiftDay(today, -29), today),
+  };
+}
+
+type ConversionStatus =
+  | "converted"
+  | "alreadyConverted"
+  | "revoked"
+  | "conflict"
+  | "notFound"
+  | "error";
+
+interface ConversionOutcome {
+  status: ConversionStatus;
+  convertedAt: Date | null;
+  outputType: (typeof OUTPUT_TYPES)[number] | null;
+  outputNote: string | null;
+}
+
+type LearningInputRow = typeof schema.learningInputs.$inferSelect;
+
+function rowOutcome(
+  status: ConversionStatus,
+  row: LearningInputRow,
+): ConversionOutcome {
+  return {
+    status,
+    convertedAt: row.convertedAt ?? null,
+    outputType: row.outputType ?? null,
+    outputNote: row.outputNote ?? null,
+  };
+}
+
+// SHA-256 (FIPS 180-4) over the UTF-8 bytes of a string, hex-encoded.
+// Implemented inline because action code may not import host crypto
+// modules; used only to fingerprint conversion payloads for the
+// receipt table (idempotency identity), never for security purposes.
+const SHA256_K = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+  0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+  0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+  0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+function sha256Hex(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  const bitLen = bytes.length * 8;
+  const paddedLen = (((bytes.length + 8) >> 6) + 1) << 6;
+  const buf = new Uint8Array(paddedLen);
+  buf.set(bytes);
+  buf[bytes.length] = 0x80;
+  const view = new DataView(buf.buffer);
+  view.setUint32(paddedLen - 4, bitLen >>> 0);
+  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000));
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Int32Array(64);
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+  for (let block = 0; block < paddedLen; block += 64) {
+    for (let i = 0; i < 16; i += 1) w[i] = view.getInt32(block + i * 4);
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(w[i - 15] ?? 0, 7) ^ rotr(w[i - 15] ?? 0, 18) ^ ((w[i - 15] ?? 0) >>> 3);
+      const s1 = rotr(w[i - 2] ?? 0, 17) ^ rotr(w[i - 2] ?? 0, 19) ^ ((w[i - 2] ?? 0) >>> 10);
+      w[i] = ((w[i - 16] ?? 0) + s0 + (w[i - 7] ?? 0) + s1) | 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i += 1) {
+      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + s1 + ch + (SHA256_K[i] ?? 0) + (w[i] ?? 0)) | 0;
+      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (s0 + maj) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0;
+      d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0;
+    h4 = (h4 + e) | 0; h5 = (h5 + f) | 0; h6 = (h6 + g) | 0; h7 = (h7 + h) | 0;
+  }
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((x) => (x >>> 0).toString(16).padStart(8, "0"))
+    .join("");
+}
+
+// The exact payload a conversion request carries: same key + same
+// payload on retry is idempotent; same key + different payload is a
+// conflict and is rejected.
+function conversionPayloadHash(
+  outputType: string,
+  outputNote: string | null,
+): string {
+  return sha256Hex(JSON.stringify([outputType, outputNote]));
+}
+
+async function readInputRow(
+  db: SpaceDb<typeof schema>,
+  inputId: number,
+): Promise<LearningInputRow | undefined> {
+  const rows = await db
+    .select()
+    .from(schema.learningInputs)
+    .where(eq(schema.learningInputs.id, inputId))
+    .limit(1);
+  return rows[0];
+}
+
+// First-conversion arbitration, shared by saveOutput and markConverted
+// (CMP-LEARN-SAVE-001). The first conversion of an input is decided by
+// ONE atomic conditional UPDATE ... WHERE converted_at IS NULL: under
+// concurrency exactly one caller wins; every loser re-reads the
+// winner's row and reports alreadyConverted with the winner's
+// convertedAt/output — the winner's output, request key, and first
+// conversion instant are never overwritten.
+//
+// Each first conversion also writes an immutable receipt keyed by the
+// caller's requestId in the same batch. The receipt carries the
+// payload hash and survives revocation (unmarkConverted only stamps
+// revokedAt), so:
+//   - same key + same payload, not revoked -> idempotent replay of the
+//     original result (covers a lost response);
+//   - same key + different payload -> conflict, rejected, no write;
+//   - same key after revocation -> "revoked", no write: the conversion
+//     is never resurrected by a late retry; re-marking must present a
+//     fresh requestId (a new generation).
+// Legacy rows converted before receipts existed have no receipt and no
+// key; they are read and reported exactly as stored, never backfilled.
+async function arbitrateConversion(
+  db: SpaceDb<typeof schema>,
+  args: {
+    inputId: number;
+    requestId: string;
+    outputType: (typeof OUTPUT_TYPES)[number];
+    outputNote: string | null;
+  },
+): Promise<ConversionOutcome> {
+  const hash = conversionPayloadHash(args.outputType, args.outputNote);
+
+  const receiptRows = await db
+    .select()
+    .from(schema.conversionReceipts)
+    .where(eq(schema.conversionReceipts.requestId, args.requestId))
+    .limit(1);
+  const receipt = receiptRows[0];
+  if (receipt) {
+    if (receipt.inputId !== args.inputId || receipt.payloadHash !== hash) {
+      const row = await readInputRow(db, args.inputId);
+      return row
+        ? rowOutcome("conflict", row)
+        : { status: "conflict", convertedAt: null, outputType: null, outputNote: null };
+    }
+    if (receipt.revokedAt != null) {
+      // Tombstone: this generation was revoked. A late retry must not
+      // resurrect it — answer plainly and write nothing.
+      const row = await readInputRow(db, args.inputId);
+      return row
+        ? rowOutcome("revoked", row)
+        : { status: "revoked", convertedAt: null, outputType: null, outputNote: null };
+    }
+    // Live receipt with a matching payload: the original conversion
+    // result, replayed. If the input row was since re-converted under
+    // a newer generation, the current row still wins the echo.
+    const row = await readInputRow(db, args.inputId);
+    if (!row) {
+      return { status: "notFound", convertedAt: null, outputType: null, outputNote: null };
+    }
+    if (row.convertedAt != null) return rowOutcome("alreadyConverted", row);
+    return {
+      status: "alreadyConverted",
+      convertedAt: new Date(receipt.convertedAt),
+      outputType: receipt.outputType,
+      outputNote: receipt.outputNote ?? null,
+    };
+  }
+
+  const before = await readInputRow(db, args.inputId);
+  if (!before) {
+    return { status: "notFound", convertedAt: null, outputType: null, outputNote: null };
+  }
+  if (before.convertedAt != null) {
+    // Already converted by another key/path (possibly a legacy row
+    // with no receipt). Nothing new is counted or rewritten.
+    return rowOutcome("alreadyConverted", before);
+  }
+
+  const now = new Date();
+  let claimed: LearningInputRow[] = [];
+  try {
+    const batchResult = await db.batch([
+      db
+        .update(schema.learningInputs)
+        .set({
+          convertedAt: now,
+          outputType: args.outputType,
+          outputNote: args.outputNote,
+          conversionRequestId: args.requestId,
+        })
+        .where(
+          and(
+            eq(schema.learningInputs.id, args.inputId),
+            isNull(schema.learningInputs.convertedAt),
+          ),
+        )
+        .returning(),
+      db.insert(schema.conversionReceipts).values({
+        requestId: args.requestId,
+        inputId: args.inputId,
+        payloadHash: hash,
+        convertedAt: now.getTime(),
+        outputType: args.outputType,
+        outputNote: args.outputNote,
+        revokedAt: null,
+      }),
+    ]);
+    claimed = (batchResult[0] ?? []) as LearningInputRow[];
+  } catch {
+    // The batch is atomic: either the conversion AND its receipt both
+    // landed, or neither did — an existing output is never lost to a
+    // failed write. Re-read to tell the causes apart, in the same
+    // order as the main path: a raced receipt for this requestId
+    // (a concurrent claim of the same key) decides first — payload
+    // mismatch is a conflict, a match replays as alreadyConverted.
+    let raced: typeof schema.conversionReceipts.$inferSelect | undefined;
+    try {
+      const racedRows = await db
+        .select()
+        .from(schema.conversionReceipts)
+        .where(eq(schema.conversionReceipts.requestId, args.requestId))
+        .limit(1);
+      raced = racedRows[0];
+    } catch {
+      raced = undefined;
+    }
+    const after = await readInputRow(db, args.inputId).catch(() => undefined);
+    if (raced) {
+      if (raced.inputId !== args.inputId || raced.payloadHash !== hash) {
+        return after
+          ? rowOutcome("conflict", after)
+          : { status: "conflict", convertedAt: null, outputType: null, outputNote: null };
+      }
+      if (raced.revokedAt != null) {
+        return after
+          ? rowOutcome("revoked", after)
+          : { status: "revoked", convertedAt: null, outputType: null, outputNote: null };
+      }
+      if (after?.convertedAt != null) return rowOutcome("alreadyConverted", after);
+      return {
+        status: "alreadyConverted",
+        convertedAt: new Date(raced.convertedAt),
+        outputType: raced.outputType,
+        outputNote: raced.outputNote ?? null,
+      };
+    }
+    if (after?.convertedAt != null) return rowOutcome("alreadyConverted", after);
+    return after
+      ? rowOutcome("error", after)
+      : { status: "error", convertedAt: null, outputType: null, outputNote: null };
+  }
+
+  const winner = claimed[0];
+  if (!winner) {
+    // Lost the race: the conditional update matched nothing because a
+    // concurrent caller converted first. Echo the winner, never
+    // overwrite it. (This call's receipt insert still landed inside
+    // the batch; it is inert — replay resolves receipts against the
+    // live row, and revocation tombstones every live receipt of the
+    // input, this one included.)
+    const after = await readInputRow(db, args.inputId);
+    if (after?.convertedAt != null) return rowOutcome("alreadyConverted", after);
+    return {
+      status: "error",
+      convertedAt: null,
+      outputType: null,
+      outputNote: null,
+    };
+  }
+  return {
+    status: "converted",
+    convertedAt: winner.convertedAt ?? now,
+    outputType: winner.outputType ?? args.outputType,
+    outputNote: winner.outputNote ?? args.outputNote,
   };
 }
 
@@ -580,38 +906,33 @@ export const Actions = {
   markConverted: defineAction({
     request: z.object({
       id: z.number().int().positive(),
+      // Optional idempotency key. The ledger form sends one per
+      // confirm; legacy callers that omit it get a fresh server-side
+      // key (a new generation each call — safe because the atomic
+      // claim still lets only the first conversion through).
+      requestId: z.string().trim().min(1).max(120).optional(),
       outputType: z.enum(OUTPUT_TYPES),
       outputNote: z.string().trim().max(500).optional(),
     }),
-    response: okResponse,
-    async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
-      if (!isOwner(ctx)) return { ok: false, forbidden: true };
+    response: markConvertedResponse,
+    async handler(ctx, args): Promise<z.infer<typeof markConvertedResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, status: "refused" };
       const db = ctx.db<typeof schema>();
-      const existing = await db
-        .select({ convertedAt: schema.learningInputs.convertedAt })
-        .from(schema.learningInputs)
-        .where(eq(schema.learningInputs.id, args.id))
-        .limit(1);
-      const row = existing[0];
-      if (!row) return { ok: false, forbidden: false };
-      // First conversion is idempotent: an already-converted input
-      // keeps its original convertedAt and output — a repeated mark
-      // counts nothing new and rewrites no history. To change the
-      // output, unmark first, then mark again.
-      if (row.convertedAt != null) {
-        ctx.invalidateQueries();
-        return { ok: true, forbidden: false };
-      }
-      await db
-        .update(schema.learningInputs)
-        .set({
-          convertedAt: new Date(),
-          outputType: args.outputType,
-          outputNote: args.outputNote || null,
-        })
-        .where(eq(schema.learningInputs.id, args.id));
+      // Shares the exact arbitration path with saveOutput: one atomic
+      // conditional claim, receipts, tombstones (CMP-LEARN-SAVE-001).
+      const outcome = await arbitrateConversion(db, {
+        inputId: args.id,
+        requestId:
+          args.requestId ?? `mark-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        outputType: args.outputType,
+        outputNote: args.outputNote || null,
+      });
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false };
+      return {
+        ok: outcome.status === "converted" || outcome.status === "alreadyConverted",
+        forbidden: false,
+        status: outcome.status,
+      };
     },
   }),
 
@@ -622,19 +943,34 @@ export const Actions = {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
       // Revoking returns the input to unconverted: conversion time,
-      // output, and the conversion's idempotency key are cleared. A
-      // later re-mark is a brand-new conversion stamped with the new
-      // conversion time — it never resurrects the old one. The attempt
-      // state is kept: having tried is a fact, not a conversion.
-      await db
-        .update(schema.learningInputs)
-        .set({
-          convertedAt: null,
-          outputType: null,
-          outputNote: null,
-          conversionRequestId: null,
-        })
-        .where(eq(schema.learningInputs.id, args.id));
+      // output, and the conversion's live idempotency key are cleared.
+      // The immutable receipts of the revoked conversion are NOT
+      // deleted — they are tombstoned (revokedAt stamped) in the same
+      // batch, so a late retry carrying an old requestId is answered
+      // "revoked" and can never resurrect this conversion; a genuine
+      // re-mark must use a fresh requestId (a new generation). The
+      // attempt state is kept: having tried is a fact, not a
+      // conversion.
+      await db.batch([
+        db
+          .update(schema.learningInputs)
+          .set({
+            convertedAt: null,
+            outputType: null,
+            outputNote: null,
+            conversionRequestId: null,
+          })
+          .where(eq(schema.learningInputs.id, args.id)),
+        db
+          .update(schema.conversionReceipts)
+          .set({ revokedAt: Date.now() })
+          .where(
+            and(
+              eq(schema.conversionReceipts.inputId, args.id),
+              isNull(schema.conversionReceipts.revokedAt),
+            ),
+          ),
+      ]);
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },
@@ -683,12 +1019,15 @@ export const Actions = {
   }),
 
   // 「挑一条去用」 step 2: save a real result as this input's output.
-  // Only this call converts, exactly once per input: the conversion is
-  // stamped with the current instant (its LA day is what the curve
-  // counts — backfilling an old input never credits a past day, and a
-  // conversion alone never creates a learning streak day). Retries
-  // carry the same requestId and are idempotent no-ops; a second,
-  // different output for the same input likewise counts nothing new.
+  // Only this call converts, exactly once per input: the first
+  // conversion is arbitrated atomically (see arbitrateConversion) and
+  // stamped with the current instant — its LA day is what the curve
+  // counts, so backfilling an old input never credits a past day and a
+  // conversion alone never creates a learning streak day. Retries
+  // carry the same requestId: same key + same payload replays the
+  // original result even after a lost response; same key + different
+  // payload is a conflict; a key whose conversion was revoked is a
+  // tombstone and never resurrects it.
   saveOutput: defineAction({
     request: z.object({
       inputId: z.number().int().positive(),
@@ -699,45 +1038,32 @@ export const Actions = {
     response: saveOutputResponse,
     async handler(ctx, args): Promise<z.infer<typeof saveOutputResponse>> {
       if (!isOwner(ctx)) {
-        return { ok: false, forbidden: true, alreadyConverted: false, convertedAt: null };
-      }
-      const db = ctx.db<typeof schema>();
-      const existing = await db
-        .select({
-          convertedAt: schema.learningInputs.convertedAt,
-          conversionRequestId: schema.learningInputs.conversionRequestId,
-        })
-        .from(schema.learningInputs)
-        .where(eq(schema.learningInputs.id, args.inputId))
-        .limit(1);
-      const row = existing[0];
-      if (!row) {
-        return { ok: false, forbidden: false, alreadyConverted: false, convertedAt: null };
-      }
-      if (row.convertedAt != null) {
         return {
-          ok: true,
-          forbidden: false,
-          alreadyConverted: true,
-          convertedAt: row.convertedAt.toISOString(),
+          ok: false,
+          forbidden: true,
+          status: "refused",
+          alreadyConverted: false,
+          convertedAt: null,
+          outputType: null,
+          outputNote: null,
         };
       }
-      const now = new Date();
-      await db
-        .update(schema.learningInputs)
-        .set({
-          convertedAt: now,
-          outputType: args.outputType,
-          outputNote: args.outputNote,
-          conversionRequestId: args.requestId,
-        })
-        .where(eq(schema.learningInputs.id, args.inputId));
+      const db = ctx.db<typeof schema>();
+      const outcome = await arbitrateConversion(db, {
+        inputId: args.inputId,
+        requestId: args.requestId,
+        outputType: args.outputType,
+        outputNote: args.outputNote,
+      });
       ctx.invalidateQueries();
       return {
-        ok: true,
+        ok: outcome.status === "converted" || outcome.status === "alreadyConverted",
         forbidden: false,
-        alreadyConverted: false,
-        convertedAt: now.toISOString(),
+        status: outcome.status,
+        alreadyConverted: outcome.status === "alreadyConverted",
+        convertedAt: outcome.convertedAt ? outcome.convertedAt.toISOString() : null,
+        outputType: outcome.outputType,
+        outputNote: outcome.outputNote,
       };
     },
   }),
@@ -748,9 +1074,16 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
-      await db
-        .delete(schema.learningInputs)
-        .where(eq(schema.learningInputs.id, args.id));
+      // Receipts reference the input; remove them with the row so no
+      // dangling foreign keys survive the delete.
+      await db.batch([
+        db
+          .delete(schema.conversionReceipts)
+          .where(eq(schema.conversionReceipts.inputId, args.id)),
+        db
+          .delete(schema.learningInputs)
+          .where(eq(schema.learningInputs.id, args.id)),
+      ]);
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },

@@ -393,6 +393,18 @@ function ActionCard({ data }: { data: Dashboard }) {
         return;
       }
       if (!res.ok) {
+        if (res.status === "revoked") {
+          // This request's earlier conversion was revoked; the same
+          // key can never resurrect it. Rotate to a fresh key so the
+          // next tap is a deliberate new conversion.
+          requestIdRef.current = null;
+          setError("这条输入之前的转化已被撤销，这次保存没有生效。草稿还在，再点一次保存会记为一次新的转化。");
+          return;
+        }
+        if (res.status === "conflict") {
+          setError("这次保存与同一次请求先前保存的内容不一致，已被拒绝，没有写入。草稿还在。");
+          return;
+        }
         setError("保存失败，草稿还在。用同一请求重试不会重复计数。");
         return;
       }
@@ -610,11 +622,25 @@ function ConvertForm({ row, onDone }: { row: InputRow; onDone: () => void }) {
   const queryClient = useQueryClient();
   const [outputType, setOutputType] = useState<OutputType>("note");
   const [note, setNote] = useState("");
+  // One idempotency key per confirm session: retries of this confirm
+  // reuse it (same key + same payload = idempotent replay), and the
+  // server arbitrates the first conversion atomically. The key is
+  // dropped when the form closes, so a deliberate re-mark after an
+  // unmark always presents a fresh key (a new generation).
+  const requestIdRef = useRef<string | null>(null);
   const mark = useMutation({
-    mutationFn: () =>
-      api.markConverted({ id: row.id, outputType, outputNote: note.trim() || undefined }),
+    mutationFn: () => {
+      if (!requestIdRef.current) requestIdRef.current = newRequestId();
+      return api.markConverted({
+        id: row.id,
+        requestId: requestIdRef.current,
+        outputType,
+        outputNote: note.trim() || undefined,
+      });
+    },
     onSuccess: (res) => {
       if (res.forbidden || !res.ok) return;
+      requestIdRef.current = null;
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       onDone();
     },

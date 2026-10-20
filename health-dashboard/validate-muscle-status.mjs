@@ -5,10 +5,16 @@
 // (1) primary/secondary counted separately, (2) only completed sets
 // count, (3) the 7-day window boundary, (4) unknown exercise keys are
 // reported as unmapped and never guessed, (5) empty snapshot yields the
-// honest empty state (no zeros dressed up as data). It also checks the
-// MUSCLE-MAP v1 table's integrity against its fixed vocabulary and
-// executes one source mutation (dropping the completed-set filter) to
-// prove the assertions are sensitive to it. Pure Node, no deps.
+// honest empty state (no zeros dressed up as data). The H4.6 refinement
+// adds (6) the three factual display groups (recent / earlier-in-
+// snapshot / not-seen) with last-date-descending order and fixed-order
+// tie-breaks, and (7) per-muscle source records: stored workout ids
+// preserved verbatim, primary/secondary overlap, out-of-window flagging,
+// and load summed only over measured completed sets in the original
+// unit. It also checks the MUSCLE-MAP v1 table's integrity against its
+// fixed vocabulary and executes one source mutation (dropping the
+// completed-set filter) to prove the assertions are sensitive to it.
+// Pure Node, no deps.
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -77,6 +83,14 @@ check('source: panel is wired into the history view and the strength-only view',
   (clientSrc.match(/<MuscleStatusPanel /g) ?? []).length === 2);
 check('source: incomplete-snapshot honesty note present',
   clientSrc.includes('只含快照内的训练记录，可能不完整'));
+check('source: the three factual group labels are present',
+  clientSrc.includes('近7天有记录') && clientSrc.includes('更早的快照内记录') && clientSrc.includes('本快照未见记录'));
+check('source: unseen muscles are never worded as never-trained',
+  !clientSrc.includes('从未练过'));
+check('source: out-of-window sources carry the 本窗口外 badge',
+  clientSrc.includes('本窗口外'));
+check('source: workout ids render as plain text, never as links (no fabricated deep link for missing sessions)',
+  !/<a[^>]*>\{source\.workoutId\}/.test(clientSrc) && clientSrc.includes('场次 {source.workoutId}'));
 check('source: no recovery percentage is computed by muscleStatus',
   !/recovery|percent/i.test(extractFunction(clientSrc, 'muscleStatus')));
 
@@ -184,6 +198,70 @@ for (const [label, input] of [['null', null], ['undefined', undefined], ['empty 
     && s.groups.every((g) => g.lastDate === null && g.daysSince === null));
   check(`empty (${label}): no unmapped keys and zero seen keys (no fabricated zeros-as-data)`,
     s.unmappedKeys.length === 0 && s.seenKeyCount === 0 && s.mappedKeyCount === 0);
+}
+
+// --------------------------------------- (6) display groups and ordering
+function richWorkout(id, date, unit, exercises, status = 'completed') { return { id, date, status, unit, exercises }; }
+function richExercise(key, sets) { return { key, sets }; }
+function sset(weight, reps, completed = true) { return { weight, reps, completed }; }
+{
+  const s = muscleStatus([
+    richWorkout('w-recent', '2026-10-18', 'lb', [richExercise('barbell-bench', [sset(60, 8), sset(60, 8), sset(60, 6)])]),
+    richWorkout('w-tie', '2026-10-15', 'lb', [richExercise('face-pull', [sset(20, 15)]), richExercise('rope-curl', [sset(25, 10)])]),
+    richWorkout('w-old-core', '2026-10-08', 'kg', [richExercise('dead-bug', [sset(null, 12)])]),
+    richWorkout('w-old-calf', '2026-10-02', 'lb', [richExercise('calf-raise', [sset(40, 12)])]),
+  ], TODAY);
+  const names = (arr) => arr.map((g) => g.muscle);
+  check('sections: the three groups partition all 19 muscles exactly once',
+    s.sections.recent.length + s.sections.older.length + s.sections.unseen.length === 19
+    && new Set([...names(s.sections.recent), ...names(s.sections.older), ...names(s.sections.unseen)]).size === 19);
+  check('sections: membership follows the window （胸 10-18 recent; 核心 10-08 and 小腿 10-02 older; 颈深屈肌 unseen)',
+    names(s.sections.recent).includes('胸') && names(s.sections.older).includes('核心')
+    && names(s.sections.older).includes('小腿') && names(s.sections.unseen).includes('颈深屈肌'));
+  check('sections: recent group ordered by last date descending （胸 10-18 ahead of the 10-15 pair)',
+    names(s.sections.recent).indexOf('胸') < names(s.sections.recent).indexOf('肩后束'));
+  check('sections: same-day ties fall back to the fixed muscle order （肩后束 ahead of 肱二头肌, both last trained 2026-10-15)',
+    names(s.sections.recent).indexOf('肩后束') < names(s.sections.recent).indexOf('肱二头肌'));
+  check('sections: older group ordered by last date descending （核心 10-08 ahead of 小腿 10-02)',
+    names(s.sections.older).indexOf('核心') < names(s.sections.older).indexOf('小腿'));
+  check('sections: unseen groups carry no last date and no sources',
+    s.sections.unseen.every((g) => g.lastDate === null && g.sources.length === 0));
+  check('sections: groups in sections are the same rows as the flat groups (no divergent copy)',
+    s.sections.recent.every((g) => s.groups.includes(g)) && s.sections.older.every((g) => s.groups.includes(g)));
+}
+
+// ------------------------------------------------------- (7) source records
+{
+  const s = muscleStatus([
+    richWorkout('w-bench-1', '2026-10-18', 'lb', [richExercise('barbell-bench', [sset(100, 5), sset(100, 5), sset(null, 8)])]),
+    richWorkout('w-old-calf', '2026-10-05', 'kg', [richExercise('calf-raise', [sset(40, 10), sset(40, 10)])]),
+    richWorkout('w-mystery', '2026-10-18', 'lb', [richExercise('mystery-move', [sset(10, 10)])]),
+    richWorkout('w-active', '2026-10-18', 'lb', [richExercise('rope-curl', [sset(20, 10)])], 'active'),
+  ], TODAY);
+  const chest = group(s, '胸');
+  const triceps = group(s, '肱三头肌');
+  const calf = group(s, '小腿');
+  check('sources: bench press appears once under 胸 as primary with its stored workout id, key and date',
+    chest.sources.length === 1 && chest.sources[0].workoutId === 'w-bench-1'
+    && chest.sources[0].role === 'primary' && chest.sources[0].exerciseKey === 'barbell-bench'
+    && chest.sources[0].date === '2026-10-18');
+  check('sources: the same session appears under 肱三头肌 as secondary with the same workout id (primary/secondary overlap)',
+    triceps.sources.length === 1 && triceps.sources[0].workoutId === 'w-bench-1' && triceps.sources[0].role === 'secondary');
+  check('sources: load sums only measured completed sets in the original unit (100x5 + 100x5 = 1000 lb; the weightless set counts as unmeasured, 3 completed sets total)',
+    chest.sources[0].load === 1000 && chest.sources[0].unit === 'lb'
+    && chest.sources[0].unmeasuredSets === 1 && chest.sources[0].completedSets === 3);
+  check('sources: an out-of-window source keeps its real date, is flagged out of window, and contributes 0 to the 7-day counts',
+    calf.sources.length === 1 && calf.sources[0].date === '2026-10-05' && calf.sources[0].inWindow === false
+    && calf.primarySets7d === 0 && calf.sources[0].load === 800 && calf.sources[0].unit === 'kg');
+  check('sources: in-window sources are flagged in window',
+    chest.sources[0].inWindow === true);
+  check('sources: unknown keys and non-completed workouts produce no sources anywhere',
+    s.groups.every((g) => g.sources.every((src) => src.exerciseKey !== 'mystery-move' && src.workoutId !== 'w-active')));
+  check('sources: sources are newest-first within a muscle',
+    muscleStatus([
+      richWorkout('w-a', '2026-10-10', 'lb', [richExercise('calf-raise', [sset(30, 10)])]),
+      richWorkout('w-b', '2026-10-17', 'lb', [richExercise('calf-raise', [sset(30, 10)])]),
+    ], TODAY).groups.find((g) => g.muscle === '小腿').sources.map((src) => src.workoutId).join(',') === 'w-b,w-a');
 }
 
 // ------------------------------------------------------- mutation sensitivity

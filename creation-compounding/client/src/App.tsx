@@ -147,20 +147,33 @@ function StageRuler({ project, today }: { project: Project; today: string }) {
   const [markDate, setMarkDate] = useState(today);
   const [confirmClear, setConfirmClear] = useState<StageKey | null>(null);
 
+  const [saveFailed, setSaveFailed] = useState(false);
   const setStage = useMutation({
     mutationFn: (stage: StageKey) =>
       api.setStage({ projectId: project.id, stage, date: markDate || today }),
     onSuccess: (res) => {
-      if (!res.forbidden && res.ok) setMarking(null);
+      if (!res.forbidden && res.ok) {
+        setMarking(null);
+        setSaveFailed(false);
+      } else {
+        setSaveFailed(true);
+      }
       invalidate();
     },
+    onError: () => setSaveFailed(true),
   });
   const clearStage = useMutation({
     mutationFn: (stage: StageKey) => api.clearStage({ projectId: project.id, stage }),
     onSuccess: (res) => {
-      if (!res.forbidden && res.ok) setConfirmClear(null);
+      if (!res.forbidden && res.ok) {
+        setConfirmClear(null);
+        setSaveFailed(false);
+      } else {
+        setSaveFailed(true);
+      }
       invalidate();
     },
+    onError: () => setSaveFailed(true),
   });
 
   const dateByStage = new Map(project.stages.map((s) => [s.stage, s.date]));
@@ -294,8 +307,8 @@ function StageRuler({ project, today }: { project: Project; today: string }) {
           );
         })}
       </ol>
-      {setStage.isError || clearStage.isError ? (
-        <p role="alert" className="mt-2 text-sm text-[var(--accent-2)]">保存失败，请重试。</p>
+      {saveFailed || setStage.isError || clearStage.isError ? (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent-2)]">保存失败：阶段记录没有变动，请重试。</p>
       ) : null}
     </div>
   );
@@ -319,6 +332,7 @@ function ProjectCard({
   const [editNote, setEditNote] = useState(project.note ?? "");
   const [editNext, setEditNext] = useState(project.nextMilestone ?? "");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState(false);
 
   const update = useMutation({
     mutationFn: () =>
@@ -335,7 +349,18 @@ function ProjectCard({
   });
   const del = useMutation({
     mutationFn: () => api.deleteProject({ id: project.id }),
-    onSuccess: invalidate,
+    onSuccess: (res) => {
+      if (res.ok && !res.forbidden) {
+        setDeleteError(false);
+      } else {
+        // The delete is atomic server-side: a refusal means NOTHING was
+        // deleted. Say so plainly and keep the card (and its records)
+        // on screen so the owner can retry from the same state.
+        setDeleteError(true);
+      }
+      invalidate();
+    },
+    onError: () => setDeleteError(true),
   });
 
   const allDone = project.nextStage == null;
@@ -433,12 +458,15 @@ function ProjectCard({
               <button
                 type="button"
                 disabled={del.isPending}
-                onClick={() => del.mutate()}
+                onClick={() => {
+                  setDeleteError(false);
+                  del.mutate();
+                }}
                 className="rounded-lg border border-[var(--accent-2)] px-3 py-1.5 text-sm font-medium text-[var(--accent-2)] disabled:opacity-50"
               >
                 确认删除项目
               </button>
-              <button type="button" onClick={() => setConfirmDelete(false)} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--dim)]">
+              <button type="button" onClick={() => { setConfirmDelete(false); setDeleteError(false); }} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--dim)]">
                 不删
               </button>
             </>
@@ -451,6 +479,11 @@ function ProjectCard({
       )}
       {confirmDelete && !editing ? (
         <p className="mt-2 text-xs text-[var(--dim)]">删除项目会同时删掉它的阶段日期与全部推进记录。</p>
+      ) : null}
+      {deleteError ? (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent-2)]">
+          删除失败：项目、阶段日期与推进记录都还完整保留，一条也没有删掉。点「确认删除项目」可直接重试。
+        </p>
       ) : null}
     </section>
   );
@@ -491,7 +524,7 @@ function AddProgressForm({
         return;
       }
       if (res.duplicate) {
-        setError("这条成果已经记过一次（同一项目、相同产出与证据），同一成果不重复累计。");
+        setError("这条成果已经记过一次（同一项目、同一日期、相同产出与证据），同一成果不重复累计。");
         return;
       }
       if (!res.ok) {
@@ -826,6 +859,41 @@ export function App() {
             ))}
           </div>
         </nav>
+
+        {data && data.reconciliation.length > 0 ? (
+          <section
+            aria-label="重复记录对账"
+            className="mt-3 rounded-[var(--radius)] border border-[var(--accent-2)] bg-[var(--surface)] p-4"
+          >
+            <h2 className="font-display text-base font-bold">
+              重复记录对账 · {data.reconciliation.length} 组
+            </h2>
+            <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+              下面是早期写入留下的重复记录：已全部原样保留，没有自动删除或合并，目前仍计入总数。
+              要清理时，在账本里逐条删掉多余的产出，或在项目阶段标尺上逐个「撤销」重复阶段。
+            </p>
+            <ul className="mt-2 space-y-1.5 text-sm">
+              {data.reconciliation.map((g) => (
+                <li key={`${g.kind}-${g.ids.join("-")}`} className="leading-relaxed">
+                  {g.kind === "progress" ? (
+                    <>
+                      产出 ×{g.count}：项目「{g.projectName}」· {g.date} · {g.description}
+                      <span className="text-[var(--dim)]">（证据：{g.evidence}）</span>
+                      <span className="text-[var(--faint)]"> · 记录 #{g.ids.join("、#")}</span>
+                    </>
+                  ) : (
+                    <>
+                      阶段 ×{g.count}：项目「{g.projectName}」· 阶段「
+                      {g.stage ? STAGE_LABEL[g.stage] : g.stage}」
+                      <span className="text-[var(--dim)]">（日期：{g.dates.join("、")}）</span>
+                      <span className="text-[var(--faint)]"> · 记录 #{g.ids.join("、#")}</span>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
 
         {dashboard.isPending ? (
           <p className="py-16 text-center text-sm text-[var(--dim)]">加载中…</p>

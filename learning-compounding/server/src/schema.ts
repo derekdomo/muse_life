@@ -46,9 +46,39 @@ export const learningInputs = sqliteTable("learning_inputs", {
   // attempts).
   attemptStartedAt: integer("attempt_started_at", { mode: "timestamp_ms" }),
   // Idempotency key of the saveOutput call that performed the current
-  // conversion; a retry carrying the same requestId is a no-op.
+  // conversion; a retry carrying the same requestId is a no-op. The
+  // immutable receipt for that key lives in conversion_receipts (below)
+  // and survives revocation; this column is only the live pointer.
   conversionRequestId: text("conversion_request_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
+});
+
+// Immutable per-request conversion receipts (CMP-LEARN-SAVE-001). One
+// row per first-conversion request, written in the same atomic batch as
+// the conversion itself. Rows are NEVER deleted and NEVER rewritten:
+// when the conversion they recorded is revoked, only revokedAt is
+// stamped, turning the row into a tombstone — a late retry carrying
+// that requestId is answered "revoked" instead of resurrecting the
+// conversion, and re-marking requires a fresh requestId (a new
+// generation). Legacy conversions that predate this table simply have
+// no receipt; nothing is backfilled or fabricated for them.
+export const conversionReceipts = sqliteTable("conversion_receipts", {
+  requestId: text("request_id").primaryKey(),
+  inputId: integer("input_id")
+    .notNull()
+    .references(() => learningInputs.id),
+  // Hash of the exact conversion payload (outputType + outputNote) the
+  // request carried. A retry with the same key but a different payload
+  // is rejected, not applied.
+  payloadHash: text("payload_hash").notNull(),
+  // The first-conversion instant this request produced (ms epoch).
+  convertedAt: integer("converted_at").notNull(),
+  outputType: text("output_type", {
+    enum: ["note", "experiment", "project", "decision"],
+  }).notNull(),
+  outputNote: text("output_note"),
+  // Set when unmarkConverted revoked this request's conversion.
+  revokedAt: integer("revoked_at"),
 });

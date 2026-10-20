@@ -395,6 +395,31 @@ export const MUSCLE_MAP_V1: Record<string, MuscleMapEntry> = {
   "side-plank": { primary: ["腹斜肌", "核心"], secondary: ["臀大肌"] },
 };
 
+export interface MuscleSource {
+  // The stored workout id, rendered verbatim as text — never turned
+  // into a link: a snapshot may be truncated, and a wrong deep link is
+  // worse than no link.
+  workoutId: string;
+  date: string;
+  exerciseKey: string;
+  // Whether this muscle is a primary or secondary target of the
+  // exercise under MUSCLE-MAP v1.
+  role: "primary" | "secondary";
+  completedSets: number;
+  // External load summed over this exercise's completed sets that carry
+  // both weight and reps, in the workout's own unit (the dashboard-wide
+  // missing-set rule). Completed sets missing weight or reps add no load
+  // and are counted in unmeasuredSets instead. Loads are never totalled
+  // across muscles: one exercise legitimately appears under several.
+  load: number;
+  unit: "lb" | "kg";
+  unmeasuredSets: number;
+  // False when the workout predates the 7-day window: the source is
+  // still shown with its real date but contributes nothing to the
+  // 7-day set counts.
+  inWindow: boolean;
+}
+
 export interface MuscleGroupStatus {
   muscle: MuscleGroup;
   // Latest date (<= today) of a completed workout in which an exercise
@@ -408,6 +433,10 @@ export interface MuscleGroupStatus {
   // the per-set completed flags only, primary and secondary kept apart.
   primarySets7d: number;
   secondarySets7d: number;
+  // Every snapshot source behind this muscle's facts (completed
+  // workouts only, at least one completed set), newest first. Includes
+  // out-of-window records, flagged as such on each entry.
+  sources: MuscleSource[];
 }
 
 export interface MuscleStatus {
@@ -424,6 +453,17 @@ export interface MuscleStatus {
   seenKeyCount: number;
   windowStart: string;
   windowEnd: string;
+  // The same groups partitioned for display: trained inside the 7-day
+  // window, trained earlier in the snapshot, and not seen in this
+  // snapshot. The first two are ordered by last trained date descending
+  // (most recent first), same-day ties broken by the fixed MUSCLE_GROUPS
+  // order; unseen groups keep the fixed order. "Not seen" is a statement
+  // about this snapshot only — never a claim about all history.
+  sections: {
+    recent: MuscleGroupStatus[];
+    older: MuscleGroupStatus[];
+    unseen: MuscleGroupStatus[];
+  };
 }
 
 // Pure aggregation over the strength snapshot's workouts (H4.6). Only
@@ -434,7 +474,7 @@ export interface MuscleStatus {
 // math, own map) so validate-muscle-status.mjs can extract it by name
 // and run it standalone over synthetic fixtures.
 export function muscleStatus(
-  workouts: Array<Pick<StrengthWorkout, "date" | "status" | "exercises">> | null | undefined,
+  workouts: Array<Pick<StrengthWorkout, "id" | "date" | "status" | "unit" | "exercises">> | null | undefined,
   today: string,
 ): MuscleStatus {
   const shift = (date: string, days: number): string => {
@@ -445,8 +485,8 @@ export function muscleStatus(
   const dayDiff = (from: string, to: string): number =>
     Math.round((new Date(`${to}T12:00:00Z`).getTime() - new Date(`${from}T12:00:00Z`).getTime()) / 86400000);
   const windowStart = shift(today, -6);
-  const stats = new Map<MuscleGroup, { lastDate: string | null; primarySets7d: number; secondarySets7d: number }>();
-  for (const muscle of MUSCLE_GROUPS) stats.set(muscle, { lastDate: null, primarySets7d: 0, secondarySets7d: 0 });
+  const stats = new Map<MuscleGroup, { lastDate: string | null; primarySets7d: number; secondarySets7d: number; sources: MuscleSource[] }>();
+  for (const muscle of MUSCLE_GROUPS) stats.set(muscle, { lastDate: null, primarySets7d: 0, secondarySets7d: 0, sources: [] });
   const seenKeys = new Set<string>();
   const unmapped = new Set<string>();
   let hasCompletedTraining = false;
@@ -455,7 +495,8 @@ export function muscleStatus(
     if (workout.date > today) continue;
     const inWindow = workout.date >= windowStart;
     for (const exercise of workout.exercises) {
-      const completedSets = exercise.sets.filter((set) => set.completed).length;
+      const completedList = exercise.sets.filter((set) => set.completed);
+      const completedSets = completedList.length;
       if (completedSets === 0) continue;
       hasCompletedTraining = true;
       seenKeys.add(exercise.key);
@@ -464,30 +505,72 @@ export function muscleStatus(
         unmapped.add(exercise.key);
         continue;
       }
+      // External load for this source, in the workout's own unit: only
+      // completed sets carrying both weight and reps add load; a
+      // completed set missing either is tallied as unmeasured instead.
+      let load = 0;
+      let unmeasuredSets = 0;
+      for (const set of completedList) {
+        if (set.weight !== null && set.weight !== undefined && set.reps !== null && set.reps !== undefined) {
+          load += set.weight * set.reps;
+        } else {
+          unmeasuredSets += 1;
+        }
+      }
+      const base = {
+        workoutId: workout.id,
+        date: workout.date,
+        exerciseKey: exercise.key,
+        completedSets,
+        load,
+        unit: workout.unit,
+        unmeasuredSets,
+        inWindow,
+      };
       for (const muscle of entry.primary) {
         const stat = stats.get(muscle);
         if (!stat) continue;
         if (stat.lastDate === null || workout.date > stat.lastDate) stat.lastDate = workout.date;
         if (inWindow) stat.primarySets7d += completedSets;
+        stat.sources.push({ ...base, role: "primary" });
       }
       for (const muscle of entry.secondary) {
         const stat = stats.get(muscle);
         if (!stat) continue;
         if (stat.lastDate === null || workout.date > stat.lastDate) stat.lastDate = workout.date;
         if (inWindow) stat.secondarySets7d += completedSets;
+        stat.sources.push({ ...base, role: "secondary" });
       }
     }
   }
   const groups: MuscleGroupStatus[] = MUSCLE_GROUPS.map((muscle) => {
-    const stat = stats.get(muscle) ?? { lastDate: null, primarySets7d: 0, secondarySets7d: 0 };
+    const stat = stats.get(muscle) ?? { lastDate: null, primarySets7d: 0, secondarySets7d: 0, sources: [] };
+    // Newest source first; the sort is stable, so same-day sources keep
+    // their snapshot order.
+    const sources = [...stat.sources].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
     return {
       muscle,
       lastDate: stat.lastDate,
       daysSince: stat.lastDate === null ? null : dayDiff(stat.lastDate, today),
       primarySets7d: stat.primarySets7d,
       secondarySets7d: stat.secondarySets7d,
+      sources,
     };
   });
+  // Display partition: last trained date descending inside the two
+  // trained groups (most recent first — a record of what happened, not
+  // a ranking of what to train next), fixed-order tie-break.
+  const fixedOrder = new Map<MuscleGroup, number>();
+  MUSCLE_GROUPS.forEach((muscle, index) => fixedOrder.set(muscle, index));
+  const byRecency = (a: MuscleGroupStatus, b: MuscleGroupStatus): number => {
+    if (a.lastDate !== b.lastDate) return (a.lastDate ?? "") < (b.lastDate ?? "") ? 1 : -1;
+    return (fixedOrder.get(a.muscle) ?? 0) - (fixedOrder.get(b.muscle) ?? 0);
+  };
+  const sections = {
+    recent: groups.filter((group) => group.lastDate !== null && group.lastDate >= windowStart).sort(byRecency),
+    older: groups.filter((group) => group.lastDate !== null && group.lastDate < windowStart).sort(byRecency),
+    unseen: groups.filter((group) => group.lastDate === null),
+  };
   const unmappedKeys = [...unmapped].sort();
   return {
     hasCompletedTraining,
@@ -497,6 +580,7 @@ export function muscleStatus(
     seenKeyCount: seenKeys.size,
     windowStart,
     windowEnd: today,
+    sections,
   };
 }
 
@@ -541,19 +625,88 @@ function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["stre
   );
 }
 
-// H4.6 肌群区：per-muscle training facts from the strength snapshot.
-// Status rides on text, position and ordering (trained groups first,
-// least-recent first), never on color alone — the owner is color-vision
-// deficient. No recovery percentage or conclusion is rendered anywhere:
-// the reference-interval rule is undecided (see muscleStatus).
+// H4.6 肌群区：per-muscle training facts from the strength snapshot,
+// presented as three factual groups under the existing 7-day window:
+// trained inside the window, trained earlier in the snapshot, and not
+// seen in this snapshot. Group identity rides on the heading text, its
+// symbol and its position in the list — never on color alone (the
+// owner is color-vision deficient). Inside the two trained groups rows
+// are ordered by last trained date descending (most recent first): a
+// record of what happened, not a suggestion of what to train next —
+// the longest-ago muscles are deliberately NOT surfaced as a priority
+// list. "Not seen" describes this snapshot only and is never worded as
+// never-trained. No recovery percentage or conclusion is rendered
+// anywhere: the reference-interval rule is undecided (see
+// muscleStatus). Tapping a muscle row expands its source workouts in
+// place; expanding or collapsing never remounts the list, so the
+// scroll position and the group the row sits in stay put.
+const MUSCLE_SECTION_HEADS: Record<"recent" | "older" | "unseen", { symbol: string; label: string }> = {
+  recent: { symbol: "●", label: "近7天有记录" },
+  older: { symbol: "◆", label: "更早的快照内记录" },
+  unseen: { symbol: "○", label: "本快照未见记录" },
+};
+
+function MuscleRow({ group, expanded, onToggle }: { group: MuscleGroupStatus; expanded: boolean; onToggle: () => void }) {
+  return (
+    <div className="muscle-row">
+      <button type="button" className="muscle-row-head" aria-expanded={expanded} aria-label={`${group.muscle}的来源明细`} onClick={onToggle}>
+        <span className="muscle-main">
+          <strong>{group.muscle}</strong>
+          {group.lastDate !== null ? (
+            <span>最近训练 {dateLabel(group.lastDate)} · {group.daysSince === 0 ? "今天" : group.daysSince === 1 ? "昨天" : `${group.daysSince} 天前`}</span>
+          ) : <span>本快照内未见已完成记录</span>}
+        </span>
+        <span className="muscle-facts">
+          {group.lastDate !== null ? (
+            <span>近7天 主要 {group.primarySets7d} 组 · 次要 {group.secondarySets7d} 组</span>
+          ) : <span>近7天 —</span>}
+          <small>修复进度：参考间隔规则未定，无法判断恢复进度</small>
+        </span>
+        <span className="muscle-chevron" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded ? (
+        <div className="muscle-sources">
+          {group.sources.length > 0 ? group.sources.map((source, index) => (
+            <div className="muscle-source" key={`${source.workoutId}-${source.exerciseKey}-${index}`}>
+              <div className="muscle-source-top">
+                <span>{fullDateLabel(source.date)}</span>
+                <span className="muscle-source-key">{source.exerciseKey}</span>
+                {source.inWindow ? null : <span className="muscle-source-badge">本窗口外</span>}
+              </div>
+              <p className="muscle-source-detail">
+                场次 {source.workoutId} · 本肌群为{source.role === "primary" ? "主要" : "次要"} · 完成 {source.completedSets} 组 · 外加负荷 {volumeLabel(source.load)} {source.unit}
+                {source.unmeasuredSets > 0 ? `（其中 ${source.unmeasuredSets} 组缺重量或次数，未计入负荷）` : ""}
+              </p>
+            </div>
+          )) : <p className="muscle-source-empty">本快照内没有该肌群的来源记录。</p>}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MuscleStatusPanel({ strength }: { strength: StrengthTraining }) {
   const status = muscleStatus(strength.workouts, laTodayDateString());
-  const orderedGroups = [...status.groups].sort((a, b) => {
-    if (a.daysSince === null && b.daysSince === null) return 0;
-    if (a.daysSince === null) return 1;
-    if (b.daysSince === null) return -1;
-    return b.daysSince - a.daysSince;
-  });
+  const [expandedMuscle, setExpandedMuscle] = useState<MuscleGroup | null>(null);
+  const [unseenOpen, setUnseenOpen] = useState(false);
+  const toggleMuscle = (muscle: MuscleGroup) => {
+    setExpandedMuscle((current) => (current === muscle ? null : muscle));
+  };
+  const sectionBlock = (key: "recent" | "older") => {
+    const groups = status.sections[key];
+    if (groups.length === 0) return null;
+    const head = MUSCLE_SECTION_HEADS[key];
+    return (
+      <div className="muscle-group-block">
+        <h3 className="muscle-group-head"><span aria-hidden="true">{head.symbol}</span><span>{head.label}</span><span className="muscle-group-count">{groups.length} 个肌群</span></h3>
+        <div className="muscle-list muscle-list-grouped">
+          {groups.map((group) => (
+            <MuscleRow key={group.muscle} group={group} expanded={expandedMuscle === group.muscle} onToggle={() => toggleMuscle(group.muscle)} />
+          ))}
+        </div>
+      </div>
+    );
+  };
   return (
     <section className="history-section muscle-section" aria-labelledby="muscle-status-title">
       <div className="section-heading">
@@ -562,26 +715,28 @@ function MuscleStatusPanel({ strength }: { strength: StrengthTraining }) {
       </div>
       <p className="muscle-note">本区只汇总训练事实：练过哪个肌群、最近一次何时、近 7 天完成了多少组（主要与次要分开计，只计已完成组）。与 readiness 恢复分数无关，不是医学恢复测量。</p>
       <p className="muscle-note">数据来自最近同步的力量快照{strength.updatedAt ? `（更新于 ${updatedLabel(strength.updatedAt)}）` : ""}，只含快照内的训练记录，可能不完整。</p>
+      <p className="muscle-note">点任意肌群行，可在原行展开它的来源场次：场次 ID、日期、动作、主要/次要归属与完成组数。近 7 天之外的来源标为「本窗口外」，不计入近 7 天组数。</p>
       {status.hasCompletedTraining ? (
         <>
-          <div className="muscle-list">
-            {orderedGroups.map((group) => (
-              <div className="muscle-row" key={group.muscle}>
-                <div className="muscle-main">
-                  <strong>{group.muscle}</strong>
-                  {group.lastDate !== null ? (
-                    <span>最近训练 {dateLabel(group.lastDate)} · {group.daysSince === 0 ? "今天" : group.daysSince === 1 ? "昨天" : `${group.daysSince} 天前`}</span>
-                  ) : <span>尚无已完成训练记录</span>}
+          {sectionBlock("recent")}
+          {sectionBlock("older")}
+          {status.sections.unseen.length > 0 ? (
+            <div className="muscle-group-block">
+              <button type="button" className="muscle-group-toggle" aria-expanded={unseenOpen} aria-label="展开或收起本快照未见记录的肌群" onClick={() => setUnseenOpen((open) => !open)}>
+                <span aria-hidden="true">{MUSCLE_SECTION_HEADS.unseen.symbol}</span>
+                <span>{MUSCLE_SECTION_HEADS.unseen.label}</span>
+                <span className="muscle-group-count">{status.sections.unseen.length} 个肌群</span>
+                <span className="muscle-chevron" aria-hidden="true">{unseenOpen ? "▾" : "▸"}</span>
+              </button>
+              {unseenOpen ? (
+                <div className="muscle-list muscle-list-grouped">
+                  {status.sections.unseen.map((group) => (
+                    <MuscleRow key={group.muscle} group={group} expanded={expandedMuscle === group.muscle} onToggle={() => toggleMuscle(group.muscle)} />
+                  ))}
                 </div>
-                <div className="muscle-facts">
-                  {group.lastDate !== null ? (
-                    <span>近7天 主要 {group.primarySets7d} 组 · 次要 {group.secondarySets7d} 组</span>
-                  ) : <span>近7天 —</span>}
-                  <small>修复进度：参考间隔规则未定，无法判断恢复进度</small>
-                </div>
-              </div>
-            ))}
-          </div>
+              ) : null}
+            </div>
+          ) : null}
           {status.seenKeyCount > 0 ? (
             <p className="muscle-note">
               动作映射覆盖 {status.mappedKeyCount}/{status.seenKeyCount}（映射表 v1）。
