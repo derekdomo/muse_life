@@ -78,11 +78,12 @@ type ExerciseGuide = {
   // linking an unchecked video.
   video?: string;
   source?: string;
-  // Looping in-dialog demonstration: a start/end photo pair —
-  // either a verified open-license real photo pair or an AI-generated
-  // photorealistic pair that passed frame-by-frame review against
-  // the guide's cues. A guide whose movement has no verified pair
-  // (calf raises) ships text cues only rather than a wrong demo.
+  // Looping in-dialog demonstration: a start/end pair — either a
+  // verified open-license real photo pair or stills from a cleanly
+  // licensed real demonstration video, each checked frame by frame
+  // against the guide's cues (see DATA-PLAN.md). A guide whose
+  // movement has no verified pair ships text cues only rather than
+  // a wrong demo.
   demo?: ExerciseDemo;
 };
 
@@ -243,7 +244,14 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "高位平板支撑，手掌在肩膀正下方；手臂全程伸直，靠肩胛骨移动身体。",
     cues: ["先让肩胛自然靠拢，背部微微下沉", "再主动把地面推远，上背顶起呈圆弧", "动作只发生在肩胛，不弯手肘"],
     mistakes: ["变成普通俯卧撑弯手肘", "塌腰或撅臀", "耸肩贴近耳朵"],
-    demo: EXERCISE_DEMOS["push-up-plus"],
+    // No demo image: no cleanly licensed real video of the
+    // straight-arm scapular push-up plus was found (regular push-up
+    // videos bend the elbows — the exact mistake listed above).
+    // Teaching video instead (verified 2026-10-19, see DATA-PLAN.md):
+    // Marcus Filly's scapular push-up — high plank, arms straight,
+    // scapular movement only.
+    video: "https://www.youtube.com/watch?v=huGj4aBk9C4",
+    source: "外部教学视频 · Marcus Filly 教练 · 肩胛俯卧撑",
   },
   "reverse-pec-deck": {
     title: "反向蝴蝶机 · 后三角",
@@ -251,7 +259,13 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "面朝靠垫坐稳，胸口贴紧垫面；把手与肩同高，手臂近乎伸直。",
     cues: ["由肘部带动向身体两侧打开", "末端夹紧肩胛并停 1 秒", "慢速回程，不让配重片落尽"],
     mistakes: ["耸肩让上斜方代偿", "身体后仰借力", "手臂弯曲变成划船"],
-    demo: EXERCISE_DEMOS["reverse-pec-deck"],
+    // No demo image: the only licensed-stills pec-deck video found
+    // was the FORWARD fly (the opposite direction). Teaching video
+    // instead (verified 2026-10-19, see DATA-PLAN.md): Renaissance
+    // Periodization's machine reverse flye — seated facing the pad,
+    // arms opening backward, rear delts.
+    video: "https://www.youtube.com/watch?v=5YK4bgzXDp0",
+    source: "外部教学视频 · Renaissance Periodization · 器械反向飞鸟",
   },
   "calf-raise": {
     title: "提踵",
@@ -259,8 +273,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "前脚掌踩稳台阶边缘，脚跟可低于台阶面；扶稳保持平衡。",
     cues: ["脚跟下沉到充分拉伸", "由前脚掌主动蹬起至最高点并停 1 秒", "全程慢速，膝盖保持姿势不变"],
     mistakes: ["借弹跳快速起落", "动作幅度只有一半", "脚踝内外翻"],
-    // No demo image: no AI-generated calf-raise pair passed
-    // frame-by-frame review (see ExerciseDemo.tsx header note).
+    demo: EXERCISE_DEMOS["calf-raise"],
   },
   "tibialis-raise": {
     title: "靠墙胫骨前肌抬脚尖",
@@ -268,7 +281,12 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "背靠墙站立，双脚向前离墙约一步，脚跟踩地。",
     cues: ["脚尖尽量抬向小腿方向", "顶部停 1 秒再慢放", "脚跟不离地、身体不前倾"],
     mistakes: ["抬得太快靠惯性", "膝盖大幅弯曲代偿", "脚尖外八"],
-    demo: EXERCISE_DEMOS["tibialis-raise"],
+    // No demo image: no cleanly licensed stills source for the
+    // against-the-wall tibialis raise. Teaching video instead
+    // (verified 2026-10-19, see DATA-PLAN.md): wall tibialis raises,
+    // back against the wall, heels down, toes lifted to the shins.
+    video: "https://www.youtube.com/watch?v=VzIcGAgBiaM",
+    source: "外部教学视频 · The Barefoot Sprinter · 靠墙胫骨前肌抬脚尖",
   },
   "supine-chin-tuck": {
     title: "仰卧收下巴",
@@ -276,7 +294,12 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "仰卧平躺，头下不垫高枕；后脑轻贴地面，眼睛看向天花板。",
     cues: ["像做双下巴一样把下巴水平后收", "每次停 5 秒再完全放松", "后脑不离地、不用力压脖子"],
     mistakes: ["低头把下巴压向胸口", "憋气耸肩", "速度太快不停顿"],
-    demo: EXERCISE_DEMOS["supine-chin-tuck"],
+    // No demo image: no cleanly licensed stills source for the
+    // supine chin tuck. Teaching video instead (verified 2026-10-19,
+    // see DATA-PLAN.md): FitLife physical therapy's supine chin
+    // tuck — lying flat, head on the mat, no pillow.
+    video: "https://www.youtube.com/watch?v=qFEBNu4vwSg",
+    source: "外部教学视频 · FitLife 物理治疗 · 仰卧收下巴",
   },
   "prone-ytw": {
     title: "俯趴 Bench Y-T-W",
@@ -284,7 +307,12 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "俯趴在 bench 上，胸口贴稳、脸朝下；双手各拿最小的片（2.5–5 lb 足够）。",
     cues: ["Y：手臂向头顶斜上方举起，拇指朝上", "T：手臂向两侧平举，夹紧肩胛", "W：屈肘呈 W 形后收，肘部向后下方拉"],
     mistakes: ["重量过大靠摆动", "抬头耸肩", "手臂举起时腰部反弓"],
-    demo: EXERCISE_DEMOS["prone-ytw"],
+    // No demo image: no cleanly licensed stills source for prone
+    // Y-T-W on a bench. Teaching video instead (verified 2026-10-19,
+    // see DATA-PLAN.md): The Active Life's prone Y-T-W — face down,
+    // working through the Y, T and W positions.
+    video: "https://www.youtube.com/watch?v=QdGTI4Lshg4",
+    source: "外部教学视频 · The Active Life · 俯卧 Y-T-W",
   },
   "side-external-rotation": {
     title: "侧卧外旋 · 小片",
@@ -300,7 +328,14 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "仰卧，上背靠在 bench 边缘，双手托住后脑，臀部贴地。",
     cues: ["以 bench 边缘为支点慢慢向后伸展上背", "每个位置停留数次呼吸", "上下移动几厘米换一个节段"],
     mistakes: ["用腰部后仰代替胸椎伸展", "臀部离地", "动作过猛或憋气"],
-    demo: EXERCISE_DEMOS["thoracic-extension"],
+    // No demo image: no cleanly licensed stills source for thoracic
+    // extension over a bench edge. Teaching video instead (verified
+    // 2026-10-19, see DATA-PLAN.md): The Barbell Physio's foam-roller
+    // thoracic extensions — the same extension pattern (upper back
+    // over a support, hands behind head, hips on the floor), with a
+    // foam roller standing in for the bench edge.
+    video: "https://www.youtube.com/watch?v=81kPLsMt6wY",
+    source: "外部教学视频 · The Barbell Physio · 胸椎伸展（泡沫轴版，同动作模式）",
   },
   "single-leg-balance": {
     title: "单腿平衡触点",
@@ -308,7 +343,13 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "单脚站稳，另一只脚悬空；先扶墙或椅背找平衡。",
     cues: ["悬空脚依次轻触前、侧、后三个点", "支撑腿膝盖对准脚尖方向", "躯干保持直立，目光看前方固定点"],
     mistakes: ["支撑脚脚踝左右晃动失控", "膝盖向内塌", "靠快速摆动保持平衡"],
-    demo: EXERCISE_DEMOS["single-leg-balance"],
+    // No demo image: no cleanly licensed stills source for the
+    // three-point single-leg balance tap. Teaching video instead
+    // (verified 2026-10-19, see DATA-PLAN.md): a physical therapist
+    // (Dr. Chonko PT, DPT) demonstrating the single-leg balance +
+    // 3-way tap — forward, lateral and backward taps.
+    video: "https://www.youtube.com/watch?v=QOUYmI6Snqs",
+    source: "外部教学视频 · Body Balance 物理治疗 · 单腿平衡三向触点",
   },
   "home-bulgarian-split-squat": {
     title: "保加利亚分腿蹲 · Bench 抱片",
@@ -316,7 +357,16 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "后脚脚背搭在 bench 上，双手抱一片杠铃片在胸前；这是耐力练法，次数优先。",
     cues: ["绝大部分重量留在前脚", "前膝沿脚尖方向移动", "节奏均匀，不追求大重量"],
     mistakes: ["前脚离凳太近导致脚跟抬起", "前膝向内塌", "后腿用力过多"],
-    demo: EXERCISE_DEMOS["home-bulgarian-split-squat"],
+    // No demo image: no cleanly licensed stills source for the home
+    // version (stock results were regular squats and walking
+    // lunges); the gym version's guide has a verified photo pair of
+    // the same movement pattern. Teaching video instead (verified
+    // 2026-10-19, see DATA-PLAN.md): ATHLEAN-X's Bulgarian split
+    // squat form tutorial (Jeff Cavaliere, physical therapist) —
+    // same rear-foot-elevated pattern; this home version holds one
+    // plate at the chest instead of dumbbells.
+    video: "https://www.youtube.com/watch?v=hiLF_pF3EJM",
+    source: "外部教学视频 · ATHLEAN-X · 保加利亚分腿蹲（同动作，居家版抱片）",
   },
   "bench-step-up": {
     title: "Bench 登阶",
@@ -332,7 +382,7 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "双手抱片于胸前，前脚掌踩稳台阶或地面边缘，另一手扶稳。",
     cues: ["脚跟下沉到充分拉伸", "蹬起至最高点停 1 秒", "高次数慢节奏，练的是耐力"],
     mistakes: ["借弹跳快速起落", "动作幅度不足", "身体前后摇晃"],
-    // No demo image: same calf-raise review outcome as the gym guide.
+    demo: EXERCISE_DEMOS["home-calf-raise"],
   },
   "wall-sit": {
     title: "靠墙静蹲",
@@ -340,7 +390,12 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     setup: "背部整片贴墙下滑，膝盖约 90°，双脚向前与肩同宽。",
     cues: ["膝盖对准脚尖方向", "重量均匀落在全脚掌", "呼吸均匀，逐周把每组时间加上去（45 秒 → 90 秒）"],
     mistakes: ["膝盖超过脚尖太多且内塌", "双手撑在大腿上卸力", "下滑角度太浅没有训练效果"],
-    demo: EXERCISE_DEMOS["wall-sit"],
+    // No demo image: no cleanly licensed stills source for the wall
+    // sit on Pexels / Pixabay / Wikimedia Commons. Teaching video
+    // instead (verified 2026-10-19, see DATA-PLAN.md): E3 Rehab's
+    // wall sit — back flat against the wall, knees ~90°, held.
+    video: "https://www.youtube.com/watch?v=RG7z0P9qrLk",
+    source: "外部教学视频 · E3 Rehab · 靠墙静蹲",
   },
   "dead-bug": {
     title: "死虫",
@@ -750,6 +805,93 @@ export function receiptReadPhase(input: { isPending: boolean; isError: boolean; 
   return phase;
 }
 
+// --- W6.2 / H4.6: exercise -> muscle-group map (MUSCLE-MAP.md v1) ---
+// The single shared mapping, copied verbatim from workout-log/
+// MUSCLE-MAP.md map_version 1: all 30 stable exercise_keys with their
+// primary (1–2) and secondary muscle groups. An unknown/custom key is
+// explicitly unmapped — never guessed from a similar name. Both calf
+// keys (calf-raise / home-calf-raise) ARE mapped (primary 小腿）; they
+// only lack a demo image, which is a separate concern.
+export type MuscleMapping = { primary: string[]; secondary: string[] };
+
+export const MUSCLE_MAP_VERSION = 1;
+
+export const MUSCLE_MAP: Record<string, MuscleMapping> = {
+  "barbell-bench": { primary: ["胸"], secondary: ["肱三头肌", "肩前束"] },
+  "overhead-press": { primary: ["肩前束", "肩中束"], secondary: ["肱三头肌", "核心"] },
+  "incline-dumbbell-press": { primary: ["胸"], secondary: ["肩前束", "肱三头肌"] },
+  dips: { primary: ["胸", "肱三头肌"], secondary: ["肩前束"] },
+  "lateral-raise": { primary: ["肩中束"], secondary: ["斜方肌"] },
+  "push-up-plus": { primary: ["前锯肌"], secondary: ["胸", "核心"] },
+  "wide-lat-pulldown": { primary: ["背阔肌"], secondary: ["肱二头肌", "肩后束"] },
+  "close-lat-pulldown": { primary: ["背阔肌"], secondary: ["肱二头肌"] },
+  "close-seated-row": { primary: ["背阔肌", "菱形肌"], secondary: ["肱二头肌", "斜方肌"] },
+  "wide-seated-row": { primary: ["菱形肌", "肩后束"], secondary: ["背阔肌", "斜方肌"] },
+  "face-pull": { primary: ["肩后束"], secondary: ["斜方肌", "菱形肌"] },
+  "reverse-pec-deck": { primary: ["肩后束"], secondary: ["斜方肌"] },
+  "rope-curl": { primary: ["肱二头肌"], secondary: [] },
+  "back-squat": { primary: ["股四头肌", "臀大肌"], secondary: ["核心", "腘绳肌"] },
+  "romanian-deadlift": { primary: ["腘绳肌", "臀大肌"], secondary: ["斜方肌", "核心"] },
+  "bulgarian-split-squat": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿", "核心"] },
+  "lying-leg-curl": { primary: ["腘绳肌"], secondary: ["小腿"] },
+  "calf-raise": { primary: ["小腿"], secondary: [] },
+  "tibialis-raise": { primary: ["胫骨前肌"], secondary: [] },
+  "supine-chin-tuck": { primary: ["颈深屈肌"], secondary: [] },
+  "prone-ytw": { primary: ["斜方肌", "肩后束"], secondary: ["菱形肌", "胸椎伸展肌群"] },
+  "side-external-rotation": { primary: ["肩后束"], secondary: [] },
+  "thoracic-extension": { primary: ["胸椎伸展肌群"], secondary: [] },
+  "single-leg-balance": { primary: ["小腿", "臀大肌"], secondary: ["核心"] },
+  "home-bulgarian-split-squat": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿", "核心"] },
+  "bench-step-up": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿"] },
+  "home-calf-raise": { primary: ["小腿"], secondary: [] },
+  "wall-sit": { primary: ["股四头肌"], secondary: ["臀大肌"] },
+  "dead-bug": { primary: ["核心"], secondary: [] },
+  "side-plank": { primary: ["腹斜肌", "核心"], secondary: ["臀大肌"] },
+};
+
+// H4.6 receipt facts (pure): aggregate THIS workout's completed sets
+// only, per muscle group. An exercise belonging to several muscle
+// groups is counted under EACH of them (duplicate attribution), so
+// the per-group set counts must never be added up into a whole-body
+// total. Bodyweight / timed sets (weight null) still count as sets —
+// this section reports set counts and exercise names only, never a
+// volume, so a missing weight is never zero-filled. Exercises with no
+// completed set contribute nothing; an exercise whose key has no
+// mapping is listed once under unmapped （尚无映射）, never guessed.
+export type MuscleGroupFact = { muscle: string; sets: number; exercises: string[] };
+export type MuscleReceiptFacts = {
+  primary: MuscleGroupFact[];
+  secondary: MuscleGroupFact[];
+  unmapped: string[];
+};
+
+export function muscleReceiptFacts(workout: Workout): MuscleReceiptFacts {
+  const primary: MuscleGroupFact[] = [];
+  const secondary: MuscleGroupFact[] = [];
+  const unmapped: string[] = [];
+  const addFact = (facts: MuscleGroupFact[], muscle: string, sets: number, name: string) => {
+    const existing = facts.find((fact) => fact.muscle === muscle);
+    if (existing) {
+      existing.sets += sets;
+      if (!existing.exercises.includes(name)) existing.exercises.push(name);
+    } else {
+      facts.push({ muscle, sets, exercises: [name] });
+    }
+  };
+  for (const exercise of groupSets(workout.sets)) {
+    const completedSets = exercise.sets.filter((set) => set.completed).length;
+    if (completedSets === 0) continue;
+    const mapping = MUSCLE_MAP[exercise.key];
+    if (!mapping) {
+      if (!unmapped.includes(exercise.name)) unmapped.push(exercise.name);
+      continue;
+    }
+    for (const muscle of mapping.primary) addFact(primary, muscle, completedSets, exercise.name);
+    for (const muscle of mapping.secondary) addFact(secondary, muscle, completedSets, exercise.name);
+  }
+  return { primary, secondary, unmapped };
+}
+
 function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
   const { start, end } = previousCompleteWeek();
   const priorStart = new Date(start);
@@ -886,6 +1028,7 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
 
   const workout = receipt;
   const lines = receiptExerciseLines(workout, query.data?.receipt_previous);
+  const muscleFacts = muscleReceiptFacts(workout);
   const doneTotal = completedCount(workout);
   const totalSets = workout.sets.length;
   const incompleteTotal = totalSets - doneTotal;
@@ -923,6 +1066,39 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
           </li>
         ))}
       </ul>
+      <div className="receipt-muscles">
+        <h3>本次训练肌群事实</h3>
+        {muscleFacts.primary.length === 0 && muscleFacts.secondary.length === 0 && muscleFacts.unmapped.length === 0 ? (
+          <p className="receipt-muscles-empty">本次没有已完成组，暂无肌群事实。</p>
+        ) : (
+          <>
+            {muscleFacts.primary.length > 0 ? (
+              <ul className="receipt-muscle-list">
+                {muscleFacts.primary.map((fact) => (
+                  <li key={`primary-${fact.muscle}`}>
+                    <span><span aria-hidden="true">●</span> 主要 · {fact.muscle}</span>
+                    <span>{fact.sets} 组 · {fact.exercises.join("、")}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {muscleFacts.secondary.length > 0 ? (
+              <ul className="receipt-muscle-list">
+                {muscleFacts.secondary.map((fact) => (
+                  <li key={`secondary-${fact.muscle}`}>
+                    <span><span aria-hidden="true">○</span> 次要 · {fact.muscle}</span>
+                    <span>{fact.sets} 组 · {fact.exercises.join("、")}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {muscleFacts.unmapped.length > 0 ? (
+              <p className="receipt-muscles-unmapped">尚无映射：{muscleFacts.unmapped.join("、")}</p>
+            ) : null}
+          </>
+        )}
+        <p className="receipt-muscles-note">口径：只统计已完成组；同一动作可同时计入多个肌群（重复归属），各肌群组数不可相加为总容量。</p>
+      </div>
       <div className="receipt-actions">
         <button type="button" className="receipt-primary" onClick={() => onViewRecord(workout.id)}>
           查看本次记录
@@ -932,7 +1108,8 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
   );
 }
 
-function ExerciseGuideDialog({ guide, onClose }: { guide: ExerciseGuide; onClose: () => void }) {
+function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseGuide; exerciseKey: string; onClose: () => void }) {
+  const muscleMapping = MUSCLE_MAP[exerciseKey];
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -959,6 +1136,17 @@ function ExerciseGuideDialog({ guide, onClose }: { guide: ExerciseGuide; onClose
           <button type="button" aria-label="关闭动作要领" onClick={onClose}>×</button>
         </div>
         <p className="guide-focus">{guide.focus}</p>
+        <div className="guide-section guide-muscles">
+          <h3>目标肌群</h3>
+          {muscleMapping ? (
+            <>
+              <p><span aria-hidden="true">●</span> 主要：{muscleMapping.primary.join("、")}</p>
+              <p><span aria-hidden="true">○</span> 次要：{muscleMapping.secondary.length > 0 ? muscleMapping.secondary.join("、") : "—"}</p>
+            </>
+          ) : (
+            <p>尚无映射</p>
+          )}
+        </div>
         {guide.demo ? <ExerciseDemoView demo={guide.demo} name={guide.title} /> : null}
         <div className="guide-section">
           <h3>起始位置</h3>
@@ -1802,7 +1990,7 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
   onSelect: () => void;
   onChanged: () => void;
   onSetCompleted: () => void;
-  onOpenGuide: (guide: ExerciseGuide) => void;
+  onOpenGuide: (guide: ExerciseGuide, key: string) => void;
   onRegisterSet: (id: number, handle: SetSaveHandle | null) => void;
   // W-FINISH-001: an in-flight add registers its promise (which only
   // settles after the dashboard invalidation/refetch completes) into
@@ -1865,7 +2053,7 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
               className="guide-trigger"
               type="button"
               aria-label={`查看${exercise.name}动作要领`}
-              onClick={() => onOpenGuide(guide)}
+              onClick={() => onOpenGuide(guide, exercise.key)}
             >要领</button>
           ) : null}
           {previous && previous.weight != null ? (
@@ -1973,7 +2161,7 @@ function ActiveWorkout({ workout, recent, onCompleted }: {
   const [finishFailed, setFinishFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [unsavedPresent, setUnsavedPresent] = useState(false);
-  const [selectedGuide, setSelectedGuide] = useState<ExerciseGuide | null>(null);
+  const [selectedGuide, setSelectedGuide] = useState<{ guide: ExerciseGuide; key: string } | null>(null);
   // W-UI-001-D1: the exercise the user picked by tapping a card
   // head. Null = no manual choice yet, so the first incomplete
   // exercise is current. Once set it changes only on another
@@ -2437,7 +2625,7 @@ function ActiveWorkout({ workout, recent, onCompleted }: {
             onSelect={() => setSelectedExerciseKey(exercise.key)}
             onChanged={refresh}
             onSetCompleted={handleSetCompleted}
-            onOpenGuide={setSelectedGuide}
+            onOpenGuide={(guide, key) => setSelectedGuide({ guide, key })}
             onRegisterSet={registerSet}
             onRegisterPendingAdd={registerPendingAdd}
             onEnterNextSet={(setId, field) => handleEnterNext(exercise.key, setId, field)}
@@ -2486,7 +2674,7 @@ function ActiveWorkout({ workout, recent, onCompleted }: {
           </div>
         )}
       </div>
-      {selectedGuide ? <ExerciseGuideDialog guide={selectedGuide} onClose={() => setSelectedGuide(null)} /> : null}
+      {selectedGuide ? <ExerciseGuideDialog guide={selectedGuide.guide} exerciseKey={selectedGuide.key} onClose={() => setSelectedGuide(null)} /> : null}
     </main>
   );
 }
