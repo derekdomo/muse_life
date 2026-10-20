@@ -395,6 +395,19 @@ const ingestResponse = z.object({
 // started but no callback arrived, a callback arrived and was
 // ignored by the generation / stale rules, or the refresh settled
 // (success / failure).
+//
+// F0.7-OBS-001: the diagnosis is derived PER ATTEMPT. Every
+// observation belongs to the generation that produced it; the
+// diagnosis reads ONLY the current attempt's own event chain
+// (the generation stored on the state row). Events from older
+// generations — or with no attributable generation at all — are
+// history / unattributed: they are listed separately and are
+// never evidence about the current attempt. (The pre-fix
+// derivation read the globally newest event, so a late failure
+// callback from an OLD generation, correctly ignored by the
+// ingest gate, was misdiagnosed as the current attempt's
+// outcome — "任务执行过、回调已到达但被忽略" — and could invite a
+// blind re-refresh.)
 export const refreshDiagnosisCodes = [
   "no_attempt",
   "awaiting_callback",
@@ -402,57 +415,126 @@ export const refreshDiagnosisCodes = [
   "settled_success",
   "settled_failure",
   "spawn_failed",
+  "unattributed_history",
 ] as const;
 
 export type RefreshDiagnosisCode = (typeof refreshDiagnosisCodes)[number];
 
+// Internal view of one recorded observation. `generation` is the
+// raw internal binding used ONLY to attribute the row to its
+// attempt inside the server; it never leaves the server — the
+// wire format carries the owner-safe attempt ordinal instead.
 export type RefreshObservationLike = {
   event: string;
   outcome: string;
   detail: string | null;
+  generation: string | null;
 };
+
+export type RefreshAttemptRelation = "current" | "history" | "unknown";
+
+// Owner-safe attempt attribution. Attempts are numbered by the
+// order their refresh_started rows were recorded (1-based). A
+// generation that never recorded a start (a foreign callback's
+// echoed id, a legacy null) has no ordinal; a row whose
+// generation is null — or unknown to the attempt list — is
+// "unknown" attribution, never silently folded into an attempt.
+export function refreshAttemptOrdinal(
+  attemptOrder: string[],
+  generation: string | null,
+): number | null {
+  if (generation == null) return null;
+  const index = attemptOrder.indexOf(generation);
+  return index >= 0 ? index + 1 : null;
+}
+
+export function refreshAttemptRelation(input: {
+  rowGeneration: string | null;
+  currentGeneration: string | null;
+  attemptOrder: string[];
+}): RefreshAttemptRelation {
+  if (input.rowGeneration == null) return "unknown";
+  if (input.currentGeneration != null && input.rowGeneration === input.currentGeneration) {
+    return "current";
+  }
+  return refreshAttemptOrdinal(input.attemptOrder, input.rowGeneration) != null
+    ? "history"
+    : "unknown";
+}
 
 const refreshDiagnosisText: Record<RefreshDiagnosisCode, string> = {
   no_attempt: "尚无任何刷新尝试记录（下一次刷新开始记录）",
-  awaiting_callback: "刷新已启动，等待回调到达（任务可能仍在执行，或回调尚未投递）",
-  callback_ignored: "任务执行过、回调已到达，但被代次/陈旧规则忽略，未落盘保存",
-  settled_success: "最近一次刷新已成功落盘",
-  settled_failure: "最近一次刷新已以失败收尾",
-  spawn_failed: "任务未能启动（spawn 失败）",
+  awaiting_callback: "等待当前代回调，执行终态未知（当前尝试尚无本代回调到达；任务可能仍在执行，也可能回调尚未投递）",
+  callback_ignored: "当前尝试的回调已到达，但被代次/陈旧规则忽略，未落盘保存（本代终态以当前状态为准）",
+  settled_success: "当前尝试已成功落盘",
+  settled_failure: "当前尝试已以失败收尾",
+  spawn_failed: "当前尝试未能启动（spawn 失败）",
+  unattributed_history: "有历史/无关事件记录，但无法归属到当前尝试（当前尝试终态未知）",
 };
 
 export function deriveRefreshDiagnosis(input: {
   status: "idle" | "running" | "error" | null | undefined;
+  // The generation stored on the state row — the current (latest)
+  // attempt. Internal only; never returned to the client.
+  currentGeneration: string | null;
+  // Distinct generations in recorded start order (oldest first);
+  // used only to number the current attempt for display.
+  attemptOrder: string[];
   observations: RefreshObservationLike[];
-}): { code: RefreshDiagnosisCode; text: string } {
-  const code = ((): RefreshDiagnosisCode => {
-    const obs = input.observations;
-    if (obs.length === 0) return "no_attempt";
-    const latest = obs[0];
-    if (!latest) return "no_attempt";
-    // An ignored callback is the freshest signal of the chain
-    // break this observability exists to surface — it outranks
-    // the settled/running status derivation.
-    if (latest.event === "callback_ignored") return "callback_ignored";
-    if (latest.event === "spawn_failed") return "spawn_failed";
-    // A callback was received (arrived) but its result event has
-    // not been recorded yet — still in flight.
-    if (latest.event === "callback_received") return "awaiting_callback";
-    if (latest.event === "callback_applied_success") return "settled_success";
-    if (latest.event === "callback_applied_failure") return "settled_failure";
-    // Started / attached / tail events: if the state still says
-    // running and no callback has arrived since this attempt
-    // started, the chain is waiting on delivery.
-    if (input.status === "running") return "awaiting_callback";
-    if (input.status === "error") return "settled_failure";
+}): { code: RefreshDiagnosisCode; text: string; attempt: number | null } {
+  const attempt = refreshAttemptOrdinal(input.attemptOrder, input.currentGeneration);
+  const finish = (code: RefreshDiagnosisCode) => ({
+    code,
+    text: refreshDiagnosisText[code],
+    attempt,
+  });
+  const obs = input.observations;
+  if (input.currentGeneration == null) {
+    // No current attempt is bound (no refresh ever started under
+    // the generation contract, or a pre-contract state row). No
+    // recorded event can be attributed to a current attempt, so
+    // nothing in the stream is evidence about one; only the bare
+    // state status may speak, and leftover rows stay history.
+    if (obs.length === 0) return finish("no_attempt");
+    if (input.status === "error") return finish("settled_failure");
     if (input.status === "idle") {
-      return obs.some((row) => row.event === "callback_applied_success")
-        ? "settled_success"
-        : "settled_failure";
+      return finish(
+        obs.some((row) => row.event === "callback_applied_success")
+          ? "settled_success"
+          : "settled_failure",
+      );
     }
-    return "no_attempt";
-  })();
-  return { code, text: refreshDiagnosisText[code] };
+    return finish("unattributed_history");
+  }
+  const own = obs.filter((row) => row.generation === input.currentGeneration);
+  if (own.length === 0) {
+    // The current attempt has no recorded events of its own in
+    // the stream (its rows fell outside the returned window, or
+    // recording failed — writes are isolated and swallowed).
+    // Other generations' events are NOT evidence about it; fall
+    // back to the attempt's own state status only.
+    if (input.status === "error") return finish("settled_failure");
+    if (input.status === "idle") return finish("settled_success");
+    return finish("awaiting_callback");
+  }
+  const has = (event: string) => own.some((row) => row.event === event);
+  // The attempt's OWN applied result is its terminal fact; own
+  // callbacks ignored afterwards (duplicates, stale retries) do
+  // not un-settle it.
+  if (has("callback_applied_success")) return finish("settled_success");
+  if (has("callback_applied_failure")) return finish("settled_failure");
+  if (has("spawn_failed")) return finish("spawn_failed");
+  // The current attempt's own callback arrived and was ignored —
+  // distinct from an ignored callback of any other generation,
+  // which never reaches this branch.
+  if (has("callback_ignored")) return finish("callback_ignored");
+  // Started / attached / received / tail events only: the
+  // attempt's own callback has not produced a recorded result.
+  // Spawn attachment is NOT proof the task executed — the honest
+  // state is "waiting for this generation's callback, final
+  // outcome unknown".
+  if (input.status === "error") return finish("settled_failure");
+  return finish("awaiting_callback");
 }
 
 const refreshObservationsResponse = z.object({
@@ -463,12 +545,22 @@ const refreshObservationsResponse = z.object({
     updatedAt: z.string().nullable(),
     hasTaskId: z.boolean(),
     hasGeneration: z.boolean(),
+    // Owner-safe ordinal of the current attempt (1-based, in
+    // recorded start order); null when it cannot be numbered.
+    // The raw generation / task id values never leave the server.
+    attempt: z.number().int().positive().nullable(),
   }).nullable(),
+  currentAttempt: z.number().int().positive().nullable(),
   observations: z.array(z.object({
     event: z.string(),
     outcome: z.string(),
     detail: z.string().nullable(),
     createdAt: z.string(),
+    // Per-row attempt attribution: the attempt ordinal this row
+    // belongs to (null when unattributable) and its relation to
+    // the current attempt — current / history / unknown.
+    attempt: z.number().int().positive().nullable(),
+    relation: z.enum(["current", "history", "unknown"]),
   })),
   diagnosis: z.object({
     code: z.enum([
@@ -478,8 +570,10 @@ const refreshObservationsResponse = z.object({
       "settled_success",
       "settled_failure",
       "spawn_failed",
+      "unattributed_history",
     ]),
     text: z.string(),
+    attempt: z.number().int().positive().nullable(),
   }).nullable(),
 });
 
@@ -3053,35 +3147,91 @@ export const Actions = {
   // generation — never their values. The diagnosis is derived by
   // the exported pure function from the state + observation
   // stream, so the UI renders facts, not guesses.
+  //
+  // F0.7-OBS-001: attribution is per attempt. Rows carry only an
+  // owner-safe attempt ordinal + relation (current / history /
+  // unknown) — the raw generation never leaves the server. The
+  // diagnosis is computed from the CURRENT attempt's own event
+  // chain, fetched separately from the 20-row display stream so
+  // a flood of other generations' late events can never push the
+  // current attempt's evidence out of the diagnosis.
   getRefreshObservations: defineAction({
     request: z.object({}),
     response: refreshObservationsResponse,
     async handler(ctx): Promise<z.infer<typeof refreshObservationsResponse>> {
       if (!isOwner(ctx)) {
-        return { access: "guest_denied", state: null, observations: [], diagnosis: null };
+        return {
+          access: "guest_denied",
+          state: null,
+          currentAttempt: null,
+          observations: [],
+          diagnosis: null,
+        };
       }
       const db = ctx.db<typeof schema>();
       const state = await getState(ctx);
-      const rows = await db
-        .select({
-          event: schema.refreshObservations.event,
-          outcome: schema.refreshObservations.outcome,
-          detail: schema.refreshObservations.detail,
-          createdAt: schema.refreshObservations.createdAt,
-        })
+      const currentGeneration = state?.generation ?? null;
+      // Attempt order: generations in the order their start was
+      // recorded. Only refresh_started rows define an attempt.
+      const startRows = await db
+        .select({ generation: schema.refreshObservations.generation })
+        .from(schema.refreshObservations)
+        .where(eq(schema.refreshObservations.event, "refresh_started"))
+        .orderBy(schema.refreshObservations.id);
+      const attemptOrder: string[] = [];
+      for (const row of startRows) {
+        if (row.generation != null && !attemptOrder.includes(row.generation)) {
+          attemptOrder.push(row.generation);
+        }
+      }
+      const obsFields = {
+        id: schema.refreshObservations.id,
+        generation: schema.refreshObservations.generation,
+        event: schema.refreshObservations.event,
+        outcome: schema.refreshObservations.outcome,
+        detail: schema.refreshObservations.detail,
+        createdAt: schema.refreshObservations.createdAt,
+      };
+      const displayRows = await db
+        .select(obsFields)
         .from(schema.refreshObservations)
         .orderBy(desc(schema.refreshObservations.id))
         .limit(20);
-      const observations = rows.map((row) => ({
+      const ownRows = currentGeneration != null
+        ? await db
+            .select(obsFields)
+            .from(schema.refreshObservations)
+            .where(eq(schema.refreshObservations.generation, currentGeneration))
+            .orderBy(desc(schema.refreshObservations.id))
+            .limit(20)
+        : [];
+      const byId = new Map<number, (typeof displayRows)[number]>();
+      for (const row of [...displayRows, ...ownRows]) byId.set(row.id, row);
+      const mergedRows = [...byId.values()].sort((a, b) => b.id - a.id);
+      const diagnosis = deriveRefreshDiagnosis({
+        status: state?.status ?? null,
+        currentGeneration,
+        attemptOrder,
+        observations: mergedRows.map((row) => ({
+          event: row.event,
+          outcome: row.outcome,
+          detail: row.detail,
+          generation: row.generation,
+        })),
+      });
+      const currentAttempt = refreshAttemptOrdinal(attemptOrder, currentGeneration);
+      const observations = displayRows.map((row) => ({
         event: row.event,
         outcome: row.outcome,
         detail: row.detail,
         createdAt: row.createdAt.toISOString(),
+        attempt: refreshAttemptOrdinal(attemptOrder, row.generation),
+        relation: refreshAttemptRelation({
+          rowGeneration: row.generation,
+          currentGeneration,
+          attemptOrder,
+        }),
       }));
-      const diagnosis = deriveRefreshDiagnosis({
-        status: state?.status ?? null,
-        observations,
-      });
       return {
         access: "owner",
         state: {
@@ -3090,7 +3240,9 @@ export const Actions = {
           updatedAt: state?.updatedAt?.toISOString() ?? null,
           hasTaskId: state?.taskId != null,
           hasGeneration: state?.generation != null,
+          attempt: currentAttempt,
         },
+        currentAttempt,
         observations,
         diagnosis,
       };

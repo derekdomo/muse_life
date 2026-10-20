@@ -888,35 +888,232 @@ const refreshResponse = z.object({ forbidden: z.boolean(), accepted: z.boolean()
 const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(["queued", "running", "completed", "failed", "not_found", "unknown"]), contractSatisfied: z.boolean() });
 
 // ---------------------------------------------------------------------------
-// LIFE-C1 人生游戏 (CWEB-MVP-001·S1): XP settlement over the health summary.
+// LIFE-C1 人生游戏 (CWEB-MVP-001·S1 + S2): XP settlement over the health
+// summary, plus the Diablo-style character system (attributes, gold,
+// equipment, daily tasks). (Owner decision 2026-10-19: the Life version
+// is pure character growth — no dungeon/expedition component.)
 //
 // The game layer reads ONLY the already-loaded health/strength snapshots
 // (the same data getDashboard returns) and writes ONLY the game tables.
-// It stores settlement metadata — category, LA local date, XP, rule
-// version, source date + source updatedAt reference — never health raw
-// values. Settlement is idempotent: (local_date, category) is the ledger
-// primary key and inserts are ON CONFLICT DO NOTHING, so re-opening the
-// page never re-awards a day. A day settles only once it is inside the
-// complete window (on or before the health snapshot's dataDate; the
-// wake-day sleep additionally requires the snapshot's coverage to be
-// complete). Anything newer is returned as a preview — visible, but not
-// booked. Missing source data yields no XP and an explicit gap entry.
-// Rule version is audit metadata only: a settled row is never recomputed
-// or revoked when rules change later.
+// It stores settlement metadata — category, LA local date, detail, XP,
+// gold, rule version, source date + source updatedAt reference — never
+// health raw values. (local_date, category, detail) is the ledger
+// primary key — the settlement identity (source date + category); the
+// source version (sourceUpdatedAt) and the rule version are separate
+// axes, never part of that identity.
+//
+// Completeness gate (CWEB-SETTLE-001): while the health snapshot's
+// coverage is incomplete, health-sourced categories (steps, quest_steps,
+// sleep) are preview-only and never book — a partial snapshot that
+// booked early would otherwise freeze at its partial values forever.
+// Strength is judged by its own snapshot (a completed session is a
+// discrete event) and still settles, through the revision path below.
+//
+// Revision settlement (CWEB-SETTLE-001): a booked row may be corrected
+// by a newer snapshot of the SAME rule version — when the candidate's
+// sourceUpdatedAt differs from the stored row's and the value differs,
+// the row is updated in place (xp, gold, source reference in one atomic
+// UPDATE) and the ledger SUM total moves by the delta automatically.
+// The same sourceUpdatedAt re-opened changes nothing; a row booked
+// under a different rule version is never recomputed or re-awarded;
+// rows are never deleted and unlocked content is never revoked (the
+// level simply presents from the new total). When the recomputed value
+// already equals the stored xp/gold, only the source reference is
+// refreshed. Anything not yet settleable is returned as a preview —
+// visible, but not booked. Missing source data yields no XP and an
+// explicit gap entry.
+//
+// S2 (rule version 2): four attributes （力量/耐力/精神/体力） each grant
+// +2% XP per point to their domain (strength/steps/sleep/quest_steps),
+// attribute portion capped at +50% per domain; equipment effects stack
+// on top. Bonuses apply only to settlements booked AFTER the allocation
+// or equip — v1 rows keep rule_version 1 and are never recomputed. Gold:
+// the first S2 read initializes the balance to the then-cumulative XP
+// (one-time conversion); every XP settlement after that mints gold 1:1
+// with the XP actually awarded (equipment gold% multiplies the mint).
+// Daily tasks book flat XP+gold under category daily_task (detail = task
+// id, at most once per task per day) the moment the health summary shows
+// the target met.
 // ---------------------------------------------------------------------------
-const GAME_RULE_VERSION = 1;
+const GAME_RULE_VERSION = 2;
 const GAME_XP_PER_LEVEL = 100;
 const GAME_QUEST_TARGET_STEPS = 8000;
 const GAME_QUEST_REWARD_XP = 10;
 const GAME_STRENGTH_SESSION_XP = 10;
+const GAME_POINTS_PER_LEVEL = 3;
+const GAME_ATTR_XP_PCT_PER_POINT = 2;
+const GAME_ATTR_DOMAIN_CAP_PCT = 50;
 
-const gameCategorySchema = z.enum(["steps", "sleep", "strength", "quest_steps"]);
+const gameCategorySchema = z.enum(["steps", "sleep", "strength", "quest_steps", "daily_task"]);
 type GameCategory = z.infer<typeof gameCategorySchema>;
+// The four settlement domains that attributes/equipment can boost.
+type GameDomain = "steps" | "sleep" | "strength" | "quest_steps";
+
+const gameAttributeSchema = z.enum(["strength", "endurance", "spirit", "stamina"]);
+type GameAttribute = z.infer<typeof gameAttributeSchema>;
+const GAME_ATTRIBUTES: GameAttribute[] = ["strength", "endurance", "spirit", "stamina"];
+const GAME_ATTRIBUTE_LABELS: Record<GameAttribute, string> = { strength: "力量", endurance: "耐力", spirit: "精神", stamina: "体力" };
+const GAME_ATTRIBUTE_DOMAIN: Record<GameAttribute, GameDomain> = { strength: "strength", endurance: "steps", spirit: "sleep", stamina: "quest_steps" };
+
+type GameSlot = "weapon" | "armor" | "accessory";
+const GAME_SLOT_LABELS: Record<GameSlot, string> = { weapon: "武器", armor: "护甲", accessory: "饰品" };
+
+interface EquipmentDef {
+  id: string;
+  name: string;
+  slot: GameSlot;
+  domain: GameDomain | "gold";
+  pct: number;
+  price: number | null;
+  obtain: "shop" | "task";
+}
+// Fixed v1 catalog: 8 items, no gacha, no random affixes, no real payment.
+// dawn_charm is task-granted only (first completion of the sleep daily
+// task); everything else is bought with gold.
+const GAME_EQUIPMENT: EquipmentDef[] = [
+  { id: "iron_sword", name: "铁剑", slot: "weapon", domain: "strength", pct: 10, price: 300, obtain: "shop" },
+  { id: "swift_blade", name: "疾风短刃", slot: "weapon", domain: "steps", pct: 15, price: 600, obtain: "shop" },
+  { id: "oak_staff", name: "橡木法杖", slot: "weapon", domain: "sleep", pct: 10, price: 300, obtain: "shop" },
+  { id: "leather_armor", name: "皮甲", slot: "armor", domain: "gold", pct: 10, price: 250, obtain: "shop" },
+  { id: "plate_armor", name: "精钢板甲", slot: "armor", domain: "strength", pct: 15, price: 650, obtain: "shop" },
+  { id: "night_cloak", name: "夜行斗篷", slot: "armor", domain: "sleep", pct: 15, price: 650, obtain: "shop" },
+  { id: "stride_charm", name: "疾行护符", slot: "accessory", domain: "steps", pct: 10, price: 280, obtain: "shop" },
+  { id: "dawn_charm", name: "晨光护符", slot: "accessory", domain: "quest_steps", pct: 20, price: null, obtain: "task" },
+];
+const GAME_EQUIPMENT_BY_ID = new Map(GAME_EQUIPMENT.map((item) => [item.id, item]));
+
+interface DailyTaskDef { id: string; label: string; targetLabel: string; target: number; rewardXp: number; rewardGold: number }
+const GAME_DAILY_TASKS: DailyTaskDef[] = [
+  { id: "steps_10000", label: "步行 10,000 步", targetLabel: "今日步数达 10,000", target: 10000, rewardXp: 15, rewardGold: 40 },
+  { id: "strength_1", label: "完成 1 次力量训练", targetLabel: "今日完成力量训练 1 次", target: 1, rewardXp: 15, rewardGold: 40 },
+  { id: "sleep_7h30", label: "主睡眠 ≥ 7.5 小时", targetLabel: "今晨主睡眠满 7.5 小时", target: 7.5, rewardXp: 15, rewardGold: 40 },
+];
+
+interface GameProfile {
+  gold: number;
+  goldInitialized: boolean;
+  attributes: Record<GameAttribute, number>;
+  attrPointsEarned: number;
+  owned: string[];
+  equipped: Record<GameSlot, string | null>;
+}
+
+function defaultGameProfile(): GameProfile {
+  return {
+    gold: 0,
+    goldInitialized: false,
+    attributes: { strength: 0, endurance: 0, spirit: 0, stamina: 0 },
+    attrPointsEarned: 0,
+    owned: [],
+    equipped: { weapon: null, armor: null, accessory: null },
+  };
+}
+
+function parseGameProfile(row: { gold: number; goldInitialized: number; attrsJson: string | null; attrPointsEarned: number; equipmentJson: string | null } | undefined): GameProfile {
+  const profile = defaultGameProfile();
+  if (!row) return profile;
+  profile.gold = row.gold;
+  profile.goldInitialized = row.goldInitialized === 1;
+  profile.attrPointsEarned = row.attrPointsEarned;
+  try {
+    if (row.attrsJson) {
+      const parsed = JSON.parse(row.attrsJson) as Partial<Record<GameAttribute, unknown>>;
+      for (const attr of GAME_ATTRIBUTES) {
+        const value = parsed[attr];
+        if (typeof value === "number" && Number.isInteger(value) && value >= 0) profile.attributes[attr] = value;
+      }
+    }
+  } catch { /* corrupt JSON keeps the zero defaults */ }
+  try {
+    if (row.equipmentJson) {
+      const parsed = JSON.parse(row.equipmentJson) as { owned?: unknown; equipped?: Partial<Record<GameSlot, unknown>> };
+      if (Array.isArray(parsed.owned)) {
+        profile.owned = parsed.owned.filter((id): id is string => typeof id === "string" && GAME_EQUIPMENT_BY_ID.has(id));
+      }
+      for (const slot of ["weapon", "armor", "accessory"] as GameSlot[]) {
+        const id = parsed.equipped?.[slot];
+        const def = typeof id === "string" ? GAME_EQUIPMENT_BY_ID.get(id) : undefined;
+        if (def && def.slot === slot && profile.owned.includes(def.id)) profile.equipped[slot] = def.id;
+      }
+    }
+  } catch { /* corrupt JSON keeps empty equipment */ }
+  return profile;
+}
+
+async function loadGameProfile(ctx: Ctx): Promise<GameProfile> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
+  return parseGameProfile(rows[0]);
+}
+
+async function saveGameProfile(ctx: Ctx, profile: GameProfile, totalXp: number, settledThroughDate: string | null): Promise<void> {
+  const db = ctx.db<typeof schema>();
+  const now = new Date();
+  const values = {
+    id: 1,
+    totalXp,
+    settledThroughDate,
+    gold: profile.gold,
+    goldInitialized: profile.goldInitialized ? 1 : 0,
+    attrsJson: JSON.stringify(profile.attributes),
+    attrPointsEarned: profile.attrPointsEarned,
+    equipmentJson: JSON.stringify({ owned: profile.owned, equipped: profile.equipped }),
+    createdAt: now,
+    updatedAt: now,
+  };
+  await db.insert(schema.gameState).values(values)
+    .onConflictDoUpdate({ target: schema.gameState.id, set: { totalXp: values.totalXp, settledThroughDate: values.settledThroughDate, gold: values.gold, goldInitialized: values.goldInitialized, attrsJson: values.attrsJson, attrPointsEarned: values.attrPointsEarned, equipmentJson: values.equipmentJson, updatedAt: now } });
+}
+
+function allocatedPoints(profile: GameProfile): number {
+  return GAME_ATTRIBUTES.reduce((sum, attr) => sum + profile.attributes[attr], 0);
+}
+
+function unspentPoints(profile: GameProfile): number {
+  return Math.max(0, profile.attrPointsEarned - allocatedPoints(profile));
+}
+
+// Attribute portion of a domain's XP bonus: +2% per point in the mapped
+// attribute, capped at +50% per domain (rule v2, shown on the page).
+function attrBonusPct(profile: GameProfile, domain: GameDomain): number {
+  const attr = GAME_ATTRIBUTES.find((candidate) => GAME_ATTRIBUTE_DOMAIN[candidate] === domain);
+  if (!attr) return 0;
+  return Math.min(GAME_ATTR_DOMAIN_CAP_PCT, GAME_ATTR_XP_PCT_PER_POINT * profile.attributes[attr]);
+}
+
+function equippedDefs(profile: GameProfile): EquipmentDef[] {
+  return (["weapon", "armor", "accessory"] as GameSlot[])
+    .map((slot) => profile.equipped[slot])
+    .filter((id): id is string => id !== null)
+    .map((id) => GAME_EQUIPMENT_BY_ID.get(id))
+    .filter((def): def is EquipmentDef => def !== undefined);
+}
+
+function equipBonusPct(profile: GameProfile, domain: GameDomain | "gold"): number {
+  return equippedDefs(profile).filter((def) => def.domain === domain).reduce((sum, def) => sum + def.pct, 0);
+}
+
+// Final XP for a domain settlement: base XP scaled by attribute +
+// equipment percentages (equipment stacks on top of the capped attribute
+// portion). The daily_task category is never scaled — its rewards are
+// flat by design.
+function boostedXp(baseXp: number, category: GameCategory, profile: GameProfile): number {
+  if (category !== "steps" && category !== "sleep" && category !== "strength" && category !== "quest_steps") return baseXp;
+  const pct = attrBonusPct(profile, category) + equipBonusPct(profile, category);
+  return Math.floor(baseXp * (1 + pct / 100));
+}
+
+function equipmentEffectLabel(def: EquipmentDef): string {
+  const domainLabel = def.domain === "gold" ? "金币" : def.domain === "strength" ? "力量训练经验" : def.domain === "steps" ? "步行经验" : def.domain === "sleep" ? "睡眠经验" : "主任务经验";
+  return `${domainLabel} +${def.pct}%`;
+}
 
 const gameSettlementEntrySchema = z.object({
   localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   category: gameCategorySchema,
+  detail: z.string(),
   xp: z.number().int().nonnegative(),
+  gold: z.number().int().nonnegative(),
   ruleVersion: z.number().int().positive(),
   sourceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   sourceUpdatedAt: z.string().nullable(),
@@ -940,6 +1137,43 @@ const gameQuestSchema = z.object({
   state: z.enum(["in_progress", "achieved", "settled", "missing"]),
 });
 
+const gameAttributesSchema = z.object({
+  strength: z.number().int().nonnegative(),
+  endurance: z.number().int().nonnegative(),
+  spirit: z.number().int().nonnegative(),
+  stamina: z.number().int().nonnegative(),
+});
+
+const gameDomainBonusSchema = z.object({
+  domain: z.enum(["steps", "sleep", "strength", "quest_steps"]),
+  attrPct: z.number().int().nonnegative(),
+  equipPct: z.number().int().nonnegative(),
+});
+
+const gameEquipmentItemSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  slot: z.enum(["weapon", "armor", "accessory"]),
+  effectLabel: z.string().min(1),
+  price: z.number().int().positive().nullable(),
+  obtain: z.enum(["shop", "task"]),
+  obtainNote: z.string().min(1),
+  owned: z.boolean(),
+  equipped: z.boolean(),
+});
+
+const gameDailyTaskSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  targetLabel: z.string().min(1),
+  progress: z.number().nullable(),
+  progressLabel: z.string().min(1),
+  target: z.number().positive(),
+  state: z.enum(["in_progress", "completed", "claimed", "missing"]),
+  rewardXp: z.number().int().positive(),
+  rewardGold: z.number().int().positive(),
+});
+
 const getGameStateResponse = z.object({
   forbidden: z.boolean(),
   ok: z.boolean(),
@@ -951,20 +1185,33 @@ const getGameStateResponse = z.object({
   xpPerLevel: z.number().int().positive(),
   xpToNextLevel: z.number().int().nonnegative(),
   settledThroughDate: z.string().nullable(),
+  gold: z.number().int().nonnegative(),
+  attributes: gameAttributesSchema,
+  unspentPoints: z.number().int().nonnegative(),
+  attrPointsEarned: z.number().int().nonnegative(),
+  domainBonuses: z.array(gameDomainBonusSchema).length(4),
+  goldBonusPct: z.number().int().nonnegative(),
+  equipment: z.array(gameEquipmentItemSchema).max(12),
+  dailyTasks: z.array(gameDailyTaskSchema).max(3),
   quest: gameQuestSchema,
-  settlements: z.array(gameSettlementEntrySchema).max(60),
+  settlements: z.array(gameSettlementEntrySchema).max(90),
   previews: z.array(gamePreviewEntrySchema).max(60),
 });
+
+const gameMutationResponse = z.object({ ok: z.boolean(), forbidden: z.boolean(), message: z.string() });
 
 interface GameCandidate {
   localDate: string;
   category: GameCategory;
+  detail: string;
   xp: number;
+  gold: number;
   sourceDate: string;
   sourceUpdatedAt: string | null;
 }
 
-// XP rules v1 (rule_version = 1, shown verbatim on the 角色 page):
+// XP rules (base values unchanged from v1; rule_version 2 adds the
+// attribute/equipment boost and gold minting on top — see boostedXp):
 // steps — 1 XP per full 1000 steps, capped at 20 per day; sleep — main
 // sleep of 7h or more earns 10 XP, shorter nights earn proportionally
 // (floor); strength — 10 XP per completed session; the daily quest
@@ -978,25 +1225,117 @@ function sleepXpFor(hours: number): number {
   return Math.floor((hours / 7) * 10);
 }
 
+type SleepHistoryRow = z.infer<typeof sleepHistorySchema>;
+
+// Ordering key for a sleep start clock time within one wake-up date:
+// evening starts (12:00–23:59) belong to the night that ends on the wake
+// date, so they sort before after-midnight starts of that same night.
+function sleepStartOrderKey(start: string): number {
+  const match = start.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return Number.POSITIVE_INFINITY;
+  const minutes = Number(match[1]) * 60 + Number(match[2]);
+  return minutes >= 12 * 60 ? minutes : minutes + 24 * 60;
+}
+
+// Deterministic main-sleep selection (CWEB-SLEEP-001), the same caliber
+// the dashboard uses: among one wake-up date's sleep rows, the main
+// sleep is the row with the longest time in bed (computed from its
+// start/end clock times); ties go to the earlier start. The result never
+// depends on array order, so a nap can never pose as the main sleep.
+// Returns null when no row's time in bed can be determined — the caller
+// then shows an unconfirmed preview and books nothing for that date.
+function selectMainSleep(rows: SleepHistoryRow[]): SleepHistoryRow | null {
+  let best: SleepHistoryRow | null = null;
+  let bestInBed = -1;
+  let bestStartKey = Number.POSITIVE_INFINITY;
+  for (const row of rows) {
+    const inBed = timeInBedHours(row.start, row.end);
+    if (inBed === null) continue;
+    const startKey = sleepStartOrderKey(row.start);
+    if (inBed > bestInBed || (inBed === bestInBed && startKey < bestStartKey)) {
+      best = row;
+      bestInBed = inBed;
+      bestStartKey = startKey;
+    }
+  }
+  return best;
+}
+
+// The stored fields of a ledger row that settlement decisions read.
+interface LedgerRowLike {
+  xp: number;
+  gold: number;
+  ruleVersion: number;
+  sourceUpdatedAt: string | null;
+}
+
+type LedgerAction =
+  | { kind: "insert" }
+  | { kind: "skip" }
+  | { kind: "refresh_source_ref" }
+  | { kind: "revise"; goldDelta: number };
+
+// Pure settlement decision for one candidate against its stored row
+// (CWEB-SETTLE-001 revision rules):
+// - no stored row -> insert;
+// - stored row under a different rule version -> skip (never recomputed,
+//   never re-awarded);
+// - same sourceUpdatedAt -> skip (re-opening with the same source
+//   version changes nothing, even if a recomputed value would differ);
+// - newer source version but the value already matches -> refresh only
+//   the source reference, xp/gold untouched;
+// - newer source version and a different value -> revise the row in
+//   place; the gold balance follows by goldDelta and the XP total (the
+//   ledger SUM) moves by the xp delta on its own.
+function planLedgerAction(existing: LedgerRowLike | undefined, candidate: GameCandidate): LedgerAction {
+  if (!existing) return { kind: "insert" };
+  if (existing.ruleVersion !== GAME_RULE_VERSION) return { kind: "skip" };
+  if (existing.sourceUpdatedAt === candidate.sourceUpdatedAt) return { kind: "skip" };
+  if (existing.xp === candidate.xp && existing.gold === candidate.gold) return { kind: "refresh_source_ref" };
+  return { kind: "revise", goldDelta: candidate.gold - existing.gold };
+}
+
 // Build the settlement plan from the loaded snapshots: candidates are
 // days inside the complete window (ready to book); previews are days the
 // sources can already see but that are not complete yet, plus explicit
 // gaps where a complete day has no source data (no XP, stated honestly).
-function buildGamePlan(health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): { candidates: GameCandidate[]; previews: GamePreviewEntry[] } {
+// Candidate XP already carries the current attribute+equipment boost and
+// the gold the settlement will mint (1:1 with awarded XP, scaled by the
+// equipped gold bonus). A booked row keeps those frozen values unless
+// the source snapshot itself is revised — only then does the revision
+// path in settleGame recompute it from the new candidate.
+function buildGamePlan(health: Snapshot | null, strength: StrengthTraining | null, todayLA: string, profile: GameProfile): { candidates: GameCandidate[]; previews: GamePreviewEntry[] } {
   const candidates: GameCandidate[] = [];
   const previews: GamePreviewEntry[] = [];
+  const goldPct = equipBonusPct(profile, "gold");
+  const domainCandidate = (localDate: string, category: GameDomain, baseXp: number, sourceDate: string, sourceUpdatedAt: string | null): GameCandidate => {
+    const xp = boostedXp(baseXp, category, profile);
+    return { localDate, category, detail: "", xp, gold: Math.floor(xp * (1 + goldPct / 100)), sourceDate, sourceUpdatedAt };
+  };
   if (health) {
     const dataDate = health.dataDate;
     const readinessDate = health.morningReference?.date ?? shiftDate(dataDate, 1);
+    // Completeness gate (CWEB-SETTLE-001): with coverage incomplete, the
+    // completeness of any single day is unproven — a date on or before
+    // dataDate may still be a partial read — so health-sourced
+    // categories stay preview-only until a snapshot reports complete
+    // coverage; source revisions after that correct booked rows through
+    // the revision path instead of leaving partial values frozen.
+    const incomplete = health.coverageIncomplete;
     const sleepDates = new Set(health.historySleeps.map((row) => row.date));
     for (const row of health.historyDaily) {
       if (row.date <= dataDate) {
         if (row.steps === null) {
           previews.push({ localDate: row.date, category: "steps", xp: null, state: "missing", note: "当日步数缺失，未发放经验" });
-        } else {
-          candidates.push({ localDate: row.date, category: "steps", xp: stepsXpFor(row.steps), sourceDate: row.date, sourceUpdatedAt: health.updatedAt });
+        } else if (incomplete) {
+          previews.push({ localDate: row.date, category: "steps", xp: boostedXp(stepsXpFor(row.steps), "steps", profile), state: "preview", note: "数据尚未完整，暂为预览，完整后自动结算" });
           if (row.steps >= GAME_QUEST_TARGET_STEPS) {
-            candidates.push({ localDate: row.date, category: "quest_steps", xp: GAME_QUEST_REWARD_XP, sourceDate: row.date, sourceUpdatedAt: health.updatedAt });
+            previews.push({ localDate: row.date, category: "quest_steps", xp: boostedXp(GAME_QUEST_REWARD_XP, "quest_steps", profile), state: "preview", note: "数据尚未完整，暂为预览；该日已达标，奖励将在数据完整后入账" });
+          }
+        } else {
+          candidates.push(domainCandidate(row.date, "steps", stepsXpFor(row.steps), row.date, health.updatedAt));
+          if (row.steps >= GAME_QUEST_TARGET_STEPS) {
+            candidates.push(domainCandidate(row.date, "quest_steps", GAME_QUEST_REWARD_XP, row.date, health.updatedAt));
           }
         }
         // A completed day inside the recent week with no main-sleep row
@@ -1005,21 +1344,36 @@ function buildGamePlan(health: Snapshot | null, strength: StrengthTraining | nul
           previews.push({ localDate: row.date, category: "sleep", xp: null, state: "missing", note: "当日无主睡眠记录，未发放经验" });
         }
       } else if (row.date === todayLA && row.steps !== null) {
-        previews.push({ localDate: row.date, category: "steps", xp: stepsXpFor(row.steps), state: "preview", note: "今日数据尚未完整，暂为预览，完整后自动结算" });
+        previews.push({ localDate: row.date, category: "steps", xp: boostedXp(stepsXpFor(row.steps), "steps", profile), state: "preview", note: incomplete ? "数据尚未完整，暂为预览，完整后自动结算" : "今日数据尚未完整，暂为预览，完整后自动结算" });
         if (row.steps >= GAME_QUEST_TARGET_STEPS) {
-          previews.push({ localDate: row.date, category: "quest_steps", xp: GAME_QUEST_REWARD_XP, state: "preview", note: "今日已达标，奖励将在该日数据完整后入账" });
+          previews.push({ localDate: row.date, category: "quest_steps", xp: boostedXp(GAME_QUEST_REWARD_XP, "quest_steps", profile), state: "preview", note: incomplete ? "数据尚未完整，暂为预览；今日已达标，奖励将在数据完整后入账" : "今日已达标，奖励将在该日数据完整后入账" });
         }
       }
     }
+    // Sleep settles per wake-up date from the deterministically chosen
+    // main sleep only (CWEB-SLEEP-001): rows are grouped by date first,
+    // so a nap sharing the date can never overwrite or impersonate the
+    // main sleep, whatever order the source listed them in.
+    const sleepsByDate = new Map<string, SleepHistoryRow[]>();
     for (const row of health.historySleeps) {
       // Main sleep belongs to its wake-up date; future or not-yet-due
       // rows never settle.
       if (row.date > readinessDate || row.date > todayLA) continue;
-      const xp = sleepXpFor(totalSleepHours(row, row.totalHours));
-      if (row.date <= dataDate || !health.coverageIncomplete) {
-        candidates.push({ localDate: row.date, category: "sleep", xp, sourceDate: row.date, sourceUpdatedAt: health.updatedAt });
+      const rows = sleepsByDate.get(row.date);
+      if (rows) rows.push(row);
+      else sleepsByDate.set(row.date, [row]);
+    }
+    for (const [date, rows] of sleepsByDate) {
+      const main = selectMainSleep(rows);
+      if (!main) {
+        previews.push({ localDate: date, category: "sleep", xp: null, state: "preview", note: "当日主睡眠无法确认，暂为预览，未入账" });
+        continue;
+      }
+      const baseXp = sleepXpFor(totalSleepHours(main, main.totalHours));
+      if (incomplete) {
+        previews.push({ localDate: date, category: "sleep", xp: boostedXp(baseXp, "sleep", profile), state: "preview", note: "数据尚未完整，暂为预览，同步完整后结算" });
       } else {
-        previews.push({ localDate: row.date, category: "sleep", xp, state: "preview", note: "今晨睡眠可能还在同步，暂为预览，同步完整后结算" });
+        candidates.push(domainCandidate(date, "sleep", baseXp, date, health.updatedAt));
       }
     }
   }
@@ -1029,65 +1383,188 @@ function buildGamePlan(health: Snapshot | null, strength: StrengthTraining | nul
       if (workout.status !== "completed") continue;
       sessionsByDate.set(workout.date, (sessionsByDate.get(workout.date) ?? 0) + 1);
     }
+    // Strength is judged by its own snapshot (CWEB-SETTLE-001): a
+    // completed session is a discrete event, so it settles without
+    // waiting for the health complete window; a later snapshot showing
+    // more (or fewer) sessions that day corrects the booked row through
+    // the same revision path.
     for (const [date, count] of sessionsByDate) {
-      const xp = GAME_STRENGTH_SESSION_XP * count;
-      if (health && date <= health.dataDate) {
-        candidates.push({ localDate: date, category: "strength", xp, sourceDate: date, sourceUpdatedAt: strength.updatedAt });
-      } else {
-        previews.push({ localDate: date, category: "strength", xp, state: "preview", note: health ? "训练日期超出健康完整窗口，暂为预览" : "健康数据尚未同步，暂为预览，同步后结算" });
-      }
+      candidates.push(domainCandidate(date, "strength", GAME_STRENGTH_SESSION_XP * count, date, strength.updatedAt));
     }
   }
   previews.sort((a, b) => b.localDate.localeCompare(a.localDate) || a.category.localeCompare(b.category));
   return { candidates, previews: previews.slice(0, 60) };
 }
 
-// Book every not-yet-settled candidate and read back the totals. The
-// ledger table is the source of truth for total XP (summed, never
-// incremented by hand); game_state is a one-row summary kept in sync for
-// future game features. All writes are idempotent: re-running with the
-// same candidates changes nothing.
-async function settleGame(ctx: Ctx, candidates: GameCandidate[]): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[] }> {
+// Insert one ledger row if its (date, category, detail) is not booked
+// yet; returns true when the row was actually inserted (so the caller
+// credits gold exactly once). Used for daily_task rows only: a met daily
+// target cannot un-happen and its reward is flat, so those rows never
+// revise. Domain candidates go through settleLedgerRow below.
+async function bookLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<boolean> {
   const db = ctx.db<typeof schema>();
-  const unique = [...new Map(candidates.map((candidate) => [`${candidate.localDate}|${candidate.category}`, candidate])).values()];
-  if (unique.length) {
-    const dates = [...new Set(unique.map((candidate) => candidate.localDate))];
-    const existing = await db.select({ localDate: schema.gameSettlements.localDate, category: schema.gameSettlements.category })
-      .from(schema.gameSettlements).where(inArray(schema.gameSettlements.localDate, dates));
-    const existingKeys = new Set(existing.map((row) => `${row.localDate}|${row.category}`));
-    const now = new Date();
-    for (const candidate of unique) {
-      if (existingKeys.has(`${candidate.localDate}|${candidate.category}`)) continue;
-      await db.insert(schema.gameSettlements).values({
-        localDate: candidate.localDate,
-        category: candidate.category,
-        xp: candidate.xp,
-        ruleVersion: GAME_RULE_VERSION,
-        sourceDate: candidate.sourceDate,
-        sourceUpdatedAt: candidate.sourceUpdatedAt,
-        createdAt: now,
-      }).onConflictDoNothing();
+  const existing = await db.select({ localDate: schema.gameSettlements.localDate })
+    .from(schema.gameSettlements)
+    .where(and(eq(schema.gameSettlements.localDate, candidate.localDate), eq(schema.gameSettlements.category, candidate.category), eq(schema.gameSettlements.detail, candidate.detail)))
+    .limit(1);
+  if (existing.length) return false;
+  await db.insert(schema.gameSettlements).values({
+    localDate: candidate.localDate,
+    category: candidate.category,
+    detail: candidate.detail,
+    xp: candidate.xp,
+    gold: candidate.gold,
+    ruleVersion: GAME_RULE_VERSION,
+    sourceDate: candidate.sourceDate,
+    sourceUpdatedAt: candidate.sourceUpdatedAt,
+    createdAt: new Date(),
+  }).onConflictDoNothing();
+  return true;
+}
+
+// Settle one domain candidate against the ledger, applying the
+// planLedgerAction decision (CWEB-SETTLE-001): insert when unbooked;
+// on a same-rule-version source revision, update the stored row in
+// place — xp, gold and the source reference in a single UPDATE, so the
+// row is never half-revised — or refresh only the source reference when
+// the value already matches. Returns the gold delta to apply to the
+// profile balance (the full mint on insert, the signed delta on revise,
+// 0 otherwise), so gold always follows the XP actually awarded.
+async function settleLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<number> {
+  const db = ctx.db<typeof schema>();
+  const key = and(eq(schema.gameSettlements.localDate, candidate.localDate), eq(schema.gameSettlements.category, candidate.category), eq(schema.gameSettlements.detail, candidate.detail));
+  const existingRows = await db.select().from(schema.gameSettlements).where(key).limit(1);
+  const action = planLedgerAction(existingRows[0], candidate);
+  if (action.kind === "skip") return 0;
+  if (action.kind === "insert") {
+    await db.insert(schema.gameSettlements).values({
+      localDate: candidate.localDate,
+      category: candidate.category,
+      detail: candidate.detail,
+      xp: candidate.xp,
+      gold: candidate.gold,
+      ruleVersion: GAME_RULE_VERSION,
+      sourceDate: candidate.sourceDate,
+      sourceUpdatedAt: candidate.sourceUpdatedAt,
+      createdAt: new Date(),
+    }).onConflictDoNothing();
+    return candidate.gold;
+  }
+  if (action.kind === "refresh_source_ref") {
+    await db.update(schema.gameSettlements)
+      .set({ sourceDate: candidate.sourceDate, sourceUpdatedAt: candidate.sourceUpdatedAt })
+      .where(key);
+    return 0;
+  }
+  await db.update(schema.gameSettlements)
+    .set({ xp: candidate.xp, gold: candidate.gold, sourceDate: candidate.sourceDate, sourceUpdatedAt: candidate.sourceUpdatedAt })
+    .where(key);
+  return action.goldDelta;
+}
+
+// Today's three daily tasks, evaluated against the same health summary
+// the base settlement uses: steps from today's historyDaily row (the
+// stored pipeline usually carries completed days only, so progress is
+// honestly "missing" until the day syncs), completed strength sessions
+// dated today, and the main sleep attributed to this morning. A task
+// whose target is met books immediately under category daily_task —
+// unlike base categories it does not wait for the complete window,
+// because a met target (10k steps, a finished session, a 7.5h night)
+// cannot un-happen; the ledger PK still caps it at once per task per day.
+function evaluateDailyTasks(health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): { def: DailyTaskDef; progress: number | null; progressLabel: string }[] {
+  const todaySteps = health?.historyDaily.find((row) => row.date === todayLA)?.steps ?? null;
+  const todaySessions = strength ? strength.workouts.filter((workout) => workout.status === "completed" && workout.date === todayLA).length : 0;
+  const strengthKnown = strength !== null;
+  const todaySleep = health ? selectMainSleep(health.historySleeps.filter((row) => row.date === todayLA)) : null;
+  const sleepHours = todaySleep ? totalSleepHours(todaySleep, todaySleep.totalHours) : null;
+  return GAME_DAILY_TASKS.map((def) => {
+    if (def.id === "steps_10000") {
+      return { def, progress: todaySteps, progressLabel: todaySteps === null ? "今日步数尚未同步" : `今日已走 ${todaySteps.toLocaleString("zh-CN")} / 10,000 步` };
     }
+    if (def.id === "strength_1") {
+      return { def, progress: strengthKnown ? todaySessions : null, progressLabel: !strengthKnown ? "训练记录尚未同步" : `今日已完成 ${todaySessions} / 1 次` };
+    }
+    return { def, progress: sleepHours, progressLabel: sleepHours === null ? "今晨主睡眠尚未同步" : `今晨主睡眠 ${sleepHours.toFixed(1)} / 7.5 小时` };
+  });
+}
+
+// Settle every candidate and today's daily tasks against the profile,
+// then read back totals and persist the profile. The ledger table is
+// the source of truth for total XP (summed, never incremented by hand);
+// game_state carries the gold balance and the S2 character state.
+// Re-running with the same source versions changes nothing; a newer
+// source version corrects already-booked rows in place (revision
+// settlement — see planLedgerAction), so totals always reflect the
+// latest source, never a frozen first read.
+async function settleGame(ctx: Ctx, candidates: GameCandidate[], profile: GameProfile, health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[]; dailyTasks: z.infer<typeof gameDailyTaskSchema>[] }> {
+  const db = ctx.db<typeof schema>();
+  // One-time gold initialization (S2): the balance starts at the
+  // cumulative XP booked before S2 existed. This must run BEFORE any new
+  // settlement mints gold in this call, and exactly once ever
+  // (goldInitialized persists in game_state).
+  if (!profile.goldInitialized) {
+    const totals = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)` }).from(schema.gameSettlements);
+    profile.gold = Number(totals[0]?.total ?? 0);
+    profile.goldInitialized = true;
+  }
+  const unique = [...new Map(candidates.map((candidate) => [`${candidate.localDate}|${candidate.category}|${candidate.detail}`, candidate])).values()];
+  for (const candidate of unique) {
+    // Gold follows the awarded XP by the signed delta; the balance is
+    // floored at 0 so a downward source revision after gold was spent
+    // can never drive it negative.
+    profile.gold = Math.max(0, profile.gold + await settleLedgerRow(ctx, candidate));
+  }
+  // Daily tasks: book each met-and-unclaimed task once for today.
+  const evaluated = evaluateDailyTasks(health, strength, todayLA);
+  const claimedRows = await db.select({ detail: schema.gameSettlements.detail }).from(schema.gameSettlements)
+    .where(and(eq(schema.gameSettlements.localDate, todayLA), eq(schema.gameSettlements.category, "daily_task")));
+  const claimed = new Set(claimedRows.map((row) => row.detail));
+  const dailyTasks: z.infer<typeof gameDailyTaskSchema>[] = [];
+  for (const entry of evaluated) {
+    let state: z.infer<typeof gameDailyTaskSchema>["state"];
+    if (claimed.has(entry.def.id)) {
+      state = "claimed";
+    } else if (entry.progress === null) {
+      state = "missing";
+    } else if (entry.progress >= entry.def.target) {
+      const booked = await bookLedgerRow(ctx, { localDate: todayLA, category: "daily_task", detail: entry.def.id, xp: entry.def.rewardXp, gold: entry.def.rewardGold, sourceDate: todayLA, sourceUpdatedAt: health?.updatedAt ?? null });
+      if (booked) {
+        profile.gold += entry.def.rewardGold;
+        claimed.add(entry.def.id);
+        // Task-granted equipment: the first sleep-task completion ever
+        // grants the dawn charm (owned forever after).
+        if (entry.def.id === "sleep_7h30" && !profile.owned.includes("dawn_charm")) {
+          profile.owned.push("dawn_charm");
+        }
+      }
+      state = "claimed";
+    } else {
+      state = "in_progress";
+    }
+    dailyTasks.push({ id: entry.def.id, label: entry.def.label, targetLabel: entry.def.targetLabel, progress: entry.progress, progressLabel: entry.progressLabel, target: entry.def.target, state, rewardXp: entry.def.rewardXp, rewardGold: entry.def.rewardGold });
   }
   const totals = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)`, through: sql`MAX(${schema.gameSettlements.localDate})` }).from(schema.gameSettlements);
   const totalRow = totals[0];
   const totalXp = Number(totalRow?.total ?? 0);
   const settledThroughDate = typeof totalRow?.through === "string" ? totalRow.through : null;
-  const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
-  const stored = stateRows[0];
-  if (!stored || stored.totalXp !== totalXp || stored.settledThroughDate !== settledThroughDate) {
-    const now = new Date();
-    await db.insert(schema.gameState).values({ id: 1, totalXp, settledThroughDate, createdAt: now, updatedAt: now })
-      .onConflictDoUpdate({ target: schema.gameState.id, set: { totalXp, settledThroughDate, updatedAt: now } });
-  }
-  const ledgerRows = await db.select().from(schema.gameSettlements).orderBy(desc(schema.gameSettlements.localDate), asc(schema.gameSettlements.category)).limit(60);
+  // Attribute points: 3 per level gained, backfilled once from the
+  // current level (level derives from total XP, so this is exact, never
+  // speculative) and never revoked.
+  const level = Math.floor(totalXp / GAME_XP_PER_LEVEL) + 1;
+  const earned = (level - 1) * GAME_POINTS_PER_LEVEL;
+  if (earned > profile.attrPointsEarned) profile.attrPointsEarned = earned;
+  await saveGameProfile(ctx, profile, totalXp, settledThroughDate);
+  const ledgerRows = await db.select().from(schema.gameSettlements).orderBy(desc(schema.gameSettlements.localDate), asc(schema.gameSettlements.category), asc(schema.gameSettlements.detail)).limit(90);
   return {
     totalXp,
     settledThroughDate,
+    dailyTasks,
     ledger: ledgerRows.map((row) => ({
       localDate: row.localDate,
       category: row.category,
+      detail: row.detail,
       xp: row.xp,
+      gold: row.gold,
       ruleVersion: row.ruleVersion,
       sourceDate: row.sourceDate,
       sourceUpdatedAt: row.sourceUpdatedAt,
@@ -1464,26 +1941,37 @@ export const Actions = {
     },
   }),
 
-  // LIFE-C1 人生游戏 (CWEB-MVP-001·S1): settles XP from the health summary
-  // on open and returns the character state. STRICT owner gate — the game
-  // reads health-derived data, so it never rides the L0.1 sync-channel
-  // exception. Fully failure-isolated: any error in the game layer is
-  // caught here and returned as ok:false, so it can never break
-  // getDashboard or the health views.
+  // LIFE-C1 人生游戏 (CWEB-MVP-001·S1 + S2): settles XP/gold from the
+  // health summary on open and returns the full character state
+  // (attributes, gold, equipment, daily tasks). STRICT owner
+  // gate — the game reads health-derived data, so it never rides the
+  // L0.1 sync-channel exception. Fully failure-isolated: any error in
+  // the game layer is caught here and returned as ok:false, so it can
+  // never break getDashboard or the health views.
   getGameState: defineAction({
     request: z.object({}), response: getGameStateResponse,
     async handler(ctx): Promise<z.infer<typeof getGameStateResponse>> {
       const todayLA = laTodayString();
       const emptyQuest: z.infer<typeof gameQuestSchema> = { date: todayLA, targetSteps: GAME_QUEST_TARGET_STEPS, steps: null, rewardXp: GAME_QUEST_REWARD_XP, state: "missing" };
-      const empty = { ruleVersion: GAME_RULE_VERSION, totalXp: 0, level: 1, xpIntoLevel: 0, xpPerLevel: GAME_XP_PER_LEVEL, xpToNextLevel: GAME_XP_PER_LEVEL, settledThroughDate: null, quest: emptyQuest, settlements: [], previews: [] };
+      const emptyProfile = defaultGameProfile();
+      const empty = {
+        ruleVersion: GAME_RULE_VERSION, totalXp: 0, level: 1, xpIntoLevel: 0, xpPerLevel: GAME_XP_PER_LEVEL, xpToNextLevel: GAME_XP_PER_LEVEL, settledThroughDate: null,
+        gold: 0, attributes: emptyProfile.attributes, unspentPoints: 0, attrPointsEarned: 0,
+        domainBonuses: (["steps", "sleep", "strength", "quest_steps"] as GameDomain[]).map((domain) => ({ domain, attrPct: 0, equipPct: 0 })),
+        goldBonusPct: 0,
+        equipment: GAME_EQUIPMENT.map((def) => ({ id: def.id, name: def.name, slot: def.slot, effectLabel: equipmentEffectLabel(def), price: def.price, obtain: def.obtain, obtainNote: def.obtain === "task" ? "完成每日任务「主睡眠 ≥ 7.5 小时」获得" : "金币购买", owned: false, equipped: false })),
+        dailyTasks: GAME_DAILY_TASKS.map((def) => ({ id: def.id, label: def.label, targetLabel: def.targetLabel, progress: null, progressLabel: "数据尚未同步", target: def.target, state: "missing" as const, rewardXp: def.rewardXp, rewardGold: def.rewardGold })),
+        quest: emptyQuest, settlements: [], previews: [],
+      };
       if (!isOwner(ctx)) return { forbidden: true, ok: false, healthState: "missing", ...empty };
       try {
         const healthLoad = await loadHealthSnapshot(ctx);
         const strengthLoad = await loadStrengthSnapshot(ctx);
         const strength = effectiveStrength(healthLoad, strengthLoad);
         const health = healthLoad.state === "ok" ? healthLoad.snapshot : null;
-        const plan = buildGamePlan(health, strength, todayLA);
-        const settled = await settleGame(ctx, plan.candidates);
+        const profile = await loadGameProfile(ctx);
+        const plan = buildGamePlan(health, strength, todayLA, profile);
+        const settled = await settleGame(ctx, plan.candidates, profile, health, strength, todayLA);
         const db = ctx.db<typeof schema>();
         // A preview whose (date, category) is already booked — possible
         // when a later snapshot's complete window moved backwards — is
@@ -1514,12 +2002,126 @@ export const Actions = {
           xpPerLevel: GAME_XP_PER_LEVEL,
           xpToNextLevel: GAME_XP_PER_LEVEL - xpIntoLevel,
           settledThroughDate: settled.settledThroughDate,
+          gold: profile.gold,
+          attributes: profile.attributes,
+          unspentPoints: unspentPoints(profile),
+          attrPointsEarned: profile.attrPointsEarned,
+          domainBonuses: (["steps", "sleep", "strength", "quest_steps"] as GameDomain[]).map((domain) => ({ domain, attrPct: attrBonusPct(profile, domain), equipPct: equipBonusPct(profile, domain) })),
+          goldBonusPct: equipBonusPct(profile, "gold"),
+          equipment: GAME_EQUIPMENT.map((def) => ({
+            id: def.id, name: def.name, slot: def.slot, effectLabel: equipmentEffectLabel(def), price: def.price, obtain: def.obtain,
+            obtainNote: def.obtain === "task" ? "完成每日任务「主睡眠 ≥ 7.5 小时」获得" : "金币购买",
+            owned: profile.owned.includes(def.id),
+            equipped: profile.equipped[def.slot] === def.id,
+          })),
+          dailyTasks: settled.dailyTasks,
           quest: { date: todayLA, targetSteps: GAME_QUEST_TARGET_STEPS, steps: todaySteps, rewardXp: GAME_QUEST_REWARD_XP, state: questState },
           settlements: settled.ledger,
           previews,
         };
       } catch {
         return { forbidden: false, ok: false, healthState: "missing", ...empty };
+      }
+    },
+  }),
+
+  // LIFE-C1 S2: allocate attribute points. STRICT owner gate. Points come
+  // only from levels already earned (attrPointsEarned is backfilled from
+  // total XP during settlement); allocation is permanent in v1 (no
+  // respec) and affects only settlements booked afterwards.
+  allocateAttribute: defineAction({
+    request: z.object({ attribute: gameAttributeSchema, count: z.number().int().min(1).max(50) }),
+    response: gameMutationResponse,
+    async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可分配属性点" };
+      try {
+        const db = ctx.db<typeof schema>();
+        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
+        const stored = stateRows[0];
+        const profile = parseGameProfile(stored);
+        if (args.count > unspentPoints(profile)) return { ok: false, forbidden: false, message: `未分配点数不足：当前剩余 ${unspentPoints(profile)} 点` };
+        profile.attributes[args.attribute] += args.count;
+        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        ctx.invalidateQueries(["game"]);
+        return { ok: true, forbidden: false, message: `已分配 ${args.count} 点到${GAME_ATTRIBUTE_LABELS[args.attribute]}，剩余 ${unspentPoints(profile)} 点` };
+      } catch {
+        return { ok: false, forbidden: false, message: "分配失败，请稍后再试" };
+      }
+    },
+  }),
+
+  // LIFE-C1 S2: buy a catalog item with gold. STRICT owner gate. No real
+  // payment anywhere — gold is minted only by XP settlements and daily
+  // tasks.
+  buyEquipment: defineAction({
+    request: z.object({ itemId: z.string().min(1) }),
+    response: gameMutationResponse,
+    async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可购买装备" };
+      try {
+        const def = GAME_EQUIPMENT_BY_ID.get(args.itemId);
+        if (!def) return { ok: false, forbidden: false, message: "没有这件装备" };
+        if (def.obtain === "task" || def.price === null) return { ok: false, forbidden: false, message: `${def.name} 不能购买：${def.obtain === "task" ? "完成每日任务「主睡眠 ≥ 7.5 小时」即可获得" : "只能通过其他方式获得"}` };
+        const db = ctx.db<typeof schema>();
+        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
+        const stored = stateRows[0];
+        const profile = parseGameProfile(stored);
+        if (profile.owned.includes(def.id)) return { ok: false, forbidden: false, message: `已经拥有${def.name}` };
+        if (profile.gold < def.price) return { ok: false, forbidden: false, message: `金币不足：${def.name} 需要 ${def.price} 金币，当前余额 ${profile.gold}` };
+        profile.gold -= def.price;
+        profile.owned.push(def.id);
+        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        ctx.invalidateQueries(["game"]);
+        return { ok: true, forbidden: false, message: `已购买${def.name}，花费 ${def.price} 金币` };
+      } catch {
+        return { ok: false, forbidden: false, message: "购买失败，请稍后再试" };
+      }
+    },
+  }),
+
+  // LIFE-C1 S2: equip an owned item into its slot (one item per slot;
+  // equipping replaces whatever the slot held). STRICT owner gate.
+  equipItem: defineAction({
+    request: z.object({ itemId: z.string().min(1) }),
+    response: gameMutationResponse,
+    async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可装备" };
+      try {
+        const def = GAME_EQUIPMENT_BY_ID.get(args.itemId);
+        if (!def) return { ok: false, forbidden: false, message: "没有这件装备" };
+        const db = ctx.db<typeof schema>();
+        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
+        const stored = stateRows[0];
+        const profile = parseGameProfile(stored);
+        if (!profile.owned.includes(def.id)) return { ok: false, forbidden: false, message: `尚未拥有${def.name}` };
+        profile.equipped[def.slot] = def.id;
+        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        ctx.invalidateQueries(["game"]);
+        return { ok: true, forbidden: false, message: `已装备${def.name}（${GAME_SLOT_LABELS[def.slot]}）` };
+      } catch {
+        return { ok: false, forbidden: false, message: "装备失败，请稍后再试" };
+      }
+    },
+  }),
+
+  // LIFE-C1 S2: unequip a slot. STRICT owner gate.
+  unequipItem: defineAction({
+    request: z.object({ slot: z.enum(["weapon", "armor", "accessory"]) }),
+    response: gameMutationResponse,
+    async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可卸下装备" };
+      try {
+        const db = ctx.db<typeof schema>();
+        const stateRows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
+        const stored = stateRows[0];
+        const profile = parseGameProfile(stored);
+        if (!profile.equipped[args.slot]) return { ok: false, forbidden: false, message: `${GAME_SLOT_LABELS[args.slot]}槽位本来就是空的` };
+        profile.equipped[args.slot] = null;
+        await saveGameProfile(ctx, profile, stored?.totalXp ?? 0, stored?.settledThroughDate ?? null);
+        ctx.invalidateQueries(["game"]);
+        return { ok: true, forbidden: false, message: `已卸下${GAME_SLOT_LABELS[args.slot]}` };
+      } catch {
+        return { ok: false, forbidden: false, message: "卸下失败，请稍后再试" };
       }
     },
   }),

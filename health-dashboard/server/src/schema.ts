@@ -68,33 +68,50 @@ export const readinessHistory = sqliteTable("readiness_history", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
-// LIFE-C1 人生游戏 (CWEB-MVP-001·S1) game-side state. These two tables hold
-// ONLY game state and settlement metadata — never health raw values. The
-// ledger records, per settled day and category, the XP awarded, the rule
-// version that produced it, and a source reference (the source calendar
-// date plus the source snapshot's updatedAt) so every award stays
-// explainable without duplicating the health record it was derived from.
-// The (local_date, category) primary key is the idempotency identity:
-// owner + LA local date + category settles at most once, enforced by the
-// database itself (inserts use ON CONFLICT DO NOTHING).
+// LIFE-C1 人生游戏 (CWEB-MVP-001·S1/S2) game-side state. These two tables
+// hold ONLY game state and settlement metadata — never health raw values.
+// The ledger records, per settled day, category, and detail, the XP and
+// gold awarded, the rule version that produced it, and a source reference
+// (the source calendar date plus the source snapshot's updatedAt) so every
+// award stays explainable without duplicating the health record it was
+// derived from. The (local_date, category, detail) primary key is the
+// idempotency identity: owner + LA local date + category + detail settles
+// at most once, enforced by the database itself (inserts use ON CONFLICT
+// DO NOTHING). `detail` is "" for the base categories; for daily_task rows
+// it is the task id (3 tasks share one date and category). S2 (migration
+// 0010) rebuilt this table with the detail/gold columns; S1 rows were
+// copied across with detail "" and gold 0 — their gold was folded into
+// the one-time initial gold balance (= cumulative XP at first S2 read),
+// never minted twice.
+// game_state additionally carries the S2 character system: gold balance,
+// the four attribute allocations (attrs_json), attribute points ever
+// earned, and owned/equipped equipment (equipment_json) — all game
+// state, stored as one row.
 export const gameState = sqliteTable("game_state", {
   id: integer("id").primaryKey(),
   totalXp: integer("total_xp").notNull().default(0),
   settledThroughDate: text("settled_through_date"),
+  gold: integer("gold").notNull().default(0),
+  goldInitialized: integer("gold_initialized").notNull().default(0),
+  attrsJson: text("attrs_json"),
+  attrPointsEarned: integer("attr_points_earned").notNull().default(0),
+  equipmentJson: text("equipment_json"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
 export const gameSettlements = sqliteTable("game_settlements", {
   localDate: text("local_date").notNull(),
-  category: text("category", { enum: ["steps", "sleep", "strength", "quest_steps"] }).notNull(),
+  category: text("category", { enum: ["steps", "sleep", "strength", "quest_steps", "daily_task"] }).notNull(),
+  detail: text("detail").notNull().default(""),
   xp: integer("xp").notNull(),
+  gold: integer("gold").notNull().default(0),
   ruleVersion: integer("rule_version").notNull(),
   sourceDate: text("source_date").notNull(),
   sourceUpdatedAt: text("source_updated_at"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 }, (table) => [
-  primaryKey({ columns: [table.localDate, table.category] }),
+  primaryKey({ columns: [table.localDate, table.category, table.detail] }),
 ]);
 
 export const syncLog = sqliteTable("sync_log", {

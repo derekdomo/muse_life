@@ -63,6 +63,7 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .sync-button:disabled { opacity: .55; }
 
 .view-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; margin: 14px 0 0; padding: 3px; background: var(--surface-soft); border-radius: 10px; }
+.view-tabs-2 { grid-template-columns: repeat(2, 1fr); }
 .view-tabs button { min-height: 38px; border: 0; border-radius: 7px; background: transparent; color: var(--dim); font-size: 13px; font-weight: 750; cursor: pointer; }
 .view-tabs button.selected { background: var(--surface); color: var(--text); box-shadow: 0 1px 4px rgba(23, 33, 27, .08); }
 
@@ -413,6 +414,37 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .game-ledger-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--border); }
 .game-xp { color: var(--accent); font-size: 13px; font-weight: 800; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .game-xp-muted { color: var(--slate); }
+.game-gold { color: var(--amber); font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.game-points-note { margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 750; }
+.game-action-note { margin: 12px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--surface-soft); color: var(--text); font-size: 12px; font-weight: 700; }
+.game-btn { min-height: 36px; border: 1px solid var(--accent); border-radius: 8px; padding: 0 14px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 800; cursor: pointer; }
+.game-btn:disabled { opacity: .45; cursor: default; }
+.game-btn-ghost { border-color: var(--border); background: transparent; color: var(--dim); }
+.game-attrs { margin-top: 6px; }
+.game-attr-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.game-attr-row:last-child { border-bottom: 0; }
+.game-attr-main strong { display: block; font-size: 14px; }
+.game-attr-main small { display: block; margin-top: 2px; color: var(--dim); font-size: 11px; line-height: 1.45; }
+.game-attr-value { font-size: 24px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.game-slots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.game-slot { display: grid; gap: 4px; align-content: start; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); }
+.game-slot-label { color: var(--dim); font-size: 11px; font-weight: 800; }
+.game-slot strong { font-size: 14px; }
+.game-slot small { color: var(--dim); font-size: 11px; line-height: 1.45; }
+.game-slot .game-btn { margin-top: 6px; justify-self: start; min-height: 30px; padding: 0 10px; }
+.game-slot-empty { padding: 6px 0; }
+.game-shop { margin-top: 12px; border-top: 1px solid var(--border); }
+.game-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.game-item:last-child { border-bottom: 0; }
+.game-item-main strong { display: block; font-size: 14px; }
+.game-item-main small { display: block; margin-top: 2px; color: var(--dim); font-size: 11px; line-height: 1.45; }
+.game-item-locked { color: var(--slate); font-size: 12px; font-weight: 750; white-space: nowrap; }
+.game-tasks { display: grid; gap: 16px; margin-top: 14px; }
+.game-task .section-line { align-items: baseline; }
+.game-task .section-line strong { font-size: 13px; }
+@media (max-width: 560px) {
+  .game-slots { grid-template-columns: 1fr; }
+}
 .source-notice { padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .source-notice h1 { margin: 4px 0 8px; font-size: 20px; }
 .source-notice p { margin: 0 0 14px; color: var(--dim); font-size: 13px; line-height: 1.6; }

@@ -1,0 +1,54 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700;900&display=swap');
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+  --text-4xl: 36px;
+  --text-4xl--line-height: 40px;
+  --text-5xl: 48px;
+  --text-5xl--line-height: 52px;
+}
+
+:root {
+  /* 学习复利 is a dark, restrained ledger by request — one palette in both
+     system modes. Status is always text + symbol; the two accent colors
+     (Okabe-Ito sky blue / orange) only support solid-vs-dashed lines. */
+  color-scheme: dark;
+  --bg: #0e1116;
+  --surface: #171c24;
+  --surface-2: #1e2530;
+  --text: #e8ecf1;
+  --dim: #9aa7b5;
+  --faint: #6b7889;
+  --border: #262e3a;
+  --accent: #56b4e9;
+  --accent-2: #e69f00;
+  --radius: 12px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-2);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+.font-display {
+  font-family: "Noto Serif SC", "Songti SC", "STSong", serif;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
