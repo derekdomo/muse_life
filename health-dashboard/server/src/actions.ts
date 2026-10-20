@@ -965,10 +965,17 @@ const refreshStatusResponse = z.object({ forbidden: z.boolean(), status: z.enum(
 // holds at write time, not just at read time.
 // Limitation: for profiles written before the watermark existed, the
 // first settlement adopts as its baseline the gold of rows booked at or
-// before the profile's last successful save (rows a failed pre-fix save
-// stranded after that save are still recovered); gold from before that
-// point is indistinguishable from gold already spent, so it is adopted
-// as accounted rather than re-minted.
+// before an IMMUTABLE adoption boundary (game_state.gold_adoption_boundary,
+// backfilled by migration 0012 from the profile's last successful save
+// at migration time and never written by any profile save afterwards),
+// so rows a failed save stranded after that save are still recovered,
+// while gold from before the boundary is indistinguishable from gold
+// already spent and is adopted as accounted rather than re-minted.
+// Ordinary profile writes (purchase / allocation / equip / unequip)
+// advance updated_at but cannot move the boundary — an earlier shape of
+// this adoption read updated_at directly, which let a purchase that
+// landed between a failed settlement save and its retry absorb the
+// stranded row into the baseline and lose the reward permanently.
 // ---------------------------------------------------------------------------
 const GAME_RULE_VERSION = 2;
 const GAME_XP_PER_LEVEL = 100;
@@ -1082,13 +1089,16 @@ function parseGameProfile(row: { gold: number; goldInitialized: number; goldLedg
 }
 
 // One persisted game_state row, decomposed: the profile, the totals the
-// settlement maintains alongside it, the write revision (CAS token), and
-// the row's last successful save instant (used only by the one-time
-// watermark baseline adoption in settleGame).
+// settlement maintains alongside it, the write revision (CAS token),
+// the row's last successful save instant, and the immutable gold
+// baseline-adoption boundary (migration 0012; null when the row never
+// needed one — read only by the one-time watermark baseline adoption in
+// settleGame, never advanced by profile writes).
 interface GameStateRow {
   exists: boolean;
   revision: number;
   updatedAt: Date | null;
+  goldAdoptionBoundary: Date | null;
   totalXp: number;
   settledThroughDate: string | null;
   profile: GameProfile;
@@ -1098,11 +1108,12 @@ async function loadGameStateRow(ctx: Ctx): Promise<GameStateRow> {
   const db = ctx.db<typeof schema>();
   const rows = await db.select().from(schema.gameState).where(eq(schema.gameState.id, 1)).limit(1);
   const row = rows[0];
-  if (!row) return { exists: false, revision: 0, updatedAt: null, totalXp: 0, settledThroughDate: null, profile: defaultGameProfile() };
+  if (!row) return { exists: false, revision: 0, updatedAt: null, goldAdoptionBoundary: null, totalXp: 0, settledThroughDate: null, profile: defaultGameProfile() };
   return {
     exists: true,
     revision: row.revision ?? 0,
     updatedAt: row.updatedAt,
+    goldAdoptionBoundary: row.goldAdoptionBoundary ?? null,
     totalXp: row.totalXp,
     settledThroughDate: row.settledThroughDate,
     profile: parseGameProfile(row),
@@ -1424,19 +1435,41 @@ type LedgerAction =
 
 // Monotonic source-version ordering (CWEB-SETTLE-001): an unversioned
 // source (null) is the OLDEST version — it never supersedes a versioned
-// row; two versioned sources order by their instants (unparseable values
-// fall back to lexicographic order, which agrees with chronological
-// order for the canonical ISO strings the snapshots carry). Returns a
-// negative number when a is older than b, 0 when equal, positive when a
-// is newer.
+// row; two versioned sources order by their parsed instants, and two
+// strings that parse to the SAME instant are the SAME version (0) even
+// when their formats differ — `2026-10-02T01:00:00.000Z` and
+// `2026-10-02T01:00:00Z` are one version, so a same-version candidate
+// never re-prices a booked row. Unparseable values fall back to
+// lexicographic order, which agrees with chronological order for the
+// canonical ISO strings the snapshots carry. Returns a negative number
+// when a is older than b, 0 when equal, positive when a is newer.
 function compareSourceVersions(a: string | null, b: string | null): number {
   if (a === b) return 0;
   if (a === null) return -1;
   if (b === null) return 1;
   const timeA = Date.parse(a);
   const timeB = Date.parse(b);
-  if (!Number.isNaN(timeA) && !Number.isNaN(timeB)) return timeA < timeB ? -1 : 1;
+  if (!Number.isNaN(timeA) && !Number.isNaN(timeB)) {
+    if (timeA === timeB) return 0;
+    return timeA < timeB ? -1 : 1;
+  }
   return a < b ? -1 : 1;
+}
+
+// The write-time twin of compareSourceVersions for the ledger UPDATE
+// guard (CWEB-SETTLE-001): a SQL boolean that is true exactly when the
+// stored source version is strictly older than the candidate's under
+// the SAME normalized ordering — both sides parsed to instants via
+// unixepoch(..., 'subsec') whenever both parse (so an equal instant in
+// a different string format is NOT "older" and the guard blocks, just
+// as the JS comparison returns 0 and planLedgerAction skips), with the
+// same lexicographic fallback when either side is unparseable. A plain
+// string `<` here would disagree with the JS side precisely on
+// same-instant format variants ("." sorts before "Z"), letting a
+// write-time guard pass a candidate the read-time decision had already
+// judged the same version.
+function sourceVersionSqlBefore(stored: typeof schema.gameSettlements.sourceUpdatedAt, candidate: string) {
+  return sql`(CASE WHEN unixepoch(${stored}, 'subsec') IS NOT NULL AND unixepoch(${candidate}, 'subsec') IS NOT NULL THEN unixepoch(${stored}, 'subsec') < unixepoch(${candidate}, 'subsec') ELSE ${stored} < ${candidate} END)`;
 }
 
 // Pure settlement decision for one candidate against its stored row
@@ -1590,28 +1623,36 @@ async function bookLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<void> 
 }
 
 // Settle one domain candidate against the ledger, applying the
-// planLedgerAction decision (CWEB-SETTLE-001): insert when unbooked
-// (ON CONFLICT DO NOTHING — a concurrent insert of the same key wins
-// and this one becomes a no-op, never a duplicate); on a same-rule-
-// version, strictly-newer source revision, update the stored row in
-// place — xp, gold and the source reference in a single UPDATE, so the
-// row is never half-revised — or refresh only the source reference when
-// the value already matches. The UPDATEs repeat the monotonic guard in
-// their WHERE clause (stored source version is null or strictly older
-// than the candidate's, under the current rule version), so the
-// decision planLedgerAction made at read time is re enforced at write
-// time: a row settled from a newer source in between is never rolled
-// back by this older candidate. Gold is NOT adjusted here — the balance
-// follows the ledger gold SUM through the watermark reconciliation in
-// settleGame, which is what makes a stranded booking recoverable.
+// planLedgerAction decision (CWEB-SETTLE-001): insert when unbooked;
+// on a same-rule-version, strictly-newer source revision, update the
+// stored row in place — xp, gold and the source reference in a single
+// UPDATE, so the row is never half-revised — or refresh only the source
+// reference when the value already matches. The insert NEVER assumes
+// success: ON CONFLICT DO NOTHING reports through RETURNING whether
+// this write actually landed, and when a concurrent settlement booked
+// the same key first (both read the key as missing), the losing
+// candidate re-reads the winning row and re-plans against it — a newer
+// source still refreshes/revises the winner through the guarded UPDATE
+// below, an older or same-version one skips — instead of being silently
+// dropped and leaving the ledger at the older source until some later
+// open. The UPDATEs repeat the monotonic guard in their WHERE clause
+// (stored source version is null or strictly older than the
+// candidate's, under the current rule version, compared with the same
+// normalized instant ordering as compareSourceVersions — see
+// sourceVersionSqlBefore), so the decision planLedgerAction made at
+// read time is re enforced at write time: a row settled from a newer
+// source in between is never rolled back by this older candidate. Gold
+// is NOT adjusted here — the balance follows the ledger gold SUM
+// through the watermark reconciliation in settleGame, which is what
+// makes a stranded booking recoverable.
 async function settleLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<void> {
   const db = ctx.db<typeof schema>();
   const key = and(eq(schema.gameSettlements.localDate, candidate.localDate), eq(schema.gameSettlements.category, candidate.category), eq(schema.gameSettlements.detail, candidate.detail));
   const existingRows = await db.select().from(schema.gameSettlements).where(key).limit(1);
-  const action = planLedgerAction(existingRows[0], candidate);
+  let action = planLedgerAction(existingRows[0], candidate);
   if (action.kind === "skip") return;
   if (action.kind === "insert") {
-    await db.insert(schema.gameSettlements).values({
+    const written = await db.insert(schema.gameSettlements).values({
       localDate: candidate.localDate,
       category: candidate.category,
       detail: candidate.detail,
@@ -1621,14 +1662,26 @@ async function settleLedgerRow(ctx: Ctx, candidate: GameCandidate): Promise<void
       sourceDate: candidate.sourceDate,
       sourceUpdatedAt: candidate.sourceUpdatedAt,
       createdAt: new Date(),
-    }).onConflictDoNothing();
-    return;
+    }).onConflictDoNothing()
+      .returning({ localDate: schema.gameSettlements.localDate });
+    if (written.length > 0) return;
+    // The insert landed nothing: a concurrent settlement won this key
+    // between our read and our insert. Re-read the winning row and
+    // decide again under the same monotonic rules; only a refresh or a
+    // revise falls through to the guarded update below.
+    const winnerRows = await db.select().from(schema.gameSettlements).where(key).limit(1);
+    action = planLedgerAction(winnerRows[0], candidate);
+    if (action.kind !== "refresh_source_ref" && action.kind !== "revise") return;
   }
   // Write-time monotonic guard: only a row still booked under the
   // current rule version from an older (or unversioned) source may be
-  // refreshed/revised by this candidate.
+  // refreshed/revised by this candidate. The candidate version is
+  // non-null here: planLedgerAction only refreshes/revises for a
+  // strictly newer candidate version, and null is the oldest version.
+  const candidateVersion = candidate.sourceUpdatedAt;
+  if (candidateVersion === null) return;
   const guard = and(key, eq(schema.gameSettlements.ruleVersion, GAME_RULE_VERSION),
-    sql`(${schema.gameSettlements.sourceUpdatedAt} IS NULL OR ${schema.gameSettlements.sourceUpdatedAt} < ${candidate.sourceUpdatedAt})`);
+    sql`(${schema.gameSettlements.sourceUpdatedAt} IS NULL OR ${sourceVersionSqlBefore(schema.gameSettlements.sourceUpdatedAt, candidateVersion)})`);
   if (action.kind === "refresh_source_ref") {
     await db.update(schema.gameSettlements)
       .set({ sourceDate: candidate.sourceDate, sourceUpdatedAt: candidate.sourceUpdatedAt })
@@ -1706,14 +1759,23 @@ async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthT
     // - Watermark present: it IS the baseline, by construction.
     // - Watermark missing (profile predates the watermark column):
     //   adopt as baseline the gold of rows booked at or before the
-    //   profile's last successful save — those rows' gold entered the
-    //   balance through that save or an earlier one. Rows booked AFTER
-    //   that save (a pre-fix save failure stranded them: the ledger has
-    //   their gold, the balance does not) stay outside the baseline, so
-    //   the reconciliation below credits them now. Gold older than the
-    //   last save cannot be told apart from gold already spent, so it
-    //   is adopted as accounted rather than re-minted — see the section
-    //   header's limitation note.
+    //   immutable adoption boundary — the profile's last successful
+    //   save as captured by the migration 0012 backfill in
+    //   game_state.gold_adoption_boundary. Those rows' gold entered
+    //   the balance through that save or an earlier one. Rows booked
+    //   AFTER the boundary (a save failure stranded them: the ledger
+    //   has their gold, the balance does not) stay outside the
+    //   baseline, so the reconciliation below credits them now. The
+    //   boundary is never written by profile saves, so a purchase,
+    //   allocation or equip landing between the failed save and this
+    //   retry cannot absorb the stranded rows into the baseline the
+    //   way reading updated_at directly did (updated_at advances on
+    //   every profile write). Gold older than the boundary cannot be
+    //   told apart from gold already spent, so it is adopted as
+    //   accounted rather than re-minted — see the section header's
+    //   limitation note. The updatedAt fallback covers only a row the
+    //   backfill could not stamp (defensive; unreachable for rows the
+    //   migration saw).
     let baseline: number;
     if (!profile.goldInitialized) {
       const totals = await db.select({ xpTotal: sql`COALESCE(SUM(${schema.gameSettlements.xp}), 0)`, goldTotal: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)` }).from(schema.gameSettlements);
@@ -1722,12 +1784,15 @@ async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthT
       baseline = Number(totals[0]?.goldTotal ?? 0);
     } else if (profile.goldLedgerSum !== null) {
       baseline = profile.goldLedgerSum;
-    } else if (row.exists && row.updatedAt) {
-      const adopted = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)` }).from(schema.gameSettlements)
-        .where(lte(schema.gameSettlements.createdAt, row.updatedAt));
-      baseline = Number(adopted[0]?.total ?? 0);
     } else {
-      baseline = 0;
+      const boundary = row.exists ? (row.goldAdoptionBoundary ?? row.updatedAt) : null;
+      if (boundary === null) {
+        baseline = 0;
+      } else {
+        const adopted = await db.select({ total: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)` }).from(schema.gameSettlements)
+          .where(lte(schema.gameSettlements.createdAt, boundary));
+        baseline = Number(adopted[0]?.total ?? 0);
+      }
     }
     const plan = buildGamePlan(health, strength, todayLA, profile);
     const unique = [...new Map(plan.candidates.map((candidate) => [`${candidate.localDate}|${candidate.category}|${candidate.detail}`, candidate])).values()];

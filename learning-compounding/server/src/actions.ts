@@ -44,6 +44,13 @@ function todayKey(now = new Date()): string {
   }).format(now);
 }
 
+// The America/Los_Angeles calendar day an instant falls on. Conversion
+// outputs are accumulated on this day (of the FIRST conversion), never
+// on the input's own date.
+function laDateKey(instant: Date): string {
+  return todayKey(instant);
+}
+
 function shiftDay(key: string, delta: number): string {
   const [y = 1970, m = 1, d = 1] = key.split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d + delta));
@@ -117,14 +124,36 @@ const pointSchema = z.object({
   minutes: z.number(),
 });
 
+// One input-batch (cohort) view: inputs whose inputDate falls inside
+// [windowStart, windowEnd], observed as of `asOf`. rate is null when
+// the denominator is 0 — the UI renders that as 无法计算, never 0%/100%.
+const cohortSchema = z.object({
+  windowStart: z.string(),
+  windowEnd: z.string(),
+  asOf: z.string(),
+  eligibleInputs: z.number(),
+  convertedInputs: z.number(),
+  rate: z.number().nullable(),
+});
+
+const cohortsSchema = z.object({
+  all: cohortSchema,
+  days30: cohortSchema,
+});
+
 const skillStatSchema = z.object({
   id: z.number(),
   name: z.string(),
   note: z.string().nullable(),
+  // Known minutes only (rows with a recorded duration). Rows whose
+  // duration is unknown (NULL) are counted in unknownMinutesCount and
+  // contribute nothing here.
   totalMinutes: z.number(),
+  unknownMinutesCount: z.number(),
   inputCount: z.number(),
   convertedCount: z.number(),
   conversionRate: z.number().nullable(),
+  cohorts: cohortsSchema,
   streakDays: z.number(),
   lastInputDate: z.string().nullable(),
   series: z.array(pointSchema),
@@ -137,11 +166,14 @@ const inputRowSchema = z.object({
   topic: z.string(),
   skillId: z.number().nullable(),
   skillName: z.string().nullable(),
-  minutes: z.number(),
+  // null = duration unknown (left blank). A stored 0 is a legacy value
+  // of unknown provenance and is shown as 来源不明, not as unknown.
+  minutes: z.number().nullable(),
   converted: z.boolean(),
   convertedAt: z.string().nullable(),
   outputType: z.enum(OUTPUT_TYPES).nullable(),
   outputNote: z.string().nullable(),
+  attemptStartedAt: z.string().nullable(),
 });
 
 const dashboardResponse = z.object({
@@ -155,7 +187,9 @@ const dashboardResponse = z.object({
     totalInputs: z.number(),
     totalConverted: z.number(),
     totalMinutes: z.number(),
+    unknownMinutesCount: z.number(),
     conversionRate: z.number().nullable(),
+    cohorts: cohortsSchema,
     streakDays: z.number(),
     activeDays: z.number(),
     unconvertedCount: z.number(),
@@ -165,19 +199,34 @@ const dashboardResponse = z.object({
 
 type Dashboard = z.infer<typeof dashboardResponse>;
 
+function emptyCohort(today: string): z.infer<typeof cohortSchema> {
+  return {
+    windowStart: today,
+    windowEnd: today,
+    asOf: today,
+    eligibleInputs: 0,
+    convertedInputs: 0,
+    rate: null,
+  };
+}
+
 // The dashboard a refused caller gets: forbidden flag set, and every
 // data field empty/zero. Built without touching the database.
 function forbiddenDashboard(): Dashboard {
+  const today = todayKey();
+  const empty = emptyCohort(today);
   return {
     forbidden: true,
-    today: todayKey(),
+    today,
     skills: [],
     inputs: [],
     totals: {
       totalInputs: 0,
       totalConverted: 0,
       totalMinutes: 0,
+      unknownMinutesCount: 0,
       conversionRate: null,
+      cohorts: { all: empty, days30: empty },
       streakDays: 0,
       activeDays: 0,
       unconvertedCount: 0,
@@ -204,20 +253,50 @@ const recordInputResponse = z.object({
   id: z.number().nullable(),
 });
 
+const startAttemptResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  attemptStartedAt: z.string().nullable(),
+});
+
+const saveOutputResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  // true when the input was already converted before this call (a
+  // same-requestId retry, or a conversion recorded another way): the
+  // call changed nothing and counted nothing new.
+  alreadyConverted: z.boolean(),
+  convertedAt: z.string().nullable(),
+});
+
+// Occurrence-time accumulation. Inputs accumulate on their inputDate;
+// outputs accumulate on the America/Los_Angeles day of the FIRST
+// conversion instant (convertedAt). A historical input converted today
+// therefore raises only today's output count — past days never change.
+// Minutes accumulate on the input day and count known durations only.
 function buildSeries(
-  rows: Array<{ date: string; convertedAt: Date | null; minutes: number }>,
+  rows: Array<{ date: string; convertedAt: Date | null; minutes: number | null }>,
   today: string,
 ): z.infer<typeof pointSchema>[] {
   if (rows.length === 0) return [];
   const byDay = new Map<string, { inputs: number; converted: number; minutes: number }>();
+  const bump = (key: string) => {
+    const cur = byDay.get(key) ?? { inputs: 0, converted: 0, minutes: 0 };
+    byDay.set(key, cur);
+    return cur;
+  };
+  let first = today;
   for (const row of rows) {
-    const cur = byDay.get(row.date) ?? { inputs: 0, converted: 0, minutes: 0 };
-    cur.inputs += 1;
-    if (row.convertedAt) cur.converted += 1;
-    cur.minutes += row.minutes;
-    byDay.set(row.date, cur);
+    const inDay = bump(row.date);
+    inDay.inputs += 1;
+    if (row.minutes != null) inDay.minutes += row.minutes;
+    if (row.date < first) first = row.date;
+    if (row.convertedAt) {
+      const convKey = laDateKey(row.convertedAt);
+      bump(convKey).converted += 1;
+      if (convKey < first) first = convKey;
+    }
   }
-  const first = rows[0]?.date ?? today;
   const points: z.infer<typeof pointSchema>[] = [];
   let cumInputs = 0;
   let cumConverted = 0;
@@ -240,6 +319,44 @@ function buildSeries(
     cursor = shiftDay(cursor, 1);
   }
   return points;
+}
+
+// Input-batch (cohort) conversion: among the distinct inputs whose
+// inputDate falls in [windowStart, asOf], how many have been converted
+// (first conversion on or before the observation cutoff `asOf`). This
+// answers "of this batch of inputs, how much became output" — it is
+// NOT a per-day output curve and is never presented as one. A zero
+// denominator yields rate null (无法计算), never 0% or 100%.
+function buildCohort(
+  rows: Array<{ date: string; convertedAt: Date | null }>,
+  windowStart: string,
+  asOf: string,
+): z.infer<typeof cohortSchema> {
+  const inWindow = rows.filter((r) => r.date >= windowStart && r.date <= asOf);
+  const converted = inWindow.filter(
+    (r) => r.convertedAt != null && laDateKey(r.convertedAt) <= asOf,
+  ).length;
+  return {
+    windowStart,
+    windowEnd: asOf,
+    asOf,
+    eligibleInputs: inWindow.length,
+    convertedInputs: converted,
+    rate: inWindow.length > 0 ? converted / inWindow.length : null,
+  };
+}
+
+function buildCohorts(
+  rows: Array<{ date: string; convertedAt: Date | null }>,
+  today: string,
+): z.infer<typeof cohortsSchema> {
+  const firstDate = rows.length
+    ? rows.reduce((min, r) => (r.date < min ? r.date : min), rows[0]?.date ?? today)
+    : today;
+  return {
+    all: buildCohort(rows, firstDate, today),
+    days30: buildCohort(rows, shiftDay(today, -29), today),
+  };
 }
 
 export const Actions = {
@@ -273,11 +390,13 @@ export const Actions = {
           id: skill.id,
           name: skill.name,
           note: skill.note ?? null,
-          totalMinutes: mine.reduce((sum, r) => sum + r.minutes, 0),
+          totalMinutes: mine.reduce((sum, r) => sum + (r.minutes ?? 0), 0),
+          unknownMinutesCount: mine.filter((r) => r.minutes == null).length,
           inputCount: mine.length,
           convertedCount,
           conversionRate:
             mine.length > 0 ? convertedCount / mine.length : null,
+          cohorts: buildCohorts(mine, today),
           streakDays: currentStreak(dates, today),
           lastInputDate: mine.length
             ? (mine[mine.length - 1]?.date ?? null)
@@ -296,11 +415,14 @@ export const Actions = {
           skillId: r.skillId ?? null,
           skillName:
             r.skillId != null ? (skillNameById.get(r.skillId) ?? null) : null,
-          minutes: r.minutes,
+          minutes: r.minutes ?? null,
           converted: r.convertedAt != null,
           convertedAt: r.convertedAt ? r.convertedAt.toISOString() : null,
           outputType: r.outputType ?? null,
           outputNote: r.outputNote ?? null,
+          attemptStartedAt: r.attemptStartedAt
+            ? r.attemptStartedAt.toISOString()
+            : null,
         }));
 
       const totalConverted = inputRows.filter((r) => r.convertedAt).length;
@@ -312,9 +434,11 @@ export const Actions = {
         totals: {
           totalInputs: inputRows.length,
           totalConverted,
-          totalMinutes: inputRows.reduce((sum, r) => sum + r.minutes, 0),
+          totalMinutes: inputRows.reduce((sum, r) => sum + (r.minutes ?? 0), 0),
+          unknownMinutesCount: inputRows.filter((r) => r.minutes == null).length,
           conversionRate:
             inputRows.length > 0 ? totalConverted / inputRows.length : null,
+          cohorts: buildCohorts(inputRows, today),
           streakDays: currentStreak(allDates, today),
           activeDays: allDates.size,
           unconvertedCount: inputRows.length - totalConverted,
@@ -392,7 +516,10 @@ export const Actions = {
       topic: z.string().trim().min(1).max(300),
       skillId: z.number().int().positive().nullable().optional(),
       skillName: z.string().trim().min(1).max(80).optional(),
-      minutes: z.number().int().min(0).max(1440).default(0),
+      // Omitted or null = duration unknown, stored as NULL. An explicit
+      // 0 is stored as 0 (legacy rows also hold 0 and are shown as
+      // 来源不明); the two are never conflated.
+      minutes: z.number().int().min(0).max(1440).nullable().optional(),
       converted: z.boolean().default(false),
       outputType: z.enum(OUTPUT_TYPES).optional(),
       outputNote: z.string().trim().max(500).optional(),
@@ -437,7 +564,7 @@ export const Actions = {
           sourceType: args.sourceType,
           topic: args.topic,
           skillId,
-          minutes: args.minutes,
+          minutes: args.minutes ?? null,
           convertedAt: converted ? new Date() : null,
           outputType: converted ? (args.outputType ?? null) : null,
           outputNote: converted ? args.outputNote || null : null,
@@ -460,6 +587,21 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
+      const existing = await db
+        .select({ convertedAt: schema.learningInputs.convertedAt })
+        .from(schema.learningInputs)
+        .where(eq(schema.learningInputs.id, args.id))
+        .limit(1);
+      const row = existing[0];
+      if (!row) return { ok: false, forbidden: false };
+      // First conversion is idempotent: an already-converted input
+      // keeps its original convertedAt and output — a repeated mark
+      // counts nothing new and rewrites no history. To change the
+      // output, unmark first, then mark again.
+      if (row.convertedAt != null) {
+        ctx.invalidateQueries();
+        return { ok: true, forbidden: false };
+      }
       await db
         .update(schema.learningInputs)
         .set({
@@ -479,12 +621,124 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
+      // Revoking returns the input to unconverted: conversion time,
+      // output, and the conversion's idempotency key are cleared. A
+      // later re-mark is a brand-new conversion stamped with the new
+      // conversion time — it never resurrects the old one. The attempt
+      // state is kept: having tried is a fact, not a conversion.
       await db
         .update(schema.learningInputs)
-        .set({ convertedAt: null, outputType: null, outputNote: null })
+        .set({
+          convertedAt: null,
+          outputType: null,
+          outputNote: null,
+          conversionRequestId: null,
+        })
         .where(eq(schema.learningInputs.id, args.id));
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
+    },
+  }),
+
+  // 「挑一条去用」 step 1: enter the attempting state for one input.
+  // This records only that an attempt started — it is NOT a conversion
+  // and touches neither convertedAt nor any count. Re-starting keeps
+  // the first attempt instant.
+  startAttempt: defineAction({
+    request: z.object({ inputId: z.number().int().positive() }),
+    response: startAttemptResponse,
+    async handler(ctx, args): Promise<z.infer<typeof startAttemptResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, attemptStartedAt: null };
+      const db = ctx.db<typeof schema>();
+      const existing = await db
+        .select({
+          attemptStartedAt: schema.learningInputs.attemptStartedAt,
+          convertedAt: schema.learningInputs.convertedAt,
+        })
+        .from(schema.learningInputs)
+        .where(eq(schema.learningInputs.id, args.inputId))
+        .limit(1);
+      const row = existing[0];
+      if (!row) return { ok: false, forbidden: false, attemptStartedAt: null };
+      if (row.convertedAt != null) {
+        // Already an output — there is nothing to attempt.
+        return {
+          ok: false,
+          forbidden: false,
+          attemptStartedAt: row.attemptStartedAt
+            ? row.attemptStartedAt.toISOString()
+            : null,
+        };
+      }
+      const started = row.attemptStartedAt ?? new Date();
+      if (row.attemptStartedAt == null) {
+        await db
+          .update(schema.learningInputs)
+          .set({ attemptStartedAt: started })
+          .where(eq(schema.learningInputs.id, args.inputId));
+      }
+      ctx.invalidateQueries();
+      return { ok: true, forbidden: false, attemptStartedAt: started.toISOString() };
+    },
+  }),
+
+  // 「挑一条去用」 step 2: save a real result as this input's output.
+  // Only this call converts, exactly once per input: the conversion is
+  // stamped with the current instant (its LA day is what the curve
+  // counts — backfilling an old input never credits a past day, and a
+  // conversion alone never creates a learning streak day). Retries
+  // carry the same requestId and are idempotent no-ops; a second,
+  // different output for the same input likewise counts nothing new.
+  saveOutput: defineAction({
+    request: z.object({
+      inputId: z.number().int().positive(),
+      requestId: z.string().trim().min(1).max(120),
+      outputType: z.enum(OUTPUT_TYPES),
+      outputNote: z.string().trim().min(1).max(500),
+    }),
+    response: saveOutputResponse,
+    async handler(ctx, args): Promise<z.infer<typeof saveOutputResponse>> {
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true, alreadyConverted: false, convertedAt: null };
+      }
+      const db = ctx.db<typeof schema>();
+      const existing = await db
+        .select({
+          convertedAt: schema.learningInputs.convertedAt,
+          conversionRequestId: schema.learningInputs.conversionRequestId,
+        })
+        .from(schema.learningInputs)
+        .where(eq(schema.learningInputs.id, args.inputId))
+        .limit(1);
+      const row = existing[0];
+      if (!row) {
+        return { ok: false, forbidden: false, alreadyConverted: false, convertedAt: null };
+      }
+      if (row.convertedAt != null) {
+        return {
+          ok: true,
+          forbidden: false,
+          alreadyConverted: true,
+          convertedAt: row.convertedAt.toISOString(),
+        };
+      }
+      const now = new Date();
+      await db
+        .update(schema.learningInputs)
+        .set({
+          convertedAt: now,
+          outputType: args.outputType,
+          outputNote: args.outputNote,
+          conversionRequestId: args.requestId,
+        })
+        .where(eq(schema.learningInputs.id, args.inputId));
+      ctx.invalidateQueries();
+      return {
+        ok: true,
+        forbidden: false,
+        alreadyConverted: false,
+        convertedAt: now.toISOString(),
+      };
     },
   }),
 

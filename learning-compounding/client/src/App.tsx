@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
@@ -50,6 +50,29 @@ function formatMinutes(min: number): string {
 
 function pct(rate: number | null): string {
   return rate == null ? "—" : `${Math.round(rate * 100)}%`;
+}
+
+// Cohort rates with a zero denominator are not 0% and not 100% — they
+// cannot be computed at all.
+function cohortPct(rate: number | null): string {
+  return rate == null ? "无法计算" : `${Math.round(rate * 100)}%`;
+}
+
+// The America/Los_Angeles calendar day (YYYY-MM-DD) of an ISO instant —
+// the day a conversion counts toward.
+function laDayOf(iso: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(iso));
+}
+
+function newRequestId(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /* ---------------- charts ---------------- */
@@ -171,8 +194,11 @@ function SkillCard({ skill }: { skill: SkillStat }) {
       </div>
       <dl className="mt-4 grid grid-cols-3 gap-3 text-center">
         <div>
-          <dt className="text-xs text-[var(--dim)]">累计投入</dt>
+          <dt className="text-xs text-[var(--dim)]">已知投入时长</dt>
           <dd className="tnum mt-0.5 text-base font-medium">{formatMinutes(skill.totalMinutes)}</dd>
+          {skill.unknownMinutesCount > 0 ? (
+            <dd className="text-xs text-[var(--dim)]">另有 {skill.unknownMinutesCount} 条时长未知</dd>
+          ) : null}
         </div>
         <div>
           <dt className="text-xs text-[var(--dim)]">已转化产出</dt>
@@ -181,10 +207,14 @@ function SkillCard({ skill }: { skill: SkillStat }) {
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-[var(--dim)]">转化率</dt>
+          <dt className="text-xs text-[var(--dim)]">转化率（全部批次）</dt>
           <dd className="tnum mt-0.5 text-base font-medium">{pct(skill.conversionRate)}</dd>
         </div>
       </dl>
+      <p className="tnum mt-3 text-xs text-[var(--dim)]">
+        近 30 天输入批次：已转化 {skill.cohorts.days30.convertedInputs} / 有效输入{" "}
+        {skill.cohorts.days30.eligibleInputs} · 转化率 {cohortPct(skill.cohorts.days30.rate)}
+      </p>
       <div className="mt-3 flex items-end justify-between gap-3 border-t border-[var(--border)] pt-3">
         <p className="text-xs text-[var(--dim)]">
           {skill.lastInputDate ? `最近输入 ${skill.lastInputDate}` : "还没有输入记录"}
@@ -213,7 +243,8 @@ function QuickAdd({ data }: { data: Dashboard }) {
         sourceType,
         topic: topic.trim(),
         skillId: skillId === "" ? null : Number(skillId),
-        minutes: minutes === "" ? 0 : Number(minutes),
+        // Blank duration = unknown (stored as NULL), never a fake 0.
+        minutes: minutes === "" ? undefined : Number(minutes),
         converted: false,
       }),
     onSuccess: (res) => {
@@ -274,8 +305,8 @@ function QuickAdd({ data }: { data: Dashboard }) {
           </select>
         </div>
         <div>
-          <label htmlFor="qa-minutes" className="mb-1 block text-sm text-[var(--dim)]">时长（分钟）</label>
-          <input id="qa-minutes" aria-label="时长（分钟）" type="number" inputMode="numeric" min={0} max={1440} className={inputCls} placeholder="0" value={minutes} onChange={(e) => setMinutes(e.target.value)} />
+          <label htmlFor="qa-minutes" className="mb-1 block text-sm text-[var(--dim)]">时长（分钟，可留空）</label>
+          <input id="qa-minutes" aria-label="时长（分钟）" type="number" inputMode="numeric" min={0} max={1440} className={inputCls} placeholder="留空 = 未知" value={minutes} onChange={(e) => setMinutes(e.target.value)} />
         </div>
       </div>
       {error ? <p role="alert" className="mt-3 text-sm text-[var(--accent-2)]">{error}</p> : null}
@@ -288,6 +319,288 @@ function QuickAdd({ data }: { data: Dashboard }) {
       </button>
       <p className="mt-3 text-xs text-[var(--faint)]">Muse 交付调研报告、点子扫描或小红书摘要时，也会直接记入这本账。</p>
     </form>
+  );
+}
+
+/* ---------------- 挑一条去用 (apply one input) ---------------- */
+
+function ActionCard({ data }: { data: Dashboard }) {
+  const queryClient = useQueryClient();
+  const [skillSel, setSkillSel] = useState<string>("all");
+  const [pickIdx, setPickIdx] = useState(0);
+  const [phase, setPhase] = useState<"idle" | "trying" | "done">("idle");
+  const [outputType, setOutputType] = useState<OutputType>("note");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [doneText, setDoneText] = useState<string | null>(null);
+  // One requestId per save flow: a failed save keeps the draft AND the
+  // same requestId, so the retry can never double-count the conversion.
+  const requestIdRef = useRef<string | null>(null);
+
+  const pending = useMemo(
+    () =>
+      data.inputs.filter((r) => {
+        if (r.converted) return false;
+        if (skillSel === "all") return true;
+        if (skillSel === "none") return r.skillId == null;
+        return r.skillId === Number(skillSel);
+      }),
+    [data.inputs, skillSel],
+  );
+  const current = pending.length > 0 ? pending[pickIdx % pending.length] : undefined;
+  const recentConverted = useMemo(
+    () => data.inputs.filter((r) => r.converted).slice(0, 3),
+    [data.inputs],
+  );
+
+  const resetPick = (nextIdx: number) => {
+    setPickIdx(nextIdx);
+    setPhase("idle");
+    setNote("");
+    setError(null);
+    setDoneText(null);
+    requestIdRef.current = null;
+  };
+
+  const start = useMutation({
+    mutationFn: (inputId: number) => api.startAttempt({ inputId }),
+    onSuccess: (res) => {
+      if (res.forbidden || !res.ok) {
+        setError("开始尝试失败，请重试。");
+        return;
+      }
+      requestIdRef.current = newRequestId();
+      setPhase("trying");
+      setError(null);
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: () => setError("开始尝试失败，请重试。"),
+  });
+
+  const save = useMutation({
+    mutationFn: (inputId: number) => {
+      if (!requestIdRef.current) requestIdRef.current = newRequestId();
+      return api.saveOutput({
+        inputId,
+        requestId: requestIdRef.current,
+        outputType,
+        outputNote: note.trim(),
+      });
+    },
+    onSuccess: (res) => {
+      if (res.forbidden) {
+        setError("当前身份无权保存产出。草稿还在，可以重试。");
+        return;
+      }
+      if (!res.ok) {
+        setError("保存失败，草稿还在。用同一请求重试不会重复计数。");
+        return;
+      }
+      setDoneText(
+        res.alreadyConverted
+          ? "这条输入此前已经记过产出了，没有重复计数。"
+          : "已保存为产出，这条输入正式计为一次转化。",
+      );
+      setPhase("done");
+      setNote("");
+      setError(null);
+      requestIdRef.current = null;
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: () => setError("保存失败，草稿还在。用同一请求重试不会重复计数。"),
+  });
+
+  const selectCls =
+    "rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]";
+  const inputCls =
+    "w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-base text-[var(--text)] outline-none focus:border-[var(--accent)]";
+
+  return (
+    <section aria-label="挑一条去用" className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-display text-lg font-bold">挑一条去用</h2>
+        <select
+          aria-label="按技能筛选待转化输入"
+          className={selectCls}
+          value={skillSel}
+          onChange={(e) => {
+            setSkillSel(e.target.value);
+            resetPick(0);
+          }}
+        >
+          <option value="all">全部技能</option>
+          {data.skills.map((s) => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+          <option value="none">未关联技能</option>
+        </select>
+      </div>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        把一条旧输入变成一个真实产出。「开始尝试」只进入尝试状态、不算转化；填好实际结果点「保存为产出」才计一次转化。补记历史输入的产出只计入转化发生的今天，不会奖励今天的连续天数。
+      </p>
+
+      {phase === "done" ? (
+        <div className="mt-4 border-t border-[var(--border)] pt-3">
+          <p className="text-sm font-medium">✓ {doneText}</p>
+          <button
+            type="button"
+            onClick={() => resetPick(0)}
+            className="mt-3 rounded-lg border border-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--accent)]"
+          >
+            再挑一条
+          </button>
+        </div>
+      ) : current ? (
+        <div className="mt-4 border-t border-[var(--border)] pt-3">
+          <p className="text-sm font-medium leading-snug">{current.topic}</p>
+          <p className="mt-1.5 text-sm text-[var(--dim)]">
+            输入于 {formatDay(current.date, data.today)} · {SOURCE_LABEL[current.sourceType]}
+            {current.skillName ? ` · ${current.skillName}` : " · 未关联技能"}
+            {current.attemptStartedAt ? ` · ◐ 已开始尝试（${laDayOf(current.attemptStartedAt)}）` : ""}
+          </p>
+          {phase === "idle" ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={start.isPending}
+                onClick={() => start.mutate(current.id)}
+                className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b1520] disabled:opacity-50"
+              >
+                {current.attemptStartedAt ? "继续尝试" : "开始尝试"}
+              </button>
+              <button
+                type="button"
+                onClick={() => resetPick(pickIdx + 1)}
+                className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm text-[var(--dim)]"
+              >
+                跳过，换一条
+              </button>
+              <span className="tnum self-center text-xs text-[var(--faint)]">
+                待转化共 {pending.length} 条
+              </span>
+            </div>
+          ) : (
+            <div className="mt-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="ac-type" className="mb-1 block text-sm text-[var(--dim)]">产出类型</label>
+                  <select id="ac-type" aria-label="产出类型" className={inputCls} value={outputType} onChange={(e) => setOutputType(e.target.value as OutputType)}>
+                    {OUTPUT_TYPES.map((t) => (
+                      <option key={t} value={t}>{OUTPUT_LABEL[t]}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="ac-note" className="mb-1 block text-sm text-[var(--dim)]">实际结果 / 作品引用</label>
+                  <input
+                    id="ac-note"
+                    aria-label="实际结果或作品引用"
+                    type="text"
+                    className={inputCls}
+                    placeholder="例如：拿这套拆分法跑通了周报任务"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={save.isPending || !note.trim()}
+                  onClick={() => save.mutate(current.id)}
+                  className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b1520] disabled:opacity-50"
+                >
+                  {save.isPending ? "保存中…" : "保存为产出"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resetPick(pickIdx + 1)}
+                  className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm text-[var(--dim)]"
+                >
+                  换一条（会清掉未保存的草稿）
+                </button>
+              </div>
+            </div>
+          )}
+          {error ? <p role="alert" className="mt-3 text-sm text-[var(--accent-2)]">{error}</p> : null}
+        </div>
+      ) : (
+        <div className="mt-4 border-t border-[var(--border)] pt-3">
+          <p className="text-sm text-[var(--dim)]">
+            这个范围里没有待转化的输入了。下面是最近的已转化记录，可以回看当时的产出：
+          </p>
+          {recentConverted.length > 0 ? (
+            <ul className="mt-3 space-y-2">
+              {recentConverted.map((r) => (
+                <li key={r.id} className="text-sm leading-snug">
+                  <span className="font-medium">✓ {r.topic}</span>
+                  <span className="text-[var(--dim)]">
+                    {" "}— {r.outputType ? OUTPUT_LABEL[r.outputType] : "已转化"}
+                    {r.outputNote ? `：${r.outputNote}` : ""}
+                    {r.convertedAt ? `（转化于 ${laDayOf(r.convertedAt)}）` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 text-sm text-[var(--dim)]">还没有任何已转化记录。先去记一笔输入吧。</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ---------------- cohort view ---------------- */
+
+function CohortView({ data }: { data: Dashboard }) {
+  const [win, setWin] = useState<"all" | "days30">("all");
+  const head = data.totals.cohorts[win];
+  const rows: Array<{ name: string; cohort: Dashboard["totals"]["cohorts"]["all"] }> = [
+    { name: "全部输入（含未关联）", cohort: data.totals.cohorts[win] },
+    ...data.skills.map((s) => ({ name: s.name, cohort: s.cohorts[win] })),
+  ];
+  return (
+    <section aria-label="输入批次转化率" className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-display text-base font-bold">视图二 · 输入批次转化率</h2>
+        <div role="group" aria-label="输入窗口" className="flex overflow-hidden rounded-lg border border-[var(--border)]">
+          {(
+            [
+              ["all", "全部时间"],
+              ["days30", "近 30 天"],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              aria-pressed={win === key}
+              onClick={() => setWin(key)}
+              className={`px-3 py-1.5 text-sm ${win === key ? "bg-[var(--surface-2)] font-semibold text-[var(--text)]" : "text-[var(--dim)]"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        同一技能、同一输入窗口内的输入里，有多少已经变成产出。它回答的是批次的转化，不是某一天的产出曲线；窗口内没有输入时显示「无法计算」。
+      </p>
+      <div className="mt-3 divide-y divide-[var(--border)]">
+        {rows.map((row) => (
+          <div key={row.name} className="flex items-baseline justify-between gap-3 py-2">
+            <p className="text-sm font-medium">{row.name}</p>
+            <p className="tnum text-sm text-[var(--dim)]">
+              已转化 {row.cohort.convertedInputs} / 有效输入 {row.cohort.eligibleInputs} ·{" "}
+              <span className="font-semibold text-[var(--text)]">{cohortPct(row.cohort.rate)}</span>
+            </p>
+          </div>
+        ))}
+      </div>
+      <p className="tnum mt-2 text-xs text-[var(--faint)]">
+        输入窗口 {head.windowStart} 至 {head.windowEnd} · 观察截至 {head.asOf}（洛杉矶日期）
+      </p>
+    </section>
   );
 }
 
@@ -360,6 +673,10 @@ function LedgerRow({ row, today }: { row: InputRow; today: string }) {
           <span className="shrink-0 rounded-full border border-[var(--accent-2)] px-2 py-0.5 text-xs font-medium text-[var(--accent-2)]">
             ✓ 已转化
           </span>
+        ) : row.attemptStartedAt ? (
+          <span className="shrink-0 rounded-full border border-[var(--accent)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">
+            ◐ 尝试中
+          </span>
         ) : (
           <span className="shrink-0 rounded-full border border-[var(--border)] px-2 py-0.5 text-xs font-medium text-[var(--dim)]">
             ○ 待转化
@@ -369,13 +686,23 @@ function LedgerRow({ row, today }: { row: InputRow; today: string }) {
       <p className="mt-1.5 text-sm text-[var(--dim)]">
         {formatDay(row.date, today)} · {SOURCE_LABEL[row.sourceType]}
         {row.skillName ? ` · ${row.skillName}` : " · 未关联技能"}
-        {row.minutes > 0 ? ` · ${row.minutes} 分钟` : ""}
+        {row.minutes == null
+          ? " · 时长未知"
+          : row.minutes === 0
+            ? " · 时长 0 分（来源不明）"
+            : ` · ${row.minutes} 分钟`}
+        {!row.converted && row.attemptStartedAt
+          ? ` · 尝试始于 ${laDayOf(row.attemptStartedAt)}`
+          : ""}
       </p>
       {row.converted ? (
         <p className="mt-2 text-sm">
           <span className="text-[var(--dim)]">产出：</span>
           {row.outputType ? OUTPUT_LABEL[row.outputType] : "已转化"}
           {row.outputNote ? ` — ${row.outputNote}` : ""}
+          {row.convertedAt ? (
+            <span className="text-[var(--dim)]">（转化于 {laDayOf(row.convertedAt)}）</span>
+          ) : null}
         </p>
       ) : null}
       <div className="mt-3 flex flex-wrap gap-2">
@@ -418,6 +745,11 @@ function LedgerRow({ row, today }: { row: InputRow; today: string }) {
           </button>
         )}
       </div>
+      {row.converted ? (
+        <p className="mt-2 text-xs text-[var(--faint)]">
+          撤销转化后这条回到待转化；之后重新标记会以新的转化时间重新计入，不会恢复旧的转化日。
+        </p>
+      ) : null}
       {converting && !row.converted ? <ConvertForm row={row} onDone={() => setConverting(false)} /> : null}
     </article>
   );
@@ -627,7 +959,8 @@ function SkillManager({ data }: { data: Dashboard }) {
                   <h3 className="font-display text-base font-bold">{skill.name}</h3>
                   {skill.note ? <p className="mt-0.5 text-sm text-[var(--dim)]">{skill.note}</p> : null}
                   <p className="tnum mt-1 text-sm text-[var(--dim)]">
-                    输入 {skill.inputCount} 条 · 产出 {skill.convertedCount} 个 · 累计 {formatMinutes(skill.totalMinutes)}
+                    输入 {skill.inputCount} 条 · 产出 {skill.convertedCount} 个 · 已知时长 {formatMinutes(skill.totalMinutes)}
+                    {skill.unknownMinutesCount > 0 ? ` · 时长未知 ${skill.unknownMinutesCount} 条` : ""}
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-2">
@@ -765,8 +1098,8 @@ export function App() {
                 {[
                   ["累计输入", `${data.totals.totalInputs} 条`],
                   ["累计转化产出", `${data.totals.totalConverted} 个`],
-                  ["总转化率", pct(data.totals.conversionRate)],
-                  ["累计投入", formatMinutes(data.totals.totalMinutes)],
+                  ["总转化率（全部批次）", pct(data.totals.conversionRate)],
+                  ["已知投入时长", formatMinutes(data.totals.totalMinutes)],
                 ].map(([label, value]) => (
                   <div key={label} className="bg-[var(--surface)] px-3 py-3">
                     <dt className="text-xs text-[var(--dim)]">{label}</dt>
@@ -774,8 +1107,16 @@ export function App() {
                   </div>
                 ))}
               </dl>
+              {data.totals.unknownMinutesCount > 0 ? (
+                <p className="tnum mt-2 text-xs text-[var(--dim)]">
+                  时长口径：已知合计 {formatMinutes(data.totals.totalMinutes)} · 另有 {data.totals.unknownMinutesCount} 条时长未知（未计入合计）
+                </p>
+              ) : null}
               <div className="mt-4 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
-                <h2 className="font-display text-base font-bold">总积累曲线</h2>
+                <h2 className="font-display text-base font-bold">视图一 · 发生时间累计曲线</h2>
+                <p className="mt-1 text-sm text-[var(--dim)]">
+                  输入按输入日累计；产出按首次转化的洛杉矶日期累计。历史输入今天才转化，只抬升今天的产出，过去的日期不会被改写。
+                </p>
                 <div className="mt-2">
                   <CompoundChart series={data.series} />
                 </div>
@@ -784,6 +1125,14 @@ export function App() {
                 </p>
               </div>
             </section>
+
+            <div className="mt-5">
+              <ActionCard data={data} />
+            </div>
+
+            <div className="mt-5">
+              <CohortView data={data} />
+            </div>
 
             <div className="mt-5">
               <QuickAdd data={data} />

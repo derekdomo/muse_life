@@ -114,6 +114,21 @@ export const gameState = sqliteTable("game_state", {
   // watermark; the first settlement afterwards adopts a baseline (see
   // settleGame) instead of re-minting history.
   goldLedgerSum: integer("gold_ledger_sum"),
+  // Immutable baseline-adoption boundary (CWEB-SETTLE-001 follow-up,
+  // migration 0012): for a legacy row whose goldLedgerSum is still null,
+  // the first settlement adopts as its baseline the gold of ledger rows
+  // booked at or before this instant. The value is the row's updated_at
+  // captured by the 0012 backfill (the profile's last successful save at
+  // migration time) and is NEVER written by saveGameProfile or any
+  // profile mutation — purchases, allocations and equips advance
+  // updated_at but cannot move this boundary, so a ledger row stranded
+  // by a failed settlement save (booked after the boundary) can no
+  // longer be adopted as already-accounted by a later profile write;
+  // the next settlement credits it exactly once. Once the watermark
+  // turns non-null the boundary is never consulted again. Rollback:
+  // dropping this column restores the 0011 shape; every other column
+  // and row is untouched.
+  goldAdoptionBoundary: integer("gold_adoption_boundary", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
