@@ -15,9 +15,28 @@
 // gate BEFORE any database read/write; refused calls return a typed
 // rejection ({ ok: false, forbidden: true } / a forbidden dashboard) and
 // touch zero rows. There is no anonymous or sync-channel exception here.
+//
+// Write integrity (CMP-CREATE-SAVE-001):
+// - A progress entry's identity is (projectId, date, description,
+//   evidence); a stage's identity is (projectId, stage). Both writes go
+//   through a single conditional INSERT … SELECT … WHERE EXISTS(project)
+//   AND NOT EXISTS(identity) statement. SQLite serializes writers, so
+//   the existence check and the insert are one atomic step: two
+//   concurrent identical writes can never both land — the loser affects
+//   zero rows, re-reads, and reports the existing row instead. The
+//   EXISTS(project) guard in the same statement also means a write
+//   racing deleteProject can never leave an orphan row behind.
+// - deleteProject removes the project's entries, stages, and the
+//   project row itself in ONE db.batch (a single transaction): any
+//   failure rolls all three deletes back and the handler answers
+//   { ok: false } with every row intact — never a half-deleted project.
+// - Legacy duplicate rows (written before this arbitration existed) are
+//   NEVER auto-deleted or merged. getDashboard surfaces them in the
+//   `reconciliation` list so the owner can see exactly which identities
+//   are duplicated and govern them by hand.
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 // Strict owner gate: only a verified owner viewer passes. Identified
@@ -97,6 +116,26 @@ const weekPointSchema = z.object({
   cumulative: z.number(),
 });
 
+// One duplicated identity found in the stored rows. Duplicates can only
+// predate the atomic write arbitration; they are reported, never
+// auto-removed, so the owner decides how to govern them.
+const reconciliationSchema = z.object({
+  kind: z.enum(["progress", "stage"]),
+  projectId: z.number(),
+  projectName: z.string(),
+  // Progress identity fields (null on stage groups).
+  date: z.string().nullable(),
+  description: z.string().nullable(),
+  evidence: z.string().nullable(),
+  // Stage identity (null on progress groups).
+  stage: z.enum(STAGE_KEYS).nullable(),
+  // Every stored value in the group: row dates for stages (they can
+  // differ), the shared date repeated for progress rows.
+  dates: z.array(z.string()),
+  ids: z.array(z.number()),
+  count: z.number(),
+});
+
 const dashboardResponse = z.object({
   // Repo-standard refusal flag: true means the caller is not the owner
   // and every data field below is empty (no creation data is returned).
@@ -106,6 +145,7 @@ const dashboardResponse = z.object({
   projects: z.array(projectSchema),
   entries: z.array(entrySchema),
   thisWeekEntries: z.array(entrySchema),
+  reconciliation: z.array(reconciliationSchema),
   totals: z.object({
     projectCount: z.number(),
     totalEntries: z.number(),
@@ -129,6 +169,7 @@ function forbiddenDashboard(): Dashboard {
     projects: [],
     entries: [],
     thisWeekEntries: [],
+    reconciliation: [],
     totals: {
       projectCount: 0,
       totalEntries: 0,
@@ -251,6 +292,81 @@ export const Actions = {
         }
       }
 
+      // Reconciliation: identities stored more than once (only possible
+      // for rows written before the atomic arbitration). They stay
+      // exactly as stored — listed here so the owner can see them and
+      // delete extras by hand; nothing is merged or removed for them.
+      const reconciliation: Dashboard["reconciliation"] = [];
+      {
+        const byIdentity = new Map<
+          string,
+          { projectId: number; date: string; description: string; evidence: string; ids: number[] }
+        >();
+        for (const e of entryRows) {
+          const key = `${e.projectId}|${e.date}|${e.description}|${e.evidence}`;
+          const group = byIdentity.get(key) ?? {
+            projectId: e.projectId,
+            date: e.date,
+            description: e.description,
+            evidence: e.evidence,
+            ids: [],
+          };
+          group.ids.push(e.id);
+          byIdentity.set(key, group);
+        }
+        for (const g of byIdentity.values()) {
+          if (g.ids.length > 1) {
+            reconciliation.push({
+              kind: "progress",
+              projectId: g.projectId,
+              projectName: nameById.get(g.projectId) ?? "(已删除项目)",
+              date: g.date,
+              description: g.description,
+              evidence: g.evidence,
+              stage: null,
+              dates: g.ids.map(() => g.date),
+              ids: g.ids,
+              count: g.ids.length,
+            });
+          }
+        }
+        const byStage = new Map<
+          string,
+          { projectId: number; stage: schema.StageKey; dates: string[]; ids: number[] }
+        >();
+        for (const s of stageRows) {
+          const key = `${s.projectId}|${s.stage}`;
+          const group = byStage.get(key) ?? {
+            projectId: s.projectId,
+            stage: s.stage,
+            dates: [],
+            ids: [],
+          };
+          group.dates.push(s.date);
+          group.ids.push(s.id);
+          byStage.set(key, group);
+        }
+        for (const g of byStage.values()) {
+          if (g.ids.length > 1) {
+            reconciliation.push({
+              kind: "stage",
+              projectId: g.projectId,
+              projectName: nameById.get(g.projectId) ?? "(已删除项目)",
+              date: null,
+              description: null,
+              evidence: null,
+              stage: g.stage,
+              dates: g.dates,
+              ids: g.ids,
+              count: g.ids.length,
+            });
+          }
+        }
+        reconciliation.sort(
+          (a, b) => a.projectId - b.projectId || (a.ids[0] ?? 0) - (b.ids[0] ?? 0),
+        );
+      }
+
       return {
         forbidden: false,
         today,
@@ -258,6 +374,7 @@ export const Actions = {
         projects,
         entries,
         thisWeekEntries: entries.filter((e) => inThisWeek(e.date)),
+        reconciliation,
         totals: {
           projectCount: projectRows.length,
           totalEntries: entryRows.length,
@@ -320,19 +437,32 @@ export const Actions = {
     },
   }),
 
+  // Delete a project with its stages and progress entries. The three
+  // deletes run as ONE db.batch — a single transaction — so a failure
+  // at any step rolls the whole delete back: the handler answers
+  // { ok: false } and the project, its stages, and its entries are all
+  // still there (CMP-CREATE-SAVE-001). Deleting an already-deleted id
+  // is a successful no-op (safe retry), and because ids are
+  // AUTOINCREMENT a stale delete can never hit a project created later.
   deleteProject: defineAction({
     request: z.object({ id: z.number().int().positive() }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
-      await db
-        .delete(schema.progressEntries)
-        .where(eq(schema.progressEntries.projectId, args.id));
-      await db
-        .delete(schema.projectStages)
-        .where(eq(schema.projectStages.projectId, args.id));
-      await db.delete(schema.projects).where(eq(schema.projects.id, args.id));
+      try {
+        await db.batch([
+          db
+            .delete(schema.progressEntries)
+            .where(eq(schema.progressEntries.projectId, args.id)),
+          db
+            .delete(schema.projectStages)
+            .where(eq(schema.projectStages.projectId, args.id)),
+          db.delete(schema.projects).where(eq(schema.projects.id, args.id)),
+        ]);
+      } catch {
+        return { ok: false, forbidden: false };
+      }
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },
@@ -340,7 +470,12 @@ export const Actions = {
 
   // Mark one stage reached on its own date. Re-marking the same stage
   // updates only that stage's date; stages are never merged or backfilled
-  // from each other.
+  // from each other. The (projectId, stage) identity is arbitrated by a
+  // single conditional INSERT … WHERE EXISTS(project) AND NOT
+  // EXISTS(stage row): two concurrent marks of the same stage land
+  // exactly one row, and when both carry different dates the later
+  // write's date wins through the update path below — the same outcome
+  // as marking them one after another.
   setStage: defineAction({
     request: z.object({
       projectId: z.number().int().positive(),
@@ -351,23 +486,54 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
-      const rows = await db
-        .select()
+      const identity = and(
+        eq(schema.projectStages.projectId, args.projectId),
+        eq(schema.projectStages.stage, args.stage),
+      );
+      const existing = await db
+        .select({ id: schema.projectStages.id })
         .from(schema.projectStages)
-        .where(eq(schema.projectStages.projectId, args.projectId));
-      const found = rows.find((r) => r.stage === args.stage);
+        .where(identity)
+        .orderBy(asc(schema.projectStages.id))
+        .limit(1);
+      const found = existing[0];
       if (found) {
         await db
           .update(schema.projectStages)
           .set({ date: args.date })
           .where(eq(schema.projectStages.id, found.id));
-      } else {
-        await db.insert(schema.projectStages).values({
-          projectId: args.projectId,
-          stage: args.stage,
-          date: args.date,
-        });
+        ctx.invalidateQueries();
+        return { ok: true, forbidden: false };
       }
+      const inserted = await db.run(sql`
+        INSERT INTO project_stages (project_id, stage, date, created_at)
+        SELECT ${args.projectId}, ${args.stage}, ${args.date}, ${Date.now()}
+        WHERE EXISTS (SELECT 1 FROM projects WHERE id = ${args.projectId})
+          AND NOT EXISTS (
+            SELECT 1 FROM project_stages
+            WHERE project_id = ${args.projectId} AND stage = ${args.stage}
+          )
+      `);
+      if (inserted.rowsAffected === 1) {
+        ctx.invalidateQueries();
+        return { ok: true, forbidden: false };
+      }
+      // Zero rows landed: either the project does not exist (possibly
+      // deleted concurrently — no orphan stage row was written), or a
+      // concurrent mark of the same stage won the insert. In the second
+      // case this call is the later write, so its date wins.
+      const winner = await db
+        .select({ id: schema.projectStages.id })
+        .from(schema.projectStages)
+        .where(identity)
+        .orderBy(asc(schema.projectStages.id))
+        .limit(1);
+      const winnerRow = winner[0];
+      if (!winnerRow) return { ok: false, forbidden: false };
+      await db
+        .update(schema.projectStages)
+        .set({ date: args.date })
+        .where(eq(schema.projectStages.id, winnerRow.id));
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },
@@ -397,9 +563,14 @@ export const Actions = {
     },
   }),
 
-  // One weekly progress entry. The same output must not be counted twice:
-  // an entry for the same project with identical description AND evidence
-  // is refused as a duplicate instead of being inserted again.
+  // One weekly progress entry. The same output must not be counted
+  // twice: an entry's identity is (projectId, date, description,
+  // evidence), and the insert is a single conditional statement —
+  // INSERT … SELECT … WHERE EXISTS(project) AND NOT EXISTS(identity) —
+  // so the duplicate check and the write are one atomic step. Two
+  // concurrent submissions of the same output land exactly one row;
+  // the loser (and any serial repeat) is answered duplicate:true with
+  // the existing row's id instead of being inserted again.
   addProgress: defineAction({
     request: z.object({
       projectId: z.number().int().positive(),
@@ -412,38 +583,55 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof addEntryResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true, id: null, duplicate: false };
       const db = ctx.db<typeof schema>();
-      const project = await db
-        .select({ id: schema.projects.id })
-        .from(schema.projects)
-        .where(eq(schema.projects.id, args.projectId))
-        .limit(1);
-      if (project.length === 0) {
-        return { ok: false, forbidden: false, id: null, duplicate: false };
-      }
-      const siblings = await db
-        .select()
-        .from(schema.progressEntries)
-        .where(eq(schema.progressEntries.projectId, args.projectId));
-      const dup = siblings.find(
-        (e) => e.description === args.description && e.evidence === args.evidence,
+      const identity = and(
+        eq(schema.progressEntries.projectId, args.projectId),
+        eq(schema.progressEntries.date, args.date),
+        eq(schema.progressEntries.description, args.description),
+        eq(schema.progressEntries.evidence, args.evidence),
       );
-      if (dup) {
-        return { ok: false, forbidden: false, id: dup.id, duplicate: true };
+      const note = args.note || null;
+      const inserted = await db.run(sql`
+        INSERT INTO progress_entries (project_id, date, description, evidence, note, created_at)
+        SELECT ${args.projectId}, ${args.date}, ${args.description}, ${args.evidence}, ${note}, ${Date.now()}
+        WHERE EXISTS (SELECT 1 FROM projects WHERE id = ${args.projectId})
+          AND NOT EXISTS (
+            SELECT 1 FROM progress_entries
+            WHERE project_id = ${args.projectId}
+              AND date = ${args.date}
+              AND description = ${args.description}
+              AND evidence = ${args.evidence}
+          )
+      `);
+      if (inserted.rowsAffected === 1) {
+        // The identity had no stored row before this statement, so the
+        // newest row matching it is the one just written.
+        const mine = await db
+          .select({ id: schema.progressEntries.id })
+          .from(schema.progressEntries)
+          .where(identity)
+          .orderBy(desc(schema.progressEntries.id))
+          .limit(1);
+        const row = mine[0];
+        if (!row) throw new Error("addProgress: insert landed but row not found");
+        ctx.invalidateQueries();
+        return { ok: true, forbidden: false, id: row.id, duplicate: false };
       }
-      const inserted = await db
-        .insert(schema.progressEntries)
-        .values({
-          projectId: args.projectId,
-          date: args.date,
-          description: args.description,
-          evidence: args.evidence,
-          note: args.note || null,
-        })
-        .returning({ id: schema.progressEntries.id });
-      const row = inserted[0];
-      if (!row) throw new Error("addProgress: insert returned no rows");
-      ctx.invalidateQueries();
-      return { ok: true, forbidden: false, id: row.id, duplicate: false };
+      // Zero rows landed. If an identical entry already exists (serial
+      // repeat, or the winner of a concurrent race), report it as a
+      // duplicate with the earliest stored id. Otherwise the project
+      // itself is gone (or never existed) — a plain refusal, and no
+      // orphan entry was written.
+      const dup = await db
+        .select({ id: schema.progressEntries.id })
+        .from(schema.progressEntries)
+        .where(identity)
+        .orderBy(asc(schema.progressEntries.id))
+        .limit(1);
+      const dupRow = dup[0];
+      if (dupRow) {
+        return { ok: false, forbidden: false, id: dupRow.id, duplicate: true };
+      }
+      return { ok: false, forbidden: false, id: null, duplicate: false };
     },
   }),
 

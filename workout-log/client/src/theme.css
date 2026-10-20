@@ -368,3 +368,22 @@ select:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 55%, 
   .guide-grid { grid-template-columns: 1fr 1fr; }
   .guide-grid > div:last-child { padding-top: 0; padding-left: 16px; border-top: 0; border-left: 1px solid var(--border); }
 }
+
+/* W6.2 muscle diagram (guide dialog): front/back line outlines.
+   Primary = solid Okabe-Ito vermillion, secondary = Okabe-Ito blue
+   diagonal hatch + outline; the text legend carries the meaning, so
+   colour is never the only channel. */
+.muscle-diagram { margin-top: 12px; }
+.muscle-figures { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 340px; }
+.muscle-figure { margin: 0; }
+.muscle-figure-svg { display: block; width: 100%; height: auto; }
+.muscle-figure figcaption { margin-top: 4px; text-align: center; color: var(--dim); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.muscle-body path, .muscle-body circle { fill: color-mix(in srgb, var(--dim) 10%, var(--surface)); stroke: var(--dim); stroke-width: 1.1; stroke-linejoin: round; }
+.muscle-region path { stroke-width: 1; stroke-linejoin: round; }
+.muscle-legend { margin-top: 10px; display: grid; gap: 5px; }
+.muscle-legend p { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: 12px; line-height: 1.5; }
+.muscle-swatch { flex: 0 0 auto; width: 14px; height: 14px; margin-top: 2px; border-radius: 3px; }
+.muscle-swatch-primary { background: #d55e00; border: 1px solid #8a3c00; }
+.muscle-swatch-secondary { background: repeating-linear-gradient(45deg, #0072b2 0 2px, rgba(0, 114, 178, .14) 2px 6px); border: 1px solid #0072b2; }
+.muscle-legend p.muscle-legend-unplaced { font-size: 11px; }
+.muscle-diagram-empty { margin: 10px 0 0; color: var(--dim); font-size: 12px; }

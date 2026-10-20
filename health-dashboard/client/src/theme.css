@@ -360,13 +360,26 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .strength-exercise-list small { grid-column: 1 / -1; overflow-wrap: anywhere; color: var(--dim); font-size: 10px; line-height: 1.45; }
 .muscle-note { margin: 12px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
 .muscle-list { display: grid; margin-top: 14px; border-top: 1px solid var(--border); }
-.muscle-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 14px; align-items: start; padding: 11px 0; border-bottom: 1px solid var(--border); }
+.muscle-list-grouped { margin-top: 4px; }
+.muscle-group-block { margin-top: 16px; }
+.muscle-group-head { display: flex; align-items: baseline; gap: 7px; margin: 0; font-size: 13px; font-weight: 700; }
+.muscle-group-count { color: var(--dim); font-size: 11px; font-weight: 400; white-space: nowrap; }
+.muscle-group-toggle { display: flex; width: 100%; align-items: baseline; gap: 7px; padding: 0; background: none; border: none; color: var(--text); font: inherit; font-size: 13px; font-weight: 700; text-align: left; cursor: pointer; }
+.muscle-row { border-bottom: 1px solid var(--border); }
+.muscle-row-head { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto auto; gap: 3px 10px; align-items: start; padding: 11px 0; background: none; border: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .muscle-main { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .muscle-main strong { font-size: 14px; }
 .muscle-main span { color: var(--dim); font-size: 12px; }
 .muscle-facts { display: flex; flex-direction: column; gap: 2px; text-align: right; }
 .muscle-facts > span { font-size: 12px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .muscle-facts small { color: var(--dim); font-size: 10px; line-height: 1.45; }
+.muscle-chevron { color: var(--dim); font-size: 11px; line-height: 1.7; }
+.muscle-sources { display: grid; gap: 10px; padding: 0 0 12px; }
+.muscle-source-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12px; font-weight: 700; }
+.muscle-source-key { color: var(--dim); font-weight: 400; overflow-wrap: anywhere; }
+.muscle-source-badge { border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.muscle-source-detail { margin: 2px 0 0; color: var(--dim); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.muscle-source-empty { margin: 0; color: var(--dim); font-size: 12px; }
 .all-workouts-section .record-row > div { flex-wrap: wrap; }
 .all-workouts-section .record-row > div strong { min-width: 0; overflow-wrap: anywhere; }
 .record-list, .sleep-list { display: grid; gap: 0; margin-top: 16px; border-top: 1px solid var(--border); }

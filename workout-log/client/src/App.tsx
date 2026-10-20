@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
 import { EXERCISE_DEMOS, ExerciseDemoView, type ExerciseDemo } from "./ExerciseDemo";
+import { MuscleDiagramView } from "./MuscleDiagram";
 
 type Dashboard = ApiResponse<typeof api, "getDashboard">;
 type Workout = NonNullable<Dashboard["active_workout"]>;
@@ -1146,6 +1147,10 @@ function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseG
           ) : (
             <p>尚无映射</p>
           )}
+          {/* W6.2 muscle diagram: front/back outlines painted from
+              this same mapping only; renders 暂无肌群图 when the key
+              is unmapped or no muscle name resolves to a region. */}
+          <MuscleDiagramView mapping={muscleMapping} />
         </div>
         {guide.demo ? <ExerciseDemoView demo={guide.demo} name={guide.title} /> : null}
         <div className="guide-section">
