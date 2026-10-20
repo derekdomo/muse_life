@@ -402,6 +402,11 @@ export interface MuscleSource {
   workoutId: string;
   date: string;
   exerciseKey: string;
+  // The exercise's display name as stored in the snapshot itself
+  // (exercise.name), passed through verbatim — never guessed from the
+  // key. Null when the snapshot carries no name for this exercise, in
+  // which case the row falls back to showing the key alone.
+  exerciseName: string | null;
   // Whether this muscle is a primary or secondary target of the
   // exercise under MUSCLE-MAP v1.
   role: "primary" | "secondary";
@@ -521,6 +526,7 @@ export function muscleStatus(
         workoutId: workout.id,
         date: workout.date,
         exerciseKey: exercise.key,
+        exerciseName: exercise.name ?? null,
         completedSets,
         load,
         unit: workout.unit,
@@ -669,8 +675,9 @@ function MuscleRow({ group, expanded, onToggle }: { group: MuscleGroupStatus; ex
           {group.sources.length > 0 ? group.sources.map((source, index) => (
             <div className="muscle-source" key={`${source.workoutId}-${source.exerciseKey}-${index}`}>
               <div className="muscle-source-top">
+                <span className="muscle-source-name">{source.exerciseName ?? source.exerciseKey}</span>
+                {source.exerciseName !== null ? <small className="muscle-source-key">{source.exerciseKey}</small> : null}
                 <span>{fullDateLabel(source.date)}</span>
-                <span className="muscle-source-key">{source.exerciseKey}</span>
                 {source.inWindow ? null : <span className="muscle-source-badge">本窗口外</span>}
               </div>
               <p className="muscle-source-detail">

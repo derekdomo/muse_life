@@ -108,3 +108,20 @@ Also rejected while sourcing the four shipped pairs: seated dumbbell/machine pre
 - The review uses the viewer's current calendar week (Monday through now) and the stored completed workouts.
 - It reports only recorded session and completed-set counts.
 - The next-week adjustment is deliberately conservative: retain the existing compound movements and add one unilateral leg exercise (Bulgarian split squat, 3 × 8–10) because the previous leg template contained bilateral squat, hip hinge, and hamstring isolation but no unilateral knee-dominant work.
+
+## Muscle diagram (W6.2, added 2026-10-20)
+
+The guide dialog's front/back muscle diagram is hand-drawn SVG line
+art authored in `client/src/MuscleDiagram.tsx` — no external or
+generated imagery, no fetched data. Painting derives ONLY from the
+exercise's existing `MUSCLE_MAP` entry (MUSCLE-MAP.md v1 primary /
+secondary muscle names) via the anatomical placement table
+`MUSCLE_NAME_REGIONS` in the same file: a name with no region entry
+is never painted or guessed, and an unmapped exercise key renders
+the text state 暂无肌群图 while keeping its demo and cues. Primary =
+solid Okabe-Ito vermillion fill, secondary = Okabe-Ito blue diagonal
+hatch + outline, always with a text legend （主要/次要 + names), so
+meaning never rides on colour alone. Verified by
+`validate-muscle-diagram.mjs` (23 checks: name/region coverage for
+all 30 exercises, shared-region primary-wins overlap, unknown
+key/name handling, front-only and back-only exercises).

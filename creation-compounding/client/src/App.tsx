@@ -527,6 +527,16 @@ function AddProgressForm({
         setError("这条成果已经记过一次（同一项目、同一日期、相同产出与证据），同一成果不重复累计。");
         return;
       }
+      if (res.code === "project_deleted") {
+        // The project was deleted while this entry was being saved, so
+        // the entry is gone with it. The draft stays exactly as typed —
+        // only the dead project selection is cleared — so the user can
+        // re-file the same entry under another project.
+        setError("所选项目已被删除，这条记录没有保存。填写内容已保留——换一个项目再提交即可。");
+        onProjectChange("");
+        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        return;
+      }
       if (!res.ok) {
         setError("保存失败，请重试。");
         return;
@@ -564,6 +574,7 @@ function AddProgressForm({
       <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
         <h2 className="font-display text-lg font-bold">记一条产出</h2>
         <p className="mt-1 text-sm text-[var(--dim)]">先在「项目」里添加一个自有产品 / 项目，再回来记它的推进。</p>
+        {error ? <p role="alert" className="mt-2 text-sm text-[var(--accent-2)]">{error}</p> : null}
       </div>
     );
   }

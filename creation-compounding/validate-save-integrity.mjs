@@ -6,7 +6,10 @@
 //  1. Source wiring: deleteProject deletes through ONE db.batch inside
 //     a try/catch that answers { ok: false }; addProgress / setStage
 //     write through single conditional INSERT … WHERE EXISTS(project)
-//     AND NOT EXISTS(identity) statements; the strict owner gate is
+//     AND NOT EXISTS(identity) statements; addProgress captures the
+//     new row's id from the insert statement itself (… RETURNING id)
+//     and answers the typed code:"project_deleted" rejection when a
+//     delete lands in the interleave; the strict owner gate is
 //     unchanged and precedes every ctx.db access.
 //  2. Behavior: the REAL handlers from server/src/actions.ts run
 //     against throwaway in-memory libsql databases (schema applied
@@ -15,7 +18,11 @@
 //     pairs in both start orders; delete failures are injected with
 //     RAISE(ABORT) triggers on each of the three tables in turn, and
 //     the post-failure state must be byte-identical to the pre-delete
-//     snapshot. A separate legacy database (0001+0002 only, seeded
+//     snapshot. A deterministic interleave (insert lands → delete
+//     commits → save handler resumes, driven by hooking the libsql
+//     client's execute) must yield the typed project_deleted
+//     rejection with zero orphan rows and post-delete data intact.
+//     A separate legacy database (0001+0002 only, seeded
 //     with pre-arbitration duplicate rows) proves old data is
 //     preserved untouched and surfaced via the reconciliation list.
 //
@@ -86,6 +93,18 @@ for (const name of ACTION_NAMES) {
     add.includes("INSERT INTO progress_entries") && add.includes("EXISTS (SELECT 1 FROM projects") && add.includes("NOT EXISTS"),
   );
   check("source: addProgress reports the existing row on duplicate", add.includes("duplicate: true"));
+  check(
+    "source: addProgress captures the new row id from the insert itself (INSERT … RETURNING id via db.all)",
+    add.includes("RETURNING id") && add.includes("db.all"),
+  );
+  check(
+    "source: the insert-then-reread invariant throw is gone (no 'insert landed but row not found' anywhere)",
+    !serverSrc.includes("insert landed but row not found"),
+  );
+  check(
+    "source: addProgress answers the typed project_deleted rejection",
+    add.includes('code: "project_deleted"') && serverSrc.includes('z.enum(["project_deleted"])'),
+  );
   const stage = actionSlice(serverSrc, "setStage");
   check(
     "source: setStage writes via one conditional INSERT (EXISTS project + NOT EXISTS stage row)",
@@ -99,6 +118,11 @@ check(
 check(
   "client: reconciliation notice renders stored duplicate groups",
   clientSrc.includes("重复记录对账") && clientSrc.includes("data.reconciliation"),
+);
+check(
+  "client: project_deleted rejection keeps the draft and says the project was deleted",
+  clientSrc.includes('res.code === "project_deleted"') &&
+    clientSrc.includes("所选项目已被删除，这条记录没有保存。填写内容已保留"),
 );
 
 /* ---------------- 2. behavior against real handlers ---------------- */
@@ -283,6 +307,11 @@ check(
   "addProgress: nonexistent project refused (not a duplicate), no orphan entry",
   orphanEntry.ok === false && orphanEntry.duplicate === false && orphanEntry.id === null,
 );
+check(
+  "addProgress: nonexistent project refusal carries the typed project_deleted code",
+  orphanEntry.code === "project_deleted",
+  JSON.stringify(orphanEntry),
+);
 
 /* deleteProject: failure injection on each delete step */
 async function seedProject(label) {
@@ -395,6 +424,89 @@ for (const order of ["save-first", "delete-first"]) {
     "setStage x delete concurrent: delete ok and zero orphan stage rows",
     delRes.ok === true && orphans === 0 && typeof stageRes.ok === "boolean",
     `orphans=${orphans}`,
+  );
+}
+
+/* addProgress × deleteProject: DETERMINISTIC interleave — the insert
+   statement lands, deleteProject then commits in full, and only then
+   does the save handler resume. Driven by hooking the libsql client's
+   execute: the first INSERT INTO progress_entries that lands while
+   armed runs the delete (and the post-delete creations) before its
+   result is handed back to the handler. The handler must answer the
+   typed project_deleted rejection — never the old invariant throw,
+   never a phantom success — leave zero orphan rows, and not touch
+   data created after the delete. */
+{
+  const victim = await seedProject("交错删写验证");
+  const origExecute = client.execute.bind(client);
+  let armed = true;
+  let hookError = null;
+  let freshId = null;
+  client.execute = async (stmt) => {
+    const result = await origExecute(stmt);
+    const text =
+      typeof stmt === "string" ? stmt : stmt && typeof stmt.sql === "string" ? stmt.sql : "";
+    if (armed && text.includes("INSERT INTO progress_entries")) {
+      armed = false; // disarm first: the interleave itself writes entries
+      try {
+        const del = await call("deleteProject", owner, { id: victim });
+        if (!del.ok) throw new Error(`interleave deleteProject answered ${JSON.stringify(del)}`);
+        const fresh = await call("addProject", owner, { name: "删除之后新建的项目-交错" });
+        freshId = fresh.id;
+        const kept = await call("addProgress", owner, {
+          projectId: fresh.id,
+          date: "2026-10-17",
+          description: "删除之后的新产出",
+          evidence: "删除之后的证据",
+        });
+        if (!kept.ok) throw new Error(`post-delete addProgress answered ${JSON.stringify(kept)}`);
+      } catch (e) {
+        hookError = e;
+      }
+    }
+    return result;
+  };
+  let saveRes = null;
+  let saveThrew = false;
+  try {
+    saveRes = await call("addProgress", owner, {
+      projectId: victim,
+      date: "2026-10-17",
+      description: "交错时刻的产出",
+      evidence: "交错证据",
+    });
+  } catch {
+    saveThrew = true;
+  } finally {
+    client.execute = origExecute;
+  }
+  check(
+    "interleave setup: delete committed and post-delete writes landed inside the insert→resume window",
+    hookError === null && typeof freshId === "number",
+    hookError ? String(hookError) : "",
+  );
+  check(
+    "addProgress × delete interleave: typed project_deleted rejection (no invariant throw, no phantom success)",
+    !saveThrew &&
+      saveRes?.ok === false &&
+      saveRes?.forbidden === false &&
+      saveRes?.duplicate === false &&
+      saveRes?.id === null &&
+      saveRes?.code === "project_deleted",
+    JSON.stringify(saveRes),
+  );
+  const snap = await snapshot(client);
+  check(
+    "addProgress × delete interleave: zero orphan rows for the deleted project (landed insert swept, never re-created)",
+    !snap.projects.some((r) => r.includes(`"id":${victim}`)) &&
+      !snap.project_stages.some((r) => r.includes(`"project_id":${victim}`)) &&
+      !snap.progress_entries.some((r) => r.includes(`"project_id":${victim}`)),
+  );
+  check(
+    "addProgress × delete interleave: data created after the delete is untouched",
+    typeof freshId === "number" &&
+      snap.projects.some((r) => r.includes(`"id":${freshId}`)) &&
+      snap.progress_entries.some((r) => r.includes(`"project_id":${freshId}`)),
   );
 }
 

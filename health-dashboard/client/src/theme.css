@@ -376,7 +376,8 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .muscle-chevron { color: var(--dim); font-size: 11px; line-height: 1.7; }
 .muscle-sources { display: grid; gap: 10px; padding: 0 0 12px; }
 .muscle-source-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12px; font-weight: 700; }
-.muscle-source-key { color: var(--dim); font-weight: 400; overflow-wrap: anywhere; }
+.muscle-source-name { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.muscle-source-key { color: var(--dim); font-weight: 400; font-size: 11px; overflow-wrap: anywhere; }
 .muscle-source-badge { border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .muscle-source-detail { margin: 2px 0 0; color: var(--dim); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .muscle-source-empty { margin: 0; color: var(--dim); font-size: 12px; }

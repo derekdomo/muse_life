@@ -899,3 +899,16 @@
 ## 2026-10-20（13:13 轮次计数更正：以构建方全量实跑为准）
 
 - 更正上一节三处验证计数（原登记取自先行回传口径，与构建方全量实跑不符，现按实跑更正）：(1) `CMP-LEARN-SAVE-001`：validate-conversion **53/53**（原 40 项全过＋新增 13 项：带键旧档 unmark 物化 revoked 回执、迟到 save/mark 双路被拒且事实不复活、无键旧档零伪造、新键重标成功、失败注入保全；实跑输出已归档工件内 VALIDATION-LOG.md）；acl 82/82、metrics 34/34 不变。(2) `CMP-CREATE-SAVE-001`：validate-save-integrity **102/102**（新增交错用例等共 +9 净增至 102：RETURNING 原子取 id、typed project_deleted、确定性交错 typed 拒绝/无孤儿/删除后新建数据完好）。(3) 训练帮助层级（space-6）：validate-muscle-diagram **36/36**（含新增 D6 顺序/折叠接线 13 项）；回归 muscle-receipt 30/30、receipt 36/36、start 66/66、plan-safe 226/226。修复内容与结论不变，仅计数更正；面板已同步修正。
+
+## 2026-10-20（muse-life-plans-sync 15:13 轮次：四项交付源码回灌关闭＋F0.7 观测复核）
+
+- 队列来源：git pull 已最新，HEAD 与基线同为 `c59c547`、无新编号条目；本轮处理上轮顺延的四项 EVID 回灌尾巴（下轮首位）并复核 F0.7 受控 run 观测终态。
+- `CMP-LEARN-SAVE-001` 回灌（space-10 → learning-compounding/）：`server/src/actions.ts`、`server/src/schema.ts`、`validate-conversion.mjs` 覆盖，新增 `VALIDATION-LOG.md`（构建方实跑输出归档，synthetic 口径自述、无真实数据）。源头实跑复核：validate-conversion **53/53**、validate-acl 82/82、validate-metrics 34/34（仓库副本缺 @hatch/space-sdk 无法直跑、与源头逐字节一致故以源头实跑为准；纯源码断言段在仓库副本亦通过至 SDK 依赖点）。
+- `CMP-CREATE-SAVE-001` 回灌（space-12 → creation-compounding/）：`server/src/actions.ts`、`client/src/App.tsx`、`validate-save-integrity.mjs` 覆盖；源头实跑 validate-save-integrity **102/102**。
+- 训练帮助层级回灌（space-6 → workout-log/）：`client/src/App.tsx`、`client/src/MuscleDiagram.tsx`、`client/src/theme.css`、`validate-muscle-diagram.mjs`、`validate-muscle-receipt.mjs`、`DATA-PLAN.md`（新增 Muscle diagram 一节）覆盖；仓库副本 node 实跑 validate-muscle-diagram **36/36**、validate-muscle-receipt 30/30。
+- 健康来源可读性回灌（space-4 → health-dashboard/）：`client/src/App.tsx`、`client/src/theme.css` 覆盖（validate-muscle-status.mjs 两边一致）；仓库副本 node 实跑 validate-muscle-status **50/50**。
+- 计数口径说明：以上实跑数与 13:13 轮次构建方先行回传（61/61、94/94、23/23）不符处，以本轮实跑为准（conversion 53、save-integrity 102、muscle-diagram 36）；13 时计数更正提交 c59c547 已先行更正同三处，本轮实跑与更正后口径一致。
+- 回灌完整性：四仓目录与已发布源码逐文件 diff 为零（排除 app.db/node_modules/构建产物；icon.webp 二进制沿既例不回灌）；git diff 隐私扫描无 UUID/邮箱命中；未提交 app.db/.env/任何真实数据。
+- `F0.7` 观测复核（只读 getRefreshObservations，2026-10-20 15:13 PDT）：currentAttempt=1、status=running、diagnosis=awaiting_callback；观测行仅 refresh_started(claimed) 与 spawn_attached（2026-10-20T18:27:22Z），state.updatedAt 冻结于启动时刻，逾 3¾ 小时无回调/终态行、新快照未核实。结论：触发链已通、断点仍在平台任务执行/回调段；不自动再 run、不冒称刷新恢复。主状态仍进行中。
+- 仍（需用户确认）：`CWEB-LEVEL-001` 路径/四参数裁决（生产过渡 XP 等级未动）；`H4.6` 恢复参考 T 未定（事实片已交）。
+- 本轮用户可见增量：0 组新线上功能（回灌/复核为 EVID 与质量工作）。顺延：无新增顺延；S3 首片 10-22、CMP-FAMILY 10-22、CMP-TIME 10-23、完整养成 10-26 沿原日期。

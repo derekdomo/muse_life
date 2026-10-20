@@ -63,7 +63,14 @@ export const learningInputs = sqliteTable("learning_inputs", {
 // that requestId is answered "revoked" instead of resurrecting the
 // conversion, and re-marking requires a fresh requestId (a new
 // generation). Legacy conversions that predate this table simply have
-// no receipt; nothing is backfilled or fabricated for them.
+// no receipt; nothing is backfilled or fabricated for them. One narrow
+// exception at revocation time only: if such a legacy row still stores
+// a real request key (conversionRequestId) for its live conversion,
+// unmarkConverted writes the revocation fact for that exact key as an
+// already-revoked receipt built solely from the row's own stored key,
+// payload and first-conversion instant — otherwise the cleared key
+// would leave no tombstone and a late retry could resurrect the
+// conversion. Keyless legacy rows get no receipt, ever.
 export const conversionReceipts = sqliteTable("conversion_receipts", {
   requestId: text("request_id").primaryKey(),
   inputId: integer("input_id")

@@ -19,6 +19,12 @@
 //    available from the back view alone;
 //  - wiring: the guide dialog renders MuscleDiagramView from the
 //    same MUSCLE_MAP entry and the 暂无肌群图 text state exists.
+//  - hierarchy (guide info order): title -> demonstration (real
+//    photo/video frames) or teaching-video link -> cue points, and
+//    the primary/secondary muscle text + MuscleDiagramView moved
+//    into a default-collapsed 「练到哪里」 disclosure whose expanded
+//    panel shows both; closing the dialog only clears the selected
+//    guide, so an in-progress workout draft/timer is untouched.
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -194,6 +200,53 @@ const {
     diagramSrc.includes('#d55e00') && diagramSrc.includes('#0072b2') && diagramSrc.includes('patternUnits="userSpaceOnUse"'));
   check('D5 wiring: the legend names 主要（实心填充）and 次要（斜纹描边）in text',
     diagramSrc.includes('主要') && diagramSrc.includes('实心填充') && diagramSrc.includes('次要') && diagramSrc.includes('斜纹描边'));
+}
+
+// --- D6: guide hierarchy — demo/video first, cues next, muscles --
+// --- collapsed under 「练到哪里」 --------------------------------
+{
+  const dialogStart = clientSrc.indexOf('function ExerciseGuideDialog');
+  const dialogEnd = clientSrc.indexOf('\nfunction ', dialogStart + 10);
+  const dialog = clientSrc.slice(dialogStart, dialogEnd > 0 ? dialogEnd : undefined);
+  const at = (needle) => dialog.indexOf(needle);
+  const titleAt = at('id="guide-title"');
+  const demoAt = at('<ExerciseDemoView demo={guide.demo}');
+  const videoAt = at('className="video-link"');
+  const cuesAt = at('记住这三点');
+  const toggleAt = at('<span>练到哪里</span>');
+  const primaryTextAt = at('主要：{muscleMapping.primary');
+  const diagramAt = at('<MuscleDiagramView mapping={muscleMapping} />');
+  check('D6 order: title renders before the demonstration block',
+    titleAt >= 0 && demoAt > titleAt);
+  check('D6 order: demonstration (photo/video frames) renders before the cue points',
+    demoAt >= 0 && cuesAt > demoAt);
+  check('D6 order: teaching-video link entry renders before the cue points (no-frame guides lead with it)',
+    videoAt >= 0 && cuesAt > videoAt);
+  check('D6 order: cue points render before the 「练到哪里」 section',
+    cuesAt >= 0 && toggleAt > cuesAt);
+  check('D6 order: primary/secondary muscle text moved below the 「练到哪里」 toggle',
+    primaryTextAt > toggleAt && at('次要：{muscleMapping.secondary') > toggleAt);
+  check('D6 order: MuscleDiagramView moved below the 「练到哪里」 toggle',
+    diagramAt > toggleAt);
+  check('D6 collapse: muscle section state starts collapsed (useState(false))',
+    dialog.includes('const [musclesOpen, setMusclesOpen] = useState(false);'));
+  check('D6 collapse: toggle button is wired with aria-expanded + aria-controls to the panel id',
+    dialog.includes('aria-expanded={musclesOpen}')
+    && dialog.includes('aria-controls={musclesPanelId}')
+    && dialog.includes('id={musclesPanelId}'));
+  check('D6 collapse: toggle flips the state on click',
+    dialog.includes('onClick={() => setMusclesOpen((open) => !open)}'));
+  const panelAt = at('{musclesOpen ? (');
+  check('D6 collapse: muscle text + diagram render only inside the expanded panel (after the musclesOpen gate)',
+    panelAt > toggleAt && primaryTextAt > panelAt && diagramAt > panelAt);
+  check('D6 collapse: toggle label carries visible 展开/收起 text state, not colour or icon alone',
+    dialog.includes('musclesOpen ? "收起 ▲" : "展开 ▼"'));
+  check('D6 no-image guides: demo stays conditional on guide.demo and the video link on guide.video (text cues + link preserved, nothing generated)',
+    dialog.includes('{guide.demo ? <ExerciseDemoView demo={guide.demo} name={guide.title} /> : null}')
+    && dialog.includes('{guide.video ? ('));
+  check('D6 close safety: closing the guide only clears the selected guide (workout draft/timer state lives outside the dialog)',
+    clientSrc.includes('onClose={() => setSelectedGuide(null)}')
+    && !dialog.includes('api.'));
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);
