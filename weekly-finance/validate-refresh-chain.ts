@@ -828,5 +828,117 @@ function obsEvents(sqlite: Database): string[] {
   check("obs001: no observation rows were recorded during the outage", obsRows(sqlite).length === 0);
 }
 
+// =====================================================================
+// Group 14: F0.7-OBS-001 selective observation loss (synthetic matrix)
+// The terminal result event's own observation write is lost while
+// refresh_started / callback_received of the SAME generation are on
+// record (recordObservation swallows write failures by design).
+// The diagnosis must degrade to the business state and must never
+// contradict the generation's own recorded events.
+// =====================================================================
+{
+  type ObsRow = { event: string; outcome: string; detail: string | null; generation: string | null };
+  const row = (event: string, generation: string | null, detail: string | null = null): ObsRow =>
+    ({ event, outcome: "success_flag", detail, generation });
+  const ORDER = ["gen-1", "gen-2"];
+  const diag = (status: "idle" | "running" | "error" | null, currentGeneration: string | null, observations: ObsRow[]) =>
+    deriveRefreshDiagnosis({ status, currentGeneration, attemptOrder: ORDER, observations });
+
+  // (a) idle + this generation's callback received, terminal event
+  // unrecorded -> settled_success_unrecorded; the text states the
+  // callback arrived and the result event is unrecorded.
+  const idleReceived = diag("idle", "gen-1", [
+    row("callback_received", "gen-1"), row("spawn_attached", "gen-1"), row("refresh_started", "gen-1"),
+  ]);
+  check("obs001-loss: idle + callback received, terminal event lost -> settled_success_unrecorded",
+    idleReceived.code === "settled_success_unrecorded" && idleReceived.attempt === 1);
+  check("obs001-loss: settled_success_unrecorded text states callback arrived + result event unrecorded, never claims no callback",
+    idleReceived.text.includes("回调已到达") && idleReceived.text.includes("未记录")
+    && idleReceived.text.includes("以业务状态为准") && !idleReceived.text.includes("尚无本代回调到达"));
+
+  // (b) idle + only refresh_started recorded -> still
+  // settled_success_unrecorded, but arrival is stated as unknown.
+  const idleStartedOnly = diag("idle", "gen-1", [row("refresh_started", "gen-1")]);
+  check("obs001-loss: idle + only refresh_started -> settled_success_unrecorded",
+    idleStartedOnly.code === "settled_success_unrecorded");
+  check("obs001-loss: no-callback-recorded text states arrival unknown, never claims the callback did not arrive",
+    idleStartedOnly.text.includes("未记录") && idleStartedOnly.text.includes("到达情况未知")
+    && !idleStartedOnly.text.includes("尚无本代回调到达") && !idleStartedOnly.text.includes("回调未到"));
+
+  // (c) error + callback received, terminal event unrecorded ->
+  // settled_failure (unchanged).
+  check("obs001-loss: error + callback received, terminal event lost -> settled_failure",
+    diag("error", "gen-1", [
+      row("callback_received", "gen-1"), row("refresh_started", "gen-1"),
+    ]).code === "settled_failure");
+
+  // (d) running + callback received, no terminal event -> still
+  // awaiting_callback, but the text says the callback arrived and
+  // the outcome is unknown — never "尚无本代回调到达".
+  const runningReceived = diag("running", "gen-1", [
+    row("callback_received", "gen-1"), row("spawn_attached", "gen-1"), row("refresh_started", "gen-1"),
+  ]);
+  check("obs001-loss: running + callback received -> awaiting_callback with the arrived text",
+    runningReceived.code === "awaiting_callback"
+    && runningReceived.text.includes("当前代回调已到达") && runningReceived.text.includes("终态未知")
+    && runningReceived.text.includes("结果事件尚未记录") && !runningReceived.text.includes("尚无本代回调到达"));
+
+  // (e) running + no callback received -> original awaiting text.
+  const runningNoCallback = diag("running", "gen-1", [
+    row("spawn_attached", "gen-1"), row("refresh_started", "gen-1"),
+  ]);
+  check("obs001-loss: running + no callback received -> awaiting_callback with the original text",
+    runningNoCallback.code === "awaiting_callback" && runningNoCallback.text.includes("尚无本代回调到达"));
+
+  // (f) legacy (no bound generation): historical events must
+  // never be used to infer a current terminal outcome — any rows
+  // at all are unattributed_history, whatever the state status.
+  check("obs001-loss: gen-null + idle + old-gen applied success -> unattributed_history (no inferred settled_success)",
+    diag("idle", null, [
+      row("callback_applied_success", "gen-1"), row("callback_received", "gen-1"), row("refresh_started", "gen-1"),
+    ]).code === "unattributed_history");
+  check("obs001-loss: gen-null + error + old-gen applied failure -> unattributed_history (no inferred settled_failure)",
+    diag("error", null, [
+      row("callback_applied_failure", "gen-1"), row("callback_received", "gen-1"), row("refresh_started", "gen-1"),
+    ]).code === "unattributed_history");
+  check("obs001-loss: gen-null + idle + no rows at all -> no_attempt",
+    diag("idle", null, []).code === "no_attempt");
+}
+
+// =====================================================================
+// Group 15: F0.7-OBS-001 selective loss through the REAL handlers
+// Only the callback_applied_success observation INSERT fails;
+// every other observation write succeeds. The refresh chain must
+// settle idle on the real save, and the owner view must diagnose
+// settled_success_unrecorded with this generation's
+// callback_received present in the stream.
+// =====================================================================
+{
+  const { sqlite, db } = freshDb();
+  sqlite.exec(`CREATE TRIGGER obs_fail_applied_success BEFORE INSERT ON refresh_observations
+    WHEN NEW.event = 'callback_applied_success'
+    BEGIN SELECT RAISE(ABORT, 'selective obs write failure'); END`);
+  const started = await Actions.refreshFinanceData.handler(ownerCtx(db), {});
+  check("obs001-loss: refresh starts while only the applied-success write is disabled",
+    started.ok && started.status === "started" && stateRow(sqlite).status === "running");
+  const gen: string = stateRow(sqlite).generation;
+  const saved = await Actions.ingestFinanceData.handler(ownerCtx(db), successPayload(gen, freshAsOf()));
+  check("obs001-loss: ingest still saves and settles idle (the lost write is observation-only)",
+    saved.savedMonths === 2 && stateRow(sqlite).status === "idle" && payloadAsOf(sqlite) != null);
+  const events = obsEvents(sqlite);
+  check("obs001-loss: the stream holds this generation's callback_received but no applied_success",
+    events.includes("callback_received") && !events.includes("callback_applied_success")
+    && obsRows(sqlite).filter((r: any) => r.event === "callback_received").every((r: any) => r.generation === gen));
+  const view = await Actions.getRefreshObservations.handler(ownerCtx(db), {});
+  check("obs001-loss: diagnosis is settled_success_unrecorded for attempt #1 (not awaiting_callback)",
+    view.diagnosis?.code === "settled_success_unrecorded" && view.diagnosis?.attempt === 1);
+  check("obs001-loss: diagnosis text states the callback arrived and the result event is unrecorded",
+    (view.diagnosis?.text ?? "").includes("回调已到达") && (view.diagnosis?.text ?? "").includes("未记录")
+    && !(view.diagnosis?.text ?? "").includes("尚无本代回调到达"));
+  check("obs001-loss: the displayed stream includes the current generation's callback_received row",
+    view.observations.some((r: any) => r.event === "callback_received" && r.relation === "current" && r.attempt === 1));
+  sqlite.exec("DROP TRIGGER obs_fail_applied_success");
+}
+
 console.log(`validate-refresh-chain: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

@@ -413,6 +413,7 @@ export const refreshDiagnosisCodes = [
   "awaiting_callback",
   "callback_ignored",
   "settled_success",
+  "settled_success_unrecorded",
   "settled_failure",
   "spawn_failed",
   "unattributed_history",
@@ -467,10 +468,26 @@ const refreshDiagnosisText: Record<RefreshDiagnosisCode, string> = {
   awaiting_callback: "等待当前代回调，执行终态未知（当前尝试尚无本代回调到达；任务可能仍在执行，也可能回调尚未投递）",
   callback_ignored: "当前尝试的回调已到达，但被代次/陈旧规则忽略，未落盘保存（本代终态以当前状态为准）",
   settled_success: "当前尝试已成功落盘",
+  // Default (no recorded callback_received for this generation):
+  // the terminal result event is unrecorded and callback arrival
+  // is unknown — the text must never claim the callback did not
+  // arrive. When this generation's callback_received IS recorded,
+  // deriveRefreshDiagnosis substitutes the arrived variant below.
+  settled_success_unrecorded: "当前尝试已成功收尾（以业务状态为准）：回调/终态事件未记录，到达情况未知",
   settled_failure: "当前尝试已以失败收尾",
   spawn_failed: "当前尝试未能启动（spawn 失败）",
   unattributed_history: "有历史/无关事件记录，但无法归属到当前尝试（当前尝试终态未知）",
 };
+
+// F0.7-OBS-001 selective-loss variants: this generation's own
+// callback_received is recorded but its terminal result event is
+// not (the observation write for the result was lost — writes are
+// isolated and swallowed by design). The texts state exactly what
+// the recorded stream proves and nothing more.
+const settledSuccessUnrecordedCallbackArrivedText =
+  "当前尝试已成功收尾（以业务状态为准）：本代回调已到达，终态结果事件未记录（观测写入可能丢失）";
+const awaitingCallbackReceivedText =
+  "等待当前代终态：当前代回调已到达，终态未知（结果事件尚未记录）";
 
 export function deriveRefreshDiagnosis(input: {
   status: "idle" | "running" | "error" | null | undefined;
@@ -483,9 +500,9 @@ export function deriveRefreshDiagnosis(input: {
   observations: RefreshObservationLike[];
 }): { code: RefreshDiagnosisCode; text: string; attempt: number | null } {
   const attempt = refreshAttemptOrdinal(input.attemptOrder, input.currentGeneration);
-  const finish = (code: RefreshDiagnosisCode) => ({
+  const finish = (code: RefreshDiagnosisCode, text?: string) => ({
     code,
-    text: refreshDiagnosisText[code],
+    text: text ?? refreshDiagnosisText[code],
     attempt,
   });
   const obs = input.observations;
@@ -493,17 +510,11 @@ export function deriveRefreshDiagnosis(input: {
     // No current attempt is bound (no refresh ever started under
     // the generation contract, or a pre-contract state row). No
     // recorded event can be attributed to a current attempt, so
-    // nothing in the stream is evidence about one; only the bare
-    // state status may speak, and leftover rows stay history.
+    // nothing in the stream is evidence about one — and no
+    // historical / unrelated event may be used to infer a current
+    // terminal outcome either: any leftover rows are unattributed
+    // history, whatever the bare state status says.
     if (obs.length === 0) return finish("no_attempt");
-    if (input.status === "error") return finish("settled_failure");
-    if (input.status === "idle") {
-      return finish(
-        obs.some((row) => row.event === "callback_applied_success")
-          ? "settled_success"
-          : "settled_failure",
-      );
-    }
     return finish("unattributed_history");
   }
   const own = obs.filter((row) => row.generation === input.currentGeneration);
@@ -528,12 +539,31 @@ export function deriveRefreshDiagnosis(input: {
   // distinct from an ignored callback of any other generation,
   // which never reaches this branch.
   if (has("callback_ignored")) return finish("callback_ignored");
-  // Started / attached / received / tail events only: the
-  // attempt's own callback has not produced a recorded result.
-  // Spawn attachment is NOT proof the task executed — the honest
-  // state is "waiting for this generation's callback, final
-  // outcome unknown".
+  // Started / attached / received / tail events only: this
+  // generation has NO recorded terminal event. Spawn attachment
+  // is NOT proof the task executed. But the absence of a terminal
+  // event is not proof the callback never arrived either: the
+  // result event's own observation write may have been lost
+  // (recordObservation swallows write failures by design), while
+  // the business state already settled. So when the business
+  // state has settled, present the outcome from the state — never
+  // contradict the generation's own recorded events.
   if (input.status === "error") return finish("settled_failure");
+  if (input.status === "idle") {
+    // Settled successfully per the business state, but the
+    // terminal result event is unrecorded. If this generation's
+    // callback_received is on record, say so plainly; otherwise
+    // arrival is unknown — never claim the callback did not come.
+    return has("callback_received")
+      ? finish("settled_success_unrecorded", settledSuccessUnrecordedCallbackArrivedText)
+      : finish("settled_success_unrecorded");
+  }
+  if (has("callback_received")) {
+    // Still running, callback on record, result event not yet
+    // recorded: waiting for the terminal outcome — the text must
+    // not say no callback of this generation has arrived.
+    return finish("awaiting_callback", awaitingCallbackReceivedText);
+  }
   return finish("awaiting_callback");
 }
 
@@ -568,6 +598,7 @@ const refreshObservationsResponse = z.object({
       "awaiting_callback",
       "callback_ignored",
       "settled_success",
+      "settled_success_unrecorded",
       "settled_failure",
       "spawn_failed",
       "unattributed_history",

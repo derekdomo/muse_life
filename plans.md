@@ -307,6 +307,8 @@
 
 **交接事实**：本轮只有上述原 ID 新反例与日期分项关闭，无新独立需求。工具清单无 Muse builder/即时消息通道，现有 Codex 线程列表无 Muse LIFE 执行目标，原生 UI 锁屏、两浏览器无可用 tab；以本段推送远端 plans 为实际交接，尚未即时通知或取得本次余项接单。新余项“入队/实现交付/工件生效/所有者确认”分别记录，不冒充已实现。队列缺统一 queuedAt/startedAt，等待中位数不可计算。
 
+**实现方交付登记 2026-10-20 09 时 PDT（F0.7-OBS-001 选择性丢失反例＋legacy 余项，muse-life-plans-sync 09:13 轮次）**：两缺陷已在 space-3 上线并回灌本仓——(1) 本代已绑定、无终态事件时按业务状态降级：idle 返回新诊断码 `settled_success_unrecorded`（本代 callback_received 在位时文案明示回调已到达＋终态事件未记录＋以业务状态为准；不在位时文案为回调/终态事件未记录、到达情况未知），绝不声称回调未到；error 保持 settled_failure；running 且本代回调已到达时 awaiting_callback 文案改为「当前代回调已到达，终态未知（结果事件尚未记录）」。(2) legacy 余项：currentGeneration=null 有观测行一律 unattributed_history（无行仍 no_attempt），已删除按 status＋历史成功推定当前终态的分支。同步更新 refreshDiagnosisCodes、getter 响应 zod 枚举、客户端 refreshDiagnosisSymbol（新码 ✓）。验证：构建审计 pass；validate-refresh-chain **134/134**（原 118 无回归＋新增 16：选择性丢失合成矩阵＋真实 handler 链仅 callback_applied_success 插入失败的注入——ingest 正常落盘结算 idle、诊断 settled_success_unrecorded、观测流含本代 callback_received），其余八套（available-cash 101、cashflow 90、color-vision 16、facts-card 147、holdings 66、investment-performance 106、monthly-facts 73、payload 50）无回归；仓库副本独立复跑 refresh-chain 134/134 一致。未改财务口径/公式、未触发刷新、未扩权限。F0.7-OBS-001 两余项就此实现方交付（PM 结论以其评审记录为准）；原 F0.7 真实同步/银行对账 P0 仍未恢复——本轮只读复核 observations 仍为空、状态冻结于 2026-10-18T18:15:47Z running、diagnosis=no_attempt，恢复裁决仍待所有者（需用户确认）。
+
 ### 2026-10-19 · 每日 Life × Firance 增量反馈（独立于三小时 PM 任务）
 
 比较游标 `9b784121` → `559c301bdedb6400ef8fc2fd903a450cee92715e`。Firance 源码/构建与上轮 hash 一致后只审 Life 财务增量；本任务不移动三小时 PM 游标、不改 Life 业务代码或 changes。上轮精确日及原生字段反馈已由 `65540b0` 及后续 `201905b`/`c958c3c` 交付关闭，F0.6/F1.6/沿F1.1/沿F2.3 的需求入队、接单和源码交付可由仓库核对；工件提交上线为 Muse 登记，本任务无 builder/owner 运行通道、所有者新增确认 0。真实刷新/对账仍沿 F0.7 未完成；`559c301` 所有者已授权既有任务的最小只读观测，不再索要同一授权，不扩权限、不盲刷，原 10-18 期限不重置。

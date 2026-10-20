@@ -1625,6 +1625,7 @@ export function observationDetailText(detail: string | null): string | null {
 export function refreshDiagnosisSymbol(code: string): string {
   switch (code) {
     case "settled_success": return "✓";
+    case "settled_success_unrecorded": return "✓";
     case "settled_failure": return "▲";
     case "spawn_failed": return "▲";
     case "callback_ignored": return "●";
