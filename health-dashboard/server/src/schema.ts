@@ -96,6 +96,24 @@ export const gameState = sqliteTable("game_state", {
   attrsJson: text("attrs_json"),
   attrPointsEarned: integer("attr_points_earned").notNull().default(0),
   equipmentJson: text("equipment_json"),
+  // Persistent write revision (CWEB-PROFILE-SAFE-001): incremented inside
+  // the profile write statement itself, and every profile write is
+  // conditional on the revision the writer read (compare-and-swap), so a
+  // stale snapshot can never overwrite a newer profile. Nullable because
+  // rows written before this column existed carry no revision; a null
+  // revision is read as 0 (the oldest version).
+  revision: integer("revision"),
+  // Gold reconciliation watermark (CWEB-SETTLE-001): the game_settlements
+  // gold SUM that the stored `gold` balance already accounts for, written
+  // in the SAME statement as the balance itself. Settlement derives the
+  // balance as stored balance + (current ledger gold SUM − watermark),
+  // so ledger rows booked by an attempt whose profile save failed are
+  // credited exactly once by the next settlement instead of leaking, and
+  // rows already reflected in the balance are never minted twice.
+  // Nullable because rows written before this column existed have no
+  // watermark; the first settlement afterwards adopts a baseline (see
+  // settleGame) instead of re-minting history.
+  goldLedgerSum: integer("gold_ledger_sum"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
