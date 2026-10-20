@@ -812,3 +812,8 @@
 
 - space-6 构建回传在本轮登记提交后送达，补记交付：指南弹窗「目标肌群」区与训练完成回执「本次训练肌群事实」区已上线。构建方验证：validate-muscle-receipt.mjs **30/30 PASS**（从 App.tsx 逐字提取 MUSCLE_MAP/groupSets/muscleReceiptFacts 实跑：映射恰 30 key 且与 MUSCLE-MAP.md v1 key 集合与每条主/次清单逐项一致、提踵两 key 在位、仅已完成组、多肌群重复归属、自重动作组数、未知 key 进 unmapped、空训练、接线字符串断言）；validate-receipt 36/36 无回归；构建审计确定性检查全过。内容评审确认聚合口径正确；弹窗/回执呈现细节因审计捕获截断未被独立确认、所有者视角以其本人打开为准（B 类口径）。安全评审 high 为 space-6 getDashboard 无身份只读通道，即 L0.1 所有者已批准例外，本轮 brief 明确不改、服务端零改动。改动文件：`workout-log/client/src/App.tsx`、`client/src/theme.css`、新增 `workout-log/validate-muscle-receipt.mjs`（以上为线上路径）；仓库源码回灌顺延下轮（EVID 尾巴），本补记不冒称已回灌。回滚：线上回退上一构建。
 - space-4 侧 H4.6 构建在本补记时仍在进行中，结果下轮核验。
+
+## 2026-10-19（21:13 轮次补记 2：H4.6 首闭环 space-4 侧交付确认）
+
+- space-4 构建回传送达，补记交付：健康看板历史页「全部运动记录」与「统一时间线」之间新增「肌群状态」区已上线。实现要点（构建方回传＋审计内容评审源码级确认）：服务端 `muscleStatusFor` 纯函数只读既有力量快照聚合（completedSets 优先、缺失时回退逐组统计 completed；日期取 completedAt 的 LA 本地日；近 7 天窗口 [dataDate−6, dataDate] 按快照数据日期而非今天）；客户端内嵌 MUSCLE_MAP 与 MUSCLE-MAP.md v1 逐字一致（30 key）；每肌群末次日期/近 7 天主次组数/距今天数齐备，T 未定全行「无法判断恢复进度」零百分比，空态与覆盖注记齐备，色弱口径（●/○ 符号＋文字）成立。改动文件（线上路径）：`health-dashboard/server/src/actions.ts`、`client/src/App.tsx`、`client/src/theme.css`、新增 `validate-muscle-status.mjs`；无 schema/迁移/同步 prompt/结算/readiness 改动。验证：validate-muscle-status 23 条断言全过、validate-game-settlement 33/33，均为审计方独立复跑；构建审计 pass、390px 零溢出、深链直达历史页探针 HTTP 200 且肌群区在位。局限：审计探针为非所有者综合视图，真实快照下各肌群数值以所有者本人打开为准；呈现层色弱符号由内容评审源码级确认、未经所有者实机确认。安全评审 3 条 high 均为 L0.1 例外家族，按既定裁决保留并具名（同既往各轮）。仓库回灌顺延下轮（EVID 尾巴），不冒称已回灌。回滚：线上回退上一构建。
+- 本轮最终顺延清单：(1) space-6 肌群区/回执与 space-4 肌群状态两批源码回灌（下轮首位，EVID）；(2) CMP-CREATE-001 首片（目标 10-21）下轮派工；(3) CWEB S3 首片 10-22、CMP-FAMILY 10-22、CMP-TIME 10-23、CWEB 完整养成闭环 10-26 沿原日期；(4) LEVEL 路径 A/B 与阈值参数待所有者决定（已在 CWEB-RULES-STATUS.md 列明，不阻塞其他队列）。
