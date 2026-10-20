@@ -769,3 +769,12 @@
 - 局限（如实保留）：契约 §5 合成测试矩阵（完整/partial/缺失/迟到/重复/跨日/DST/同日并发/旧规则迁移/保存失败）的服务端决定性逻辑完整断言仍属 S1/EVID 待补证据（S1 首片登记已注明证据捕获不完整），本结论只就架构可行性、字段 coverage、权限与持久化契约落地作答；所有者本人首次打开「角色」视图的实测以所有者为准，28 日 dogfooding 不自任何上线/交付申报起算。
 - 回滚：revert 本提交（仅 CWEB-DATA-CONTRACT.md、plans.md 登记与本条 changes.md，无代码/迁移/线上行为可回滚项）。
 - 本轮用户可见增量：0 组新线上功能（spike 结论为契约/决策交付，消除 MVP 后续片的架构不确定性）；队列中位等待缺统一 queuedAt/startedAt，不可计算。未提交 app.db/.env/任何真实数据。
+
+## 2026-10-19（muse-life-plans-sync 17:13 轮次：F0.7-OBS-001 交付、CWEB-SETTLE/SLEEP 派工待核验）
+
+- 队列来源：git pull 已最新；基线 `1b939f8`..HEAD `a03365a` 新入队——PM 15:25 bug 单（CWEB-SETTLE-001 P0、CWEB-SLEEP-001/CWEB-RULES-001/F0.7-OBS-001 P1、W6.2/H4.6 回执细化）、所有者直提（S2 直派与 LIFE-C1 拆分、S3、CWEB-LEVEL-001 修仙境界三定案、compounding 理念、CMP 四项，其中 CMP-LEARN-001 已由直派聊天交付 space-10）。S1/S2 沿直派聊天推进，本轮不重复派工。
+- `F0.7-OBS-001` / P1 / A 诊断语义＋B 呈现（space-3，已上线）：getRefreshObservations 按代次/尝试关联——每条观测与诊断结论携带所有者安全的本地尝试序号（#N）与归属关系（当前尝试/历史尝试/归属未知），原始 generation/taskId 不外泄（验证脚本断言响应 JSON 不含原始 generation 值）；诊断只基于当前尝试自身事件链生成，旧代迟到的成功/失败/ignored 回调只记历史事件、不再生成当前结论；当前尝试尚无自身回调时诊断为 awaiting「等待当前代回调，执行终态未知」，spawn 附着不表述为任务已执行；成功/失败/执行中/未知四态可区分。客户端观测面板改版：当前尝试结论（带尝试序号）、当前尝试事件、历史/无关事件分开展示，每行带文字归属标签（色弱口径，不只靠颜色）。未动财务数据口径/公式，未触发任何刷新 spawn，未写业务状态，严格所有者＋白名单字段保持。
+- 验证证据：构建审计 verdict=pass、fix_before_attesting 为空、安全审查无发现；`validate-refresh-chain.ts` 实跑 **118/118**（新增 Group 13 合成矩阵：纯函数双代双序/PM 复现序、真实 handler 两代场景、20 条显示截断下诊断仍读当前尝试自身链、观测写失败隔离时链路照常落盘且诊断按本代状态诚实降级），validate-color-vision 16/16、validate-payload 50/50、validate-facts-card 147/147 全过；非所有者探针 guest_denied 零数据。局限：审计环境无所有者身份，所有者面板视觉确认以所有者本人打开为准（B 类口径）；构建方披露的 4 条往期遗留 findings（旧快照、DATA-PLAN 脱敏、FIRE 口径、月度 balanceDate 回退）不属本单范围、未触碰、未声称解决。仓库源码回灌本轮未执行，登记 EVID 尾巴下轮补齐，不冒称已回灌。回滚：线上回退上一构建＋revert 本登记提交（无 schema/迁移变更项超出构建方实现范围的记录）。
+- `CWEB-SETTLE-001`（P0/A）＋`CWEB-SLEEP-001`（P1/A）合并派工（space-4）：已向 builder 派发完整修复 brief（完整性门、修订差量、主睡眠确定性选择、validate-game-settlement 验证脚本、角色页说明行）。artifact 状态显示构建已完成（完成卡更新、无在跑构建），但构建方验证回传未送达本轮，两次只读核查未取得结果（一次基础设施连接失败、一次未回传）——按证据规则本轮**不登记交付、不勾选、不断言已生效**；下轮首位核验并回灌，未生效则重新派工。
+- `CWEB-RULES-001` 暂缓：PM 数值基线与所有者同日 S2（规则 v2）/LEVEL 定案冲突，待 S2 落地后按所有者最新口径合并，已在 plans 登记并列入汇报请用户确认口径。
+- 本轮顺延（逐条，责任均为 Muse）：W6.2/H4.6 回执首闭环（目标 10-20 不变）；CMP-CREATE/FAMILY/TIME 三个新 artifact（下轮起逐个派工）；CWEB-MVP-001·S3（待 S2 落地）；CWEB-LEVEL-001 模型设计先行；F0.7-OBS-001 与 CWEB 结算回灌尾巴。本轮用户可见增量：1 组（财务观测诊断代次关联与面板分账）。队列中位等待缺统一 queuedAt/startedAt，不可计算。未提交 app.db/.env/任何真实数据。
