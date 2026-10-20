@@ -292,6 +292,21 @@
 
 本批交接：新增需求2项（F0.6/F1.6），推进既有方向2项（F1.1/F2.3）；Life 本轮用户可见实现增量 **0**，尚未声明 Muse 已交付/上线。队列等待中位数未计算，旧条目缺 queuedAt/startedAt；新条目自本日入队计时。Muse 按既有优先级与真实技术依赖连续实现，P0＞用户直提＞其他；F0.6 的字段兼容是 F1.6 的技术依赖，其他独立工作继续。保留既有健康/训练截止日期、P0与已关闭分项，不因本批重置或重复立项。每项首次自检证据已一次列齐：合成数据/真实生产函数与 handler 保存回读、schema/migration旧版兼容、builder plan→build→audit→submit及源码回灌、changes记录命令结果/局限/回滚。实现不等PM复验；不使用本地 build 或 app.db，不索要例行 owner 截图批准，不打印真实财务数据。
 
+### 2026-10-20 · 每日 Life × Firance 增量反馈（独立于三小时 PM 任务）
+
+比较游标 `9e628729` → `9b3c3a6`，Firance 前轮 128 个源码/资源 hash 全部一致；原父仓迁移/删除/未跟踪现场保持。本轮用户可见本地增量 **0**：Life 新增刷新观测依赖其平台任务链，本地 Firance 没有同构刷新管道，不为借鉴引入新系统。已有日期/范围/只读依据交互已交付，不重复实现，不重跑同 hash 的 Firance 单元、构建或 Electron。只维护本节相关反馈，不移动三小时 PM 游标、不改 Life 业务代码、changes、数据库或 artifact。
+
+**前轮反馈进展与独立验证**：`9e628729` 两项日期反馈已由 Muse 接单、在 `6e791dc` 交付回灌；本轮逐条核对共享 `monthEnd`/`normalizeBalanceDate`、现金/收益/现金资格消费者与客户端 `isValidBalanceDateText`/`sourceLedgerRows`。独立复跑实际生产函数 synthetic：cashflow **90/90**、investment-performance **106/106**、available-cash **101/101**、facts-card **147/147**，共 **444/444**。非法月两端不再滚动为合法日，坏日期不计已知、仍留分母，原合法月/零/退款/负收益/旧数据矩阵通过，故沿 F0.6/F1.6/共用 F1.1 与 F0.5 的**本次日期源码余项已验证关闭**；不勾选 F0.5 服务端逐源台账本体。工件 plan→build→audit→submit/上线及映射为 Muse changes 登记，本任务无平台独立核实，所有者新增确认 **0**。
+
+**沿 F0.7-OBS-001 / 原 P1 / A 诊断语义 / 有问题（新增具体反例） / Muse / 原目标 2026-10-20，不延后、不新编号。** 当前 `9b3c3a6` 的 `deriveRefreshDiagnosis`（actions.ts:520–537）在有本代部分观测但缺成功结果事件时，仅对 error 状态降级，没有 idle 降级。真实 `recordObservation` 吞写失败是既定隔离设计；synthetic adapter 让当前代 `refresh_started`、`callback_received` 成功，仅 `callback_applied_success` 插入失败，业务状态设为已结算 idle。执行实际只读 `getRefreshObservations`：返回 state.status=idle、currentAttempt=1、当前代 callback_received 行，却诊断 awaiting_callback，文字“当前尝试尚无本代回调到达”。对照：全观测丢失+idle 正确 settled_success、完整成功事件正确 settled_success、running+attached 正确 awaiting、error 正确 failure、旧代噪声不污染正常成功、guest 拒绝且零 DB。实际 helpers/getter＋内存 adapter 共 **13 项**断言通过，非 SDK/Zod/真实 SQLite/refresh 或 ingest handler 保存回读/工件运行证据；不是线上事故声明。首次已列“记录失败”矩阵原脚本仅覆盖整段 outage，本反例是部分失败，不改写其 118 项已过事实。
+
+- **用户问题/影响**：已经 idle 且回调到达仍显示等待到达，诊断和自身事件矛盾，可能误导排查或重复刷新；不把诊断缺陷升级为存档损坏或 F0.7 真实恢复。
+- **具体范围与一次列齐判据**：仅修诊断/必要文案与测试；当前代已绑定时以本代已结算状态及可证事件一致呈现，观测缺失单独说明，不能把缺结果事件说成回调未到。保留无当前代不借历史成功的既有 legacy 余项（既有 PM 原单，不重复立项）；无关旧代不能推出当前结果。沿原矩阵补**选择性丢失** start/received/applied-success/applied-failure 任一观测、尤其仅终态事件失败后 idle/error、callback_received 仍 running 的到达但终态未知、总 outage、正常成功/失败、两代双序与20条截断、guest/匿名零数据；在实际合法 synthetic refresh→ingest→getter 链用条件失败注入补证，财务 payload 与状态只由原业务结算决定，诊断只读且不触发刷新、不扩权限、不改账本。按既有 builder plan→build→audit→submit、自检和回灌推进，无 PM 上线审批。
+
+**F0.7 / 原 P0 / Muse / 10-18 逾期保持**：Muse 最近只读登记仍观测表空、no_attempt、无真实终态/银行对账恢复事实；只读观测源码已交付不等于同步恢复。现存任务只读观测的 559c301 授权保持，无需重问；受控重试/恢复方案若超出既有授权，沿现有具体裁决，不盲并行 spawn。本任务无任务/工件接口，未读取真实财务记录或触发刷新。F0.5 本体与既有健康/训练重点、所有者已拍板例外均不变。
+
+**交接事实**：本轮只有上述原 ID 新反例与日期分项关闭，无新独立需求。工具清单无 Muse builder/即时消息通道，现有 Codex 线程列表无 Muse LIFE 执行目标，原生 UI 锁屏、两浏览器无可用 tab；以本段推送远端 plans 为实际交接，尚未即时通知或取得本次余项接单。新余项“入队/实现交付/工件生效/所有者确认”分别记录，不冒充已实现。队列缺统一 queuedAt/startedAt，等待中位数不可计算。
+
 ### 2026-10-19 · 每日 Life × Firance 增量反馈（独立于三小时 PM 任务）
 
 比较游标 `9b784121` → `559c301bdedb6400ef8fc2fd903a450cee92715e`。Firance 源码/构建与上轮 hash 一致后只审 Life 财务增量；本任务不移动三小时 PM 游标、不改 Life 业务代码或 changes。上轮精确日及原生字段反馈已由 `65540b0` 及后续 `201905b`/`c958c3c` 交付关闭，F0.6/F1.6/沿F1.1/沿F2.3 的需求入队、接单和源码交付可由仓库核对；工件提交上线为 Muse 登记，本任务无 builder/owner 运行通道、所有者新增确认 0。真实刷新/对账仍沿 F0.7 未完成；`559c301` 所有者已授权既有任务的最小只读观测，不再索要同一授权，不扩权限、不盲刷，原 10-18 期限不重置。
