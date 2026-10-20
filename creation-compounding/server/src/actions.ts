@@ -30,13 +30,21 @@
 //   project row itself in ONE db.batch (a single transaction): any
 //   failure rolls all three deletes back and the handler answers
 //   { ok: false } with every row intact — never a half-deleted project.
+// - addProgress captures the new row's id from the SAME statement via
+//   INSERT … RETURNING — never a post-insert SELECT — so there is no
+//   window in which a committed deleteProject can strand the handler
+//   between "insert landed" and "row not found". If a delete commits
+//   in that interleave (sweeping the just-landed entry away with its
+//   project), the handler answers the typed rejection
+//   { ok: false, code: "project_deleted" } instead of reporting a
+//   phantom success, and never re-inserts a replacement row.
 // - Legacy duplicate rows (written before this arbitration existed) are
 //   NEVER auto-deleted or merged. getDashboard surfaces them in the
 //   `reconciliation` list so the owner can see exactly which identities
 //   are duplicated and govern them by hand.
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 // Strict owner gate: only a verified owner viewer passes. Identified
@@ -198,6 +206,10 @@ const addEntryResponse = z.object({
   forbidden: z.boolean(),
   id: z.number().nullable(),
   duplicate: z.boolean(),
+  // Typed refusal reason. "project_deleted" means the target project
+  // is gone — deleted concurrently with the save, or before it — so
+  // nothing was (or could stay) recorded. Null on every other outcome.
+  code: z.enum(["project_deleted"]).nullable(),
 });
 
 /* ---------------- actions ---------------- */
@@ -566,11 +578,19 @@ export const Actions = {
   // One weekly progress entry. The same output must not be counted
   // twice: an entry's identity is (projectId, date, description,
   // evidence), and the insert is a single conditional statement —
-  // INSERT … SELECT … WHERE EXISTS(project) AND NOT EXISTS(identity) —
-  // so the duplicate check and the write are one atomic step. Two
-  // concurrent submissions of the same output land exactly one row;
-  // the loser (and any serial repeat) is answered duplicate:true with
-  // the existing row's id instead of being inserted again.
+  // INSERT … SELECT … WHERE EXISTS(project) AND NOT EXISTS(identity)
+  // RETURNING id — so the duplicate check, the write, and the capture
+  // of the new row's id are one atomic step. Two concurrent
+  // submissions of the same output land exactly one row; the loser
+  // (and any serial repeat) is answered duplicate:true with the
+  // existing row's id instead of being inserted again. Because the id
+  // comes back with the insert itself, there is no post-insert SELECT
+  // for a concurrent deleteProject to strand: if a delete commits
+  // right after the insert lands, it sweeps the new entry away with
+  // its project, the handler detects the missing project, and answers
+  // the typed rejection code:"project_deleted" — never an internal
+  // error, never a phantom success, and never a replacement row
+  // written into the void.
   addProgress: defineAction({
     request: z.object({
       projectId: z.number().int().positive(),
@@ -581,7 +601,9 @@ export const Actions = {
     }),
     response: addEntryResponse,
     async handler(ctx, args): Promise<z.infer<typeof addEntryResponse>> {
-      if (!isOwner(ctx)) return { ok: false, forbidden: true, id: null, duplicate: false };
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true, id: null, duplicate: false, code: null };
+      }
       const db = ctx.db<typeof schema>();
       const identity = and(
         eq(schema.progressEntries.projectId, args.projectId),
@@ -589,8 +611,16 @@ export const Actions = {
         eq(schema.progressEntries.description, args.description),
         eq(schema.progressEntries.evidence, args.evidence),
       );
+      const projectAlive = async (): Promise<boolean> => {
+        const rows = await db
+          .select({ id: schema.projects.id })
+          .from(schema.projects)
+          .where(eq(schema.projects.id, args.projectId))
+          .limit(1);
+        return rows.length > 0;
+      };
       const note = args.note || null;
-      const inserted = await db.run(sql`
+      const inserted = await db.all<{ id: number }>(sql`
         INSERT INTO progress_entries (project_id, date, description, evidence, note, created_at)
         SELECT ${args.projectId}, ${args.date}, ${args.description}, ${args.evidence}, ${note}, ${Date.now()}
         WHERE EXISTS (SELECT 1 FROM projects WHERE id = ${args.projectId})
@@ -601,26 +631,24 @@ export const Actions = {
               AND description = ${args.description}
               AND evidence = ${args.evidence}
           )
+        RETURNING id
       `);
-      if (inserted.rowsAffected === 1) {
-        // The identity had no stored row before this statement, so the
-        // newest row matching it is the one just written.
-        const mine = await db
-          .select({ id: schema.progressEntries.id })
-          .from(schema.progressEntries)
-          .where(identity)
-          .orderBy(desc(schema.progressEntries.id))
-          .limit(1);
-        const row = mine[0];
-        if (!row) throw new Error("addProgress: insert landed but row not found");
+      const newRow = inserted[0];
+      if (newRow) {
+        // The row landed and its id came back with the statement. A
+        // deleteProject that committed in the interleave has already
+        // removed both the project and this entry (one batch), so the
+        // save no longer exists: answer the typed rejection rather
+        // than reporting success for a swept-away row.
+        if (!(await projectAlive())) {
+          return { ok: false, forbidden: false, id: null, duplicate: false, code: "project_deleted" };
+        }
         ctx.invalidateQueries();
-        return { ok: true, forbidden: false, id: row.id, duplicate: false };
+        return { ok: true, forbidden: false, id: newRow.id, duplicate: false, code: null };
       }
       // Zero rows landed. If an identical entry already exists (serial
       // repeat, or the winner of a concurrent race), report it as a
-      // duplicate with the earliest stored id. Otherwise the project
-      // itself is gone (or never existed) — a plain refusal, and no
-      // orphan entry was written.
+      // duplicate with the earliest stored id.
       const dup = await db
         .select({ id: schema.progressEntries.id })
         .from(schema.progressEntries)
@@ -629,9 +657,19 @@ export const Actions = {
         .limit(1);
       const dupRow = dup[0];
       if (dupRow) {
-        return { ok: false, forbidden: false, id: dupRow.id, duplicate: true };
+        return { ok: false, forbidden: false, id: dupRow.id, duplicate: true, code: null };
       }
-      return { ok: false, forbidden: false, id: null, duplicate: false };
+      // No duplicate either: the EXISTS(project) guard is what refused
+      // the write — the project itself is gone (deleted concurrently,
+      // or it never existed), and no orphan entry was written.
+      if (!(await projectAlive())) {
+        return { ok: false, forbidden: false, id: null, duplicate: false, code: "project_deleted" };
+      }
+      // The project exists and no identical entry is stored, yet the
+      // insert landed zero rows — a concurrent winner's row was itself
+      // removed between the two statements. Plain refusal; the owner
+      // can simply retry.
+      return { ok: false, forbidden: false, id: null, duplicate: false, code: null };
     },
   }),
 

@@ -951,26 +951,84 @@ export const Actions = {
       // re-mark must use a fresh requestId (a new generation). The
       // attempt state is kept: having tried is a fact, not a
       // conversion.
-      await db.batch([
-        db
-          .update(schema.learningInputs)
-          .set({
-            convertedAt: null,
-            outputType: null,
-            outputNote: null,
-            conversionRequestId: null,
-          })
-          .where(eq(schema.learningInputs.id, args.id)),
-        db
-          .update(schema.conversionReceipts)
-          .set({ revokedAt: Date.now() })
-          .where(
-            and(
-              eq(schema.conversionReceipts.inputId, args.id),
-              isNull(schema.conversionReceipts.revokedAt),
+      //
+      // Legacy gap (CMP-LEARN-SAVE-001 follow-up): a row converted
+      // BEFORE the receipt table existed can carry a real request key
+      // on the input row itself yet have NO receipt. Tombstoning only
+      // existing receipts would leave that key with no revocation
+      // fact at all — once the row's key is cleared, a late retry
+      // with the same key + payload would find neither receipt nor
+      // conversion and silently re-convert (re-counting the input).
+      // So when the row still stores a real key for a live conversion
+      // and no receipt exists for that key, the SAME atomic batch
+      // first materializes the revocation fact for that exact key:
+      // a receipt built only from facts the row itself stores (its
+      // key, its payload fingerprint, its first-conversion instant),
+      // already stamped revoked. Rows with no stored key keep the
+      // "unknown" semantics — no key or receipt is ever fabricated
+      // for them.
+      const before = await readInputRow(db, args.id);
+      const revokedAt = Date.now();
+      const storedKey = before?.conversionRequestId ?? null;
+      const storedType = before?.outputType ?? null;
+      const storedAt = before?.convertedAt ?? null;
+      let legacyTombstone: typeof schema.conversionReceipts.$inferInsert | null =
+        null;
+      if (storedKey != null && storedType != null && storedAt != null) {
+        const existing = await db
+          .select({ requestId: schema.conversionReceipts.requestId })
+          .from(schema.conversionReceipts)
+          .where(eq(schema.conversionReceipts.requestId, storedKey))
+          .limit(1);
+        if (existing.length === 0) {
+          legacyTombstone = {
+            requestId: storedKey,
+            inputId: args.id,
+            payloadHash: conversionPayloadHash(
+              storedType,
+              before?.outputNote ?? null,
             ),
+            convertedAt: storedAt.getTime(),
+            outputType: storedType,
+            outputNote: before?.outputNote ?? null,
+            revokedAt,
+          };
+        }
+      }
+      const clearRow = db
+        .update(schema.learningInputs)
+        .set({
+          convertedAt: null,
+          outputType: null,
+          outputNote: null,
+          conversionRequestId: null,
+        })
+        .where(eq(schema.learningInputs.id, args.id));
+      const tombstoneLive = db
+        .update(schema.conversionReceipts)
+        .set({ revokedAt })
+        .where(
+          and(
+            eq(schema.conversionReceipts.inputId, args.id),
+            isNull(schema.conversionReceipts.revokedAt),
           ),
-      ]);
+        );
+      if (legacyTombstone) {
+        // onConflictDoNothing covers a receipt for the stored key
+        // landing between the check above and this batch: the
+        // tombstoneLive statement still revokes it by input, and the
+        // batch stays atomic either way.
+        await db.batch([
+          clearRow,
+          db
+            .insert(schema.conversionReceipts)
+            .values(legacyTombstone)
+            .onConflictDoNothing(),
+          tombstoneLive,
+        ]);
+      } else {
+        await db.batch([clearRow, tombstoneLive]);
+      }
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
     },

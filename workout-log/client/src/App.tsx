@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
@@ -1111,6 +1111,11 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
 
 function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseGuide; exerciseKey: string; onClose: () => void }) {
   const muscleMapping = MUSCLE_MAP[exerciseKey];
+  // 「练到哪里」 (primary/secondary muscle text + front/back diagram)
+  // is secondary reference material: collapsed by default so the
+  // demonstration and the cue points lead the dialog.
+  const [musclesOpen, setMusclesOpen] = useState(false);
+  const musclesPanelId = useId();
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -1137,22 +1142,18 @@ function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseG
           <button type="button" aria-label="关闭动作要领" onClick={onClose}>×</button>
         </div>
         <p className="guide-focus">{guide.focus}</p>
-        <div className="guide-section guide-muscles">
-          <h3>目标肌群</h3>
-          {muscleMapping ? (
-            <>
-              <p><span aria-hidden="true">●</span> 主要：{muscleMapping.primary.join("、")}</p>
-              <p><span aria-hidden="true">○</span> 次要：{muscleMapping.secondary.length > 0 ? muscleMapping.secondary.join("、") : "—"}</p>
-            </>
-          ) : (
-            <p>尚无映射</p>
-          )}
-          {/* W6.2 muscle diagram: front/back outlines painted from
-              this same mapping only; renders 暂无肌群图 when the key
-              is unmapped or no muscle name resolves to a region. */}
-          <MuscleDiagramView mapping={muscleMapping} />
-        </div>
+        {/* Order: demonstration first (real photo/video frames, or
+            the teaching-video link when the guide has no frames),
+            then the cue points; the muscle text + diagram live in
+            the collapsed 「练到哪里」 section below. */}
         {guide.demo ? <ExerciseDemoView demo={guide.demo} name={guide.title} /> : null}
+        {guide.video ? (
+          <a className="video-link" href={guide.video} target="_blank" rel="noreferrer">
+            <span aria-hidden="true">▶</span>
+            <span><strong>看真人教学视频</strong><small>{guide.source} · 在 YouTube 打开</small></span>
+            <i aria-hidden="true">↗</i>
+          </a>
+        ) : null}
         <div className="guide-section">
           <h3>起始位置</h3>
           <p>{guide.setup}</p>
@@ -1167,13 +1168,34 @@ function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseG
             <ul>{guide.mistakes.map((mistake) => <li key={mistake}>{mistake}</li>)}</ul>
           </div>
         </div>
-        {guide.video ? (
-          <a className="video-link" href={guide.video} target="_blank" rel="noreferrer">
-            <span aria-hidden="true">▶</span>
-            <span><strong>看真人教学视频</strong><small>{guide.source} · 在 YouTube 打开</small></span>
-            <i aria-hidden="true">↗</i>
-          </a>
-        ) : null}
+        <div className="guide-section guide-muscles">
+          <button
+            type="button"
+            className="guide-muscles-toggle"
+            aria-expanded={musclesOpen}
+            aria-controls={musclesPanelId}
+            onClick={() => setMusclesOpen((open) => !open)}
+          >
+            <span>练到哪里</span>
+            <span className="guide-muscles-toggle-state">{musclesOpen ? "收起 ▲" : "展开 ▼"}</span>
+          </button>
+          {musclesOpen ? (
+            <div id={musclesPanelId} className="guide-muscles-body">
+              {muscleMapping ? (
+                <>
+                  <p><span aria-hidden="true">●</span> 主要：{muscleMapping.primary.join("、")}</p>
+                  <p><span aria-hidden="true">○</span> 次要：{muscleMapping.secondary.length > 0 ? muscleMapping.secondary.join("、") : "—"}</p>
+                </>
+              ) : (
+                <p>尚无映射</p>
+              )}
+              {/* W6.2 muscle diagram: front/back outlines painted from
+                  this same mapping only; renders 暂无肌群图 when the key
+                  is unmapped or no muscle name resolves to a region. */}
+              <MuscleDiagramView mapping={muscleMapping} />
+            </div>
+          ) : null}
+        </div>
         <p className="guide-safety">动作疼痛时立即停止；视频用于学习动作，不替代现场教练或医疗建议。</p>
       </section>
     </div>

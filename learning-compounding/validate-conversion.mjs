@@ -26,7 +26,14 @@
 //   - legacy rows (converted before receipts existed, with and without
 //     a stored key): read back exactly as stored, never backfilled,
 //     a new key only echoes alreadyConverted, unmark + fresh key
-//     converts as a new generation.
+//     converts as a new generation;
+//   - legacy KEYED rows revoked after the upgrade: unmark materializes
+//     a revoked receipt for the stored key in the same atomic batch,
+//     so late saveOutput/markConverted retries with that key are
+//     rejected as "revoked" and never resurrect or re-count the
+//     conversion; legacy KEYLESS rows get no fabricated key/receipt;
+//     a failing unmark batch preserves the conversion, the stored key
+//     and the absence of any tombstone.
 // Synthetic data only; the real app.db is never opened.
 // Run with: bun validate-conversion.mjs
 import { readFileSync, readdirSync } from "node:fs";
@@ -74,6 +81,12 @@ check(
   check(
     "source: unmark tombstones receipts (revokedAt) and never deletes them",
     unmark.includes("revokedAt") && !unmark.includes("delete(schema.conversionReceipts"),
+  );
+  check(
+    "source: unmark materializes a revoked receipt for a stored legacy key (payload fingerprint from the row itself)",
+    unmark.includes("conversionPayloadHash") &&
+      unmark.includes("onConflictDoNothing") &&
+      unmark.includes("conversionRequestId"),
   );
 }
 check(
@@ -583,6 +596,221 @@ async function newInput(ctx, topic) {
     "legacy row unmarked then re-marked with a fresh key: converts as a new generation",
     reGen.ok === true && reGen.status === "converted" &&
       (await rowOf(db, keyedId)).outputNote === "撤销旧档后新转化",
+  );
+}
+
+/* -------- legacy KEYED rows: revocation must leave a tombstone -------- */
+// A conversion recorded before the receipt table existed (pre-0004)
+// carries its real request key on the input row but has NO receipt.
+// Revoking it used to clear the row's key and tombstone nothing, so a
+// late retry with the same key + payload found neither receipt nor
+// conversion and silently resurrected (and re-counted) the conversion.
+// The fix: unmark materializes the revocation fact for that stored key
+// — a revoked receipt built only from the row's own key, payload and
+// first-conversion instant — inside the same atomic batch.
+
+{
+  const db = await freshDb();
+  const { ctx } = makeCtx(db);
+  await call(ctx, "getDashboard", {});
+  const legacyInstant = new Date(Date.now() - 2 * 24 * 3600 * 1000);
+  const inserted = await db
+    .insert(schema.learningInputs)
+    .values({
+      date: "2026-10-11",
+      sourceType: "video",
+      topic: "旧档有键撤销留墓碑",
+      minutes: 25,
+      convertedAt: legacyInstant,
+      outputType: "experiment",
+      outputNote: "旧键产出（撤销目标）",
+      conversionRequestId: "legacy-revoke-key",
+    })
+    .returning({ id: schema.learningInputs.id });
+  const id = inserted[0].id;
+
+  await call(ctx, "unmarkConverted", { id });
+  const rowAfterUnmark = await rowOf(db, id);
+  const tombs = await receiptsOf(db, id);
+  check(
+    "legacy keyed: unmark materializes ONE revoked receipt for the stored key (key, payload, original instant all from the row)",
+    rowAfterUnmark.convertedAt === null &&
+      rowAfterUnmark.conversionRequestId === null &&
+      tombs.length === 1 &&
+      tombs[0].requestId === "legacy-revoke-key" &&
+      tombs[0].revokedAt != null &&
+      tombs[0].convertedAt === legacyInstant.getTime() &&
+      tombs[0].outputType === "experiment" &&
+      tombs[0].outputNote === "旧键产出（撤销目标）",
+    `receipts=${tombs.length}`,
+  );
+  const lateSave = await call(ctx, "saveOutput", {
+    inputId: id, requestId: "legacy-revoke-key", outputType: "experiment", outputNote: "旧键产出（撤销目标）",
+  });
+  const rowAfterLateSave = await rowOf(db, id);
+  check(
+    "legacy keyed: late saveOutput with the old key + same payload is rejected as revoked; the fact does not resurrect",
+    lateSave.ok === false && lateSave.status === "revoked" &&
+      rowAfterLateSave.convertedAt === null &&
+      rowAfterLateSave.outputNote === null &&
+      rowAfterLateSave.conversionRequestId === null,
+  );
+  const lateMark = await call(ctx, "markConverted", {
+    id, requestId: "legacy-revoke-key", outputType: "experiment", outputNote: "旧键产出（撤销目标）",
+  });
+  check(
+    "legacy keyed: late markConverted with the old key is also rejected as revoked",
+    lateMark.ok === false && lateMark.status === "revoked" &&
+      (await rowOf(db, id)).convertedAt === null,
+  );
+  const dash = await call(ctx, "getDashboard", {});
+  const todayPoint = dash.series.find((p) => p.date === dash.today);
+  check(
+    "legacy keyed: after unmark + late retries, curve and cohort count zero converted for the input",
+    dash.totals.totalConverted === 0 &&
+      dash.totals.cohorts.all.convertedInputs === 0 &&
+      todayPoint?.converted === 0 &&
+      dash.inputs.find((r) => r.id === id)?.converted === false,
+  );
+  const remark = await call(ctx, "saveOutput", {
+    inputId: id, requestId: "legacy-new-gen", outputType: "note", outputNote: "新代次产出",
+  });
+  const receiptsAfter = await receiptsOf(db, id);
+  check(
+    "legacy keyed: fresh requestId re-marks as a new generation; the materialized tombstone coexists",
+    remark.ok === true && remark.status === "converted" &&
+      (await rowOf(db, id)).conversionRequestId === "legacy-new-gen" &&
+      receiptsAfter.length === 2 &&
+      receiptsAfter.find((r) => r.requestId === "legacy-revoke-key")?.revokedAt != null &&
+      receiptsAfter.find((r) => r.requestId === "legacy-new-gen")?.revokedAt == null,
+  );
+  const lateAgain = await call(ctx, "saveOutput", {
+    inputId: id, requestId: "legacy-revoke-key", outputType: "experiment", outputNote: "旧键产出（撤销目标）",
+  });
+  check(
+    "legacy keyed: the old key stays revoked even after the new generation converted",
+    lateAgain.ok === false && lateAgain.status === "revoked" &&
+      (await rowOf(db, id)).outputNote === "新代次产出",
+  );
+}
+
+/* -------- legacy KEYLESS rows: unmark must not fabricate anything -------- */
+
+{
+  const db = await freshDb();
+  const { ctx } = makeCtx(db);
+  await call(ctx, "getDashboard", {});
+  const legacyInstant = new Date(Date.now() - 4 * 24 * 3600 * 1000);
+  const inserted = await db
+    .insert(schema.learningInputs)
+    .values({
+      date: "2026-10-09",
+      sourceType: "article",
+      topic: "旧档无键撤销",
+      minutes: 0,
+      convertedAt: legacyInstant,
+      outputType: "note",
+      outputNote: "无键旧产出",
+      conversionRequestId: null,
+    })
+    .returning({ id: schema.learningInputs.id });
+  const id = inserted[0].id;
+  await call(ctx, "unmarkConverted", { id });
+  const row = await rowOf(db, id);
+  check(
+    "legacy keyless: unmark fabricates no key and no receipt ('unknown' semantics preserved)",
+    row.convertedAt === null && row.outputNote === null &&
+      row.conversionRequestId === null &&
+      (await receiptsOf(db, id)).length === 0,
+  );
+  const lateKeyed = await call(ctx, "saveOutput", {
+    inputId: id, requestId: "never-seen-key", outputType: "note", outputNote: "无键旧产出",
+  });
+  check(
+    "legacy keyless: after unmark, an arbitrary key is just a fresh conversion (no phantom tombstone blocks or revives)",
+    lateKeyed.ok === true && lateKeyed.status === "converted" &&
+      (await rowOf(db, id)).convertedAt !== null,
+  );
+}
+
+/* -------- legacy KEYED rows: write-point failures preserve old state -------- */
+
+{
+  const db = await freshDb();
+  const failBatch = (real) =>
+    new Proxy(real, {
+      get(t, prop, recv) {
+        const v = Reflect.get(t, prop, recv);
+        if (prop === "batch") {
+          return async () => {
+            throw new Error("injected batch failure");
+          };
+        }
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+  const { ctx: okCtx } = makeCtx(db);
+  const { ctx: failCtx } = makeCtx(db, OWNER, failBatch);
+  await call(okCtx, "getDashboard", {});
+  const failInstant = new Date(Date.now() - 24 * 3600 * 1000);
+  const inserted = await db
+    .insert(schema.learningInputs)
+    .values({
+      date: "2026-10-12",
+      sourceType: "course",
+      topic: "旧档有键撤销写失败",
+      minutes: 40,
+      convertedAt: failInstant,
+      outputType: "project",
+      outputNote: "失败注入下须保全的产出",
+      conversionRequestId: "legacy-fail-key",
+    })
+    .returning({ id: schema.learningInputs.id });
+  const id = inserted[0].id;
+
+  let threw = false;
+  try {
+    await call(failCtx, "unmarkConverted", { id });
+  } catch {
+    threw = true;
+  }
+  const rowKept = await rowOf(db, id);
+  check(
+    "legacy keyed: failing unmark batch preserves the conversion, the stored key AND writes no tombstone",
+    threw === true &&
+      rowKept.convertedAt?.getTime() === failInstant.getTime() &&
+      rowKept.outputNote === "失败注入下须保全的产出" &&
+      rowKept.conversionRequestId === "legacy-fail-key" &&
+      (await receiptsOf(db, id)).length === 0,
+  );
+  await call(okCtx, "unmarkConverted", { id });
+  const lateFail = await call(failCtx, "saveOutput", {
+    inputId: id, requestId: "legacy-fail-key", outputType: "project", outputNote: "失败注入下须保全的产出",
+  });
+  const rowAfterFail = await rowOf(db, id);
+  const tombsAfterFail = await receiptsOf(db, id);
+  check(
+    "legacy keyed: after a healed unmark, the tombstone exists and a failing late retry still cannot resurrect",
+    lateFail.ok === false && lateFail.status === "revoked" &&
+      rowAfterFail.convertedAt === null &&
+      tombsAfterFail.length === 1 && tombsAfterFail[0].revokedAt != null,
+  );
+  const failedNewGen = await call(failCtx, "saveOutput", {
+    inputId: id, requestId: "legacy-fail-new", outputType: "note", outputNote: "新代次不应落库",
+  });
+  check(
+    "legacy keyed: failing new-generation write after revocation applies nothing (row unconverted, tombstone untouched)",
+    failedNewGen.ok === false && failedNewGen.status === "error" &&
+      (await rowOf(db, id)).convertedAt === null &&
+      (await receiptsOf(db, id)).length === 1,
+  );
+  const healedNewGen = await call(okCtx, "saveOutput", {
+    inputId: id, requestId: "legacy-fail-new", outputType: "note", outputNote: "新代次不应落库",
+  });
+  check(
+    "legacy keyed: the new-generation key converts once writes recover",
+    healedNewGen.ok === true && healedNewGen.status === "converted" &&
+      (await rowOf(db, id)).outputNote === "新代次不应落库",
   );
 }
 

@@ -216,8 +216,8 @@ const sameList = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]
   const guideBegin = clientSrc.indexOf('function ExerciseGuideDialog(');
   const guideEnd = clientSrc.indexOf('// --- W-UI-001', guideBegin);
   const guideSlice = clientSrc.slice(guideBegin, guideEnd > guideBegin ? guideEnd : undefined);
-  check('wiring(guide): dialog has a 目标肌群 section fed by MUSCLE_MAP[exerciseKey]',
-    guideSlice.includes('目标肌群') && guideSlice.includes('MUSCLE_MAP[exerciseKey]'));
+  check('wiring(guide): dialog has a 练到哪里 muscle section fed by MUSCLE_MAP[exerciseKey]',
+    guideSlice.includes('练到哪里') && guideSlice.includes('MUSCLE_MAP[exerciseKey]'));
   check('wiring(guide): primary/secondary lines carry symbol + label （● 主要：/ ○ 次要：), not colour alone',
     guideSlice.includes('●') && guideSlice.includes('主要：') && guideSlice.includes('○') && guideSlice.includes('次要：'));
   check('wiring(guide): an empty secondary renders — and an unknown key renders 尚无映射',
