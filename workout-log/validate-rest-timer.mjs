@@ -73,10 +73,10 @@ check('source: completion toggle starts the timer only when fresh and unblocked'
 check('source: panel renders only while a deadline exists',
   clientSrc.includes('restTimer.endsAt != null ? (') && clientSrc.includes('<RestTimerPanel timer={restTimer}'));
 check('source: panel lives in the current exercise block via timerSlot, with a below-stack fallback',
-  clientSrc.includes('const currentExercise = exerciseGroups.find(')
-  && clientSrc.includes('timerSlot={currentExercise != null && exercise.key === currentExercise.key ? restTimerUi : undefined}')
+  clientSrc.includes('const currentKey = resolveCurrentExerciseKey(')
+  && clientSrc.includes('timerSlot={currentKey != null && exercise.key === currentKey ? restTimerUi : undefined}')
   && clientSrc.includes('{timerSlot}')
-  && clientSrc.includes('currentExercise == null ? <div className="rest-timer-fallback">{restTimerUi}</div>'));
+  && clientSrc.includes('currentKey == null ? <div className="rest-timer-fallback">{restTimerUi}</div>'));
 check('source: completing a set auto-starts only when autoEnabled',
   clientSrc.includes('shouldAutoStartRest(state) ? startRestTimer(state, Date.now()) : state'));
 check('source: auto toggle is a 44px aria-pressed button that never calls a data action',
