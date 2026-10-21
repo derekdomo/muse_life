@@ -1006,3 +1006,11 @@
 ## 2026-10-21（09:13 轮次证据口径补记，EVID-LIFE-001：陪伴返工独立检查结论）
 
 - 陪伴返工的独立检查（inspection 07c2fd6e）结论：两项修复已进入当前已发布构建，上线判定 **probable**——构建成功（build 310ccacc）、审计 ok、当前源码直接读到 saveOutcome.ts deleted 双分支与 actions.ts 认领＋7 种子单 db.batch、迁移 0005 在位；生产计数活动 0/类型 7/请求键 0/meta 1 与未动一致（无编辑前基线、属推断）。关键缺口：证据包中无 validate-family-ledger 实跑输出文件，独立检查无法确认实跑计数。故本轮登记的 **153/153 明确归属为构建方实跑报告**，独立复核计数待构建方补交运行 stdout 后关闭，此项列 EVID 尾巴，不改交付结论；所有者视角验收仍以本人打开为准。
+
+## 2026-10-21（muse-life-plans-sync 11:13 轮次：S3＋陪伴返工两批源码回灌关闭＋独立复跑补证＋F0.7 只读续查）
+
+- 队列来源：git pull 已最新，HEAD 与基线同为 `e637eb4`，无新编号条目、无新 PM bug 单；按上轮顺延清单处理两批 EVID 回灌尾巴（下轮首位），并按所有者丙(ii) 续查 F0.7。
+- `CWEB-MVP-001·S3` 仓库回灌（EVID 尾巴关闭）：需求编号 CWEB-MVP-001·S3；任务：将 09:13 轮次已上线 space-4 的个人奖励首片源码回灌本仓。改了什么：以已发布源码为准覆盖 `health-dashboard/server/src/actions.ts`、`server/src/schema.ts`、`client/src/App.tsx`、`client/src/theme.css`、`drizzle/meta/_journal.json`，新增 `drizzle/0013_add_game_rewards_and_redemptions.sql` 与 `validate-rewards.mjs`。验证证据：回灌后与已发布源码逐文件 diff 为零（排除 app.db/node_modules/构建产物与仓库独有文档/脚本）；同步轮次在源头（与回灌文件逐字节相同）独立实跑 validate-rewards **36/36** 退出码 0；回灌文件隐私扫描（UUID/邮箱/地址模式）零命中。局限：所有者视角三态渲染以本人打开为准（沿既定分级）；线上 artifact 未动。回滚：revert 本次提交即撤销回灌，线上不受影响。
+- `CMP-FAMILY-SAVE-001`＋`CMP-FAMILY-INIT-001` 返工仓库回灌（EVID 尾巴关闭）：需求编号沿两原 ID；任务：将 09:13 补记轮次已上线 space-13 的 deleted 清稿＋播种原子可见返工源码回灌本仓。改了什么：覆盖 `family-compounding/client/src/App.tsx`、`server/src/actions.ts`、`server/src/schema.ts`、`drizzle/meta/_journal.json`、`validate-family-ledger.mjs`，新增 `client/src/saveOutcome.ts`（settleSubmit 纯函数）与 `drizzle/0005_unique_activity_type_name.sql`（activity_types.name 唯一索引，INIT 勘误所指迁移）。验证证据：回灌后逐文件 diff 为零；同步轮次在源头独立实跑 validate-family-ledger **153/153** 退出码 0——09:13 证据口径补记所列「证据包无实跑输出、独立复核计数待补」缺口就此关闭，153/153 不再仅归属构建方实跑报告；隐私扫描零命中。局限：所有者本人视角交互以其打开为准；线上 artifact 未动。回滚：revert 本次提交；迁移 0005 仅为仓库镜像，线上库不受回滚影响。
+- `F0.7`（P0，只读续查，遵丙(ii)）：11:13 PDT 经 space-3 `getRefreshObservations`——access=owner、currentAttempt=1、status=running、diagnosis=awaiting_callback（本代回调未到达文本），观测行仅 refresh_started(claimed)＋spawn_attached（2026-10-20T18:27:22Z），state.updatedAt 冻结于 2026-10-20T18:27:22.446Z，距启动约 23¾ 小时无本代 callback_received、无终态行、新快照未核实，断点未变（平台任务执行/回调段）。未触发任何 run，未清冻/重置，继续只读观察。脱敏：只记状态/事件类型/时刻。
+- 仍（需用户确认）：`CWEB-LEVEL-001` 路径/四参数定案（线上过渡 XP 未动）；`W6.2-PM-IMG` 素材写入特许与整批过目确认未收，不接入；`H4.6` 恢复参考 T 未定。本轮用户可见增量：0 组新线上功能。顺延：无新增顺延；CMP-TIME-001 首片 10-23、完整养成闭环 10-26 沿原日期。未提交 app.db/.env/任何真实数据。

@@ -135,7 +135,13 @@ export const gameState = sqliteTable("game_state", {
 
 export const gameSettlements = sqliteTable("game_settlements", {
   localDate: text("local_date").notNull(),
-  category: text("category", { enum: ["steps", "sleep", "strength", "quest_steps", "daily_task"] }).notNull(),
+  // reward_redeem (S3): a redemption books its gold flow into this same
+  // ledger with xp 0 and NEGATIVE gold (detail = the reward id), so the
+  // balance/watermark reconciliation in settleGame accounts for spent
+  // gold exactly like earned gold. The category is a plain text column
+  // in SQLite (no CHECK constraint in any migration); the enum here is
+  // the type-level contract.
+  category: text("category", { enum: ["steps", "sleep", "strength", "quest_steps", "daily_task", "reward_redeem"] }).notNull(),
   detail: text("detail").notNull().default(""),
   xp: integer("xp").notNull(),
   gold: integer("gold").notNull().default(0),
@@ -146,6 +152,44 @@ export const gameSettlements = sqliteTable("game_settlements", {
 }, (table) => [
   primaryKey({ columns: [table.localDate, table.category, table.detail] }),
 ]);
+
+// LIFE-C1 人生游戏 S3 (CWEB-MVP-001·S3) personal rewards: the owner's
+// own reward list (name + gold price) and the redemption receipts
+// issued against it. Additive only (migration 0013) — no existing table
+// or row is touched. A reward carries a `revision` that increments on
+// every save of its name/price, so a redemption preview can pin exactly
+// the version the owner saw. A redemption receipt is an immutable
+// snapshot: the reward name/price/revision at redemption time, the
+// balance version the preview pinned, the gold actually spent, the
+// saved balance right after, and the LA local date — later price edits
+// or late source revisions never rewrite it. `request_id` is UNIQUE:
+// it is the idempotency identity of one redemption intent, so a retry
+// with the same id resolves to the original receipt instead of charging
+// twice. The gold itself moves through the EXISTING ledger/balance
+// caliber (a reward_redeem row in game_settlements plus the profile
+// CAS write) — these tables hold no balance of their own.
+export const gameRewards = sqliteTable("game_rewards", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  price: integer("price").notNull(),
+  revision: integer("revision").notNull().default(1),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const gameRewardRedemptions = sqliteTable("game_reward_redemptions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  requestId: text("request_id").notNull().unique(),
+  rewardId: integer("reward_id").notNull(),
+  rewardName: text("reward_name").notNull(),
+  rewardPrice: integer("reward_price").notNull(),
+  rewardRevision: integer("reward_revision").notNull(),
+  balanceVersion: integer("balance_version").notNull(),
+  goldSpent: integer("gold_spent").notNull(),
+  balanceAfter: integer("balance_after").notNull(),
+  localDate: text("local_date").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
 
 export const syncLog = sqliteTable("sync_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),

@@ -297,40 +297,39 @@ export const Actions = {
       const thisMonth = today.slice(0, 7);
 
       // Materialize the preset types exactly once (CMP-FAMILY-INIT-001).
-      // The claim is a single INSERT … ON CONFLICT DO NOTHING …
-      // RETURNING statement — atomic on its own, so of any number of
-      // concurrent first reads exactly one caller wins it. The winner
-      // then commits all 7 preset inserts as ONE db.batch (a single
-      // transaction: readers see either all 7 types or none — there
-      // is no window where a concurrent first read can observe a
-      // partially seeded type list). If the seed batch fails, the
-      // claim row is removed before rethrowing so a retry can seed
-      // cleanly. Once claimed, the meta row stays forever: after the
-      // owner deletes every type, later reads never resurrect presets.
-      const claimed = await db
-        .insert(schema.ledgerMeta)
-        .values({ key: "types_seeded", value: "1" })
-        .onConflictDoNothing()
-        .returning();
-      if (claimed.length > 0) {
-        try {
-          const now = Date.now();
-          const inserts = schema.PRESET_TYPES.map((name, i) =>
-            db.insert(schema.activityTypes).values({
-              name,
-              isPreset: 1,
-              createdAt: new Date(now + i),
-            }),
-          );
-          const [firstInsert, ...restInserts] = inserts;
-          if (!firstInsert) throw new Error("preset type list is empty");
-          await db.batch([firstInsert, ...restInserts]);
-        } catch (err) {
-          await db
-            .delete(schema.ledgerMeta)
-            .where(eq(schema.ledgerMeta.key, "types_seeded"));
-          throw err;
-        }
+      // The completion marker and the seeds share ONE atomic boundary:
+      // when the "types_seeded" meta row is absent, the claim INSERT …
+      // ON CONFLICT DO NOTHING and all 7 preset INSERTs … ON CONFLICT
+      // DO NOTHING go out as a single db.batch — one transaction that
+      // commits or rolls back as a unit. There is therefore no instant
+      // at which any reader can observe "claimed but not yet seeded",
+      // and an interruption mid-seed leaves neither a false completion
+      // marker nor partial types behind: the next read simply seeds
+      // again. Concurrent first reads all attempt the same batch; the
+      // loser's statements no-op on their conflict targets (the meta
+      // primary key, the UNIQUE index on activity_types.name), so
+      // exactly 7 presets and exactly 1 meta row land whoever commits
+      // first, and both readers re-read the same committed state.
+      // Once the meta row exists, seeding is never attempted again:
+      // after the owner deletes every type, later reads keep the list
+      // empty — an empty type list never refills itself.
+      const seedClaim = await db
+        .select({ key: schema.ledgerMeta.key })
+        .from(schema.ledgerMeta)
+        .where(eq(schema.ledgerMeta.key, "types_seeded"));
+      if (seedClaim.length === 0) {
+        const now = Date.now();
+        const claimInsert = db
+          .insert(schema.ledgerMeta)
+          .values({ key: "types_seeded", value: "1" })
+          .onConflictDoNothing();
+        const presetInserts = schema.PRESET_TYPES.map((name, i) =>
+          db
+            .insert(schema.activityTypes)
+            .values({ name, isPreset: 1, createdAt: new Date(now + i) })
+            .onConflictDoNothing(),
+        );
+        await db.batch([claimInsert, ...presetInserts]);
       }
 
       const typeRows = await db

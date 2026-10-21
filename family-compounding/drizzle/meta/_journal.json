@@ -29,6 +29,13 @@
       "when": 1792592837757,
       "tag": "0004_deleted_request_key_insert_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792601450269,
+      "tag": "0005_unique_activity_type_name",
+      "breakpoints": true
     }
   ]
 }

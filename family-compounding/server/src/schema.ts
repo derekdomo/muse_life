@@ -9,9 +9,12 @@
 
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
-// Preset activity types, materialized on first dashboard read when the
-// types table is empty. The owner can rename the set freely afterwards
-// (add / delete); presets carry no special behavior beyond the flag.
+// Preset activity types, materialized exactly once on the first
+// dashboard read: the "types_seeded" ledger-meta claim and all 7
+// preset inserts commit as ONE atomic db.batch (CMP-FAMILY-INIT-001),
+// so the completion marker can never exist without its types. The
+// owner can change the set freely afterwards (add / delete); presets
+// carry no special behavior beyond the flag.
 export const PRESET_TYPES = [
   "一起吃饭",
   "陪玩",
