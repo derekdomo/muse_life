@@ -1025,3 +1025,8 @@
 - EVID 描述纠正（EVID-LIFE-001/P2，随本轮修复）：changes.md 09:13 补记与 plans 同轮登记中「客户端收敛为单一 settleSubmit」「服务端新增导出纯函数 seedIfNeeded、getDashboard 与 addType 共用」两处与回灌镜像源码不符，现纠正：客户端实际裁决函数为 `client/src/saveOutcome.ts` 导出的 `decideSaveOutcome`（App.tsx 调用之）；服务端播种逻辑内联于 getDashboard（认领＋种子同 db.batch），无 seedIfNeeded 导出函数，addType 未共用播种函数。原登记其余内容（行为、计数、生产未动）不变。
 - `F0.7`（P0，只读续查，遵丙(ii)）：13:13 PDT 经 space-3 `getRefreshObservations`——access=owner、currentAttempt=1、status=running、diagnosis=awaiting_callback，观测行仅 refresh_started(claimed)＋spawn_attached（2026-10-20T18:27:22Z），距启动约 25¾ 小时无本代回调/终态行、新快照未核实，断点未变。未触发 run、未清冻/重置，继续只读观察。
 - 仍（需用户确认）：`CWEB-LEVEL-001` 路径/四参数定案（线上过渡 XP 未动）；`W6.2-PM-IMG` 素材写入特许与整批过目确认未收，不接入；`H4.6` 恢复参考 T 未定。本轮用户可见增量：2 组（兑换原子化＋下一奖励目标、陪伴 INIT 两余项）。未提交 app.db/.env/任何真实数据；两脚本计数差与 health journal 登记差异列 EVID 尾巴，下轮随 PM 复验一并跟进。CMP-TIME-001 10-23、完整养成 10-26 沿原日期。
+
+## 2026-10-21（13:13 轮次计数勘误，EVID-LIFE-001：validate 计数口径更正）
+
+- 上一节与 plans 同轮登记中「validate-rewards 构建方实跑 127/127」一数作废：构建方最终澄清并经同步轮次复核——不存在 127 项的脚本版本，落盘 `validate-rewards.mjs`（687 行、md5 5aa667c2）全量判据为 **65 项**（原 36 项矩阵全保留并全过＋19 条新形状源码断言＋12 个 scenario 含失败注入/双竞态/改价改余额/丢响应/旧状态保全/目标矩阵），构建方在本机多次复跑与同步轮次独立复跑均为 **65/65、零失败、退出码 0**。127 系构建方首份回传的计数口径（疑子断言计），无脚本可核，自此以脚本计数 65 为准；交付行为与零失败结论不变。
+- 同理注明 family：`validate-family-ledger.mjs` 脚本全量计数为 **176/176**（构建方详细验证报告亦以 176 为脚本实跑数、与同步轮次 bun 复跑一致）；上一节所引 182 为构建方摘要口径，自此以脚本计数 176 为准。两脚本计数差尾巴就此关闭，不再列 EVID 未决。
