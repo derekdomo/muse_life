@@ -294,6 +294,14 @@
 
 本批交接：新增需求2项（F0.6/F1.6），推进既有方向2项（F1.1/F2.3）；Life 本轮用户可见实现增量 **0**，尚未声明 Muse 已交付/上线。队列等待中位数未计算，旧条目缺 queuedAt/startedAt；新条目自本日入队计时。Muse 按既有优先级与真实技术依赖连续实现，P0＞用户直提＞其他；F0.6 的字段兼容是 F1.6 的技术依赖，其他独立工作继续。保留既有健康/训练截止日期、P0与已关闭分项，不因本批重置或重复立项。每项首次自检证据已一次列齐：合成数据/真实生产函数与 handler 保存回读、schema/migration旧版兼容、builder plan→build→audit→submit及源码回灌、changes记录命令结果/局限/回滚。实现不等PM复验；不使用本地 build 或 app.db，不索要例行 owner 截图批准，不打印真实财务数据。
 
+### 2026-10-21 · 每日 Life × Firance 增量反馈（独立于三小时 PM 任务）
+
+- **增量与本地实际交付**：上次远端游标 `72830ed`→`58cbc090101a7776fc1541294c9726af508ad312`，Firance 起始138个源码/构建资源hash与上轮全同，父仓仍565b5e5、迁移现场保持。本轮借鉴 Life `performProgressCheck` / 三层反馈的现有交互，在 Firance Connections 实现1组可见增量：配置/连接列表独立读取与会话内本机成功读取时间；失败保旧显示和时间、初次失败不伪装空连接、坏格式不吞为空表、重复点读合并；只读按钮明确范围。既有 sync 返回 syncError 不再称全成功，同步业务结果与后续状态读取失败分开，缺返回不冒称成功、不把成功说成银行对账。没有引入新系统或执行真实账户操作。lint、68单元、snapshot parser、Vite、两套实际 Electron 临时profile/synthetic通过（新增18项连接分路/同步结果控制＋原smoke）；1360/900宽截图已查。源码与测试构建一并回填，备份留本任务run目录，不提交父仓整片迁移。
+- **沿 F0.7-OBS-001 / 原P1 / A诊断语义+B呈现 / Muse / 原目标10-20**：上轮每日新增“选择性终态观测写失败”与原legacy余项已由 `244d356` 接单交付回灌，源码分项本轮验证关闭；不新建同义单、不重开已交付正常路径。独立实际recordObservation/deriveRefreshDiagnosis/getRefreshObservations＋内存adapter **32项**通过：仅丢结果事件且idle返回settled_success_unrecorded并写已到达/结果未记录；选择性丢start/received/success/failure×idle/running/error、总outage、历史代噪声、无绑定代次有行unattributed_history/无行no_attempt、guest零DB与不泄原始generation均通过。新增检查进度反馈当前仓脚本实跑 **68/68**（复用Firance TypeScript，仅临时依赖软链；Muse源头登记71，本任务按实际输出计数，不冒充相同）；透传本代已到达文案、超时投影不称失败、两路失败隔离与只读接线通过。不是SDK/真实SQLite/合法refresh→ingest保存回读/React或线上证据；134原生handler矩阵是Muse登记，不称本任务实跑。
+- **交付四层事实**：上述原需求入队、Muse接单和仓库源码交付可由244d356/c202e90核实；工件按builder plan→build→audit→submit已提交上线、逐文件回灌为changes申报，本任务没有平台接口独立核对，新增所有者确认0。其余F0.6/F1.6/F1.1/F2.3源码hash未变的已过公式/日期/范围检查复用，不重复跑旧444项。
+- **真实阻点及原期限**：F0.7仍原P0/Muse/10-18逾期；最新07:13只读申报仍running/awaiting_callback、无本代回调/终态、新快照未核实，观测/反馈改善不等于真实恢复或银行对账。所有者已选丙(ii)继续只读观察，沿该决定、不再触发run/清冻/重问同裁决。F0.5服务端逐源coverage/最后成功时间台账本体仍待交付、原期限不重置；不以呈现修复勾本体。健康/训练重点、L0.1已拍板例外不变。队列缺统一真实开工时间，等待中位数不可计算。
+- **交接**：本轮没有新独立需求或新产品bug；以上是既有反馈关闭与已落地比较，不凑需求。仅本节维护plans，未改Life业务代码/changes/数据库或本地build，未改三小时PM记忆或游标。工具无Muse builder/即时消息入口，线程清单无Muse LIFE执行目标；CUA确认Mac锁屏、两浏览器0tab。以本节进入远端plans作为可用交接，尚未即时通知、未取得本轮新确认；不向其他PM聊天或无关人员发送。本轮每日任务用户可见本地增量1组、Life新增实现0组（复验已交付）。
+
 ### 2026-10-20 · 每日 Life × Firance 增量反馈（独立于三小时 PM 任务）
 
 比较游标 `9e628729` → `9b3c3a6`，Firance 前轮 128 个源码/资源 hash 全部一致；原父仓迁移/删除/未跟踪现场保持。本轮用户可见本地增量 **0**：Life 新增刷新观测依赖其平台任务链，本地 Firance 没有同构刷新管道，不为借鉴引入新系统。已有日期/范围/只读依据交互已交付，不重复实现，不重跑同 hash 的 Firance 单元、构建或 Electron。只维护本节相关反馈，不移动三小时 PM 游标、不改 Life 业务代码、changes、数据库或 artifact。
