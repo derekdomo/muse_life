@@ -59,6 +59,25 @@
 // - deleteActivity removes exactly one row by id; every total, the
 //   weekly series, and the calendar counts are recomputed from the live
 //   record set on each read, so a deletion corrects all of them.
+// - Preset seeding (CMP-FAMILY-INIT-001) is gated on the REAL claim
+//   outcome inside the same atomic batch: the claim row carries a
+//   fresh per-attempt token as its value, and every preset insert is a
+//   guarded INSERT … SELECT that fires only while the stored claim
+//   holds THIS attempt's token. A reader whose pre-check saw an empty
+//   claim but whose batch lands after another reader already seeded
+//   (and the owner then deleted every type) therefore writes zero
+//   seed rows — its claim no-ops against the winner's token and every
+//   guard fails — so deleted types can never be resurrected by a late
+//   stale first read.
+// - Type-name uniqueness is scoped to preset identity, never global
+//   (migrations 0005/0006): the only UNIQUE index on activity_types
+//   is on the stable preset_key column (the earliest preset row of
+//   each name carries it; custom types and legacy same-name rows
+//   keep preset_key NULL). Legacy databases holding two exact-same-
+//   name types upgrade cleanly with both rows and their history
+//   preserved — nothing is deleted or silently merged, and preset
+//   seeding still dedupes by name (concurrent same-name seeding
+//   lands exactly one row; addType's duplicate returns the winner).
 // - Future dates are not completed facts (CMP-FAMILY-DATE-001): a save
 //   dated after today (America/Los_Angeles) is refused with a typed
 //   'future' result, and pre-existing future-dated rows are excluded
@@ -297,37 +316,53 @@ export const Actions = {
       const thisMonth = today.slice(0, 7);
 
       // Materialize the preset types exactly once (CMP-FAMILY-INIT-001).
-      // The completion marker and the seeds share ONE atomic boundary:
-      // when the "types_seeded" meta row is absent, the claim INSERT …
-      // ON CONFLICT DO NOTHING and all 7 preset INSERTs … ON CONFLICT
-      // DO NOTHING go out as a single db.batch — one transaction that
-      // commits or rolls back as a unit. There is therefore no instant
-      // at which any reader can observe "claimed but not yet seeded",
-      // and an interruption mid-seed leaves neither a false completion
-      // marker nor partial types behind: the next read simply seeds
-      // again. Concurrent first reads all attempt the same batch; the
-      // loser's statements no-op on their conflict targets (the meta
-      // primary key, the UNIQUE index on activity_types.name), so
-      // exactly 7 presets and exactly 1 meta row land whoever commits
-      // first, and both readers re-read the same committed state.
-      // Once the meta row exists, seeding is never attempted again:
-      // after the owner deletes every type, later reads keep the list
-      // empty — an empty type list never refills itself.
+      // The completion marker and the seeds share ONE atomic boundary,
+      // and the seeds are gated on the REAL claim outcome inside that
+      // boundary — not on the pre-check above, whose result can go
+      // stale while this call is paused:
+      //   - the claim INSERT … ON CONFLICT DO NOTHING stores a fresh
+      //     per-attempt token as the marker's value;
+      //   - each preset insert is a guarded INSERT … SELECT … WHERE
+      //     EXISTS (claim row still holding THIS attempt's token),
+      //     with ON CONFLICT DO NOTHING against the preset_key UNIQUE
+      //     index as the storage-level backstop.
+      // All 8 statements go out as a single db.batch — one transaction
+      // that commits or rolls back as a unit. The reader that actually
+      // claims sees its own token mid-batch and seeds; any other
+      // reader's batch either runs before the winner's (and becomes
+      // the winner) or after it commits, in which case its claim
+      // no-ops, every guard sees the winner's token, and it writes
+      // ZERO seed rows. That closes the stale-first-read resurrection:
+      // reader A pre-checks an empty claim and pauses; reader B seeds
+      // fully; the owner deletes every type; A resumes — A's seeds are
+      // all guarded off, the type list stays empty, and the marker
+      // keeps B's token (seeded stays seeded). An interruption mid-seed
+      // likewise leaves neither a false completion marker nor partial
+      // types behind: the next read simply seeds again. Once the meta
+      // row exists, seeding is never attempted again: after the owner
+      // deletes every type, later reads keep the list empty — an empty
+      // type list never refills itself.
       const seedClaim = await db
         .select({ key: schema.ledgerMeta.key })
         .from(schema.ledgerMeta)
         .where(eq(schema.ledgerMeta.key, "types_seeded"));
       if (seedClaim.length === 0) {
         const now = Date.now();
+        const seedToken = `seed:${now}:${Math.random().toString(36).slice(2)}:${Math.random().toString(36).slice(2)}`;
         const claimInsert = db
           .insert(schema.ledgerMeta)
-          .values({ key: "types_seeded", value: "1" })
+          .values({ key: "types_seeded", value: seedToken })
           .onConflictDoNothing();
         const presetInserts = schema.PRESET_TYPES.map((name, i) =>
-          db
-            .insert(schema.activityTypes)
-            .values({ name, isPreset: 1, createdAt: new Date(now + i) })
-            .onConflictDoNothing(),
+          db.run(sql`
+            INSERT INTO activity_types (name, is_preset, preset_key, created_at)
+            SELECT ${name}, 1, ${name}, ${now + i}
+            WHERE EXISTS (
+              SELECT 1 FROM ledger_meta
+              WHERE key = 'types_seeded' AND value = ${seedToken}
+            )
+            ON CONFLICT DO NOTHING
+          `),
         );
         await db.batch([claimInsert, ...presetInserts]);
       }

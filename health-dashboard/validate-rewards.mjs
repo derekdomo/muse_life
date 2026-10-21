@@ -1,6 +1,9 @@
-// CWEB-MVP-001·S3 personal rewards validation.
-// Runs the REAL production handler cores (handleGetRewards /
+// CWEB-MVP-001·S3 personal rewards validation, extended by
+// CWEB-REDEEM-SAFE-001 (atomic redemption adjudication) and the S3
+// 余项 (next-reward goal + balance three-state). Runs the REAL
+// production handler cores (handleGetRewards /
 // handleSaveReward / handleRedeemReward / handleGetRedemptionReceipt
+// / handleSetRewardGoal
 // and their callees — settleGame, saveGameProfile, loadGameStateRow,
 // the ledger writers) extracted verbatim from server/src/actions.ts,
 // against a real in-memory SQLite database built by applying this
@@ -11,14 +14,26 @@
 // with revision increments, insufficient-funds zero-write rejection,
 // stale price / stale reward revision / stale balance version
 // rejections (zero writes), a successful atomic redemption (deduct +
-// watermark + ledger flow + receipt snapshot in one caliber), replay
+// watermark + ledger flow + receipt snapshot in one batch), replay
 // with the same requestId + same content returning the original
 // receipt without a second charge, same-key different-content
 // conflict, price edits never rewriting an old receipt, a second
 // same-day redemption accumulating into one ledger flow row, missing
 // sources keeping list + receipts readable, and a late source revision
 // neither deleting the receipt nor re-pricing it (and never posing
-// the redemption day as settled-through).
+// the redemption day as settled-through). The REDEEM-SAFE extension
+// adds: failure injection at the batch and at each inner write point
+// (only the fully old state or the same-key-recoverable committed
+// state survives), a lost response after the commit landed, different-
+// key concurrency (at most one success, exact balance), same-key
+// concurrency (exactly one charge, one receipt), price AND balance
+// changes landing after the final pre-read (old confirmation
+// rejected, fresh preview charges the new values exactly), the
+// receipt proving the actual deduction/watermark/flow, preservation
+// of a seeded legacy half-completed state (never silently rewritten),
+// and the goal matrix (gates, persistence across reopen, failed save
+// keeps the previous goal, rename/reprice reads current values while
+// old receipts keep snapshots, goal readable with sources missing).
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -88,6 +103,8 @@ check('source: schema carries the rewards + redemptions tables',
   schemaSrc.includes('export const gameRewards = sqliteTable("game_rewards"')
   && schemaSrc.includes('export const gameRewardRedemptions = sqliteTable("game_reward_redemptions"')
   && schemaSrc.includes('requestId: text("request_id").notNull().unique()'));
+check('source: schema carries the additive next-reward goal preference (rewardId only)',
+  schemaSrc.includes('export const gameRewardGoal = sqliteTable("game_reward_goal"'));
 check('source: ledger category enum includes reward_redeem',
   schemaSrc.includes('"reward_redeem"') && serverSrc.includes('const gameCategorySchema = z.enum(["steps", "sleep", "strength", "quest_steps", "daily_task", "reward_redeem"])'));
 const migration0013 = './drizzle/0013_add_game_rewards_and_redemptions.sql';
@@ -96,23 +113,55 @@ check('source: migration 0013 creates both tables and the unique request_id inde
   && readFileSync(new URL(migration0013, import.meta.url), 'utf8').includes('CREATE TABLE `game_rewards`')
   && readFileSync(new URL(migration0013, import.meta.url), 'utf8').includes('CREATE TABLE `game_reward_redemptions`')
   && readFileSync(new URL(migration0013, import.meta.url), 'utf8').includes('CREATE UNIQUE INDEX `game_reward_redemptions_request_id_unique`'));
+const migration0014 = './drizzle/0014_add_game_reward_goal.sql';
+check('source: migration 0014 additively creates the goal table (no existing table touched)',
+  existsSync(new URL(migration0014, import.meta.url))
+  && readFileSync(new URL(migration0014, import.meta.url), 'utf8').includes('CREATE TABLE `game_reward_goal`')
+  && !/ALTER TABLE|DROP TABLE|DELETE FROM/.test(readFileSync(new URL(migration0014, import.meta.url), 'utf8')));
 check('source: redemption books its flow into the shared ledger (reward_redeem, detail = reward id, negative gold)',
-  serverSrc.includes('category: "reward_redeem"') && serverSrc.includes('detail: String(freshReward.id)') && serverSrc.includes('gold: -args.price'));
+  serverSrc.includes("'reward_redeem'") && serverSrc.includes('${String(freshReward.id)}') && serverSrc.includes('${-args.price}'));
 check('source: settled-through MAX excludes reward_redeem rows',
   serverSrc.includes("<> 'reward_redeem' THEN"));
 check('source: redeem handler checks the replay before any write and pins before settling',
   serverSrc.indexOf('const existing = await loadRedemptionByRequestId(ctx, args.requestId);') > 0
   && serverSrc.indexOf('const existing = await loadRedemptionByRequestId(ctx, args.requestId);') < serverSrc.indexOf('// (2) Pre-validation against stored state')
-  && serverSrc.indexOf('// (2) Pre-validation against stored state') < serverSrc.indexOf('// (4) The redemption itself, under the profile CAS.'));
+  && serverSrc.indexOf('// (2) Pre-validation against stored state') < serverSrc.indexOf('// (4) The redemption itself, as ONE atomic batch'));
+check('source: the redemption commit is a single atomic batch (guarded receipt insert + chained CAS deduction + changes()-gated ledger flow)',
+  serverSrc.includes('db.batch([receiptInsert, casDeduction, ledgerInsert])')
+  && serverSrc.includes('const receiptInsert = db.insert(schema.gameRewardRedemptions).select(sql`')
+  && serverSrc.includes('const ledgerInsert = db.insert(schema.gameSettlements).select(sql`')
+  && serverSrc.includes('COALESCE(${schema.gameState.revision}, 0) = ${readRevision}')
+  && serverSrc.includes('EXISTS (SELECT 1 FROM ${schema.gameRewards}')
+  && serverSrc.includes('EXISTS (SELECT 1 FROM ${schema.gameRewardRedemptions} WHERE ${schema.gameRewardRedemptions.requestId} = ${args.requestId})')
+  && serverSrc.includes('(SELECT changes()) > 0'));
+check('source: the redeem handler never writes a receipt ahead of the deduction and never floors the balance',
+  !extractHandlerFunction(serverSrc, 'handleRedeemReward').includes('onConflictDoNothing().returning({ id: schema.gameRewardRedemptions.id })')
+  && !extractHandlerFunction(serverSrc, 'handleRedeemReward').includes('Math.max(0'));
 check('source: reward actions are wired with the strict owner gate only (no sync-channel exception)',
   serverSrc.includes('handler: handleGetRewards') && serverSrc.includes('handler: handleRedeemReward')
-  && !/handle(Redeem|Save)Reward[\s\S]{0,200}isOwnerOrSyncChannel/.test(serverSrc));
+  && serverSrc.includes('handler: handleSetRewardGoal')
+  && !/handle(Redeem|Save)Reward[\s\S]{0,200}isOwnerOrSyncChannel/.test(serverSrc)
+  && !/handleSetRewardGoal[\s\S]{0,200}isOwnerOrSyncChannel/.test(serverSrc));
 check('source: client states the receipt-only proof and the no-purchase line',
   clientSrc.includes('兑换只记个人回执，不代购、不下单') && clientSrc.includes('只证明金币已兑换，不证明现实奖励已经享用'));
 check('source: client carries the unconfirmed-result state resolved by the same requestId',
   clientSrc.includes('兑换结果未确认') && clientSrc.includes('用同一请求重试兑换') && clientSrc.includes('api.getRedemptionReceipt'));
+check('source: client treats typed busy as unconfirmed (identity kept), never as a plain rejection',
+  clientSrc.includes('result.status === "busy"') && clientSrc.includes('setStage({ kind: "unconfirmed", draft, lookupNote: result.message })'));
+check('source: client persists the pending redemption identity across reopens and never re-keys it',
+  clientSrc.includes('PENDING_REDEMPTION_KEY') && clientSrc.includes('loadPendingRedemption') && clientSrc.includes('storePendingRedemption(draft)') && clientSrc.includes('继续确认'));
+check('source: a not-found lookup says 未确认 and never claims the gold did not move',
+  clientSrc.includes('结果仍未确认') && !clientSrc.includes('它没有入账'));
 check('source: client shows the shortfall as text, never color alone',
   clientSrc.includes('还差 ${numberLabel(shortfall)} 金币'));
+check('source: client keeps the three balance states distinct (还差 N / 可兑换 / 余额暂不可核实) and pauses writes when unverified',
+  clientSrc.includes('余额暂不可核实') && clientSrc.includes('✓ 可兑换') && clientSrc.includes('暂时不能发起兑换')
+  && clientSrc.includes('const balanceVerified = !!data && data.ok'));
+check('source: client offers 设为下一奖励 per reward, the character-screen goal strip, and the receipt goal choices',
+  clientSrc.includes('设为下一奖励') && clientSrc.includes('选一项你想先实现的奖励')
+  && clientSrc.includes('<NextRewardGoal />') && clientSrc.includes('查看奖励')
+  && clientSrc.includes('保留该目标') && clientSrc.includes('选择下一项')
+  && clientSrc.includes('api.setRewardGoal'));
 
 // ------------------------------------------------------------ harness
 async function loadHarnessDeps() {
@@ -140,7 +189,7 @@ async function buildHarness() {
   const z = deps.zod.z;
   const schemaCode = schemaSrc.replace(/^import[^;]+;/m, '').replace(/export const /g, 'const ');
   const schema = new Function('sqliteTable', 'integer', 'text', 'real', 'primaryKey',
-    `${stripTypeScriptTypes(schemaCode)}\nreturn { healthSnapshot, strengthTrainingSnapshot, morningCheckin, readinessHistory, gameState, gameSettlements, gameRewards, gameRewardRedemptions, syncLog };`)
+    `${stripTypeScriptTypes(schemaCode)}\nreturn { healthSnapshot, strengthTrainingSnapshot, morningCheckin, readinessHistory, gameState, gameSettlements, gameRewards, gameRewardRedemptions, gameRewardGoal, syncLog };`)
     (core.sqliteTable, core.integer, core.text, core.real, core.primaryKey);
   const constNames = [
     'statusSchema', 'trendPointSchema', 'dailySchema', 'workoutSchema', 'sleepHistorySchema',
@@ -161,15 +210,15 @@ async function buildHarness() {
     'stepsXpFor', 'sleepXpFor', 'sleepStartOrderKey', 'selectMainSleep',
     'compareSourceVersions', 'sourceVersionSqlBefore', 'planLedgerAction', 'buildGamePlan',
     'bookLedgerRow', 'settleLedgerRow', 'evaluateDailyTasks', 'settleGame',
-    'rewardItemFromRow', 'rewardReceiptFromRow', 'loadRedemptionByRequestId', 'sameRedemptionContent',
-    'handleGetRewards', 'handleSaveReward', 'handleRedeemReward', 'handleGetRedemptionReceipt',
+    'rewardItemFromRow', 'rewardReceiptFromRow', 'loadRedemptionByRequestId', 'loadRewardGoalId', 'sameRedemptionContent',
+    'handleGetRewards', 'handleSaveReward', 'handleRedeemReward', 'handleGetRedemptionReceipt', 'handleSetRewardGoal',
   ];
   const code = [
     ...constNames.map((n) => extractConst(serverSrc, n)),
     ...fnNames.map((n) => extractHandlerFunction(serverSrc, n)),
   ].join('\n');
   const fns = new Function('schema', 'eq', 'and', 'sql', 'desc', 'asc', 'lte', 'z',
-    `${stripTypeScriptTypes(code)}\nreturn { handleGetRewards, handleSaveReward, handleRedeemReward, handleGetRedemptionReceipt, settleGame, loadHealthSnapshot, loadGameStateRow };`)
+    `${stripTypeScriptTypes(code)}\nreturn { handleGetRewards, handleSaveReward, handleRedeemReward, handleGetRedemptionReceipt, handleSetRewardGoal, settleGame, loadHealthSnapshot, loadGameStateRow };`)
     (schema, eq, and, sql, desc, asc, lte, z);
   const migrationFiles = readdirSync(new URL('./drizzle/', import.meta.url)).filter((f) => f.endsWith('.sql')).sort();
   async function makeDb() {
@@ -397,6 +446,240 @@ if (H) {
     const settled = await H.settleGame(owner, healthLoad.snapshot, null, TODAY);
     check('source revision: settled-through stays at the last settled source day, never the redemption day',
       settled.settledThroughDate === '2026-10-02', `through=${settled.settledThroughDate}`);
+  });
+
+  // -------------------------------------------- atomic commit (REDEEM-SAFE-001)
+  function wrapDb(db, overrides) {
+    return new Proxy(db, {
+      get(t, p) {
+        if (Object.prototype.hasOwnProperty.call(overrides, p)) return overrides[p];
+        const v = t[p];
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+  }
+
+  await scenario('atomic commit: failure injection at the batch write point', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '原子测试', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    const args = { requestId: 'req-atomic-fail-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion };
+    const failingDb = wrapDb(db, { batch: async () => { throw new Error('injected batch failure'); } });
+    const failed = await H.handleRedeemReward(ctxFor(failingDb, OWNER), args);
+    const stateAfterFail = await rawState(db);
+    check('atomic: an injected batch failure returns busy (unconfirmed) and leaves the fully old state — no receipt, no flow, no deduction',
+      failed.status === 'busy' && failed.receipt === null
+      && stateAfterFail.gold === 100 && stateAfterFail.goldLedgerSum === 0
+      && stateAfterFail.redemptionCount === 0 && stateAfterFail.redeemRowCount === 0, `status=${failed.status}`);
+    const retry = await H.handleRedeemReward(owner, args);
+    const state = await rawState(db);
+    check('atomic: the same requestId retry after the failed commit succeeds exactly once',
+      retry.status === 'redeemed' && state.gold === 40 && state.redemptionCount === 1 && state.redeemGoldSum === -60);
+    check('atomic: the issued receipt proves the actual commit (balanceAfter == stored gold, watermark == ledger redeem sum, goldSpent == -flow)',
+      retry.receipt !== null && retry.receipt.balanceAfter === state.gold
+      && state.goldLedgerSum === state.redeemGoldSum && retry.receipt.goldSpent === -state.redeemGoldSum);
+  });
+
+  await scenario('atomic commit: failure injection at each inner write point rolls back everything', async () => {
+    for (const [table, bak] of [['game_settlements', 'game_settlements_sab'], ['game_reward_redemptions', 'game_reward_redemptions_sab']]) {
+      const { client, db } = await H.makeDb();
+      const owner = ctxFor(db, OWNER);
+      await seedFundedProfile(client, 100);
+      const reward = await H.handleSaveReward(owner, { id: null, name: '写点注入', price: 60 });
+      const list = await H.handleGetRewards(owner);
+      const sabotageDb = wrapDb(db, {
+        batch: async (stmts) => {
+          await client.execute(`ALTER TABLE ${table} RENAME TO ${bak}`);
+          try { return await db.batch(stmts); }
+          finally { await client.execute(`ALTER TABLE ${bak} RENAME TO ${table}`); }
+        },
+      });
+      const res = await H.handleRedeemReward(ctxFor(sabotageDb, OWNER), { requestId: `req-sabotage-${table}`, rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion });
+      const state = await rawState(db);
+      check(`atomic: breaking ${table} mid-commit leaves the fully old state (busy, gold 100, watermark 0, zero receipts, zero flows)`,
+        res.status === 'busy' && state.gold === 100 && state.goldLedgerSum === 0
+        && state.redemptionCount === 0 && state.redeemRowCount === 0, `status=${res.status}`);
+    }
+  });
+
+  await scenario('atomic commit: response lost after the commit landed', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '丢响应', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    const args = { requestId: 'req-lost-response', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion };
+    let committed = false;
+    let dropReads = true;
+    const lossyDb = wrapDb(db, {
+      batch: async (stmts) => { const result = await db.batch(stmts); committed = true; return result; },
+      select: (...a) => { if (committed && dropReads) throw new Error('response lost in transit'); return db.select(...a); },
+    });
+    const lost = await H.handleRedeemReward(ctxFor(lossyDb, OWNER), args);
+    check('lost response: the handler reports busy (unconfirmed), never a false typed rejection',
+      lost.status === 'busy' && lost.receipt === null, `status=${lost.status}`);
+    dropReads = false;
+    const stateAfterLoss = await rawState(db);
+    const lookup = await H.handleGetRedemptionReceipt(owner, { requestId: 'req-lost-response' });
+    const retry = await H.handleRedeemReward(owner, args);
+    const state = await rawState(db);
+    check('lost response: the commit had in fact landed once (gold 40, one -60 flow); lookup finds the receipt and the same-key retry returns it with no second charge',
+      stateAfterLoss.gold === 40 && stateAfterLoss.redeemGoldSum === -60
+      && lookup.found === true && retry.status === 'already_resolved'
+      && retry.receipt?.id === lookup.receipt?.id
+      && state.gold === 40 && state.redemptionCount === 1 && state.redeemGoldSum === -60);
+  });
+
+  await scenario('atomic commit: concurrent different keys cannot overdraw', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '并发奖励', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    const base = { rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion };
+    const [r1, r2] = await Promise.all([
+      H.handleRedeemReward(owner, { ...base, requestId: 'req-race-key-a01' }),
+      H.handleRedeemReward(owner, { ...base, requestId: 'req-race-key-b01' }),
+    ]);
+    const statuses = [r1.status, r2.status];
+    const state = await rawState(db);
+    check('race different keys: exactly one success and one typed rejection; one receipt; gold exactly 40 (winner state), ledger -60, watermark -60 — no overdraft, no floor',
+      statuses.filter((s) => s === 'redeemed').length === 1
+      && statuses.every((s) => s === 'redeemed' || s === 'stale' || s === 'insufficient_funds' || s === 'busy')
+      && state.redemptionCount === 1 && state.gold === 40 && state.redeemGoldSum === -60 && state.goldLedgerSum === -60,
+      `statuses=${statuses.join(',')}`);
+  });
+
+  await scenario('atomic commit: concurrent same key charges exactly once', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '同键并发', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    const args = { requestId: 'req-race-same-key', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion };
+    const [s1, s2] = await Promise.all([
+      H.handleRedeemReward(owner, args),
+      H.handleRedeemReward(owner, args),
+    ]);
+    const state = await rawState(db);
+    check('race same key: both submits resolve to the SAME single receipt; exactly one deduction (gold 40, one -60 flow)',
+      s1.receipt !== null && s2.receipt !== null && s1.receipt.id === s2.receipt.id
+      && [s1.status, s2.status].every((s) => s === 'redeemed' || s === 'already_resolved')
+      && state.redemptionCount === 1 && state.gold === 40 && state.redeemGoldSum === -60,
+      `statuses=${s1.status},${s2.status}`);
+  });
+
+  await scenario('atomic commit: price change after the final pre-read rejects the old confirmation', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '改价测试', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    let armed = true;
+    const raceDb = wrapDb(db, {
+      batch: async (stmts) => {
+        if (armed) {
+          armed = false;
+          await client.execute({ sql: 'UPDATE game_rewards SET price = 70, revision = revision + 1 WHERE id = ?', args: [reward.reward.id] });
+        }
+        return db.batch(stmts);
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(raceDb, OWNER), { requestId: 'req-race-price-01', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion });
+    const state = await rawState(db);
+    check('race price change: the in-batch pin guard rejects the old confirmation as stale with zero redemption writes (charged at neither 60 nor 70)',
+      res.status === 'stale' && state.gold === 100 && state.redemptionCount === 0 && state.redeemGoldSum === 0, `status=${res.status}`);
+    const list2 = await H.handleGetRewards(owner);
+    const ok = await H.handleRedeemReward(owner, { requestId: 'req-race-price-02', rewardId: reward.reward.id, rewardRevision: 2, price: 70, expectedBalanceVersion: list2.balanceVersion });
+    const state2 = await rawState(db);
+    check('race price change: a fresh preview at the new price redeems at exactly 70',
+      ok.status === 'redeemed' && ok.receipt?.price === 70 && state2.gold === 30 && state2.redeemGoldSum === -70);
+  });
+
+  await scenario('atomic commit: balance change after the final pre-read rejects the old confirmation', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '改余额测试', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    let armed = true;
+    const raceDb = wrapDb(db, {
+      batch: async (stmts) => {
+        if (armed) {
+          armed = false;
+          // A competing redemption (different key) commits first.
+          await H.handleRedeemReward(owner, { requestId: 'req-race-balance-0', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion });
+        }
+        return db.batch(stmts);
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(raceDb, OWNER), { requestId: 'req-race-balance-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion });
+    const state = await rawState(db);
+    check('race balance change: the moved balance rejects the old confirmation (stale or insufficient) with zero writes by the loser — only the winner receipt exists, gold exactly 40',
+      (res.status === 'stale' || res.status === 'insufficient_funds') && res.receipt === null
+      && state.redemptionCount === 1 && state.gold === 40 && state.redeemGoldSum === -60, `status=${res.status}`);
+  });
+
+  await scenario('legacy half-completed state is preserved, never silently rewritten', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '旧回执', price: 60 });
+    // A pre-fix half-completed state, seeded directly: a receipt
+    // claiming 60 spent / 40 after, but no ledger flow and no
+    // deduction ever landed.
+    await client.execute({
+      sql: 'INSERT INTO game_reward_redemptions (request_id, reward_id, reward_name, reward_price, reward_revision, balance_version, gold_spent, balance_after, local_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: ['req-legacy-half-1', reward.reward.id, '旧回执', 60, 1, 1, 60, 40, TODAY, Date.now()],
+    });
+    const list = await H.handleGetRewards(owner);
+    check('legacy: the stored receipt stays listed and the balance is NOT silently re-based to match it',
+      list.receipts.length === 1 && list.balance === 100);
+    const retry = await H.handleRedeemReward(owner, { requestId: 'req-legacy-half-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: 1 });
+    const state = await rawState(db);
+    check('legacy: a same-key retry resolves to the stored receipt as-is (already_resolved) — no retroactive deduction, no deletion, no compensating flow',
+      retry.status === 'already_resolved' && retry.receipt?.goldSpent === 60
+      && state.gold === 100 && state.redemptionCount === 1 && state.redeemRowCount === 0, `status=${retry.status}`);
+  });
+
+  // ---------------------------------------------------------- next-reward goal
+  await scenario('next-reward goal preference', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    const guest = ctxFor(db, GUEST);
+    await seedFundedProfile(client, 500);
+    const setGuest = await H.handleSetRewardGoal(guest, { rewardId: 1 });
+    const setAnon = await H.handleSetRewardGoal(ctxFor(db, undefined), { rewardId: 1 });
+    check('goal gate: guest/no-viewer setRewardGoal forbidden, nothing written',
+      setGuest.forbidden === true && setAnon.forbidden === true
+      && (await db.select().from(H.schema.gameRewardGoal)).length === 0);
+    const initial = await H.handleGetRewards(owner);
+    check('goal: no preference saved -> goalRewardId null (no default reward invented)',
+      initial.goalRewardId === null);
+    const a = await H.handleSaveReward(owner, { id: null, name: '目标甲', price: 100 });
+    const b = await H.handleSaveReward(owner, { id: null, name: '目标乙', price: 200 });
+    const setA = await H.handleSetRewardGoal(owner, { rewardId: a.reward.id });
+    const listA = await H.handleGetRewards(owner);
+    check('goal: setting a goal persists and reads back identically on the next open',
+      setA.ok === true && setA.goalRewardId === a.reward.id && listA.goalRewardId === a.reward.id);
+    const setB = await H.handleSetRewardGoal(owner, { rewardId: b.reward.id });
+    const failed = await H.handleSetRewardGoal(owner, { rewardId: 999 });
+    const listB = await H.handleGetRewards(owner);
+    check('goal: switching works; a failed save (unknown reward) keeps and reports the previous goal',
+      setB.ok === true && failed.ok === false && failed.goalRewardId === b.reward.id && listB.goalRewardId === b.reward.id);
+    const list2 = await H.handleGetRewards(owner);
+    const redeemed = await H.handleRedeemReward(owner, { requestId: 'req-goal-keep-01', rewardId: a.reward.id, rewardRevision: 1, price: 100, expectedBalanceVersion: list2.balanceVersion });
+    await H.handleSaveReward(owner, { id: b.reward.id, name: '目标乙（改名）', price: 260 });
+    const list3 = await H.handleGetRewards(owner);
+    const goalNow = list3.rewards.find((r) => r.id === list3.goalRewardId);
+    check('goal: redeeming another reward and renaming/repricing the goal keep the goal; it reads the CURRENT name/price while the old receipt keeps its snapshot',
+      redeemed.status === 'redeemed' && list3.goalRewardId === b.reward.id
+      && goalNow?.name === '目标乙（改名）' && goalNow?.price === 260
+      && list3.receipts[0]?.rewardName === '目标甲' && list3.receipts[0]?.price === 100);
+    check('goal: the goal stays readable with the health source missing (list shows goal + rewards, healthState missing)',
+      list3.healthState === 'missing' && list3.goalRewardId === b.reward.id && list3.rewards.length === 2);
   });
 }
 

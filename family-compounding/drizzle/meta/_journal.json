@@ -36,6 +36,13 @@
       "when": 1792601450269,
       "tag": "0005_unique_activity_type_name",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792614180293,
+      "tag": "0006_preset_key_identity_for_activity_types",
+      "breakpoints": true
     }
   ]
 }

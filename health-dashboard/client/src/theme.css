@@ -430,6 +430,7 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .game-progress-text { margin: 8px 0 0; color: var(--dim); font-size: 12px; line-height: 1.55; font-variant-numeric: tabular-nums; }
 .game-rules { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border); color: var(--dim); font-size: 11px; line-height: 1.65; }
 .game-note { margin: 12px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
+.game-note .game-btn { min-height: 28px; margin-left: 8px; padding: 0 10px; vertical-align: middle; }
 .game-camp { border-style: dashed; }
 .game-camp h3 { margin-top: 4px; font-size: 16px; }
 .game-camp .game-note { margin-top: 6px; }
@@ -439,6 +440,12 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .game-xp-muted { color: var(--slate); }
 .game-gold { color: var(--amber); font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .game-points-note { margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 750; }
+.game-goal { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.game-goal .section-line { align-items: center; }
+.game-goal .section-line strong { font-size: 13px; }
+.game-goal .section-line .game-btn { min-height: 30px; padding: 0 10px; }
+.game-goal-main { margin: 8px 0 0; font-size: 14px; font-weight: 750; line-height: 1.55; font-variant-numeric: tabular-nums; }
+.game-goal .game-note { margin-top: 6px; }
 .game-action-note { margin: 12px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--surface-soft); color: var(--text); font-size: 12px; font-weight: 700; }
 .game-btn { min-height: 36px; border: 1px solid var(--accent); border-radius: 8px; padding: 0 14px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 800; cursor: pointer; }
 .game-btn:disabled { opacity: .45; cursor: default; }

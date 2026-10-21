@@ -148,12 +148,14 @@ check(
   );
   const dash = actionSlice(serverSrc, "getDashboard");
   {
-    // CMP-FAMILY-INIT-001 (re-review): the completion marker and the
-    // seeds must share ONE atomic boundary — a single db.batch whose
-    // statement list contains BOTH the ledgerMeta claim insert and the
-    // activityTypes preset inserts, all ON CONFLICT DO NOTHING, gated
-    // by a prior meta read, with no separate claim commit and no
-    // delete-the-claim rollback path.
+    // CMP-FAMILY-INIT-001 (final fix round): the completion marker and
+    // the seeds still share ONE atomic boundary — a single db.batch
+    // containing BOTH the ledgerMeta claim insert and the preset type
+    // inserts, gated by a prior meta read, with no separate claim
+    // commit and no delete-the-claim rollback path. The seeds are now
+    // guarded raw INSERT … SELECT statements whose WHERE EXISTS tests
+    // the claim row for THIS attempt's token, so the batch segment
+    // asserts the claim builder, the guarded seed SQL, and the token.
     const batchIdx = dash.indexOf("db.batch([");
     const batchEnd = batchIdx >= 0 ? dash.indexOf("]);", batchIdx) : -1;
     const batchSegment = batchIdx >= 0 && batchEnd > batchIdx ? dash.slice(batchIdx, batchEnd) : "";
@@ -163,12 +165,20 @@ check(
       batchSegment.includes("claimInsert") &&
         batchSegment.includes("presetInserts") &&
         dash.includes("insert(schema.ledgerMeta)") &&
-        dash.includes("insert(schema.activityTypes)") &&
+        dash.includes("INSERT INTO activity_types") &&
         seedBatchCount === 1,
     );
     check(
-      "source(init): claim and every preset insert use onConflictDoNothing (>= 2 in the seed block), so a concurrent loser no-ops",
-      (dash.match(/onConflictDoNothing/g) ?? []).length >= 2,
+      "source(init): every seed insert is gated on the real claim outcome (WHERE EXISTS on the claim row holding this attempt's seedToken)",
+      dash.includes("seedToken") &&
+        dash.includes("WHERE EXISTS") &&
+        dash.includes("value = ${seedToken}") &&
+        dash.includes("key = 'types_seeded'"),
+    );
+    check(
+      "source(init): claim and every preset insert carry a conflict no-op (>= 2 across builder + SQL spellings), so a concurrent loser no-ops",
+      (dash.match(/onConflictDoNothing/g) ?? []).length +
+        (dash.match(/ON CONFLICT DO NOTHING/g) ?? []).length >= 2,
     );
     check(
       "source(init): seeding is gated by a prior ledgerMeta read and never deletes the claim (no two-step claim/rollback path)",
@@ -178,8 +188,10 @@ check(
         !dash.includes(".returning()"),
     );
     check(
-      "source(init): activity_types.name carries a UNIQUE index (the preset inserts' conflict target)",
-      migrationSql.includes("CREATE UNIQUE INDEX activity_types_name_idx ON activity_types (name)"),
+      "source(init): uniqueness is scoped to preset identity — the only UNIQUE index on activity_types is on preset_key, and no global UNIQUE index on name exists in any migration",
+      migrationSql.includes("CREATE UNIQUE INDEX activity_types_preset_key_idx ON activity_types (preset_key)") &&
+        !migrationSql.includes("CREATE UNIQUE INDEX activity_types_name_idx") &&
+        !/CREATE UNIQUE INDEX[^;]*ON activity_types \(name\)/.test(migrationSql),
     );
   }
   check(
@@ -247,6 +259,29 @@ async function makeDb() {
       if (trimmed) await client.execute(trimmed);
     }
   }
+  return { client, db: drizzle(client, { schema }) };
+}
+
+// Apply only a chosen subset of migrations (by filename prefix), for
+// legacy-database upgrade tests: build the old database first, then
+// run the remaining migrations over it.
+async function applyMigrations(client, prefixes) {
+  const migrationDir = new URL("./drizzle/", import.meta.url);
+  const names = readdirSync(migrationDir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort()
+    .filter((f) => prefixes.some((p) => f.startsWith(p)));
+  for (const file of names) {
+    const sqlText = readFileSync(new URL(file, migrationDir), "utf8");
+    for (const stmt of sqlText.split("--> statement-breakpoint")) {
+      const trimmed = stmt.trim();
+      if (trimmed) await client.execute(trimmed);
+    }
+  }
+}
+async function makeLegacyDb() {
+  const client = createClient({ url: ":memory:" });
+  await applyMigrations(client, ["0001", "0002", "0003", "0004"]);
   return { client, db: drizzle(client, { schema }) };
 }
 
@@ -1124,6 +1159,286 @@ for (const slowFirst of [true, false]) {
     "init-gap: owner-deleted-all + double read (one slow) → types stay empty, meta stays exactly 1, no reseeding",
     d1.types.length === 0 && d2.types.length === 0 &&
       Number(typeCount.rows[0].c) === 0 && Number(metaCount.rows[0].c) === 1,
+  );
+}
+
+/* ---- INIT-001 (final fix): a late stale first read cannot resurrect
+   owner-deleted types ----
+   The genuine interleave the token guard closes: reader A's pre-check
+   reads an EMPTY claim, then A is paused inside its seed batch;
+   reader B's first read seeds all 7 presets and commits the marker;
+   the owner deletes every type; A finally resumes. A's claim insert
+   no-ops against B's stored token and every guarded seed insert sees
+   a foreign token, so A writes ZERO seed rows: the type list stays
+   empty and the marker keeps B's claim. Run in both directions
+   (whichever reader is the late one). */
+function wrapDbGateBatch(db, { beforeBatch } = {}) {
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === "batch") {
+        return async (statements) => {
+          if (beforeBatch) await beforeBatch();
+          return target.batch(statements);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+function makeGate() {
+  let release;
+  const promise = new Promise((r) => { release = r; });
+  let armed = true;
+  return {
+    release,
+    beforeBatch: async () => {
+      if (armed) { armed = false; await promise; }
+    },
+  };
+}
+async function lateInterleaveScenario(mode) {
+  const { db, client } = await makeDb();
+  const winnerCtx = makeCtx(db, OWNER);
+  if (mode === "single-gate") {
+    // One gated (late) reader + one ungated winner.
+    const gate = makeGate();
+    const lateCtx = makeCtx(wrapDbGateBatch(db, gate), OWNER);
+    const latePromise = call("getDashboard", lateCtx.ctx, {});
+    await new Promise((r) => setTimeout(r, 50)); // late reader parks in its batch
+    const winnerDash = await call("getDashboard", winnerCtx.ctx, {});
+    const markerBefore = await client.execute("SELECT value FROM ledger_meta WHERE key = 'types_seeded'");
+    for (const t of [...winnerDash.types]) {
+      await call("deleteType", winnerCtx.ctx, { id: t.id });
+    }
+    gate.release();
+    const lateDash = await latePromise;
+    return { db, client, winnerCtx, winnerDash, lateDash, markerBefore };
+  }
+  // Both readers pre-check an empty claim and park inside their seed
+  // batches; the second-parked reader is released first and wins.
+  const gateA = makeGate();
+  const gateB = makeGate();
+  const ctxA = makeCtx(wrapDbGateBatch(db, gateA), OWNER);
+  const ctxB = makeCtx(wrapDbGateBatch(db, gateB), OWNER);
+  const promiseA = call("getDashboard", ctxA.ctx, {});
+  const promiseB = call("getDashboard", ctxB.ctx, {});
+  await new Promise((r) => setTimeout(r, 50)); // both readers park in their batches
+  gateB.release();
+  const dashB = await promiseB;
+  const markerBefore = await client.execute("SELECT value FROM ledger_meta WHERE key = 'types_seeded'");
+  for (const t of [...dashB.types]) {
+    await call("deleteType", winnerCtx.ctx, { id: t.id });
+  }
+  gateA.release();
+  const lateDash = await promiseA;
+  return { db, client, winnerCtx, winnerDash: dashB, lateDash, markerBefore };
+}
+for (const mode of ["single-gate", "both-gated"]) {
+  const { client, winnerCtx, winnerDash, lateDash, markerBefore } = await lateInterleaveScenario(mode);
+  check(
+    `init-late (${mode}): the winning first read seeds exactly 7 presets`,
+    winnerDash.types.length === 7,
+  );
+  const typesAfter = await client.execute("SELECT COUNT(*) AS c FROM activity_types");
+  const markerAfter = await client.execute("SELECT value FROM ledger_meta WHERE key = 'types_seeded'");
+  check(
+    `init-late (${mode}): the late stale reader writes ZERO seed rows — deleted types are NOT resurrected`,
+    lateDash.types.length === 0 && Number(typesAfter.rows[0].c) === 0,
+  );
+  check(
+    `init-late (${mode}): the completion marker still holds the winner's claim (seeded stays seeded)`,
+    markerAfter.rows.length === 1 && markerAfter.rows[0].value === markerBefore.rows[0].value,
+  );
+  const reread = await call("getDashboard", winnerCtx.ctx, {});
+  check(
+    `init-late (${mode}): a further read still sees the empty type list (no deferred resurrection)`,
+    reread.types.length === 0,
+  );
+}
+
+/* ---- INIT-001 (final fix): legacy databases with duplicate type
+   names upgrade cleanly (migration 0005/0006 conflict policy) ----
+   A database that lived through 0001–0004 may legally hold two
+   activity_types rows with the exact same name. The upgrade must
+   succeed, preserve BOTH rows and the history that references the
+   name, and leave seeding / add / delete behavior normal. Neither
+   duplicate is deleted or silently merged; the stable preset_key is
+   backfilled only where a preset identity exists. */
+{
+  const { client, db } = await makeLegacyDb();
+  const nowTs = Date.now();
+  // Two exact-same-name custom types, plus one activity recorded
+  // under that name (records snapshot the name — history by label).
+  const ins1 = await client.execute({
+    sql: "INSERT INTO activity_types (name, is_preset, created_at) VALUES ('拼图', 0, ?) RETURNING id",
+    args: [nowTs],
+  });
+  const ins2 = await client.execute({
+    sql: "INSERT INTO activity_types (name, is_preset, created_at) VALUES ('拼图', 0, ?) RETURNING id",
+    args: [nowTs + 1],
+  });
+  const dupA = Number(ins1.rows[0].id);
+  const dupB = Number(ins2.rows[0].id);
+  await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, '拼图', 25, NULL, 'legacy-dup-hist-01', ?)",
+    args: [TODAY, nowTs],
+  });
+  let upgradeError = null;
+  try {
+    await applyMigrations(client, ["0005", "0006"]);
+  } catch (e) {
+    upgradeError = e;
+  }
+  check(
+    "upgrade-dup: a 0001–0004 database with two exact-same-name types upgrades through 0005+0006 without error",
+    upgradeError === null,
+    upgradeError ? String(upgradeError) : "",
+  );
+  const dupRows = await client.execute({
+    sql: "SELECT id, preset_key FROM activity_types WHERE name = '拼图' ORDER BY id",
+  });
+  check(
+    "upgrade-dup: BOTH duplicate rows are preserved with their original ids (nothing deleted, nothing merged)",
+    dupRows.rows.length === 2 &&
+      Number(dupRows.rows[0].id) === dupA && Number(dupRows.rows[1].id) === dupB,
+  );
+  check(
+    "upgrade-dup: custom duplicates carry no preset identity (preset_key NULL on both)",
+    dupRows.rows.every((r) => r.preset_key === null),
+  );
+  const hist = await client.execute("SELECT type_name, minutes FROM family_activities WHERE request_key = 'legacy-dup-hist-01'");
+  check(
+    "upgrade-dup: recorded history referencing the duplicated name is preserved untouched",
+    hist.rows.length === 1 && hist.rows[0].type_name === "拼图" && Number(hist.rows[0].minutes) === 25,
+  );
+  const idxRows = await client.execute(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'activity_types'",
+  );
+  check(
+    "upgrade-dup: after upgrade the only unique index is on preset_key; no global name unique index exists",
+    idxRows.rows.some((r) => r.name === "activity_types_preset_key_idx") &&
+      !idxRows.rows.some((r) => /UNIQUE/i.test(String(r.sql ?? "")) && /\(name\)/.test(String(r.sql ?? ""))),
+  );
+  // Post-upgrade behavior is normal: first read seeds the 7 presets,
+  // addType works, an exact-name add returns a duplicate winner, and
+  // deleting one duplicate leaves the other standing.
+  const { ctx } = makeCtx(db, OWNER);
+  const dash = await call("getDashboard", ctx, {});
+  check(
+    "upgrade-dup: first post-upgrade read seeds the 7 presets alongside the preserved duplicates",
+    dash.types.filter((t) => t.isPreset).length === 7 && dash.types.length === 9 && dash.totalCount === 1,
+  );
+  const addNew = await call("addType", ctx, { name: "新类型" });
+  const addDupName = await call("addType", ctx, { name: "拼图" });
+  check(
+    "upgrade-dup: addType still works after upgrade, and an exact-name add resolves to a duplicate winner row",
+    addNew.ok === true && addNew.duplicate === false &&
+      addDupName.ok === true && addDupName.duplicate === true &&
+      (addDupName.id === dupA || addDupName.id === dupB),
+  );
+  const delOne = await call("deleteType", ctx, { id: dupA });
+  const remaining = await client.execute({
+    sql: "SELECT COUNT(*) AS c FROM activity_types WHERE name = '拼图'",
+  });
+  check(
+    "upgrade-dup: deleting one duplicate leaves the other row standing",
+    delOne.ok === true && Number(remaining.rows[0].c) === 1,
+  );
+}
+{
+  // The other upgrade path: a database that DID apply the original
+  // 0005 (global UNIQUE index on name). Recreate that state by hand
+  // (the published 0005 file is the revised one), then run 0006: the
+  // global index must be swapped for the preset_key index with all
+  // rows preserved, and preset identities backfilled.
+  const { client, db } = await makeLegacyDb();
+  const nowTs = Date.now();
+  await client.execute("CREATE UNIQUE INDEX activity_types_name_idx ON activity_types (name)");
+  await client.execute({
+    sql: "INSERT INTO activity_types (name, is_preset, created_at) VALUES ('陪玩', 1, ?), ('拼图', 0, ?)",
+    args: [nowTs, nowTs + 1],
+  });
+  let upgradeError = null;
+  try {
+    await applyMigrations(client, ["0006"]);
+  } catch (e) {
+    upgradeError = e;
+  }
+  check(
+    "upgrade-0005: a database that applied the original global-index 0005 upgrades through 0006 without error",
+    upgradeError === null,
+    upgradeError ? String(upgradeError) : "",
+  );
+  const idxRows = await client.execute(
+    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'activity_types'",
+  );
+  const idxNames = idxRows.rows.map((r) => String(r.name));
+  check(
+    "upgrade-0005: the global name index is gone and the preset_key unique index exists",
+    !idxNames.includes("activity_types_name_idx") && idxNames.includes("activity_types_preset_key_idx"),
+  );
+  const keyed = await client.execute({
+    sql: "SELECT name, preset_key FROM activity_types ORDER BY id",
+  });
+  check(
+    "upgrade-0005: rows preserved; the preset row is backfilled with its stable preset_key, the custom row keeps NULL",
+    keyed.rows.length === 2 &&
+      keyed.rows[0].name === "陪玩" && keyed.rows[0].preset_key === "陪玩" &&
+      keyed.rows[1].name === "拼图" && keyed.rows[1].preset_key === null,
+  );
+  // After the swap, custom duplicates no longer hit a global unique
+  // failure at the storage layer, while preset identity stays unique.
+  await client.execute({
+    sql: "INSERT INTO activity_types (name, is_preset, created_at) VALUES ('拼图', 0, ?)",
+    args: [nowTs + 2],
+  });
+  let presetBlocked = false;
+  try {
+    await client.execute({
+      sql: "INSERT INTO activity_types (name, is_preset, preset_key, created_at) VALUES ('陪玩二', 1, '陪玩', ?)",
+      args: [nowTs + 3],
+    });
+  } catch {
+    presetBlocked = true;
+  }
+  check(
+    "upgrade-0005: custom same-name rows are storable again, but a second row claiming the same preset_key is refused",
+    presetBlocked === true,
+  );
+  const { ctx } = makeCtx(db, OWNER);
+  const dash = await call("getDashboard", ctx, {});
+  check(
+    "upgrade-0005: post-upgrade read is normal — the pre-existing 陪玩 preset is not duplicated by seeding",
+    dash.types.filter((t) => t.name === "陪玩").length === 1 &&
+      dash.types.filter((t) => t.isPreset).length === 7,
+  );
+}
+{
+  // Rollback control: withdrawing ONLY the new preset_key unique
+  // index (DROP INDEX) changes no data at all — every row of every
+  // table is byte-identical before and after.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  await call("getDashboard", ctx, {}); // seed presets
+  await call("addType", ctx, { name: "拼图" });
+  await call("addActivity", ctx, { date: TODAY, typeName: "拼图", minutes: 15, note: null, requestKey: "rollback-ctl-00001" });
+  const snapshot = async () => {
+    const types = await client.execute("SELECT id, name, is_preset, preset_key, created_at FROM activity_types ORDER BY id");
+    const acts = await client.execute("SELECT id, date, type_name, minutes, note, request_key, created_at FROM family_activities ORDER BY id");
+    const meta = await client.execute("SELECT key, value FROM ledger_meta ORDER BY key");
+    const keys = await client.execute("SELECT request_key, payload, activity_id, state, created_at, updated_at FROM family_request_keys ORDER BY request_key");
+    return JSON.stringify([types.rows, acts.rows, meta.rows, keys.rows]);
+  };
+  const before = await snapshot();
+  await client.execute("DROP INDEX IF EXISTS activity_types_preset_key_idx");
+  const after = await snapshot();
+  const idxGone = await client.execute(
+    "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'index' AND name = 'activity_types_preset_key_idx'",
+  );
+  check(
+    "rollback-ctl: dropping only the new preset_key index leaves every row of every table byte-identical",
+    before === after && Number(idxGone.rows[0].c) === 0,
   );
 }
 

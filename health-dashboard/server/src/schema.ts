@@ -191,6 +191,21 @@ export const gameRewardRedemptions = sqliteTable("game_reward_redemptions", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// LIFE-C1 S3 余项 (CWEB-MVP-001·S3): the owner's single "next reward"
+// preference — one row (id = 1) naming the rewardId the owner explicitly
+// chose as their next goal. Additive only (migration 0014). It is a
+// display preference, never an economic input: it does not affect
+// prices, balances, settlement, or redemption, and it is never
+// auto-populated (no default reward is invented when no row exists).
+// Deleting or renaming the target reward never rewrites receipts; the
+// goal simply reads against the reward's current row.
+export const gameRewardGoal = sqliteTable("game_reward_goal", {
+  id: integer("id").primaryKey(),
+  rewardId: integer("reward_id").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const syncLog = sqliteTable("sync_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   source: text("source", { enum: ["health", "strength", "system"] }).notNull(),
