@@ -273,6 +273,7 @@ function RecordForm({ data }: { data: Dashboard }) {
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [conflictPending, setConflictPending] = useState(false);
   const requestKeyRef = useRef<string>(newRequestKey());
 
   const typeNames = data.types.map((t) => t.name);
@@ -291,6 +292,7 @@ function RecordForm({ data }: { data: Dashboard }) {
       if (res.ok && res.duplicate) {
         setSavedMsg("这条已经记过了——重复提交没有重复计数。");
         setError(null);
+        setConflictPending(false);
         requestKeyRef.current = newRequestKey();
         setMinutesText("");
         setNote("");
@@ -298,10 +300,31 @@ function RecordForm({ data }: { data: Dashboard }) {
       } else if (res.ok) {
         setSavedMsg("已记下。");
         setError(null);
+        setConflictPending(false);
         requestKeyRef.current = newRequestKey();
         setMinutesText("");
         setNote("");
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else if (res.conflict) {
+        // Same submission, different content: keep the whole draft and
+        // the request key untouched. The owner decides explicitly —
+        // either edit and resubmit, or save the draft as a new record
+        // via the dedicated button below.
+        setSavedMsg(null);
+        setError(
+          "这次提交已经保存过了，但内容和现在填写的不一样——已保存的那一条没有被改动，现在填写的内容也保留着。可以改好后重新点「记下这一次」，或把当前内容作为新的一条保存。",
+        );
+        setConflictPending(true);
+      } else if (res.deleted) {
+        setSavedMsg("这条记录已删除，未重新添加。");
+        setError(null);
+        setConflictPending(false);
+        requestKeyRef.current = newRequestKey();
+        setMinutesText("");
+        setNote("");
+        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else if (res.future) {
+        setError("日期在今天之后，还没发生的事不能记为已完成；填写内容已保留。");
       } else if (res.forbidden) {
         setError("当前身份无权写入这本账，记录没有保存。");
       } else {
@@ -313,8 +336,7 @@ function RecordForm({ data }: { data: Dashboard }) {
     },
   });
 
-  function onSubmit(e: FormEvent) {
-    e.preventDefault();
+  function submitDraft() {
     setSavedMsg(null);
     const typeName = typeNames.length > 0 ? effectiveType : customType.trim();
     if (!typeName) {
@@ -332,6 +354,7 @@ function RecordForm({ data }: { data: Dashboard }) {
       minutes = parsed;
     }
     setError(null);
+    setConflictPending(false);
     add.mutate({
       date,
       typeName,
@@ -339,6 +362,18 @@ function RecordForm({ data }: { data: Dashboard }) {
       note: note.trim() === "" ? null : note.trim(),
       requestKey: requestKeyRef.current,
     });
+  }
+
+  function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    submitDraft();
+  }
+
+  // Explicit owner choice after a conflict: rotate to a fresh request
+  // key and save the current draft as a brand-new record.
+  function saveAsNew() {
+    requestKeyRef.current = newRequestKey();
+    submitDraft();
   }
 
   return (
@@ -351,6 +386,7 @@ function RecordForm({ data }: { data: Dashboard }) {
           id="activity-date"
           type="date"
           value={date}
+          max={data.today}
           onChange={(e) => setDate(e.target.value)}
           className={inputCls}
           required
@@ -440,6 +476,16 @@ function RecordForm({ data }: { data: Dashboard }) {
       >
         {add.isPending ? "保存中…" : "记下这一次"}
       </button>
+      {conflictPending ? (
+        <button
+          type="button"
+          onClick={saveAsNew}
+          disabled={add.isPending}
+          className="w-full rounded-lg border border-[var(--accent)] px-4 py-2.5 text-sm font-bold text-[var(--accent)] disabled:opacity-50"
+        >
+          作为新的一条保存
+        </button>
+      ) : null}
     </form>
   );
 }
@@ -694,6 +740,12 @@ export function App() {
                   ? "账本还是空的。记下第一条家庭活动，积累从这里开始。"
                   : `本月共 ${dashboard.data.thisMonthCount} 次家庭活动，累计 ${dashboard.data.totalCount} 次——一次一次记下来，就是在长。`}
               </p>
+              {dashboard.data.futureRecordCount > 0 ? (
+                <p className="mt-2 text-sm text-[var(--dim)]">
+                  有 <span className="tnum">{dashboard.data.futureRecordCount}</span>{" "}
+                  条记录日期在今天之后，未计入累计；可以在最近记录里删除，或等日期到达后重新记录。
+                </p>
+              ) : null}
             </section>
 
             <section className={sectionCls} aria-label="每周积累曲线">

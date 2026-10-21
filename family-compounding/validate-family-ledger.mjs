@@ -97,6 +97,60 @@ check(
   !/连续(天数|打卡)|断签|排名|得分|评分/.test(clientSrc.replace("不打分、不排名、不算连续", "")),
 );
 
+/* ---- CMP-FAMILY-SAVE-001 / INIT-001 / DATE-001 source wiring ---- */
+check(
+  "source(save): migration creates the persistent family_request_keys ledger",
+  migrationSql.includes("CREATE TABLE family_request_keys") &&
+    migrationSql.includes("request_key TEXT PRIMARY KEY") &&
+    migrationSql.includes("payload TEXT NOT NULL"),
+);
+{
+  const add = actionSlice(serverSrc, "addActivity");
+  check(
+    "source(save): addActivity consults the request-key ledger and can refuse as conflict/deleted",
+    add.includes("familyRequestKeys") && add.includes("conflict: true") && add.includes("deleted: true"),
+  );
+  check(
+    "source(date): addActivity refuses future dates with a typed future result",
+    add.includes("future: true") && add.includes("todayKey()"),
+  );
+  const del = actionSlice(serverSrc, "deleteActivity");
+  check(
+    "source(save): deleteActivity tombstones the request key in the ledger (upsert to 'deleted')",
+    del.includes("family_request_keys") && del.includes("'deleted'") && del.includes("ON CONFLICT(request_key) DO UPDATE"),
+  );
+  const dash = actionSlice(serverSrc, "getDashboard");
+  check(
+    "source(init): preset seeding is an atomic claim (INSERT … ON CONFLICT DO NOTHING … RETURNING)",
+    dash.includes("INSERT INTO ledger_meta") && dash.includes("ON CONFLICT(key) DO NOTHING") && dash.includes("RETURNING key"),
+  );
+  check(
+    "source(date): dashboard counts future-dated rows separately (futureRecordCount)",
+    dash.includes("futureRecordCount") && serverSrc.includes("futureRecordCount: z.number()"),
+  );
+  const addT = actionSlice(serverSrc, "addType");
+  check(
+    "source(init): addType is one conditional INSERT … WHERE NOT EXISTS on the exact name",
+    addT.includes("INSERT INTO activity_types") && addT.includes("NOT EXISTS") && addT.includes("activity_types WHERE name"),
+  );
+}
+check(
+  "client(save): conflict keeps the draft and offers an explicit save-as-new action",
+  clientSrc.includes("作为新的一条保存") && clientSrc.includes("res.conflict"),
+);
+check(
+  "client(save): deleted retry is reported as deleted, not re-added",
+  clientSrc.includes("这条记录已删除，未重新添加。"),
+);
+check(
+  "client(date): future save shows the draft-preserving message and the date input is capped at today",
+  clientSrc.includes("日期在今天之后，还没发生的事不能记为已完成；填写内容已保留。") && clientSrc.includes("max={data.today}"),
+);
+check(
+  "client(date): future-dated records get a plain not-counted note",
+  clientSrc.includes("条记录日期在今天之后，未计入累计"),
+);
+
 /* ---------------- 2. behavior against real handlers ---------------- */
 
 const { Actions } = await import("./server/src/actions.ts");
@@ -195,6 +249,7 @@ const TODAY = todayKey();
       `gate: ${label} getDashboard is forbidden with zero data`,
       dash.forbidden === true &&
         dash.totalCount === 0 &&
+        dash.futureRecordCount === 0 &&
         dash.types.length === 0 &&
         dash.series.length === 0 &&
         dash.calendar.length === 0 &&
@@ -205,7 +260,11 @@ const TODAY = todayKey();
     const add = await call("addActivity", ctx, {
       date: TODAY, typeName: "陪玩", minutes: 30, note: null, requestKey: `gate-${label}-0001`,
     });
-    check(`gate: ${label} addActivity refused`, add.ok === false && add.forbidden === true && add.id === null);
+    check(
+      `gate: ${label} addActivity refused`,
+      add.ok === false && add.forbidden === true && add.id === null &&
+        add.conflict === false && add.deleted === false && add.future === false,
+    );
     const del = await call("deleteActivity", ctx, { id: 1 });
     check(`gate: ${label} deleteActivity refused`, del.ok === false && del.forbidden === true);
     const addT = await call("addType", ctx, { name: "越权类型" });
@@ -397,6 +456,203 @@ const TODAY = todayKey();
   const readd = await call("addType", ctx, { name: "一起吃饭" });
   dash = await call("getDashboard", ctx, {});
   check("types: owner can re-add a type by hand afterwards", readd.ok === true && dash.types.length === 1);
+}
+
+/* ---- SAVE-001: request-key lifecycle survives deletion, detects edits ---- */
+const TOMORROW = shiftDay(TODAY, 1);
+{
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  await call("getDashboard", ctx, {}); // seed presets
+  const base = { date: TODAY, typeName: "陪玩", minutes: 30, note: "公园", requestKey: "save-key-00000001" };
+  const first = await call("addActivity", ctx, base);
+  check(
+    "save: first save ok, all new flags false",
+    first.ok === true && first.duplicate === false && first.conflict === false && first.deleted === false && first.future === false,
+  );
+  const retry = await call("addActivity", ctx, base);
+  check(
+    "save: same-key same-payload retry returns the original as duplicate",
+    retry.ok === true && retry.duplicate === true && retry.id === first.id && retry.conflict === false,
+  );
+  // Response-lost-then-edit: the first save landed, the owner edited
+  // the draft and resubmitted under the same key.
+  const conflictMin = await call("addActivity", ctx, { ...base, minutes: 45 });
+  check(
+    "save: same-key different minutes is a typed conflict",
+    conflictMin.ok === false && conflictMin.conflict === true && conflictMin.id === null && conflictMin.duplicate === false,
+  );
+  const conflictNote = await call("addActivity", ctx, { ...base, note: "改了备注" });
+  check("save: same-key different note is a typed conflict", conflictNote.ok === false && conflictNote.conflict === true);
+  let dash = await call("getDashboard", ctx, {});
+  const stored = dash.recentActivities.find((r) => r.id === first.id);
+  const rawCount = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  check(
+    "save: conflicts wrote nothing and the original row is intact",
+    dash.totalCount === 1 && dash.totalKnownMinutes === 30 &&
+      stored?.minutes === 30 && stored?.note === "公园" && Number(rawCount.rows[0].c) === 1,
+  );
+  const retryAfter = await call("addActivity", ctx, base);
+  check(
+    "save: after conflicts, a same-payload retry still returns the original duplicate",
+    retryAfter.ok === true && retryAfter.duplicate === true && retryAfter.id === first.id,
+  );
+  const del = await call("deleteActivity", ctx, { id: first.id });
+  const late = await call("addActivity", ctx, base);
+  check(
+    "save: delete ok; late retry with the original key is typed deleted",
+    del.ok === true && late.ok === false && late.deleted === true && late.conflict === false && late.id === null,
+  );
+  dash = await call("getDashboard", ctx, {});
+  const rawAfter = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  check(
+    "save: the late retry resurrects nothing — totals stay 0, no new row",
+    dash.totalCount === 0 && dash.totalKnownMinutes === 0 && Number(rawAfter.rows[0].c) === 0,
+  );
+  const ledgerRow = await client.execute({
+    sql: "SELECT state FROM family_request_keys WHERE request_key = ?",
+    args: ["save-key-00000001"],
+  });
+  check(
+    "save: the ledger row survives deletion in state 'deleted'",
+    ledgerRow.rows.length === 1 && ledgerRow.rows[0].state === "deleted",
+  );
+}
+{
+  // Delete-then-save interleave: a brand-new key saves fine after a
+  // delete, while the deleted key stays dead.
+  const { db } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const a = await call("addActivity", ctx, { date: TODAY, typeName: "阅读", minutes: 20, note: null, requestKey: "interleave-key-001" });
+  await call("deleteActivity", ctx, { id: a.id });
+  const b = await call("addActivity", ctx, { date: TODAY, typeName: "阅读", minutes: 20, note: null, requestKey: "interleave-key-002" });
+  const lateA = await call("addActivity", ctx, { date: TODAY, typeName: "阅读", minutes: 20, note: null, requestKey: "interleave-key-001" });
+  const dash = await call("getDashboard", ctx, {});
+  check(
+    "save: delete-then-save interleave — new key saves, old key stays deleted, one record total",
+    b.ok === true && b.duplicate === false && lateA.ok === false && lateA.deleted === true && dash.totalCount === 1,
+  );
+}
+{
+  // Legacy pre-ledger row: activity exists with a request key but no
+  // ledger entry. A retry backfills the ledger and compares payloads.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const ins = await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+    args: [TODAY, "户外", 60, "骑行", "legacy-key-000001", Date.now()],
+  });
+  const legacyId = Number(ins.rows[0].id);
+  const retry = await call("addActivity", ctx, { date: TODAY, typeName: "户外", minutes: 60, note: "骑行", requestKey: "legacy-key-000001" });
+  check(
+    "save: legacy row retry returns duplicate with the legacy id (no conflict)",
+    retry.ok === true && retry.duplicate === true && retry.id === legacyId && retry.conflict === false,
+  );
+  const ledgerRow = await client.execute({
+    sql: "SELECT state, activity_id FROM family_request_keys WHERE request_key = ?",
+    args: ["legacy-key-000001"],
+  });
+  check(
+    "save: the legacy retry backfilled the ledger row as 'saved'",
+    ledgerRow.rows.length === 1 && ledgerRow.rows[0].state === "saved" && Number(ledgerRow.rows[0].activity_id) === legacyId,
+  );
+  const edited = await call("addActivity", ctx, { date: TODAY, typeName: "户外", minutes: 61, note: "骑行", requestKey: "legacy-key-000001" });
+  check("save: an edited retry against the backfilled legacy row conflicts", edited.ok === false && edited.conflict === true);
+  const dash = await call("getDashboard", ctx, {});
+  check("save: the legacy row is still the only record, unmodified", dash.totalCount === 1 && dash.totalKnownMinutes === 60);
+}
+
+/* ---- INIT-001: concurrent-safe seeding and type creation ---- */
+{
+  const { db, client } = await makeDb();
+  const o1 = makeCtx(db, OWNER);
+  const o2 = makeCtx(db, OWNER);
+  const [d1, d2] = await Promise.all([
+    call("getDashboard", o1.ctx, {}),
+    call("getDashboard", o2.ctx, {}),
+  ]);
+  const typeCount = await client.execute("SELECT COUNT(*) AS c FROM activity_types");
+  const metaCount = await client.execute("SELECT COUNT(*) AS c FROM ledger_meta WHERE key = 'types_seeded'");
+  check("init: two concurrent first getDashboard calls both succeed", d1.forbidden === false && d2.forbidden === false);
+  check(
+    "init: concurrent seeding lands exactly 7 preset types and one meta row",
+    Number(typeCount.rows[0].c) === 7 && Number(metaCount.rows[0].c) === 1 &&
+      d1.types.length === 7 && d2.types.length === 7,
+  );
+  const [t1, t2] = await Promise.all([
+    call("addType", o1.ctx, { name: "拼图" }),
+    call("addType", o2.ctx, { name: "拼图" }),
+  ]);
+  const namedCount = await client.execute({
+    sql: "SELECT COUNT(*) AS c FROM activity_types WHERE name = ?",
+    args: ["拼图"],
+  });
+  check(
+    "init: concurrent addType with the same name → exactly one row, both ok, one duplicate",
+    t1.ok === true && t2.ok === true && t1.id === t2.id &&
+      t1.duplicate !== t2.duplicate && Number(namedCount.rows[0].c) === 1,
+  );
+  const dashAll = await call("getDashboard", o1.ctx, {});
+  for (const t of [...dashAll.types]) {
+    await call("deleteType", o1.ctx, { id: t.id });
+  }
+  const [d3, d4] = await Promise.all([
+    call("getDashboard", o1.ctx, {}),
+    call("getDashboard", o2.ctx, {}),
+  ]);
+  const typeCountAfter = await client.execute("SELECT COUNT(*) AS c FROM activity_types");
+  check(
+    "init: delete-all-types then two reads → no resurrection",
+    d3.types.length === 0 && d4.types.length === 0 && Number(typeCountAfter.rows[0].c) === 0,
+  );
+}
+
+/* ---- DATE-001: future dates are not completed facts ---- */
+{
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const fut = await call("addActivity", ctx, { date: TOMORROW, typeName: "陪玩", minutes: 30, note: null, requestKey: "future-key-000001" });
+  const rawActs = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  const rawKeys = await client.execute("SELECT COUNT(*) AS c FROM family_request_keys");
+  check(
+    "date: tomorrow (America/Los_Angeles) is refused as future with zero writes",
+    fut.ok === false && fut.future === true && fut.conflict === false && fut.deleted === false &&
+      Number(rawActs.rows[0].c) === 0 && Number(rawKeys.rows[0].c) === 0,
+  );
+  const okToday = await call("addActivity", ctx, { date: TODAY, typeName: "陪玩", minutes: 30, note: null, requestKey: "future-key-000002" });
+  const okYday = await call("addActivity", ctx, { date: shiftDay(TODAY, -1), typeName: "阅读", minutes: null, note: null, requestKey: "future-key-000003" });
+  const okLeap = await call("addActivity", ctx, { date: "2024-02-29", typeName: "户外", minutes: 45, note: null, requestKey: "future-key-000004" });
+  let dash = await call("getDashboard", ctx, {});
+  check(
+    "date: today, yesterday and leap day 2024-02-29 are accepted",
+    okToday.ok === true && okYday.ok === true && okLeap.ok === true &&
+      dash.totalCount === 3 && dash.totalKnownMinutes === 75 && dash.unknownMinutesCount === 1 && dash.futureRecordCount === 0,
+  );
+  const badFeb = await call("addActivity", ctx, { date: "2026-02-30", typeName: "陪玩", minutes: null, note: null, requestKey: "future-key-000005" });
+  check("date: Feb 30 is refused as invalid (not flagged future)", badFeb.ok === false && badFeb.future === false);
+  const before = dash;
+  // A pre-seeded future-dated legacy row: stored, but counts toward
+  // nothing until its date arrives.
+  await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    args: [TOMORROW, "旅行", 120, null, "future-legacy-001", Date.now()],
+  });
+  dash = await call("getDashboard", ctx, {});
+  check(
+    "date: future legacy row excluded from totals, counted in futureRecordCount",
+    dash.totalCount === before.totalCount && dash.totalKnownMinutes === before.totalKnownMinutes &&
+      dash.unknownMinutesCount === before.unknownMinutesCount && dash.thisMonthCount === before.thisMonthCount &&
+      dash.lastActivityDate === before.lastActivityDate && dash.futureRecordCount === 1,
+  );
+  check(
+    "date: future legacy row excluded from the weekly series and the calendar",
+    JSON.stringify(dash.series) === JSON.stringify(before.series) &&
+      JSON.stringify(dash.calendar) === JSON.stringify(before.calendar),
+  );
+  check(
+    "date: future legacy row is still listed in recentActivities so the owner can delete it",
+    dash.recentActivities.some((r) => r.date === TOMORROW && r.typeName === "旅行"),
+  );
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

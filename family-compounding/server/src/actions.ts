@@ -23,11 +23,22 @@
 //   statement, and request_key has a UNIQUE index: a retried save with
 //   the same key can never create a second record — the handler reports
 //   the existing row with duplicate: true instead.
+// - The request-key lifecycle lives in family_request_keys, a ledger
+//   that survives deletion (CMP-FAMILY-SAVE-001): each key remembers
+//   the canonical payload it saved and whether its record is 'saved'
+//   or 'deleted'. A same-key retry with different content is a typed
+//   conflict (nothing written, the stored record untouched); a retry
+//   of a deleted record is typed 'deleted' and can never resurrect it.
 // - A record stores a snapshot of its type name, so deleting a type from
 //   the type list never rewrites or drops recorded history.
 // - deleteActivity removes exactly one row by id; every total, the
 //   weekly series, and the calendar counts are recomputed from the live
 //   record set on each read, so a deletion corrects all of them.
+// - Future dates are not completed facts (CMP-FAMILY-DATE-001): a save
+//   dated after today (America/Los_Angeles) is refused with a typed
+//   'future' result, and pre-existing future-dated rows are excluded
+//   from every total/series/calendar figure — counted separately as
+//   futureRecordCount and still listed so the owner can delete them.
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { asc, eq, sql } from "drizzle-orm";
@@ -66,6 +77,18 @@ function weekStartOf(key: string): string {
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun..6=Sat
   const sinceMonday = (dow + 6) % 7;
   return shiftDay(key, -sinceMonday);
+}
+
+// Canonical payload fingerprint for a save: the exact content a
+// request key stands for. Stored in the request-key ledger so a retry
+// can be compared field-for-field against what was originally saved.
+function canonicalPayload(
+  date: string,
+  typeName: string,
+  minutes: number | null,
+  note: string | null,
+): string {
+  return JSON.stringify({ date, typeName, minutes, note });
 }
 
 // A date key must be a real calendar date, not just shaped like one.
@@ -112,6 +135,7 @@ const dashboardResponse = z.object({
   unknownMinutesCount: z.number(),
   thisMonthCount: z.number(),
   thisMonth: z.string(), // "YYYY-MM" of today
+  futureRecordCount: z.number(),
   lastActivityDate: z.string().nullable(),
   types: z.array(typeSchema),
   series: z.array(weekPointSchema),
@@ -132,6 +156,7 @@ function forbiddenDashboard(): Dashboard {
     unknownMinutesCount: 0,
     thisMonthCount: 0,
     thisMonth: todayKey().slice(0, 7),
+    futureRecordCount: 0,
     lastActivityDate: null,
     types: [],
     series: [],
@@ -147,7 +172,28 @@ const addActivityResponse = z.object({
   forbidden: z.boolean(),
   id: z.number().nullable(),
   duplicate: z.boolean(),
+  conflict: z.boolean(),
+  deleted: z.boolean(),
+  future: z.boolean(),
 });
+
+type AddActivityResult = z.infer<typeof addActivityResponse>;
+
+// Every non-success addActivity outcome, fully typed: callers branch on
+// exactly one flag (forbidden / conflict / deleted / future) or on the
+// plain invalid-date refusal where all flags stay false.
+function addRefusal(flags: Partial<AddActivityResult>): AddActivityResult {
+  return {
+    ok: false,
+    forbidden: false,
+    id: null,
+    duplicate: false,
+    conflict: false,
+    deleted: false,
+    future: false,
+    ...flags,
+  };
+}
 
 const addTypeResponse = z.object({
   ok: z.boolean(),
@@ -168,37 +214,55 @@ export const Actions = {
       const today = todayKey();
       const thisMonth = today.slice(0, 7);
 
-      // Materialize the preset types exactly once (guarded by the
-      // ledger_meta flag, in one batch). After that the type list is
-      // entirely the owner's: deleting every type stays deleted.
-      const seeded = await db
-        .select()
-        .from(schema.ledgerMeta)
-        .where(eq(schema.ledgerMeta.key, "types_seeded"));
-      if (seeded.length === 0) {
-        const now = Date.now();
-        await db.batch([
-          db.insert(schema.activityTypes).values(
+      // Materialize the preset types exactly once, claimed atomically
+      // (CMP-FAMILY-INIT-001): the claim is a single
+      // INSERT … ON CONFLICT DO NOTHING … RETURNING, so of any number
+      // of concurrent first reads exactly one caller wins the claim
+      // and inserts the 7 presets — there is no check-then-write
+      // window. If the preset insert fails, the claim row is removed
+      // before rethrowing so a retry can seed cleanly (no half-seeded
+      // state). Once claimed, the meta row stays forever: after the
+      // owner deletes every type, later reads never resurrect presets.
+      const claimed = await db.all<{ key: string }>(sql`
+        INSERT INTO ledger_meta (key, value) VALUES ('types_seeded', '1')
+        ON CONFLICT(key) DO NOTHING
+        RETURNING key
+      `);
+      if (claimed.length > 0) {
+        try {
+          const now = Date.now();
+          await db.insert(schema.activityTypes).values(
             schema.PRESET_TYPES.map((name, i) => ({
               name,
               isPreset: 1,
               createdAt: new Date(now + i),
             })),
-          ),
-          db
-            .insert(schema.ledgerMeta)
-            .values({ key: "types_seeded", value: "1" }),
-        ]);
+          );
+        } catch (err) {
+          await db
+            .delete(schema.ledgerMeta)
+            .where(eq(schema.ledgerMeta.key, "types_seeded"));
+          throw err;
+        }
       }
 
       const typeRows = await db
         .select()
         .from(schema.activityTypes)
         .orderBy(asc(schema.activityTypes.id));
-      const rows = await db
+      const allRows = await db
         .select()
         .from(schema.familyActivities)
         .orderBy(asc(schema.familyActivities.date), asc(schema.familyActivities.id));
+
+      // Future-dated rows (only possible from before the future-date
+      // refusal existed) are not completed facts: they are excluded
+      // from every total, the weekly series and the calendar, counted
+      // separately as futureRecordCount, and still listed in
+      // recentActivities below so the owner can see and delete them.
+      // They are never silently deleted or edited here.
+      const rows = allRows.filter((r) => r.date <= today);
+      const futureRecordCount = allRows.length - rows.length;
 
       // Totals are plain facts over the live record set. Unknown
       // durations (minutes NULL) count as activities but contribute
@@ -256,7 +320,10 @@ export const Actions = {
             .map(([date, count]) => ({ date, count })),
         }));
 
-      const recentActivities: Dashboard["recentActivities"] = [...rows]
+      // Recent list spans ALL rows, future-dated ones included: the
+      // owner must be able to see (and delete) a future-dated record
+      // even though it counts toward nothing yet.
+      const recentActivities: Dashboard["recentActivities"] = [...allRows]
         .sort((a, b) => b.id - a.id)
         .slice(0, 30)
         .map((r) => ({
@@ -275,6 +342,7 @@ export const Actions = {
         unknownMinutesCount,
         thisMonthCount,
         thisMonth,
+        futureRecordCount,
         lastActivityDate: lastRow ? lastRow.date : null,
         types: typeRows.map((t) => ({
           id: t.id,
@@ -297,38 +365,129 @@ export const Actions = {
       requestKey: z.string().min(8).max(64),
     }),
     response: addActivityResponse,
-    async handler(ctx, args): Promise<z.infer<typeof addActivityResponse>> {
-      if (!isOwner(ctx)) return { ok: false, forbidden: true, id: null, duplicate: false };
-      if (!isRealDateKey(args.date)) {
-        return { ok: false, forbidden: false, id: null, duplicate: false };
-      }
+    async handler(ctx, args): Promise<AddActivityResult> {
+      if (!isOwner(ctx)) return addRefusal({ forbidden: true });
+      if (!isRealDateKey(args.date)) return addRefusal({});
+      // A future date is not a completed fact: refuse, write nothing.
+      if (args.date > todayKey()) return addRefusal({ future: true });
       const db = ctx.db<typeof schema>();
       const note = args.note && args.note.length > 0 ? args.note : null;
-      // One conditional statement: the existence check on the request
-      // key and the insert are a single atomic step, and the UNIQUE
-      // index on request_key backs it at the storage layer. A retry
-      // with the same key affects zero rows and is answered with the
-      // existing record's id.
+      const payload = canonicalPayload(args.date, args.typeName, args.minutes, note);
+      const now = Date.now();
+
+      // (a) The request-key ledger is the authority on this key's
+      // lifecycle. A stored payload that differs from the incoming one
+      // means the same submission was edited after its first save:
+      // typed conflict, nothing written, the stored record untouched.
+      // A matching payload replays the original outcome: the original
+      // id while 'saved', a typed refusal once 'deleted'.
+      const ledgerRows = await db
+        .select()
+        .from(schema.familyRequestKeys)
+        .where(eq(schema.familyRequestKeys.requestKey, args.requestKey));
+      const ledger = ledgerRows[0];
+      if (ledger) {
+        if (ledger.payload !== payload) return addRefusal({ conflict: true });
+        if (ledger.state === "deleted") return addRefusal({ deleted: true });
+        return {
+          ok: true,
+          forbidden: false,
+          id: ledger.activityId,
+          duplicate: true,
+          conflict: false,
+          deleted: false,
+          future: false,
+        };
+      }
+
+      // (b) No ledger row, but a pre-ledger activity already carries
+      // this key: backfill the ledger from the stored row's own
+      // fields, then apply the same payload comparison.
+      const legacyRows = await db
+        .select()
+        .from(schema.familyActivities)
+        .where(eq(schema.familyActivities.requestKey, args.requestKey));
+      const legacy = legacyRows[0];
+      if (legacy) {
+        const storedPayload = canonicalPayload(
+          legacy.date,
+          legacy.typeName,
+          legacy.minutes,
+          legacy.note,
+        );
+        await db.insert(schema.familyRequestKeys).values({
+          requestKey: args.requestKey,
+          payload: storedPayload,
+          activityId: legacy.id,
+          state: "saved",
+          createdAt: now,
+          updatedAt: now,
+        });
+        if (storedPayload !== payload) return addRefusal({ conflict: true });
+        return {
+          ok: true,
+          forbidden: false,
+          id: legacy.id,
+          duplicate: true,
+          conflict: false,
+          deleted: false,
+          future: false,
+        };
+      }
+
+      // (c) Fresh key: one conditional statement — the existence check
+      // on the request key and the insert are a single atomic step,
+      // and the UNIQUE index on request_key backs it at the storage
+      // layer. The ledger row is written with the new activity id, so
+      // the two always agree; a same-key same-payload retry is
+      // answered by step (a) with the original row, never a second
+      // record.
       const inserted = await db.all<{ id: number }>(sql`
         INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at)
-        SELECT ${args.date}, ${args.typeName}, ${args.minutes}, ${note}, ${args.requestKey}, ${Date.now()}
+        SELECT ${args.date}, ${args.typeName}, ${args.minutes}, ${note}, ${args.requestKey}, ${now}
         WHERE NOT EXISTS (SELECT 1 FROM family_activities WHERE request_key = ${args.requestKey})
         RETURNING id
       `);
       const row = inserted[0];
       if (row) {
+        await db.insert(schema.familyRequestKeys).values({
+          requestKey: args.requestKey,
+          payload,
+          activityId: row.id,
+          state: "saved",
+          createdAt: now,
+          updatedAt: now,
+        });
         ctx.invalidateQueries();
-        return { ok: true, forbidden: false, id: row.id, duplicate: false };
+        return {
+          ok: true,
+          forbidden: false,
+          id: row.id,
+          duplicate: false,
+          conflict: false,
+          deleted: false,
+          future: false,
+        };
       }
-      const existing = await db
+      // The conditional insert lost a race: another save with this key
+      // landed first. Answer with that row as a duplicate.
+      const raced = await db
         .select({ id: schema.familyActivities.id })
         .from(schema.familyActivities)
         .where(eq(schema.familyActivities.requestKey, args.requestKey));
-      const found = existing[0];
+      const found = raced[0];
       if (found) {
-        return { ok: true, forbidden: false, id: found.id, duplicate: true };
+        return {
+          ok: true,
+          forbidden: false,
+          id: found.id,
+          duplicate: true,
+          conflict: false,
+          deleted: false,
+          future: false,
+        };
       }
-      return { ok: false, forbidden: false, id: null, duplicate: false };
+      return addRefusal({});
     },
   }),
 
@@ -338,6 +497,36 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
       const db = ctx.db<typeof schema>();
+      const targets = await db
+        .select()
+        .from(schema.familyActivities)
+        .where(eq(schema.familyActivities.id, args.id));
+      const target = targets[0];
+      if (!target) return { ok: false, forbidden: false };
+      // Tombstone the record's request key in the ledger BEFORE the
+      // row goes away: the ledger row is upserted to 'deleted'
+      // (created from the activity's stored key and fields when none
+      // exists), so a late retry of that save is typed-rejected and
+      // can never resurrect the record. The ledger row itself is
+      // never deleted. Records with a NULL/legacy missing request key
+      // have no key to tombstone and delete exactly as before.
+      if (target.requestKey !== null) {
+        const now = Date.now();
+        await db.all(sql`
+          INSERT INTO family_request_keys (request_key, payload, activity_id, state, created_at, updated_at)
+          VALUES (
+            ${target.requestKey},
+            ${canonicalPayload(target.date, target.typeName, target.minutes, target.note)},
+            ${target.id},
+            'deleted',
+            ${now},
+            ${now}
+          )
+          ON CONFLICT(request_key) DO UPDATE SET
+            state = 'deleted',
+            updated_at = ${now}
+        `);
+      }
       const removed = await db
         .delete(schema.familyActivities)
         .where(eq(schema.familyActivities.id, args.id))
@@ -353,6 +542,22 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof addTypeResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true, id: null, duplicate: false };
       const db = ctx.db<typeof schema>();
+      // One conditional statement (CMP-FAMILY-INIT-001): the
+      // same-exact-name check and the insert are a single atomic step,
+      // so two concurrent adds of the same name produce exactly one
+      // type row — the loser inserts zero rows and reads back the
+      // existing type as a duplicate.
+      const inserted = await db.all<{ id: number }>(sql`
+        INSERT INTO activity_types (name, is_preset, created_at)
+        SELECT ${args.name}, 0, ${Date.now()}
+        WHERE NOT EXISTS (SELECT 1 FROM activity_types WHERE name = ${args.name})
+        RETURNING id
+      `);
+      const row = inserted[0];
+      if (row) {
+        ctx.invalidateQueries();
+        return { ok: true, forbidden: false, id: row.id, duplicate: false };
+      }
       const existing = await db
         .select({ id: schema.activityTypes.id })
         .from(schema.activityTypes)
@@ -361,14 +566,7 @@ export const Actions = {
       if (found) {
         return { ok: true, forbidden: false, id: found.id, duplicate: true };
       }
-      const inserted = await db
-        .insert(schema.activityTypes)
-        .values({ name: args.name, isPreset: 0 })
-        .returning({ id: schema.activityTypes.id });
-      const row = inserted[0];
-      if (!row) return { ok: false, forbidden: false, id: null, duplicate: false };
-      ctx.invalidateQueries();
-      return { ok: true, forbidden: false, id: row.id, duplicate: false };
+      return { ok: false, forbidden: false, id: null, duplicate: false };
     },
   }),
 

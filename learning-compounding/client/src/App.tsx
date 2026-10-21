@@ -753,7 +753,10 @@ function LedgerRow({ row, today }: { row: InputRow; today: string }) {
   const del = useMutation({ mutationFn: () => api.deleteInput({ id: row.id }), onSuccess: invalidate });
 
   return (
-    <article className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
+    <article
+      id={`ledger-row-${row.id}`}
+      className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
+    >
       <div className="flex items-start justify-between gap-3">
         <p className="text-sm font-medium leading-snug">{row.topic}</p>
         {row.converted ? (
@@ -771,6 +774,8 @@ function LedgerRow({ row, today }: { row: InputRow; today: string }) {
         )}
       </div>
       <p className="mt-1.5 text-sm text-[var(--dim)]">
+        <span className="tnum">#{row.id}</span>
+        {" · "}
         {formatDay(row.date, today)} · {SOURCE_LABEL[row.sourceType]}
         {row.skillName ? ` · ${row.skillName}` : " · 未关联技能"}
         {row.minutes == null
