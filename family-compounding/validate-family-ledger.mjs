@@ -5,10 +5,13 @@
 //
 // Two layers:
 //  1. Source wiring: every action's strict isOwner gate precedes any
-//     ctx.db access; addActivity writes through one conditional
-//     INSERT … WHERE NOT EXISTS(request_key) with a UNIQUE index on
-//     request_key in the migration; the client carries the honesty
-//     copy （没有记录不等于没陪伴 / 空账本空态 / 重复提交不重计）.
+//     ctx.db access; addActivity's fresh save and deleteActivity are
+//     single db.batch writes over the request-key ledger and the
+//     activities table, with a UNIQUE index on request_key and the
+//     migration-0004 deleted-key insert trigger as storage backstops;
+//     the client carries the honesty copy （没有记录不等于没陪伴 /
+//     空账本空态 / 重复提交不重计） and the submitted-snapshot draft
+//     protection in the record form.
 //  2. Behavior: the REAL handlers from server/src/actions.ts run
 //     against throwaway in-memory libsql databases (schema applied
 //     from drizzle/*.sql) behind synthetic owner / non-owner /
@@ -63,10 +66,19 @@ for (const name of ACTION_NAMES) {
 {
   const add = actionSlice(serverSrc, "addActivity");
   check(
-    "source: addActivity writes via one conditional INSERT (NOT EXISTS on request_key)",
-    add.includes("INSERT INTO family_activities") && add.includes("NOT EXISTS") && add.includes("request_key"),
+    "source: addActivity fresh save is one db.batch of builder statements (ledger claim + activity insert)",
+    add.includes("db.batch") &&
+      add.includes("insert(schema.familyRequestKeys)") &&
+      add.includes("insert(schema.familyActivities)"),
   );
-  check("source: addActivity reports the existing row on duplicate", add.includes("duplicate: true"));
+  check(
+    "source: addActivity claim, activity insert and legacy backfill all use onConflictDoNothing",
+    (add.match(/onConflictDoNothing/g) ?? []).length >= 3,
+  );
+  check(
+    "source: the shared adjudication reports the existing row on duplicate",
+    serverSrc.includes("async function adjudicateSave") && add.includes("adjudicateSave(db, args.requestKey, payload"),
+  );
   check(
     "source: request_key carries a UNIQUE index in the migration",
     migrationSql.includes("CREATE UNIQUE INDEX") && migrationSql.includes("request_key"),
@@ -106,9 +118,12 @@ check(
 );
 {
   const add = actionSlice(serverSrc, "addActivity");
+  const adjudStart = serverSrc.indexOf("async function adjudicateSave");
+  const adjud = adjudStart >= 0 ? serverSrc.slice(adjudStart, serverSrc.indexOf("/* ---------------- actions", adjudStart)) : "";
   check(
-    "source(save): addActivity consults the request-key ledger and can refuse as conflict/deleted",
-    add.includes("familyRequestKeys") && add.includes("conflict: true") && add.includes("deleted: true"),
+    "source(save): addActivity adjudicates via the request-key ledger and can refuse as conflict/deleted",
+    add.includes("familyRequestKeys") && add.includes("adjudicateSave") &&
+      adjud.includes("familyRequestKeys") && adjud.includes("conflict: true") && adjud.includes("deleted: true"),
   );
   check(
     "source(date): addActivity refuses future dates with a typed future result",
@@ -116,13 +131,27 @@ check(
   );
   const del = actionSlice(serverSrc, "deleteActivity");
   check(
-    "source(save): deleteActivity tombstones the request key in the ledger (upsert to 'deleted')",
-    del.includes("family_request_keys") && del.includes("'deleted'") && del.includes("ON CONFLICT(request_key) DO UPDATE"),
+    "source(save): deleteActivity is one db.batch (ledger tombstone upsert to 'deleted' + activity delete)",
+    del.includes("db.batch") &&
+      del.includes("insert(schema.familyRequestKeys)") &&
+      del.includes("onConflictDoUpdate") &&
+      del.includes('state: "deleted"'),
+  );
+  check(
+    "source(save): migration 0004 adds the BEFORE INSERT deleted-key guard trigger on family_activities",
+    migrationSql.includes("CREATE TRIGGER") &&
+      migrationSql.includes("BEFORE INSERT ON family_activities") &&
+      migrationSql.includes("state = 'deleted'") &&
+      migrationSql.includes("RAISE(ABORT, 'request key deleted')"),
   );
   const dash = actionSlice(serverSrc, "getDashboard");
   check(
-    "source(init): preset seeding is an atomic claim (INSERT … ON CONFLICT DO NOTHING … RETURNING)",
-    dash.includes("INSERT INTO ledger_meta") && dash.includes("ON CONFLICT(key) DO NOTHING") && dash.includes("RETURNING key"),
+    "source(init): preset seeding claims via a builder INSERT … ON CONFLICT DO NOTHING … RETURNING, then seeds all presets in one db.batch",
+    dash.includes("insert(schema.ledgerMeta)") &&
+      dash.includes("onConflictDoNothing") &&
+      dash.includes("returning()") &&
+      dash.includes("db.batch") &&
+      dash.includes("insert(schema.activityTypes)"),
   );
   check(
     "source(date): dashboard counts future-dated rows separately (futureRecordCount)",
@@ -149,6 +178,14 @@ check(
 check(
   "client(date): future-dated records get a plain not-counted note",
   clientSrc.includes("条记录日期在今天之后，未计入累计"),
+);
+check(
+  "client(date): the future-record note says the records count automatically once their date arrives (no re-recording)",
+  clientSrc.includes("会在日期到达后自动计入累计，无需重新记录"),
+);
+check(
+  "client(save): the success handler compares the live draft against the submittedSnapshot before clearing fields",
+  clientSrc.includes("submittedSnapshot") && clientSrc.includes("draftMatchesSnapshot"),
 );
 
 /* ---------------- 2. behavior against real handlers ---------------- */
@@ -652,6 +689,158 @@ const TOMORROW = shiftDay(TODAY, 1);
   check(
     "date: future legacy row is still listed in recentActivities so the owner can delete it",
     dash.recentActivities.some((r) => r.date === TOMORROW && r.typeName === "旅行"),
+  );
+}
+
+/* ---- SAVE-001 atomicity: races and interleaves over the batch writes ---- */
+{
+  // Concurrent same key, DIFFERENT payloads: exactly one save wins,
+  // the loser is a typed conflict, and exactly one activity row —
+  // holding the winner's payload — exists afterwards.
+  const { db, client } = await makeDb();
+  const o1 = makeCtx(db, OWNER);
+  const o2 = makeCtx(db, OWNER);
+  const key = "race-diff-payload-01";
+  const [r1, r2] = await Promise.all([
+    call("addActivity", o1.ctx, { date: TODAY, typeName: "陪玩", minutes: 30, note: null, requestKey: key }),
+    call("addActivity", o2.ctx, { date: TODAY, typeName: "陪玩", minutes: 45, note: null, requestKey: key }),
+  ]);
+  const winnerMinutes = r1.ok ? 30 : 45;
+  const rows = await client.execute({
+    sql: "SELECT minutes FROM family_activities WHERE request_key = ?",
+    args: [key],
+  });
+  check(
+    "race: concurrent same-key different-payload → exactly one ok and one typed conflict",
+    [r1, r2].filter((r) => r.ok).length === 1 && [r1, r2].filter((r) => r.conflict).length === 1,
+  );
+  check(
+    "race: exactly one activity row exists and it holds the winner's payload",
+    rows.rows.length === 1 && Number(rows.rows[0].minutes) === winnerMinutes,
+  );
+}
+{
+  // Concurrent same key, SAME payload: both calls succeed with the
+  // same id and exactly one activity row exists.
+  const { db, client } = await makeDb();
+  const o1 = makeCtx(db, OWNER);
+  const o2 = makeCtx(db, OWNER);
+  const args = { date: TODAY, typeName: "阅读", minutes: 20, note: "绘本", requestKey: "race-same-payload-01" };
+  const [r1, r2] = await Promise.all([
+    call("addActivity", o1.ctx, args),
+    call("addActivity", o2.ctx, args),
+  ]);
+  const count = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  check(
+    "race: concurrent same-key same-payload → both ok with the same id, exactly one row",
+    r1.ok === true && r2.ok === true && r1.id !== null && r1.id === r2.id && Number(count.rows[0].c) === 1,
+  );
+}
+{
+  // Save → delete → same-key retry: typed deleted, zero activities,
+  // and the tombstone + delete landed together (no half state).
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const args = { date: TODAY, typeName: "运动", minutes: 35, note: null, requestKey: "race-del-retry-0001" };
+  const saved = await call("addActivity", ctx, args);
+  const del = await call("deleteActivity", ctx, { id: saved.id });
+  const retry = await call("addActivity", ctx, args);
+  const acts = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  const led = await client.execute({
+    sql: "SELECT state FROM family_request_keys WHERE request_key = ?",
+    args: ["race-del-retry-0001"],
+  });
+  check(
+    "race: save → delete → same-key retry is typed deleted with zero activities and a committed tombstone",
+    del.ok === true && retry.ok === false && retry.deleted === true &&
+      Number(acts.rows[0].c) === 0 && led.rows.length === 1 && led.rows[0].state === "deleted",
+  );
+}
+{
+  // A 'deleted' tombstone written directly (simulating a delete batch
+  // that has already committed) blocks a later save of the same key:
+  // the handler refuses typed-deleted, and at the storage level the
+  // migration-0004 trigger aborts a direct activity insert outright.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const key = "tombstone-first-0001";
+  const payload = JSON.stringify({ date: TODAY, typeName: "陪玩", minutes: 30, note: null });
+  const nowTs = Date.now();
+  await client.execute({
+    sql: "INSERT INTO family_request_keys (request_key, payload, activity_id, state, created_at, updated_at) VALUES (?, ?, NULL, 'deleted', ?, ?)",
+    args: [key, payload, nowTs, nowTs],
+  });
+  const res = await call("addActivity", ctx, { date: TODAY, typeName: "陪玩", minutes: 30, note: null, requestKey: key });
+  let triggerBlocked = false;
+  try {
+    await client.execute({
+      sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      args: [TODAY, "陪玩", 30, null, key, Date.now()],
+    });
+  } catch {
+    triggerBlocked = true;
+  }
+  const acts = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  check(
+    "race: pre-written deleted tombstone → save refused as deleted, zero activities",
+    res.ok === false && res.deleted === true && Number(acts.rows[0].c) === 0,
+  );
+  check(
+    "race: migration 0004 trigger aborts a direct activity insert under a deleted key",
+    triggerBlocked === true && Number(acts.rows[0].c) === 0,
+  );
+}
+{
+  // Legacy pre-ledger row under two concurrent same-key retries: the
+  // ON CONFLICT DO NOTHING backfill means neither call throws, both
+  // replay the legacy row as duplicates, and exactly one ledger row
+  // exists afterwards.
+  const { db, client } = await makeDb();
+  const o1 = makeCtx(db, OWNER);
+  const o2 = makeCtx(db, OWNER);
+  const ins = await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+    args: [TODAY, "户外", 60, "骑行", "legacy-race-000001", Date.now()],
+  });
+  const legacyId = Number(ins.rows[0].id);
+  const args = { date: TODAY, typeName: "户外", minutes: 60, note: "骑行", requestKey: "legacy-race-000001" };
+  const [r1, r2] = await Promise.all([
+    call("addActivity", o1.ctx, args),
+    call("addActivity", o2.ctx, args),
+  ]);
+  const ledgerCount = await client.execute({
+    sql: "SELECT COUNT(*) AS c FROM family_request_keys WHERE request_key = ?",
+    args: ["legacy-race-000001"],
+  });
+  check(
+    "race: legacy row, two concurrent same-key retries → both duplicate with the legacy id, no error, exactly one ledger row",
+    r1.ok === true && r2.ok === true && r1.duplicate === true && r2.duplicate === true &&
+      r1.id === legacyId && r2.id === legacyId && Number(ledgerCount.rows[0].c) === 1,
+  );
+}
+{
+  // Deleting a legacy row (activity with a key but no ledger row)
+  // writes its tombstone in the same batch as the delete, and a later
+  // retry of that key is typed deleted.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const ins = await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+    args: [TODAY, "旅行", 90, null, "legacy-del-0000001", Date.now()],
+  });
+  const legacyId = Number(ins.rows[0].id);
+  const del = await call("deleteActivity", ctx, { id: legacyId });
+  const acts = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  const led = await client.execute({
+    sql: "SELECT state FROM family_request_keys WHERE request_key = ?",
+    args: ["legacy-del-0000001"],
+  });
+  const retry = await call("addActivity", ctx, { date: TODAY, typeName: "旅行", minutes: 90, note: null, requestKey: "legacy-del-0000001" });
+  check(
+    "race: legacy-row delete commits tombstone + row removal together; later retry is typed deleted",
+    del.ok === true && Number(acts.rows[0].c) === 0 &&
+      led.rows.length === 1 && led.rows[0].state === "deleted" &&
+      retry.ok === false && retry.deleted === true,
   );
 }
 

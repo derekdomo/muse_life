@@ -18,17 +18,42 @@
 // sync-channel exception here.
 //
 // Write integrity:
-// - addActivity carries a client-generated request key. The write is a
-//   single conditional INSERT … SELECT … WHERE NOT EXISTS(same key)
-//   statement, and request_key has a UNIQUE index: a retried save with
-//   the same key can never create a second record — the handler reports
-//   the existing row with duplicate: true instead.
+// - ctx.db has no transaction method; db.batch is the only atomic
+//   primitive (one transaction, any statement failing rolls the whole
+//   batch back, and batch elements must be drizzle query builders).
+//   Every multi-row write below is therefore ONE db.batch of builder
+//   statements, followed by a re-read that adjudicates the outcome
+//   from the stored state — never from assumptions about which
+//   statement "won".
+// - addActivity carries a client-generated request key. A fresh save
+//   is one batch: claim the key in the request-key ledger
+//   (INSERT … ON CONFLICT DO NOTHING) and insert the activity
+//   (INSERT … ON CONFLICT DO NOTHING, backed by the UNIQUE index on
+//   request_key). After the batch the handler re-reads the ledger row
+//   and the activity row and adjudicates: a stored payload differing
+//   from the incoming one is a typed conflict (nothing of this call
+//   survives); a 'deleted' ledger row is a typed deleted refusal; an
+//   existing activity row is success (duplicate iff the row already
+//   existed before this call's batch); a 'saved' ledger row with no
+//   activity row converges to the deleted refusal. If the batch itself
+//   throws, the same re-read adjudication runs once; only when it
+//   cannot decide does the call return a plain refusal — the rolled
+//   back batch guarantees no half-written pair is left behind.
 // - The request-key lifecycle lives in family_request_keys, a ledger
 //   that survives deletion (CMP-FAMILY-SAVE-001): each key remembers
 //   the canonical payload it saved and whether its record is 'saved'
 //   or 'deleted'. A same-key retry with different content is a typed
 //   conflict (nothing written, the stored record untouched); a retry
 //   of a deleted record is typed 'deleted' and can never resurrect it.
+// - Storage-level backstop (migration 0004): a BEFORE INSERT trigger
+//   on family_activities aborts any insert whose request key already
+//   has a 'deleted' ledger row, so a save batch that lands after a
+//   delete batch has committed rolls back whole and is adjudicated
+//   deleted on re-read — a deleted record cannot be resurrected by an
+//   interleaved save.
+// - deleteActivity is one batch too: the ledger tombstone upsert and
+//   the activity delete commit or roll back together, so the ledger
+//   can never say 'deleted' while the record still exists.
 // - A record stores a snapshot of its type name, so deleting a type from
 //   the type list never rewrites or drops recorded history.
 // - deleteActivity removes exactly one row by id; every total, the
@@ -40,7 +65,13 @@
 //   from every total/series/calendar figure — counted separately as
 //   futureRecordCount and still listed so the owner can delete them.
 
-import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
+import {
+defineAction,
+z,
+type ActionsModule,
+type Ctx,
+type SpaceDb,
+} from "@hatch/space-sdk";
 import { asc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
@@ -202,6 +233,57 @@ const addTypeResponse = z.object({
   duplicate: z.boolean(),
 });
 
+/* ---------------- request-key adjudication ---------------- */
+
+type Db = SpaceDb<typeof schema>;
+
+// The one adjudication rule, applied identically by every addActivity
+// path (ledger fast path, legacy backfill, fresh-save re-read, and the
+// re-read after a failed batch): the stored ledger row and the stored
+// activity row decide the outcome, in this order —
+//   no ledger row            → (only after a failed fresh batch) plain
+//                              refusal; callers on other paths handle
+//                              the missing-row case themselves
+//   payload mismatch         → typed conflict, nothing of ours written
+//   ledger state 'deleted'   → typed deleted
+//   'saved' but no activity  → typed deleted (converged: the record is
+//                              gone, whatever removed it)
+//   'saved' with the row     → ok, the row's id; `duplicate` comes from
+//                              the caller (the fast paths always replay
+//                              an earlier save → true; the fresh path
+//                              passes whether its activity row already
+//                              existed before its batch ran)
+async function adjudicateSave(
+  db: Db,
+  requestKey: string,
+  payload: string,
+  duplicate: boolean,
+): Promise<AddActivityResult | null> {
+  const ledgerRows = await db
+    .select()
+    .from(schema.familyRequestKeys)
+    .where(eq(schema.familyRequestKeys.requestKey, requestKey));
+  const ledger = ledgerRows[0];
+  if (!ledger) return null;
+  if (ledger.payload !== payload) return addRefusal({ conflict: true });
+  if (ledger.state === "deleted") return addRefusal({ deleted: true });
+  const activityRows = await db
+    .select({ id: schema.familyActivities.id })
+    .from(schema.familyActivities)
+    .where(eq(schema.familyActivities.requestKey, requestKey));
+  const activity = activityRows[0];
+  if (!activity) return addRefusal({ deleted: true });
+  return {
+    ok: true,
+    forbidden: false,
+    id: activity.id,
+    duplicate,
+    conflict: false,
+    deleted: false,
+    future: false,
+  };
+}
+
 /* ---------------- actions ---------------- */
 
 export const Actions = {
@@ -214,30 +296,35 @@ export const Actions = {
       const today = todayKey();
       const thisMonth = today.slice(0, 7);
 
-      // Materialize the preset types exactly once, claimed atomically
-      // (CMP-FAMILY-INIT-001): the claim is a single
-      // INSERT … ON CONFLICT DO NOTHING … RETURNING, so of any number
-      // of concurrent first reads exactly one caller wins the claim
-      // and inserts the 7 presets — there is no check-then-write
-      // window. If the preset insert fails, the claim row is removed
-      // before rethrowing so a retry can seed cleanly (no half-seeded
-      // state). Once claimed, the meta row stays forever: after the
+      // Materialize the preset types exactly once (CMP-FAMILY-INIT-001).
+      // The claim is a single INSERT … ON CONFLICT DO NOTHING …
+      // RETURNING statement — atomic on its own, so of any number of
+      // concurrent first reads exactly one caller wins it. The winner
+      // then commits all 7 preset inserts as ONE db.batch (a single
+      // transaction: readers see either all 7 types or none — there
+      // is no window where a concurrent first read can observe a
+      // partially seeded type list). If the seed batch fails, the
+      // claim row is removed before rethrowing so a retry can seed
+      // cleanly. Once claimed, the meta row stays forever: after the
       // owner deletes every type, later reads never resurrect presets.
-      const claimed = await db.all<{ key: string }>(sql`
-        INSERT INTO ledger_meta (key, value) VALUES ('types_seeded', '1')
-        ON CONFLICT(key) DO NOTHING
-        RETURNING key
-      `);
+      const claimed = await db
+        .insert(schema.ledgerMeta)
+        .values({ key: "types_seeded", value: "1" })
+        .onConflictDoNothing()
+        .returning();
       if (claimed.length > 0) {
         try {
           const now = Date.now();
-          await db.insert(schema.activityTypes).values(
-            schema.PRESET_TYPES.map((name, i) => ({
+          const inserts = schema.PRESET_TYPES.map((name, i) =>
+            db.insert(schema.activityTypes).values({
               name,
               isPreset: 1,
               createdAt: new Date(now + i),
-            })),
+            }),
           );
+          const [firstInsert, ...restInserts] = inserts;
+          if (!firstInsert) throw new Error("preset type list is empty");
+          await db.batch([firstInsert, ...restInserts]);
         } catch (err) {
           await db
             .delete(schema.ledgerMeta)
@@ -375,34 +462,18 @@ export const Actions = {
       const payload = canonicalPayload(args.date, args.typeName, args.minutes, note);
       const now = Date.now();
 
-      // (a) The request-key ledger is the authority on this key's
-      // lifecycle. A stored payload that differs from the incoming one
-      // means the same submission was edited after its first save:
-      // typed conflict, nothing written, the stored record untouched.
-      // A matching payload replays the original outcome: the original
-      // id while 'saved', a typed refusal once 'deleted'.
-      const ledgerRows = await db
-        .select()
-        .from(schema.familyRequestKeys)
-        .where(eq(schema.familyRequestKeys.requestKey, args.requestKey));
-      const ledger = ledgerRows[0];
-      if (ledger) {
-        if (ledger.payload !== payload) return addRefusal({ conflict: true });
-        if (ledger.state === "deleted") return addRefusal({ deleted: true });
-        return {
-          ok: true,
-          forbidden: false,
-          id: ledger.activityId,
-          duplicate: true,
-          conflict: false,
-          deleted: false,
-          future: false,
-        };
-      }
+      // (a) Ledger fast path: a stored ledger row already decides this
+      // key — payload conflict, deleted refusal, or the original save
+      // replayed as a duplicate. A 'saved' ledger row whose activity
+      // row no longer exists converges to the deleted refusal.
+      const fastPath = await adjudicateSave(db, args.requestKey, payload, true);
+      if (fastPath) return fastPath;
 
       // (b) No ledger row, but a pre-ledger activity already carries
       // this key: backfill the ledger from the stored row's own
-      // fields, then apply the same payload comparison.
+      // fields (ON CONFLICT DO NOTHING — a concurrent backfill of the
+      // same key is a no-op, never a UNIQUE error), then re-read and
+      // adjudicate against the ledger row that actually landed.
       const legacyRows = await db
         .select()
         .from(schema.familyActivities)
@@ -415,78 +486,83 @@ export const Actions = {
           legacy.minutes,
           legacy.note,
         );
-        await db.insert(schema.familyRequestKeys).values({
-          requestKey: args.requestKey,
-          payload: storedPayload,
-          activityId: legacy.id,
-          state: "saved",
-          createdAt: now,
-          updatedAt: now,
-        });
-        if (storedPayload !== payload) return addRefusal({ conflict: true });
-        return {
-          ok: true,
-          forbidden: false,
-          id: legacy.id,
-          duplicate: true,
-          conflict: false,
-          deleted: false,
-          future: false,
-        };
+        await db
+          .insert(schema.familyRequestKeys)
+          .values({
+            requestKey: args.requestKey,
+            payload: storedPayload,
+            activityId: legacy.id,
+            state: "saved",
+            createdAt: now,
+            updatedAt: now,
+          })
+          .onConflictDoNothing();
+        const verdict = await adjudicateSave(db, args.requestKey, payload, true);
+        // A vanished verdict (no ledger row at all) cannot happen after
+        // a successful backfill; refuse plainly rather than guess.
+        return verdict ?? addRefusal({});
       }
 
-      // (c) Fresh key: one conditional statement — the existence check
-      // on the request key and the insert are a single atomic step,
-      // and the UNIQUE index on request_key backs it at the storage
-      // layer. The ledger row is written with the new activity id, so
-      // the two always agree; a same-key same-payload retry is
-      // answered by step (a) with the original row, never a second
-      // record.
-      const inserted = await db.all<{ id: number }>(sql`
-        INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at)
-        SELECT ${args.date}, ${args.typeName}, ${args.minutes}, ${note}, ${args.requestKey}, ${now}
-        WHERE NOT EXISTS (SELECT 1 FROM family_activities WHERE request_key = ${args.requestKey})
-        RETURNING id
-      `);
-      const row = inserted[0];
-      if (row) {
-        await db.insert(schema.familyRequestKeys).values({
-          requestKey: args.requestKey,
-          payload,
-          activityId: row.id,
-          state: "saved",
-          createdAt: now,
-          updatedAt: now,
-        });
-        ctx.invalidateQueries();
-        return {
-          ok: true,
-          forbidden: false,
-          id: row.id,
-          duplicate: false,
-          conflict: false,
-          deleted: false,
-          future: false,
-        };
-      }
-      // The conditional insert lost a race: another save with this key
-      // landed first. Answer with that row as a duplicate.
-      const raced = await db
+      // (c) Fresh key: ONE db.batch, two builder statements —
+      //   1. claim the request key in the ledger
+      //      (INSERT … ON CONFLICT DO NOTHING, activityId filled by
+      //      nobody — the activity row is found by its unique
+      //      request_key on re-read);
+      //   2. insert the activity (INSERT … ON CONFLICT DO NOTHING on
+      //      the request_key UNIQUE index).
+      // Whichever statement a concurrent same-key save beats us to
+      // simply no-ops; the batch commits or rolls back as a unit, so
+      // the ledger and the activity can never half-exist. Whether the
+      // activity row already existed before this batch decides the
+      // duplicate flag. After the batch (or after it throws — e.g. the
+      // migration-0004 trigger aborting our activity insert because a
+      // delete committed first), re-read and adjudicate from stored
+      // state; only an undecidable re-read after a thrown batch is a
+      // plain refusal.
+      const preExisting = await db
         .select({ id: schema.familyActivities.id })
         .from(schema.familyActivities)
         .where(eq(schema.familyActivities.requestKey, args.requestKey));
-      const found = raced[0];
-      if (found) {
-        return {
-          ok: true,
-          forbidden: false,
-          id: found.id,
-          duplicate: true,
-          conflict: false,
-          deleted: false,
-          future: false,
-        };
+      const existedBefore = preExisting.length > 0;
+      let batchThrew = false;
+      try {
+        await db.batch([
+          db
+            .insert(schema.familyRequestKeys)
+            .values({
+              requestKey: args.requestKey,
+              payload,
+              activityId: null,
+              state: "saved",
+              createdAt: now,
+              updatedAt: now,
+            })
+            .onConflictDoNothing(),
+          db
+            .insert(schema.familyActivities)
+            .values({
+              date: args.date,
+              typeName: args.typeName,
+              minutes: args.minutes,
+              note,
+              requestKey: args.requestKey,
+              createdAt: new Date(now),
+            })
+            .onConflictDoNothing(),
+        ]);
+      } catch {
+        batchThrew = true;
       }
+      const verdict = await adjudicateSave(db, args.requestKey, payload, existedBefore);
+      if (verdict) {
+        if (verdict.ok && !verdict.duplicate) ctx.invalidateQueries();
+        return verdict;
+      }
+      // No ledger row after the batch: either the batch threw before
+      // anything landed (rolled back — nothing half-written), or a
+      // concurrent delete removed… the ledger is never deleted, so in
+      // practice this is the thrown-batch case. Plain refusal.
+      void batchThrew;
       return addRefusal({});
     },
   }),
@@ -503,34 +579,51 @@ export const Actions = {
         .where(eq(schema.familyActivities.id, args.id));
       const target = targets[0];
       if (!target) return { ok: false, forbidden: false };
-      // Tombstone the record's request key in the ledger BEFORE the
-      // row goes away: the ledger row is upserted to 'deleted'
-      // (created from the activity's stored key and fields when none
-      // exists), so a late retry of that save is typed-rejected and
-      // can never resurrect the record. The ledger row itself is
-      // never deleted. Records with a NULL/legacy missing request key
-      // have no key to tombstone and delete exactly as before.
-      if (target.requestKey !== null) {
-        const now = Date.now();
-        await db.all(sql`
-          INSERT INTO family_request_keys (request_key, payload, activity_id, state, created_at, updated_at)
-          VALUES (
-            ${target.requestKey},
-            ${canonicalPayload(target.date, target.typeName, target.minutes, target.note)},
-            ${target.id},
-            'deleted',
-            ${now},
-            ${now}
-          )
-          ON CONFLICT(request_key) DO UPDATE SET
-            state = 'deleted',
-            updated_at = ${now}
-        `);
-      }
-      const removed = await db
+      // ONE db.batch: the ledger tombstone upsert and the activity
+      // delete commit or roll back together — there is no state where
+      // the tombstone is committed but the record still exists (or the
+      // reverse). The tombstone flips the record's request key to
+      // 'deleted' in the ledger (created from the activity's stored
+      // key and fields when none exists), so a late retry of that save
+      // is typed-rejected and can never resurrect the record; the
+      // migration-0004 trigger additionally aborts any activity insert
+      // that tries. The ledger row itself is never deleted. Records
+      // with a NULL request key have no key to tombstone: the batch is
+      // just the delete.
+      const deleteStatement = db
         .delete(schema.familyActivities)
         .where(eq(schema.familyActivities.id, args.id))
         .returning({ id: schema.familyActivities.id });
+      let removed: { id: number }[];
+      if (target.requestKey !== null) {
+        const now = Date.now();
+        const [, deletedRows] = await db.batch([
+          db
+            .insert(schema.familyRequestKeys)
+            .values({
+              requestKey: target.requestKey,
+              payload: canonicalPayload(
+                target.date,
+                target.typeName,
+                target.minutes,
+                target.note,
+              ),
+              activityId: target.id,
+              state: "deleted",
+              createdAt: now,
+              updatedAt: now,
+            })
+            .onConflictDoUpdate({
+              target: schema.familyRequestKeys.requestKey,
+              set: { state: "deleted", updatedAt: now },
+            }),
+          deleteStatement,
+        ]);
+        removed = deletedRows;
+      } else {
+        const [deletedRows] = await db.batch([deleteStatement]);
+        removed = deletedRows;
+      }
       if (removed.length > 0) ctx.invalidateQueries();
       return { ok: removed.length > 0, forbidden: false };
     },
