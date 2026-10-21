@@ -15,6 +15,16 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 // so the completion marker can never exist without its types. The
 // owner can change the set freely afterwards (add / delete); presets
 // carry no special behavior beyond the flag.
+//
+// Type-name uniqueness is scoped to preset identity, never global:
+// legacy databases may legally hold two types with the exact same
+// name (custom duplicates, or a preset duplicated by a pre-batch
+// seeding race), and those rows are always preserved. Each preset
+// row carries a stable preset_key (its canonical name); the only
+// UNIQUE index on this table is on preset_key (migration 0006,
+// backfilled onto the earliest preset row of each name — later
+// same-name rows keep preset_key NULL). Custom types always have
+// preset_key NULL, so custom same-name rows never collide.
 export const PRESET_TYPES = [
   "一起吃饭",
   "陪玩",
@@ -29,6 +39,12 @@ export const activityTypes = sqliteTable("activity_types", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   isPreset: integer("is_preset").notNull().default(0),
+  // Stable preset identity (migration 0006): for a preset row this is
+  // its canonical preset name; NULL for custom types and for legacy
+  // duplicate preset rows beyond the earliest of their name. The
+  // UNIQUE index on this column is what the seed inserts conflict
+  // against — names themselves are never globally unique.
+  presetKey: text("preset_key"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

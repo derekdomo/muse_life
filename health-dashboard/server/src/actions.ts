@@ -2193,15 +2193,24 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
 // write (stale price / stale balance version / insufficient funds are
 // typed rejections with zero redemption writes), then settles (so gold
 // stranded by a failed settlement save is reconciled into the balance
-// first), then performs the redemption itself: receipt insert (UNIQUE
-// request_id, ON CONFLICT DO NOTHING) → reward_redeem ledger flow
-// (xp 0, gold −price, detail = reward id; accumulated per day+reward)
-// → ONE profile CAS write that deducts the gold AND advances the
-// watermark by the same amount, so the next settlement's reconciliation
-// sees a zero delta and never charges twice. If the CAS loses a race
-// after the receipt and ledger landed, the handler reconciles through
-// settleGame — the un-advanced watermark makes the deduction land
-// exactly once — and still returns the real receipt.
+// first), then commits the redemption itself as ONE atomic batch
+// (CWEB-REDEEM-SAFE-001): receipt insert guarded on the exact
+// pre-commit profile state and the reward pin → profile CAS
+// deduction (gold −price, watermark −price, revision +1) chained on
+// that receipt row existing → reward_redeem ledger flow (xp 0,
+// gold −price, detail = reward id; accumulated per day+reward)
+// gated on the deduction having actually modified the profile
+// (SQLite changes()). All three land together or none do: a failed
+// statement, a lost CAS race, or an interruption leaves the fully
+// old state, and a competitor's commit classifies the loser from
+// the winner's stored state (insufficient / stale / the winner's
+// receipt) with zero writes by the loser. There is no
+// receipt-without-deduction window and no Math.max(0) flooring
+// anywhere in the redemption path — the CAS guard gold ≥ price
+// makes an overdraft unrepresentable. The stored receipt, read back
+// after the batch, is the only success oracle: it exists only when
+// the deduction, the watermark advance, and the ledger flow
+// committed with it.
 //
 // Idempotency: requestId is the identity of one redemption intent. A
 // replay with the same id and the same content returns the original
@@ -2209,7 +2218,15 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
 // different content is a typed request_conflict rejection. A client
 // that loses the response can look the receipt up by requestId
 // (getRedemptionReceipt) or retry redeemReward with the identical
-// arguments — never with a fresh id for the same intent.
+// arguments — never with a fresh id for the same intent. A `busy`
+// result means the outcome is UNKNOWN (the commit may or may not have
+// landed); the client keeps the same requestId and resolves it through
+// the lookup/retry path instead of starting a new intent.
+//
+// Next-reward goal (S3 余项): game_reward_goal holds the owner's one
+// explicit "next reward" preference (rewardId only). It is a display
+// preference — never an input to prices, balances, or settlement —
+// and no default is ever invented when it is unset.
 //
 // STRICT owner gate on every read and write below — the L0.1
 // sync-channel exception does NOT extend to rewards. Settlement
@@ -2248,8 +2265,16 @@ const getRewardsResponse = z.object({
   healthState: z.enum(["ok", "missing", "corrupt"]),
   healthDataDate: z.string().nullable(),
   coverageIncomplete: z.boolean(),
+  goalRewardId: z.number().int().positive().nullable(),
   rewards: z.array(rewardItemSchema).max(100),
   receipts: z.array(rewardReceiptSchema).max(50),
+});
+
+const setRewardGoalResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  message: z.string(),
+  goalRewardId: z.number().int().positive().nullable(),
 });
 
 const saveRewardResponse = z.object({
@@ -2310,6 +2335,15 @@ async function loadRedemptionByRequestId(ctx: Ctx, requestId: string): Promise<R
   return row ? rewardReceiptFromRow(row) : null;
 }
 
+// The owner's single next-reward preference (id = 1 row), or null when
+// none was ever chosen. Read independently of settlement: a balance
+// that cannot be verified right now never clears or hides the goal.
+async function loadRewardGoalId(ctx: Ctx): Promise<number | null> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select({ rewardId: schema.gameRewardGoal.rewardId }).from(schema.gameRewardGoal).where(eq(schema.gameRewardGoal.id, 1)).limit(1);
+  return rows[0]?.rewardId ?? null;
+}
+
 // Whether a stored receipt is the resolution of THIS redemption intent:
 // same reward, same reward revision, same price, same pinned balance
 // version. Any difference under the same requestId is a different
@@ -2322,7 +2356,7 @@ function sameRedemptionContent(receipt: RewardReceipt, args: RedeemRewardArgs): 
 }
 
 async function handleGetRewards(ctx: Ctx): Promise<z.infer<typeof getRewardsResponse>> {
-  if (!isOwner(ctx)) return { forbidden: true, ok: false, balance: 0, balanceVersion: 0, healthState: "missing", healthDataDate: null, coverageIncomplete: false, rewards: [], receipts: [] };
+  if (!isOwner(ctx)) return { forbidden: true, ok: false, balance: 0, balanceVersion: 0, healthState: "missing", healthDataDate: null, coverageIncomplete: false, goalRewardId: null, rewards: [], receipts: [] };
   const db = ctx.db<typeof schema>();
   const healthLoad = await loadHealthSnapshot(ctx);
   const strengthLoad = await loadStrengthSnapshot(ctx);
@@ -2333,6 +2367,10 @@ async function handleGetRewards(ctx: Ctx): Promise<z.infer<typeof getRewardsResp
   // cannot persist, the list and the historical receipts still return
   // from stored state with ok:false — a missing or corrupt health
   // source never hides them, and the saved balance stays spendable.
+  // ok:false is the balance-three-state "unverifiable" signal: the
+  // stored numbers ride along for reference, but the client must not
+  // present them as a verified balance or offer a redemption against
+  // them until a later read returns ok:true.
   let ok = true;
   try {
     await settleGame(ctx, health, strength, laTodayString());
@@ -2342,6 +2380,7 @@ async function handleGetRewards(ctx: Ctx): Promise<z.infer<typeof getRewardsResp
   const row = await loadGameStateRow(ctx);
   const rewardRows = await db.select().from(schema.gameRewards).orderBy(asc(schema.gameRewards.id)).limit(100);
   const receiptRows = await db.select().from(schema.gameRewardRedemptions).orderBy(desc(schema.gameRewardRedemptions.id)).limit(50);
+  const goalRewardId = await loadRewardGoalId(ctx);
   return {
     forbidden: false,
     ok,
@@ -2350,9 +2389,27 @@ async function handleGetRewards(ctx: Ctx): Promise<z.infer<typeof getRewardsResp
     healthState: healthLoad.state,
     healthDataDate: health?.dataDate ?? null,
     coverageIncomplete: health?.coverageIncomplete ?? false,
+    goalRewardId,
     rewards: rewardRows.map(rewardItemFromRow),
     receipts: receiptRows.map(rewardReceiptFromRow),
   };
+}
+
+async function handleSetRewardGoal(ctx: Ctx, args: { rewardId: number }): Promise<z.infer<typeof setRewardGoalResponse>> {
+  if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可设置下一奖励", goalRewardId: null };
+  const db = ctx.db<typeof schema>();
+  const rewardRows = await db.select({ id: schema.gameRewards.id }).from(schema.gameRewards).where(eq(schema.gameRewards.id, args.rewardId)).limit(1);
+  if (!rewardRows[0]) {
+    // Typed failure: the previously saved goal (if any) is returned
+    // unchanged so the client keeps showing it — a failed save never
+    // clears the current target.
+    return { ok: false, forbidden: false, message: "这条奖励已不存在，下一奖励未保存", goalRewardId: await loadRewardGoalId(ctx) };
+  }
+  const now = new Date();
+  await db.insert(schema.gameRewardGoal).values({ id: 1, rewardId: args.rewardId, createdAt: now, updatedAt: now })
+    .onConflictDoUpdate({ target: schema.gameRewardGoal.id, set: { rewardId: args.rewardId, updatedAt: now } });
+  ctx.invalidateQueries(["rewards"]);
+  return { ok: true, forbidden: false, message: "已设为下一奖励", goalRewardId: args.rewardId };
 }
 
 async function handleSaveReward(ctx: Ctx, args: { id: number | null; name: string; price: number }): Promise<z.infer<typeof saveRewardResponse>> {
@@ -2420,21 +2477,90 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
     }
     // (3) Settle, so any gold a failed settlement save stranded in the
     // ledger is reconciled into the balance before the redemption
-    // validates funds. Failure-isolated — the CAS loop below re-reads
-    // and revalidates the freshest stored state either way. (The
-    // balance-version pin was already consumed in step 2 against the
-    // pre-settle revision; this handler's own settlement advancing the
-    // revision is not a concurrent change and does not stale it.)
-    const healthLoad = await loadHealthSnapshot(ctx);
-    const strengthLoad = await loadStrengthSnapshot(ctx);
-    const health = healthLoad.state === "ok" ? healthLoad.snapshot : null;
-    const strength = effectiveStrength(healthLoad, strengthLoad);
-    try {
-      await settleGame(ctx, health, strength, todayLA);
-    } catch { /* the CAS loop below revalidates against stored state */ }
-    // (4) The redemption itself, under the profile CAS.
+    // validates funds. Skipped when the stored watermark already
+    // equals the ledger gold SUM: settlement then could not move the
+    // balance — it would only re-write the profile, advancing the
+    // revision and staling this very confirmation (a same-requestId
+    // retry after a busy result must survive its own first attempt's
+    // pin). Failure-isolated when it does run — the CAS loop below
+    // re-reads and revalidates the freshest stored state either way.
+    // (The balance-version pin was already consumed in step 2 against
+    // the pre-settle revision; this handler's own settlement advancing
+    // the revision is not a concurrent change and does not stale it.)
+    const storedLedgerTotals = await db.select({ goldTotal: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)` }).from(schema.gameSettlements);
+    const storedLedgerGoldSum = Number(storedLedgerTotals[0]?.goldTotal ?? 0);
+    const settleNeeded = !stored.profile.goldInitialized
+      || stored.profile.goldLedgerSum === null
+      || stored.profile.goldLedgerSum !== storedLedgerGoldSum;
+    if (settleNeeded) {
+      const healthLoad = await loadHealthSnapshot(ctx);
+      const strengthLoad = await loadStrengthSnapshot(ctx);
+      const health = healthLoad.state === "ok" ? healthLoad.snapshot : null;
+      const strength = effectiveStrength(healthLoad, strengthLoad);
+      try {
+        await settleGame(ctx, health, strength, todayLA);
+      } catch { /* the CAS loop below revalidates against stored state */ }
+    }
+    // (4) The redemption itself, as ONE atomic batch
+    // (CWEB-REDEEM-SAFE-001). Each attempt re-reads the freshest
+    // stored state, re-classifies from it (a receipt that landed
+    // meanwhile resolves or conflicts this intent; a moved reward pin
+    // is stale; a balance the winner already spent down is
+    // insufficient), and then submits a single db.batch whose three
+    // statements stand or fall together, chained so each can only
+    // land on top of the previous one IN THIS BATCH:
+    //   a. receipt insert — INSERT … SELECT from game_state guarded
+    //      on the exact PRE-commit state just read (revision, gold,
+    //      watermark, gold ≥ price) and on the reward pin still
+    //      holding (an EXISTS over the reward row at the pinned
+    //      revision + price, evaluated inside the batch — a
+    //      rename/reprice landing after the final pre-read still
+    //      rejects the old confirmation). A competing commit always
+    //      MOVES that state, so it can never satisfy this guard for
+    //      the loser — no timestamp or clock value is trusted as a
+    //      discriminator anywhere in the chain;
+    //   b. profile CAS deduction — gold −price, watermark −price,
+    //      revision +1, under the same pre-state guards AND an
+    //      EXISTS on this batch's own receipt row (a), so the
+    //      deduction can only follow its own receipt insert, never
+    //      a foreign one, and can never overdraw or floor at 0;
+    //   c. reward_redeem ledger flow — INSERT … SELECT from the
+    //      redemptions table for this requestId, additionally gated
+    //      on SQLite changes() > 0, i.e. statement (b) having
+    //      actually modified the profile on this connection in
+    //      this batch — a same-key winner's receipt alone can never
+    //      book a second flow — accumulating −price into the one
+    //      (date, category, detail) row on conflict.
+    // A failed batch (any statement erroring, a locked or stale
+    // snapshot under contention) commits NOTHING — the attempt
+    // loops, re-reads, and classifies from the winner's state; the
+    // fully old state survives and the intent stays resolvable by
+    // the same requestId. A batch whose guards all miss also writes
+    // nothing. And if the balance itself moved under the attempt
+    // (the winner spent or credited gold), the old confirmation is
+    // rejected as stale rather than silently re-based.
+    let lastAttemptRead: { gold: number; goldLedgerSum: number | null } | null = null;
     for (let attempt = 0; attempt < PROFILE_CAS_ATTEMPTS; attempt++) {
       const row = await loadGameStateRow(ctx);
+      // A same-intent commit may have landed while this attempt was
+      // being prepared (concurrent submit, or a retry racing the
+      // original): classify from the stored receipt before writing
+      // anything.
+      const raced = await loadRedemptionByRequestId(ctx, args.requestId);
+      if (raced) {
+        if (sameRedemptionContent(raced, args)) {
+          return { forbidden: false, status: "already_resolved", message: "这笔兑换已经完成，返回原回执，未重复扣账", receipt: raced, balance: row.profile.gold, balanceVersion: row.revision };
+        }
+        return { forbidden: false, status: "request_conflict", message: "同一个请求编号已用于另一笔兑换，本次提交已拒绝，未扣账", receipt: null, balance: row.profile.gold, balanceVersion: row.revision };
+      }
+      if (lastAttemptRead !== null
+        && (row.profile.gold !== lastAttemptRead.gold || row.profile.goldLedgerSum !== lastAttemptRead.goldLedgerSum)) {
+        // The balance moved after this handler's final pre-read (a
+        // competing commit spent gold, or a settlement credited new
+        // gold): the pinned confirmation no longer describes the
+        // balance — reject it instead of re-basing the charge.
+        return { forbidden: false, status: "stale", message: "金币余额已经变化，未扣账；请重新预览确认", receipt: null, balance: row.profile.gold, balanceVersion: row.revision };
+      }
       const freshRewardRows = await db.select().from(schema.gameRewards).where(eq(schema.gameRewards.id, args.rewardId)).limit(1);
       const freshReward = freshRewardRows[0];
       if (!freshReward) {
@@ -2450,79 +2576,86 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
       if (profile.gold < args.price) {
         return { forbidden: false, status: "insufficient_funds", message: `金币不足：兑换需要 ${args.price} 金币，已保存余额 ${profile.gold}，还差 ${args.price - profile.gold} 金币，未扣账`, receipt: null, balance: profile.gold, balanceVersion: row.revision };
       }
-      const balanceAfter = profile.gold - args.price;
+      const readRevision = row.revision;
+      const readGold = profile.gold;
+      const readWatermark = profile.goldLedgerSum;
+      const balanceAfter = readGold - args.price;
+      const watermarkAfter = readWatermark - args.price;
       const now = new Date();
-      const inserted = await db.insert(schema.gameRewardRedemptions).values({
-        requestId: args.requestId,
-        rewardId: freshReward.id,
-        rewardName: freshReward.name,
-        rewardPrice: args.price,
-        rewardRevision: args.rewardRevision,
-        balanceVersion: args.expectedBalanceVersion,
-        goldSpent: args.price,
-        balanceAfter,
-        localDate: todayLA,
-        createdAt: now,
-      }).onConflictDoNothing().returning({ id: schema.gameRewardRedemptions.id });
-      if (inserted.length === 0) {
-        // A concurrent submit of the same intent landed its receipt
-        // first: classify against it instead of charging again.
-        const raced = await loadRedemptionByRequestId(ctx, args.requestId);
-        if (raced && sameRedemptionContent(raced, args)) {
-          return { forbidden: false, status: "already_resolved", message: "这笔兑换已经完成，返回原回执，未重复扣账", receipt: raced, balance: row.profile.gold, balanceVersion: row.revision };
-        }
-        return { forbidden: false, status: "request_conflict", message: "同一个请求编号已用于另一笔兑换，本次提交已拒绝，未扣账", receipt: null, balance: row.profile.gold, balanceVersion: row.revision };
-      }
-      // The gold flow joins the shared ledger: category reward_redeem,
-      // detail = reward id, gold −price, accumulated into the one
-      // (date, category, detail) row when the same reward is redeemed
-      // again the same day.
-      await db.insert(schema.gameSettlements).values({
-        localDate: todayLA,
-        category: "reward_redeem",
-        detail: String(freshReward.id),
-        xp: 0,
-        gold: -args.price,
-        ruleVersion: GAME_RULE_VERSION,
-        sourceDate: todayLA,
-        sourceUpdatedAt: null,
-        createdAt: now,
-      }).onConflictDoUpdate({
+      const nowMs = now.getTime();
+      const receiptInsert = db.insert(schema.gameRewardRedemptions).select(sql`
+        SELECT NULL, ${args.requestId}, ${freshReward.id}, ${freshReward.name}, ${args.price}, ${args.rewardRevision}, ${args.expectedBalanceVersion}, ${args.price}, ${balanceAfter}, ${todayLA}, ${nowMs}
+        FROM ${schema.gameState}
+        WHERE ${schema.gameState.id} = 1 AND COALESCE(${schema.gameState.revision}, 0) = ${readRevision} AND ${schema.gameState.gold} = ${readGold} AND ${schema.gameState.gold} >= ${args.price} AND ${schema.gameState.goldLedgerSum} = ${readWatermark}
+          AND EXISTS (SELECT 1 FROM ${schema.gameRewards} WHERE ${schema.gameRewards.id} = ${freshReward.id} AND ${schema.gameRewards.revision} = ${args.rewardRevision} AND ${schema.gameRewards.price} = ${args.price})
+      `);
+      const casDeduction = db.update(schema.gameState)
+        .set({
+          gold: sql`${schema.gameState.gold} - ${args.price}`,
+          goldLedgerSum: sql`${schema.gameState.goldLedgerSum} - ${args.price}`,
+          revision: sql`COALESCE(${schema.gameState.revision}, 0) + 1`,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(schema.gameState.id, 1),
+          sql`COALESCE(${schema.gameState.revision}, 0) = ${readRevision}`,
+          sql`${schema.gameState.gold} = ${readGold}`,
+          sql`${schema.gameState.gold} >= ${args.price}`,
+          sql`${schema.gameState.goldLedgerSum} = ${readWatermark}`,
+          sql`EXISTS (SELECT 1 FROM ${schema.gameRewardRedemptions} WHERE ${schema.gameRewardRedemptions.requestId} = ${args.requestId})`,
+        ));
+      const ledgerInsert = db.insert(schema.gameSettlements).select(sql`
+        SELECT ${todayLA}, 'reward_redeem', ${String(freshReward.id)}, 0, ${-args.price}, ${GAME_RULE_VERSION}, ${todayLA}, NULL, ${nowMs}
+        FROM ${schema.gameRewardRedemptions}
+        WHERE ${schema.gameRewardRedemptions.requestId} = ${args.requestId} AND (SELECT changes()) > 0
+      `).onConflictDoUpdate({
         target: [schema.gameSettlements.localDate, schema.gameSettlements.category, schema.gameSettlements.detail],
         set: { gold: sql`${schema.gameSettlements.gold} - ${args.price}` },
       });
-      // Deduction + watermark advance in the SAME CAS statement as
-      // every other profile write: the balance drops by the price and
-      // the watermark drops by the price, so the ledger SUM (which now
-      // includes the −price flow) reconciles to a zero delta on the
-      // next settlement — spent gold is never re-credited or charged
-      // twice, and the balance can never go negative (funds were
-      // validated against this very profile read).
-      const draft: GameProfile = { ...profile, gold: balanceAfter, goldLedgerSum: profile.goldLedgerSum - args.price };
-      const saved = await saveGameProfile(ctx, draft, row.totalXp, row.settledThroughDate, row.exists ? row.revision : null);
-      const receipt = await loadRedemptionByRequestId(ctx, args.requestId);
-      if (saved) {
-        ctx.invalidateQueries(["rewards"]);
-        ctx.invalidateQueries(["game"]);
-        return { forbidden: false, status: "redeemed", message: `已兑换「${freshReward.name}」，扣除 ${args.price} 金币`, receipt, balance: balanceAfter, balanceVersion: row.revision + 1 };
-      }
-      // The CAS lost a race after the receipt and the ledger flow
-      // landed: the deduction is already booked in the ledger and the
-      // watermark was NOT advanced, so one settlement pass reconciles
-      // it into the balance exactly once. The receipt stands.
+      lastAttemptRead = { gold: readGold, goldLedgerSum: readWatermark };
+      let casRowsAffected = 0;
       try {
-        await settleGame(ctx, health, strength, todayLA);
-      } catch { /* the next open reconciles the stranded flow */ }
-      const fresh = await loadGameStateRow(ctx);
+        const batchResults = await db.batch([receiptInsert, casDeduction, ledgerInsert]);
+        casRowsAffected = Number((batchResults[1] as { rowsAffected?: number } | undefined)?.rowsAffected ?? 0);
+      } catch {
+        // The batch committed nothing (a statement failed, or the
+        // snapshot went stale under a competing commit). Loop: the
+        // next read classifies from the winner's stored state — a
+        // landed same-key receipt resolves there, a moved balance
+        // or pin rejects there — instead of failing the whole call.
+        continue;
+      }
+      // The stored receipt is the only success oracle: it exists
+      // after the batch only when the deduction, the watermark
+      // advance, and the ledger flow committed with it (this batch),
+      // or when a same-intent commit landed concurrently (classified
+      // by content like any replay). The CAS statement's own
+      // rowsAffected says whether THIS batch performed the deduction.
+      const receipt = await loadRedemptionByRequestId(ctx, args.requestId);
       if (receipt) {
+        if (!sameRedemptionContent(receipt, args)) {
+          const current = await loadGameStateRow(ctx);
+          return { forbidden: false, status: "request_conflict", message: "同一个请求编号已用于另一笔兑换，本次提交已拒绝，未扣账", receipt: null, balance: current.profile.gold, balanceVersion: current.revision };
+        }
+        const fresh = await loadGameStateRow(ctx);
+        const ours = casRowsAffected === 1
+          && fresh.profile.gold === receipt.balanceAfter
+          && fresh.profile.goldLedgerSum === watermarkAfter;
         ctx.invalidateQueries(["rewards"]);
         ctx.invalidateQueries(["game"]);
-        return { forbidden: false, status: "redeemed", message: `已兑换「${freshReward.name}」，扣除 ${args.price} 金币`, receipt, balance: fresh.profile.gold, balanceVersion: fresh.revision };
+        return {
+          forbidden: false,
+          status: ours ? "redeemed" : "already_resolved",
+          message: ours ? `已兑换「${freshReward.name}」，扣除 ${args.price} 金币` : "这笔兑换已经完成，返回原回执，未重复扣账",
+          receipt, balance: fresh.profile.gold, balanceVersion: fresh.revision,
+        };
       }
-      // The receipt could not be read back after landing — loop and
-      // let the replay check at the top classify from storage.
+      // No receipt after the batch: every guard missed, so this
+      // attempt wrote nothing at all. Loop — the next read
+      // classifies from the winner's state (or retries on top of
+      // it when the intent is still fulfillable).
     }
-    return { forbidden: false, status: "busy", message: "存档正忙，未能确认扣账；请用同一请求重试确认结果", receipt: null, balance: null, balanceVersion: null };
+    return { forbidden: false, status: "busy", message: "存档正忙，兑换结果未确认；请用同一请求查询回执或重试，不要换新请求重复兑换", receipt: null, balance: null, balanceVersion: null };
   } catch {
     return { forbidden: false, status: "busy", message: "兑换处理失败；若请求已经提交，请用同一请求查询回执确认结果，不要换新请求重复兑换", receipt: null, balance: null, balanceVersion: null };
   }
@@ -2791,6 +2924,14 @@ export const Actions = {
   saveReward: defineAction({
     request: z.object({ id: z.number().int().positive().nullable(), name: z.string().min(1).max(60), price: z.number().int().min(1).max(1000000) }),
     response: saveRewardResponse, handler: handleSaveReward,
+  }),
+
+  // LIFE-C1 S3 余项: set the owner's single next-reward goal
+  // (rewardId only — a display preference, never an economic input).
+  // STRICT owner gate.
+  setRewardGoal: defineAction({
+    request: z.object({ rewardId: z.number().int().positive() }),
+    response: setRewardGoalResponse, handler: handleSetRewardGoal,
   }),
 
   // LIFE-C1 S3: redeem one reward against the pinned preview

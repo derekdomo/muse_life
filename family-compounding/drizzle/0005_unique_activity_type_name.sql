@@ -1,1 +1,14 @@
-CREATE UNIQUE INDEX activity_types_name_idx ON activity_types (name);
+-- CMP-FAMILY-INIT-001 conflict policy (revised): there is deliberately
+-- NO global UNIQUE index on activity_types(name). Databases that lived
+-- through 0001-0004 may legally hold two activity types with the exact
+-- same name (custom types were never name-constrained at the storage
+-- layer, and pre-batch seeding races could duplicate a preset); a
+-- global unique index aborts the whole migration run on such a
+-- database and strands the upgrade. Name uniqueness is therefore
+-- scoped to preset identity only: migration 0006 adds the stable
+-- preset_key column (backfilled onto the earliest preset row of each
+-- name; later same-name rows keep preset_key NULL and are preserved,
+-- never deleted or silently merged) and puts the only UNIQUE index on
+-- preset_key. This step only adds a non-unique lookup index, which is
+-- valid on every legacy database regardless of duplicate names.
+CREATE INDEX activity_types_name_lookup_idx ON activity_types (name);
