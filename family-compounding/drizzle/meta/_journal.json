@@ -15,6 +15,13 @@
       "when": 1792577900825,
       "tag": "0002_family_activities_and_types",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792585110261,
+      "tag": "0003_family_request_keys_ledger",
+      "breakpoints": true
     }
   ]
 }

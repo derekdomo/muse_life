@@ -40,6 +40,25 @@ export const ledgerMeta = sqliteTable("ledger_meta", {
   value: text("value").notNull(),
 });
 
+// Persistent request-key ledger (CMP-FAMILY-SAVE-001). One row per
+// client request key ever used to save an activity: the canonical
+// payload fingerprint, the activity it produced, and its lifecycle
+// state. Rows here are NEVER deleted when an activity is deleted —
+// deleting an activity flips its key to 'deleted', so a late retry of
+// that save is recognized and refused instead of resurrecting the
+// record, and a retry carrying different content under the same key
+// is recognized as a conflict instead of silently passing as a
+// duplicate.
+export const familyRequestKeys = sqliteTable("family_request_keys", {
+  requestKey: text("request_key").primaryKey(),
+  // Canonical JSON fingerprint of (date, typeName, minutes, note).
+  payload: text("payload").notNull(),
+  activityId: integer("activity_id"),
+  state: text("state", { enum: ["saved", "deleted"] }).notNull(),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 export const familyActivities = sqliteTable("family_activities", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   // Local calendar date of the activity, "YYYY-MM-DD" (owner's local
