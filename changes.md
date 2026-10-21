@@ -998,3 +998,7 @@
 - `CMP-FAMILY-INIT-001` 原子可见余项（同构建）：服务端 ensureSeeded 重写——新增导出纯函数 seedIfNeeded（仅 types 与 ledgerMeta 皆空才返回 true），getDashboard 与 addType 共用；播种改为单次 db.batch 两条语句原子提交（ledgerMeta 认领行 onConflictDoNothing＋7 条预置类型批量 onConflictDoNothing），认领与种子同时可见、任一失败整批回滚、不留 meta=1/types=0 半完成态；删光类型后 meta 在位、seedIfNeeded 恒 false 永不重种。无新迁移（0001–0004 不变）、schema 未动。
 - 验证证据：构建审计 verdict=pass（390×844 无溢出、零控制台错误、零可达性问题；审计非所有者身份见门禁页）；构建方实跑 validate-family-ledger **153/153**（真实 handler＋内存 SQLite＋真实 settleSubmit 回调：原 124 项适配新形状＋新增 deleted 一致清稿/deleted 不一致保稿与四维草稿矩阵快照比对/ok·duplicate·conflict·失败全分支/seedIfNeeded 三态/慢首读双调度均 7 类型恰 1 meta/中断整批回滚/删光不重种/同名并发/门禁矩阵）；生产数据未动（构建方编辑前后比对一致：family_activities 0、activity_types 7、family_request_keys 0、ledger_meta 1）。局限：审计内容评审 P0 为结构性证据限制（源码捕获截断、capture 恒为非所有者拦截页），所有者视角以本人打开为准；JS 级暂停点在单 batch 后无可暂停点，以同等并发用例代偿。回滚：artifact 回退上一构建；无迁移变更、无数据结构变化。仓库源码回灌顺延为 EVID 尾巴（与 S3 回灌同批下轮补齐），不冒称已回灌。
 - 本轮合计用户可见增量：2 组（S3 个人奖励首片、陪伴 deleted 清稿＋播种原子可见返工）。顺延：S3 与陪伴返工两批仓库源码回灌（EVID 尾巴，下轮首位）；CMP-TIME-001 10-23、完整养成 10-26 沿原日期。仍（需用户确认）：CWEB-LEVEL-001 路径/四参数、W6.2-PM-IMG 素材特许与整批过目、H4.6 恢复参考 T。未提交 app.db/.env/任何真实数据。
+
+## 2026-10-21（09:13 轮次勘误，EVID-LIFE-001/P2：陪伴 INIT 返工迁移说法更正）
+
+- 上一节补记称 INIT 返工「无新迁移（0001–0004 不变）、schema 未动」，与构建方正式完成报告不符，现更正：本次 INIT 修复实际新增迁移 **0005**（activity_types.name 唯一索引，作为预置类型批量插入的 ON CONFLICT 冲突目标），已登记于 journal；认领与种子同批原子提交的实现依赖该唯一索引。SAVE deleted 清稿部分无迁移不变。其余交付内容与验证结论（153/153、生产数据未动）不变。plans.md 本轮返工登记中的「无新迁移（0001–0004 不变）」一句以本勘误为准作废。
