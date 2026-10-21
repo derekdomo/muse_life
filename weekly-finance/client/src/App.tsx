@@ -1650,19 +1650,35 @@ export function observationRelationText(relation: string, attempt: number | null
 // response, when the local device received it (epoch ms — a
 // client-side receipt instant, never a server update time), the
 // refresh status that response carried, whether it carried
-// successful data, and the attempt start it reported.
+// successful data, and the attempt start it reported. The
+// dashboard channel additionally carries its own message (the
+// only client-visible signal that a saved payload is unreadable)
+// and the stored payload's asOf; the observations channel
+// additionally carries the CURRENT generation's diagnosis code
+// and attempt ordinal, because the dashboard's status is only a
+// projection (a stored "running" past the wait window, or an
+// unreadable saved payload, both surface as "error" without any
+// state write) and must never be read as a terminal verdict.
 export type ProgressReadOutcome = {
   ok: boolean;
   receivedAt: number | null;
   refreshStatus: RefreshStatus | null;
   hasData: boolean;
   startedAt: string | null;
+  message: string | null;
+  asOf: string | null;
+  diagnosisCode: string | null;
+  diagnosisAttempt: number | null;
 };
 
 export type ProgressReadRaw = {
   refreshStatus: RefreshStatus | null;
   hasData: boolean;
   startedAt: string | null;
+  message?: string | null;
+  asOf?: string | null;
+  diagnosisCode?: string | null;
+  diagnosisAttempt?: number | null;
 };
 
 export type CheckProgressFeedback = {
@@ -1671,6 +1687,8 @@ export type CheckProgressFeedback = {
   headline: string;
   dashboardLine: string;
   observationsLine: string;
+  refreshResultLine: string;
+  dataFactLine: string;
   waitedText: string | null;
   note: string;
 };
@@ -1702,9 +1720,23 @@ export async function performProgressCheck(args: {
         refreshStatus: raw.refreshStatus,
         hasData: raw.hasData,
         startedAt: raw.startedAt,
+        message: raw.message ?? null,
+        asOf: raw.asOf ?? null,
+        diagnosisCode: raw.diagnosisCode ?? null,
+        diagnosisAttempt: raw.diagnosisAttempt ?? null,
       };
     } catch {
-      return { ok: false, receivedAt: null, refreshStatus: null, hasData: false, startedAt: null };
+      return {
+        ok: false,
+        receivedAt: null,
+        refreshStatus: null,
+        hasData: false,
+        startedAt: null,
+        message: null,
+        asOf: null,
+        diagnosisCode: null,
+        diagnosisAttempt: null,
+      };
     }
   };
   try {
@@ -1716,16 +1748,35 @@ export async function performProgressCheck(args: {
   }
 }
 
-// Pure feedback wording for one manual progress check. Each
-// channel is reported on its own line with its own result and
-// its own local receipt time; a partial read is never merged
-// into an "all verified" claim. The terminal/running conclusion
-// follows the status the successful read actually returned —
-// reading successfully is never worded as the refresh having
+// Pure feedback wording for one manual progress check, in three
+// separately-attributed layers — the two reads settle at
+// different instants, so each layer states only what its own
+// channel actually showed, never a merged instant conclusion:
+//  1. 读取结果 — each channel on its own line with its own
+//     result and its own local receipt time; a partial read is
+//     never merged into an "all verified" claim.
+//  2. 刷新结果 — derived ONLY from the observations channel's
+//     current-generation diagnosis and the RAW stored state. The
+//     dashboard's status is a projection (stored "running" past
+//     the wait window, or an unreadable saved payload, both read
+//     as "error" with no state write), so it can never by itself
+//     earn a terminal verdict: a projected "error" over a still-
+//     running generation is "超过等待窗口，执行终态尚不能确认",
+//     never a failure terminal, and a legacy "idle" with no bound
+//     generation is never a completed terminal either. When the
+//     observations channel itself failed to read, the projection
+//     alone still earns no terminal claim.
+//  3. 数据事实 — what the dashboard read carried: the last
+//     successful snapshot, no successful data yet, or saved data
+//     unreadable — plus the standing fact that this check is
+//     read-only and changed nothing.
+// Reading successfully is never worded as the refresh having
 // succeeded, let alone as a bank reconciliation. The waited
-// duration is only computed from a present, parseable attempt
-// start that is not in the future; a missing or invalid
-// startedAt yields no waited claim at all.
+// duration shows while the current generation is still awaiting
+// its callback (the observations channel's startedAt preferred),
+// and is only computed from a present, parseable attempt start
+// that is not in the future; a missing or invalid startedAt
+// yields no waited claim at all.
 export function checkProgressFeedback(input: {
   dashboard: ProgressReadOutcome;
   observations: ProgressReadOutcome;
@@ -1742,33 +1793,123 @@ export function checkProgressFeedback(input: {
       : refreshStatusText(read.refreshStatus, read.hasData);
     return `${label}：✓ 已读取 · 最近读取状态：${input.formatTime(read.receivedAt)}（仅本次会话；本机收到响应的时刻，非服务器更新时间）· 当时状态：${statusText}`;
   };
-  const status = dashboard.ok ? dashboard.refreshStatus : observations.ok ? observations.refreshStatus : null;
+  // The dashboard read itself reports an unreadable saved
+  // payload: projected "error", no data carried, and the
+  // dashboard's own message naming the saved data as corrupted.
+  const payloadUnreadable = dashboard.ok
+    && dashboard.refreshStatus === "error"
+    && !dashboard.hasData
+    && dashboard.message != null
+    && dashboard.message.includes("已保存数据损坏");
   let headline: string;
   if (!dashboard.ok && !observations.ok) {
     headline = "进度暂未读出，尚不能确认本次更新结果";
   } else if (!dashboard.ok) {
     headline = "看板状态暂未读出，尚不能确认本次更新结果（观测记录一路已读出，见下方分路结果，不合成全部已核实）";
-  } else if (status === "running") {
-    headline = dashboard.hasData
-      ? "状态已读取，本次尝试仍未观测到终态；当前显示上次成功数据"
-      : "状态已读取，本次尝试仍未观测到终态；尚无成功数据";
-  } else if (status === "error") {
-    headline = dashboard.hasData
-      ? "状态已读取：最近一次尝试已失败（终态）；当前显示上次成功数据"
-      : "状态已读取：最近一次尝试已失败（终态）；尚无成功数据";
-  } else if (status === "idle") {
-    headline = dashboard.hasData
-      ? "状态已读取：最近一次尝试已完成（终态）；当前显示最后成功快照"
-      : "状态已读取：当前无进行中的更新；尚无成功数据";
+  } else if (!observations.ok) {
+    headline = "看板状态已读取；观测记录一路未读出（见下方分路结果）";
   } else {
-    headline = "状态已读取，但返回中未包含刷新状态，尚不能确认本次更新结果";
+    headline = "状态已读取（两路结果分列如下）";
   }
-  if (dashboard.ok && !observations.ok) {
-    headline += "；观测记录一路未读出（见下方分路结果）";
+  // Layer 2 — the refresh outcome, from the observations
+  // channel's current-generation diagnosis and raw state only.
+  const attemptTag = observations.ok && observations.diagnosisAttempt != null
+    ? `（当前尝试 #${observations.diagnosisAttempt}）`
+    : "";
+  let refreshResultLine: string;
+  if (payloadUnreadable) {
+    refreshResultLine = "刷新结果：▲ 已保存数据无法读取，不能据此判定本次尝试结果";
+  } else if (observations.ok) {
+    const code = observations.diagnosisCode;
+    const symbol = refreshDiagnosisSymbol(code ?? "");
+    switch (code) {
+      case "settled_success":
+        refreshResultLine = `刷新结果${attemptTag}：${symbol} 最近一次尝试已成功收尾，新数据已保存（依据观测记录的业务状态与当前代事件）`;
+        break;
+      case "settled_success_unrecorded":
+        refreshResultLine = `刷新结果${attemptTag}：${symbol} 最近一次尝试已成功收尾（以业务状态为准），但终态事件未记录`;
+        break;
+      case "settled_failure":
+        refreshResultLine = `刷新结果${attemptTag}：${symbol} 最近一次尝试已结算失败（终态）`;
+        break;
+      case "spawn_failed":
+        refreshResultLine = `刷新结果${attemptTag}：${symbol} 最近一次尝试未能启动（任务启动失败）`;
+        break;
+      case "callback_ignored":
+        refreshResultLine = `刷新结果${attemptTag}：${symbol} 当前尝试的回调已到达但被忽略（未落盘保存）`;
+        break;
+      case "awaiting_callback": {
+        // Raw state still running while the dashboard projects
+        // "error": the stored attempt has outlived the wait
+        // window — its execution terminal is unconfirmed, and
+        // the projection must never be worded as a failure.
+        const projectedPastWindow = dashboard.ok
+          && dashboard.refreshStatus === "error"
+          && observations.refreshStatus === "running";
+        refreshResultLine = projectedPastWindow
+          ? `刷新结果${attemptTag}：${symbol} 当前尝试仍在等待回调：已超过等待窗口，执行终态尚不能确认（看板状态为投影，原始状态仍为进行中）`
+          : `刷新结果${attemptTag}：${symbol} 正在等待当前代回调，终态尚不能确认`;
+        break;
+      }
+      case "unattributed_history":
+        refreshResultLine = `刷新结果：${symbol} 当前无进行中的刷新，最近尝试结果未证实（现有记录无法归属到当前尝试）`;
+        break;
+      case "no_attempt":
+        refreshResultLine = `刷新结果：${symbol} 尚无刷新尝试记录`;
+        break;
+      default:
+        // Read succeeded but carried no diagnosis: fall back to
+        // the raw state alone, with no terminal claim beyond it.
+        if (observations.refreshStatus === "running") {
+          refreshResultLine = "刷新结果：当前尝试仍在进行中，仍未观测到终态（未提供当前代诊断）";
+        } else if (observations.refreshStatus === "error") {
+          refreshResultLine = "刷新结果：原始状态为失败，但未提供当前代诊断，不能仅凭此确认终态";
+        } else if (observations.refreshStatus === "idle") {
+          refreshResultLine = "刷新结果：原始状态为空闲，但未提供当前代诊断，最近尝试结果未证实";
+        } else {
+          refreshResultLine = "刷新结果：观测记录未包含当前尝试状态，尚不能确认本次尝试结果";
+        }
+    }
+  } else if (dashboard.ok) {
+    // The observations channel failed to read: the dashboard
+    // projection alone never earns a terminal conclusion.
+    if (dashboard.refreshStatus === "error") {
+      refreshResultLine = "刷新结果：观测记录未读出，仅凭看板状态不能据此判定已失败（终态尚不能确认）";
+    } else if (dashboard.refreshStatus === "idle") {
+      refreshResultLine = "刷新结果：观测记录未读出，最近尝试结果未证实";
+    } else if (dashboard.refreshStatus === "running") {
+      refreshResultLine = "刷新结果：观测记录未读出，本次尝试仍未观测到终态";
+    } else {
+      refreshResultLine = "刷新结果：观测记录未读出，尚不能确认本次尝试结果";
+    }
+  } else {
+    refreshResultLine = "刷新结果：两路均未读出，尚不能确认本次尝试结果";
   }
+  // Layer 3 — the data facts the dashboard read carried.
+  let dataFactLine: string;
+  if (!dashboard.ok) {
+    dataFactLine = "数据事实：看板一路未读出，本次检查未能确认当前数据状态；本次检查只读，未改变任何数据";
+  } else if (payloadUnreadable) {
+    dataFactLine = "数据事实：已保存数据无法读取，当前无可展示的成功数据；本次检查只读，未改变任何数据";
+  } else if (dashboard.hasData) {
+    const asOfMs = dashboard.asOf ? new Date(dashboard.asOf).getTime() : Number.NaN;
+    const asOfText = Number.isNaN(asOfMs) ? "快照时间未提供" : `快照时间 ${input.formatTime(asOfMs)}`;
+    dataFactLine = `数据事实：当前显示最后成功快照（${asOfText}）；本次检查只读，未改变任何数据`;
+  } else {
+    dataFactLine = "数据事实：尚无成功数据；本次检查只读，未改变任何数据";
+  }
+  // The waited duration tracks the CURRENT generation still
+  // awaiting its callback — it survives a projected dashboard
+  // "error", and prefers the observations channel's startedAt.
+  const stillAwaiting = observations.ok
+    ? observations.diagnosisCode === "awaiting_callback"
+      || (observations.diagnosisCode == null && observations.refreshStatus === "running")
+    : dashboard.ok && dashboard.refreshStatus === "running";
   let waitedText: string | null = null;
-  if (status === "running") {
-    const startedAt = dashboard.ok ? dashboard.startedAt : observations.ok ? observations.startedAt : null;
+  if (stillAwaiting) {
+    const startedAt = observations.ok
+      ? (observations.startedAt ?? dashboard.startedAt)
+      : dashboard.startedAt;
     if (startedAt) {
       const startMs = new Date(startedAt).getTime();
       if (!Number.isNaN(startMs) && input.nowMs >= startMs) {
@@ -1783,6 +1924,8 @@ export function checkProgressFeedback(input: {
     headline,
     dashboardLine: readLine("看板状态", dashboard),
     observationsLine: readLine("观测记录", observations),
+    refreshResultLine,
+    dataFactLine,
     waitedText,
     note: "读取成功只表示本机读到了当时的状态，不等于刷新成功，也不等于银行对账成功。",
   };
@@ -1943,7 +2086,9 @@ function RefreshStatusBand({
           <p><strong>{checkFeedback.headline}</strong></p>
           <p>{checkFeedback.dashboardLine}</p>
           <p>{checkFeedback.observationsLine}</p>
+          <p>{checkFeedback.refreshResultLine}</p>
           {checkFeedback.waitedText ? <p>{checkFeedback.waitedText}</p> : null}
+          <p>{checkFeedback.dataFactLine}</p>
           <p>{checkFeedback.note}</p>
         </div>
       ) : null}
@@ -2018,6 +2163,8 @@ export function App() {
           refreshStatus: result.data.refresh.status,
           hasData: result.data.data != null,
           startedAt: result.data.refresh.startedAt,
+          message: result.data.refresh.message,
+          asOf: result.data.data?.asOf ?? null,
         };
       },
       readObservations: async () => {
@@ -2029,6 +2176,8 @@ export function App() {
           refreshStatus: result.data.state?.status ?? null,
           hasData: false,
           startedAt: result.data.state?.startedAt ?? null,
+          diagnosisCode: result.data.diagnosis?.code ?? null,
+          diagnosisAttempt: result.data.diagnosis?.attempt ?? null,
         };
       },
       now: () => Date.now(),
