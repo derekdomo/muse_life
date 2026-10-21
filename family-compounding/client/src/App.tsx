@@ -2,6 +2,13 @@ import { useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
+import {
+decideSaveOutcome,
+draftsEqual,
+outcomeKindOfResult,
+type SaveDecision,
+type SubmittedDraft,
+} from "./saveOutcome";
 
 type Dashboard = ApiResponse<typeof api, "getDashboard">;
 type WeekPoint = Dashboard["series"][number];
@@ -264,16 +271,15 @@ function MonthCalendar({ data }: { data: Dashboard }) {
 
 /* ---------------- record form ---------------- */
 
-// The exact draft a submission carried, passed along as a mutation
-// variable so the success handler can tell whether the owner kept
-// editing while the request was in flight. `minutes: undefined` marks
-// an unparseable minutes field (it can never match a snapshot).
-type SubmittedDraft = {
-  date: string;
-  typeName: string;
-  minutes: number | null | undefined;
-  note: string | null;
-};
+// What a submission's outcome does to the form is decided by the pure
+// decideSaveOutcome in saveOutcome.ts: EVERY branch (ok / duplicate /
+// conflict / deleted / future / forbidden / invalid / network error)
+// compares the live draft against the submitted snapshot first, and
+// clears fields only when the two still match. An edit made while a
+// save was in flight is a new, unsaved draft and is preserved whole —
+// including on a `deleted` refusal, where the changed draft stays put
+// with an explicit "not saved" note and is only ever stored when the
+// owner explicitly saves again (under the fresh request key).
 
 function RecordForm({ data }: { data: Dashboard }) {
   const queryClient = useQueryClient();
@@ -322,13 +328,7 @@ function RecordForm({ data }: { data: Dashboard }) {
   }
 
   function draftMatchesSnapshot(submittedSnapshot: SubmittedDraft): boolean {
-    const cur = currentDraft();
-    return (
-      cur.date === submittedSnapshot.date &&
-      cur.typeName === submittedSnapshot.typeName &&
-      cur.minutes === submittedSnapshot.minutes &&
-      cur.note === submittedSnapshot.note
-    );
+    return draftsEqual(currentDraft(), submittedSnapshot);
   }
 
   function clearFlexibleFields() {
@@ -336,6 +336,19 @@ function RecordForm({ data }: { data: Dashboard }) {
     minutesTextRef.current = "";
     setNote("");
     noteRef.current = "";
+  }
+
+  // Apply a SaveDecision from saveOutcome.ts to the form state.
+  // Fields the decision leaves undefined stay exactly as they are.
+  function applySaveDecision(decision: SaveDecision) {
+    if (decision.statusMessage !== undefined) setSavedMsg(decision.statusMessage);
+    if (decision.errorMessage !== undefined) setError(decision.errorMessage);
+    if (decision.conflictPending !== undefined) setConflictPending(decision.conflictPending);
+    if (decision.rotateKey) requestKeyRef.current = newRequestKey();
+    if (decision.clearFlexibleFields) clearFlexibleFields();
+    if (decision.invalidateDashboard) {
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    }
   }
 
   const add = useMutation({
@@ -355,58 +368,15 @@ function RecordForm({ data }: { data: Dashboard }) {
         requestKey: vars.requestKey,
       }),
     onSuccess: (res, variables) => {
-      if (res.ok && res.duplicate) {
-        setError(null);
-        setConflictPending(false);
-        requestKeyRef.current = newRequestKey();
-        if (draftMatchesSnapshot(variables.submittedSnapshot)) {
-          setSavedMsg("这条已经记过了——重复提交没有重复计数。");
-          clearFlexibleFields();
-        } else {
-          // The owner edited the draft while this save was in flight:
-          // keep every field as it now stands — the new content is a
-          // separate, still-unsaved draft under the fresh key.
-          setSavedMsg("这条已经记过了——重复提交没有重复计数。（你刚修改的新内容已保留，还没保存。）");
-        }
-        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      } else if (res.ok) {
-        setError(null);
-        setConflictPending(false);
-        requestKeyRef.current = newRequestKey();
-        if (draftMatchesSnapshot(variables.submittedSnapshot)) {
-          setSavedMsg("已记下。");
-          clearFlexibleFields();
-        } else {
-          setSavedMsg("已记下。（你刚修改的新内容已保留，还没保存。）");
-        }
-        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      } else if (res.conflict) {
-        // Same submission, different content: keep the whole draft and
-        // the request key untouched. The owner decides explicitly —
-        // either edit and resubmit, or save the draft as a new record
-        // via the dedicated button below.
-        setSavedMsg(null);
-        setError(
-          "这次提交已经保存过了，但内容和现在填写的不一样——已保存的那一条没有被改动，现在填写的内容也保留着。可以改好后重新点「记下这一次」，或把当前内容作为新的一条保存。",
-        );
-        setConflictPending(true);
-      } else if (res.deleted) {
-        setSavedMsg("这条记录已删除，未重新添加。");
-        setError(null);
-        setConflictPending(false);
-        requestKeyRef.current = newRequestKey();
-        clearFlexibleFields();
-        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      } else if (res.future) {
-        setError("日期在今天之后，还没发生的事不能记为已完成；填写内容已保留。");
-      } else if (res.forbidden) {
-        setError("当前身份无权写入这本账，记录没有保存。");
-      } else {
-        setError("保存失败：日期可能不是真实日期。填写内容已保留，改好后可直接重试。");
-      }
+      applySaveDecision(
+        decideSaveOutcome(
+          outcomeKindOfResult(res),
+          draftMatchesSnapshot(variables.submittedSnapshot),
+        ),
+      );
     },
     onError: () => {
-      setError("保存失败，请重试。用同一个请求重试不会重复计数，填写内容已保留。");
+      applySaveDecision(decideSaveOutcome("networkError", false));
     },
   });
 

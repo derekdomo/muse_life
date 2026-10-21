@@ -85,6 +85,13 @@
       "when": 1792499400028,
       "tag": "0012_add_game_gold_adoption_boundary",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1792600599644,
+      "tag": "0013_add_game_rewards_and_redemptions",
+      "breakpoints": true
     }
   ]
 }

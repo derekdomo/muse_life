@@ -33,6 +33,8 @@ function check(name, ok, note = "") {
 
 const serverSrc = readFileSync(new URL("./server/src/actions.ts", import.meta.url), "utf8");
 const clientSrc = readFileSync(new URL("./client/src/App.tsx", import.meta.url), "utf8");
+const decisionSrc = readFileSync(new URL("./client/src/saveOutcome.ts", import.meta.url), "utf8");
+const clientAll = `${clientSrc}\n${decisionSrc}`;
 const migrationSql = readdirSync(new URL("./drizzle/", import.meta.url))
   .filter((f) => f.endsWith(".sql"))
   .sort()
@@ -102,7 +104,7 @@ check(
 );
 check(
   "client: duplicate save is surfaced as not double-counted",
-  clientSrc.includes("重复提交没有重复计数"),
+  clientAll.includes("重复提交没有重复计数"),
 );
 check(
   "client: no score / streak / ranking language anywhere",
@@ -145,14 +147,41 @@ check(
       migrationSql.includes("RAISE(ABORT, 'request key deleted')"),
   );
   const dash = actionSlice(serverSrc, "getDashboard");
-  check(
-    "source(init): preset seeding claims via a builder INSERT … ON CONFLICT DO NOTHING … RETURNING, then seeds all presets in one db.batch",
-    dash.includes("insert(schema.ledgerMeta)") &&
-      dash.includes("onConflictDoNothing") &&
-      dash.includes("returning()") &&
-      dash.includes("db.batch") &&
-      dash.includes("insert(schema.activityTypes)"),
-  );
+  {
+    // CMP-FAMILY-INIT-001 (re-review): the completion marker and the
+    // seeds must share ONE atomic boundary — a single db.batch whose
+    // statement list contains BOTH the ledgerMeta claim insert and the
+    // activityTypes preset inserts, all ON CONFLICT DO NOTHING, gated
+    // by a prior meta read, with no separate claim commit and no
+    // delete-the-claim rollback path.
+    const batchIdx = dash.indexOf("db.batch([");
+    const batchEnd = batchIdx >= 0 ? dash.indexOf("]);", batchIdx) : -1;
+    const batchSegment = batchIdx >= 0 && batchEnd > batchIdx ? dash.slice(batchIdx, batchEnd) : "";
+    const seedBatchCount = (dash.match(/db\.batch\(/g) ?? []).length;
+    check(
+      "source(init): preset seeding is ONE db.batch containing both the ledgerMeta claim and the preset type inserts",
+      batchSegment.includes("claimInsert") &&
+        batchSegment.includes("presetInserts") &&
+        dash.includes("insert(schema.ledgerMeta)") &&
+        dash.includes("insert(schema.activityTypes)") &&
+        seedBatchCount === 1,
+    );
+    check(
+      "source(init): claim and every preset insert use onConflictDoNothing (>= 2 in the seed block), so a concurrent loser no-ops",
+      (dash.match(/onConflictDoNothing/g) ?? []).length >= 2,
+    );
+    check(
+      "source(init): seeding is gated by a prior ledgerMeta read and never deletes the claim (no two-step claim/rollback path)",
+      dash.indexOf("from(schema.ledgerMeta)") > -1 &&
+        dash.indexOf("from(schema.ledgerMeta)") < batchIdx &&
+        !dash.includes("delete(schema.ledgerMeta)") &&
+        !dash.includes(".returning()"),
+    );
+    check(
+      "source(init): activity_types.name carries a UNIQUE index (the preset inserts' conflict target)",
+      migrationSql.includes("CREATE UNIQUE INDEX activity_types_name_idx ON activity_types (name)"),
+    );
+  }
   check(
     "source(date): dashboard counts future-dated rows separately (futureRecordCount)",
     dash.includes("futureRecordCount") && serverSrc.includes("futureRecordCount: z.number()"),
@@ -165,15 +194,27 @@ check(
 }
 check(
   "client(save): conflict keeps the draft and offers an explicit save-as-new action",
-  clientSrc.includes("作为新的一条保存") && clientSrc.includes("res.conflict"),
+  clientSrc.includes("作为新的一条保存") && clientAll.includes("conflict"),
 );
 check(
   "client(save): deleted retry is reported as deleted, not re-added",
-  clientSrc.includes("这条记录已删除，未重新添加。"),
+  clientAll.includes("这条记录已删除，未重新添加。"),
+);
+check(
+  "client(save): deleted with a changed draft says plainly the new content is not saved yet",
+  clientAll.includes("原记录已删除，未重新添加；你修改的新内容尚未保存"),
+);
+check(
+  "client(save): the form routes every outcome through the shared snapshot-guarded decision (decideSaveOutcome + submittedSnapshot)",
+  clientSrc.includes("decideSaveOutcome") &&
+    clientSrc.includes("outcomeKindOfResult") &&
+    clientSrc.includes("applySaveDecision") &&
+    decisionSrc.includes("draftMatchesSnapshot") &&
+    decisionSrc.includes('case "deleted"'),
 );
 check(
   "client(date): future save shows the draft-preserving message and the date input is capped at today",
-  clientSrc.includes("日期在今天之后，还没发生的事不能记为已完成；填写内容已保留。") && clientSrc.includes("max={data.today}"),
+  clientAll.includes("日期在今天之后，还没发生的事不能记为已完成；填写内容已保留。") && clientSrc.includes("max={data.today}"),
 );
 check(
   "client(date): future-dated records get a plain not-counted note",
@@ -841,6 +882,248 @@ const TOMORROW = shiftDay(TODAY, 1);
     del.ok === true && Number(acts.rows[0].c) === 0 &&
       led.rows.length === 1 && led.rows[0].state === "deleted" &&
       retry.ok === false && retry.deleted === true,
+  );
+}
+
+/* ---- SAVE-001 (re-review): the REAL client callback decision ----
+   The record form's onSuccess/onError delegate to decideSaveOutcome
+   in client/src/saveOutcome.ts; the same module is imported here and
+   run directly, fed with typed results produced by the REAL server
+   handlers above, so the deleted-branch draft protection is verified
+   end to end: server verdict → outcome kind → form decision. */
+const { decideSaveOutcome, draftsEqual, outcomeKindOfResult } = await import("./client/src/saveOutcome.ts");
+{
+  // Reproduce the PM scenario with the real handlers: a save lands,
+  // its record is deleted, and the (response-lost / late) retry of
+  // the same submission comes back typed `deleted`.
+  const { db } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  await call("getDashboard", ctx, {}); // seed presets
+  const submitted = { date: TODAY, typeName: "陪玩", minutes: 15, note: "备注 A", requestKey: "cb-deleted-key-0001" };
+  const saved = await call("addActivity", ctx, submitted);
+  await call("deleteActivity", ctx, { id: saved.id });
+  const late = await call("addActivity", ctx, submitted);
+  check(
+    "client-cb: the real retry of a deleted record returns typed deleted",
+    late.ok === false && late.deleted === true && outcomeKindOfResult(late) === "deleted",
+  );
+  const snapshot = { date: submitted.date, typeName: submitted.typeName, minutes: 15, note: "备注 A" };
+  // While the deleted verdict was in flight the owner edited the
+  // draft to 25 minutes / 备注 B — the deleted branch must NOT clear
+  // it, must NOT auto-resubmit, and must say it is unsaved.
+  const editedDraft = { ...snapshot, minutes: 25, note: "备注 B" };
+  const decEdited = decideSaveOutcome("deleted", draftsEqual(editedDraft, snapshot));
+  check(
+    "client-cb: deleted + edited draft (25 分钟/备注 B) → nothing cleared, explicit unsaved message, key rotated for a future explicit save only",
+    draftsEqual(editedDraft, snapshot) === false &&
+      decEdited.clearFlexibleFields === false &&
+      decEdited.statusMessage === "原记录已删除，未重新添加；你修改的新内容尚未保存" &&
+      decEdited.errorMessage === null &&
+      decEdited.conflictPending === false &&
+      decEdited.rotateKey === true,
+  );
+  // Unchanged draft → the deleted outcome is resolved like any other
+  // resolved save: fields clear, resolved message shown.
+  const decSame = decideSaveOutcome("deleted", draftsEqual(snapshot, snapshot));
+  check(
+    "client-cb: deleted + unchanged draft → resolved (fields clear, '这条记录已删除，未重新添加。')",
+    decSame.clearFlexibleFields === true &&
+      decSame.statusMessage === "这条记录已删除，未重新添加。" &&
+      decSame.rotateKey === true,
+  );
+  // Per-field matrix: changing ANY single field (minutes / note /
+  // date / type) before the deleted verdict returns flips the branch
+  // to full preservation; changing none keeps it resolved.
+  const fieldVariants = [
+    ["minutes", { ...snapshot, minutes: 25 }],
+    ["note", { ...snapshot, note: "备注 B" }],
+    ["date", { ...snapshot, date: shiftDay(TODAY, -1) }],
+    ["type", { ...snapshot, typeName: "户外" }],
+    ["none", { ...snapshot }],
+  ];
+  for (const [field, draft] of fieldVariants) {
+    const matches = draftsEqual(draft, snapshot);
+    const dec = decideSaveOutcome("deleted", matches);
+    if (field === "none") {
+      check(
+        "client-cb: deleted matrix — no field changed → resolved branch",
+        matches === true && dec.clearFlexibleFields === true,
+      );
+    } else {
+      check(
+        `client-cb: deleted matrix — only ${field} changed → draft fully preserved`,
+        matches === false &&
+          dec.clearFlexibleFields === false &&
+          dec.statusMessage === "原记录已删除，未重新添加；你修改的新内容尚未保存",
+      );
+    }
+  }
+  // Read-back: the deleted key stays dead — 0 activities, 0 totals.
+  const dash = await call("getDashboard", ctx, {});
+  check(
+    "client-cb: read-back after the deleted verdict — activities 0, totals 0",
+    dash.totalCount === 0 && dash.totalKnownMinutes === 0 && dash.unknownMinutesCount === 0,
+  );
+  // Explicit-save path: ONLY an explicit new submission (fresh
+  // requestId, as the rotated key provides) stores the edited draft
+  // as a brand-new record.
+  const explicit = await call("addActivity", ctx, {
+    date: editedDraft.date, typeName: editedDraft.typeName,
+    minutes: editedDraft.minutes, note: editedDraft.note,
+    requestKey: "cb-deleted-key-0002",
+  });
+  const dash2 = await call("getDashboard", ctx, {});
+  check(
+    "client-cb: an explicit save under a fresh key stores the edited draft as a new record (25 分钟/备注 B)",
+    explicit.ok === true && explicit.duplicate === false &&
+      dash2.totalCount === 1 && dash2.totalKnownMinutes === 25 &&
+      dash2.recentActivities[0]?.note === "备注 B",
+  );
+}
+{
+  // Old outcome matrix, no regression: every other branch keeps its
+  // snapshot guard exactly as before.
+  const okSame = decideSaveOutcome("ok", true);
+  const okDiff = decideSaveOutcome("ok", false);
+  check(
+    "client-cb: ok — unchanged draft clears with '已记下。'; changed draft is preserved with an unsaved note",
+    okSame.clearFlexibleFields === true && okSame.statusMessage === "已记下。" &&
+      okDiff.clearFlexibleFields === false && (okDiff.statusMessage ?? "").includes("还没保存"),
+  );
+  const dupSame = decideSaveOutcome("duplicate", true);
+  const dupDiff = decideSaveOutcome("duplicate", false);
+  check(
+    "client-cb: duplicate — unchanged clears, changed preserved, both surface 不重复计数",
+    dupSame.clearFlexibleFields === true && (dupSame.statusMessage ?? "").includes("重复提交没有重复计数") &&
+      dupDiff.clearFlexibleFields === false && (dupDiff.statusMessage ?? "").includes("还没保存"),
+  );
+  const conflict = decideSaveOutcome("conflict", false);
+  check(
+    "client-cb: conflict — draft AND request key preserved, save-as-new offered (conflictPending)",
+    conflict.clearFlexibleFields === false && conflict.rotateKey === false && conflict.conflictPending === true,
+  );
+  const net = decideSaveOutcome("networkError", false);
+  check(
+    "client-cb: network failure — draft AND request key preserved (same-key retry cannot double-count)",
+    net.clearFlexibleFields === false && net.rotateKey === false &&
+      (net.errorMessage ?? "").includes("填写内容已保留"),
+  );
+  const future = decideSaveOutcome("future", false);
+  const forbidden = decideSaveOutcome("forbidden", false);
+  const invalid = decideSaveOutcome("invalid", false);
+  check(
+    "client-cb: future / forbidden / invalid refusals all preserve the draft and the key",
+    [future, forbidden, invalid].every((d) => d.clearFlexibleFields === false && d.rotateKey === false),
+  );
+  check(
+    "client-cb: outcomeKindOfResult maps each typed server result to exactly its kind",
+    outcomeKindOfResult({ ok: true, duplicate: false, conflict: false, deleted: false, future: false, forbidden: false }) === "ok" &&
+      outcomeKindOfResult({ ok: true, duplicate: true, conflict: false, deleted: false, future: false, forbidden: false }) === "duplicate" &&
+      outcomeKindOfResult({ ok: false, duplicate: false, conflict: true, deleted: false, future: false, forbidden: false }) === "conflict" &&
+      outcomeKindOfResult({ ok: false, duplicate: false, conflict: false, deleted: true, future: false, forbidden: false }) === "deleted" &&
+      outcomeKindOfResult({ ok: false, duplicate: false, conflict: false, deleted: false, future: true, forbidden: false }) === "future" &&
+      outcomeKindOfResult({ ok: false, duplicate: false, conflict: false, deleted: false, future: false, forbidden: true }) === "forbidden" &&
+      outcomeKindOfResult({ ok: false, duplicate: false, conflict: false, deleted: false, future: false, forbidden: false }) === "invalid",
+  );
+}
+
+/* ---- INIT-001 (re-review): atomic claim+seed under slow reads ----
+   The seed batch is intercepted through a db proxy that can pause it
+   (a slow first read caught mid-seed by a second reader) or fail it
+   (an interruption mid-seed). Because claim and seeds are one batch,
+   neither schedule can expose or persist a half-initialized ledger. */
+function wrapDbBatch(db, { delayMs = 0, failFirstBatch = false } = {}) {
+  let failed = false;
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === "batch") {
+        return async (statements) => {
+          if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+          if (failFirstBatch && !failed) {
+            failed = true;
+            throw new Error("simulated interruption inside the seed batch");
+          }
+          return target.batch(statements);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+for (const slowFirst of [true, false]) {
+  const { db, client } = await makeDb();
+  const slowCtx = makeCtx(wrapDbBatch(db, { delayMs: 80 }), OWNER);
+  const fastCtx = makeCtx(db, OWNER);
+  const [first, second] = slowFirst ? [slowCtx, fastCtx] : [fastCtx, slowCtx];
+  const [d1, d2] = await Promise.all([
+    call("getDashboard", first.ctx, {}),
+    call("getDashboard", second.ctx, {}),
+  ]);
+  const typeCount = await client.execute("SELECT COUNT(*) AS c FROM activity_types");
+  const metaCount = await client.execute("SELECT COUNT(*) AS c FROM ledger_meta WHERE key = 'types_seeded'");
+  check(
+    `init-gap: slow first read (${slowFirst ? "first" : "second"} reader's seed batch paused 80ms) — both readers return exactly 7 presets`,
+    d1.types.length === 7 && d2.types.length === 7 &&
+      d1.types.map((t) => t.name).join(",") === "一起吃饭,陪玩,户外,阅读,运动,旅行,其他" &&
+      d2.types.map((t) => t.name).join(",") === "一起吃饭,陪玩,户外,阅读,运动,旅行,其他",
+  );
+  check(
+    `init-gap: slow first read (${slowFirst ? "first" : "second"} delayed) — storage holds exactly 7 types and exactly 1 meta row`,
+    Number(typeCount.rows[0].c) === 7 && Number(metaCount.rows[0].c) === 1,
+  );
+}
+{
+  // Interruption inside the seed batch: the whole batch rolls back,
+  // so no completion marker and no partial types survive; the next
+  // read seeds cleanly from scratch.
+  const { db, client } = await makeDb();
+  const flakyCtx = makeCtx(wrapDbBatch(db, { failFirstBatch: true }), OWNER);
+  let threw = false;
+  try {
+    await call("getDashboard", flakyCtx.ctx, {});
+  } catch {
+    threw = true;
+  }
+  const metaAfter = await client.execute("SELECT COUNT(*) AS c FROM ledger_meta");
+  const typesAfter = await client.execute("SELECT COUNT(*) AS c FROM activity_types");
+  check(
+    "init-gap: interrupted seed batch propagates the failure",
+    threw === true,
+  );
+  check(
+    "init-gap: interruption leaves NO false completion marker and NO partial types (atomic rollback)",
+    Number(metaAfter.rows[0].c) === 0 && Number(typesAfter.rows[0].c) === 0,
+  );
+  const { ctx } = makeCtx(db, OWNER);
+  const dash = await call("getDashboard", ctx, {});
+  const metaFinal = await client.execute("SELECT COUNT(*) AS c FROM ledger_meta WHERE key = 'types_seeded'");
+  const typesFinal = await client.execute("SELECT COUNT(*) AS c FROM activity_types");
+  check(
+    "init-gap: the next read after an interruption seeds cleanly — exactly 7 types, exactly 1 meta",
+    dash.types.length === 7 && Number(typesFinal.rows[0].c) === 7 && Number(metaFinal.rows[0].c) === 1,
+  );
+}
+{
+  // Owner deletes every type, then two reads (one slow): the meta row
+  // still gates seeding, so the list stays empty — never reseeded.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const seeded = await call("getDashboard", ctx, {});
+  for (const t of [...seeded.types]) {
+    await call("deleteType", ctx, { id: t.id });
+  }
+  const slowCtx = makeCtx(wrapDbBatch(db, { delayMs: 40 }), OWNER);
+  const [d1, d2] = await Promise.all([
+    call("getDashboard", slowCtx.ctx, {}),
+    call("getDashboard", ctx, {}),
+  ]);
+  const typeCount = await client.execute("SELECT COUNT(*) AS c FROM activity_types");
+  const metaCount = await client.execute("SELECT COUNT(*) AS c FROM ledger_meta WHERE key = 'types_seeded'");
+  check(
+    "init-gap: owner-deleted-all + double read (one slow) → types stay empty, meta stays exactly 1, no reseeding",
+    d1.types.length === 0 && d2.types.length === 0 &&
+      Number(typeCount.rows[0].c) === 0 && Number(metaCount.rows[0].c) === 1,
   );
 }
 

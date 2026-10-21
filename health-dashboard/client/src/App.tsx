@@ -33,6 +33,9 @@ type ReadinessHistoryPoint = DashboardResponse["readinessHistory"][number];
 type SourceState = DashboardResponse["healthState"];
 type GameState = ApiResponse<typeof api, "getGameState">;
 type GameCategory = GameState["settlements"][number]["category"];
+type RewardsState = ApiResponse<typeof api, "getRewards">;
+type RewardItem = RewardsState["rewards"][number];
+type RewardReceipt = RewardsState["receipts"][number];
 type Tab = "today" | "trends" | "history" | "game";
 type Status = "正常" | "偏低" | "偏高" | "数据缺失" | "基线不足";
 
@@ -1983,13 +1986,14 @@ function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifie
 // just calls them and invalidates the game query. Status is always text
 // + symbol, never color alone (owner is color-vision deficient);
 // category symbols differ in shape: ▲ steps, ◑ sleep, ■ strength,
-// ★ quest, ✦ daily task.
+// ★ quest, ✦ daily task, ✧ reward redemption.
 const GAME_CATEGORY_META: Record<GameCategory, { label: string; symbol: string }> = {
   steps: { label: "步行", symbol: "▲" },
   sleep: { label: "主睡眠", symbol: "◑" },
   strength: { label: "力量训练", symbol: "■" },
   quest_steps: { label: "主任务 · 步行达标", symbol: "★" },
   daily_task: { label: "每日任务", symbol: "✦" },
+  reward_redeem: { label: "奖励兑换", symbol: "✧" },
 };
 
 const GAME_TASK_LABELS: Record<string, string> = {
@@ -2012,13 +2016,303 @@ const GAME_SLOT_META: { slot: "weapon" | "armor" | "accessory"; label: string; s
   { slot: "accessory", label: "饰品", symbol: "◎" },
 ];
 
+// LIFE-C1 人生游戏 S3 (CWEB-MVP-001·S3) 奖励 section: the owner's own
+// reward list on the same gold ledger, in three states — list →
+// confirmation preview → receipt. It runs its own ["rewards"] query
+// (getRewards settles and returns the saved balance + the balance
+// version a preview pins), separate from the ["game"] query, so a
+// rewards failure renders as a note inside this section only. Status
+// is always text + symbol + numbers, never color alone: ✓ 余额足够 /
+// 还差 N 金币. A redemption whose response is lost lands in an explicit
+// 兑换结果未确认 state that resolves through the SAME requestId
+// (read-only receipt lookup, then an idempotent retry with the
+// identical arguments) — never through a fresh request that could
+// charge twice. Failed saves/redemptions keep the list and the drafts.
+interface RedeemDraft {
+  requestId: string;
+  rewardId: number;
+  rewardRevision: number;
+  name: string;
+  price: number;
+  balance: number;
+  expectedBalanceVersion: number;
+}
+
+function newRewardRequestId(): string {
+  const cryptoObj = globalThis.crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") return cryptoObj.randomUUID();
+  return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function RewardsPanel() {
+  const queryClient = useQueryClient();
+  const rewards = useQuery({ queryKey: ["rewards"], queryFn: () => api.getRewards({}) });
+  const [note, setNote] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
+  const [newPrice, setNewPrice] = useState("");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editPrice, setEditPrice] = useState("");
+  const [stage, setStage] = useState<{ kind: "list" } | { kind: "preview"; draft: RedeemDraft } | { kind: "unconfirmed"; draft: RedeemDraft; lookupNote: string | null }>({ kind: "list" });
+  const [lastReceipt, setLastReceipt] = useState<RewardReceipt | null>(null);
+  const [receiptNote, setReceiptNote] = useState<string | null>(null);
+
+  const invalidateRewards = () => {
+    void queryClient.invalidateQueries({ queryKey: ["rewards"] });
+    void queryClient.invalidateQueries({ queryKey: ["game"] });
+  };
+
+  const saveReward = useMutation({
+    mutationFn: (args: { id: number | null; name: string; price: number }) => api.saveReward(args),
+    onSuccess: (result, args) => {
+      setNote(result.message);
+      if (result.ok) {
+        if (args.id === null) { setNewName(""); setNewPrice(""); }
+        else setEditingId(null);
+        invalidateRewards();
+      }
+    },
+    onError: () => setNote("保存失败，请稍后再试；已填写的内容还在。"),
+  });
+
+  const redeem = useMutation({
+    mutationFn: (draft: RedeemDraft) => api.redeemReward({ requestId: draft.requestId, rewardId: draft.rewardId, rewardRevision: draft.rewardRevision, price: draft.price, expectedBalanceVersion: draft.expectedBalanceVersion }),
+    onSuccess: (result) => {
+      if ((result.status === "redeemed" || result.status === "already_resolved") && result.receipt) {
+        setLastReceipt(result.receipt);
+        setReceiptNote(result.status === "already_resolved" ? "这笔兑换此前已经入账，下面是原回执，未重复扣账。" : null);
+        setNote(null);
+        setStage({ kind: "list" });
+        invalidateRewards();
+        return;
+      }
+      // Typed rejection (stale / insufficient / conflict / busy): back
+      // to the list with the reason; the list and drafts are untouched
+      // and the balance refreshes for a fresh preview.
+      setNote(result.message);
+      setStage({ kind: "list" });
+      invalidateRewards();
+    },
+    onError: (_error, draft) => {
+      // The response was lost — the redemption may or may not have
+      // landed. Keep the exact same requestId and resolve from it.
+      setStage({ kind: "unconfirmed", draft, lookupNote: null });
+    },
+  });
+
+  const lookup = useMutation({
+    mutationFn: (requestId: string) => api.getRedemptionReceipt({ requestId }),
+    onSuccess: (result) => {
+      if (result.receipt) {
+        setLastReceipt(result.receipt);
+        setReceiptNote("已确认：这笔兑换已经入账，下面是原回执，未重复扣账。");
+        setNote(null);
+        setStage({ kind: "list" });
+        invalidateRewards();
+      } else {
+        setStage((prev) => prev.kind === "unconfirmed" ? { ...prev, lookupNote: "未查到这笔兑换的回执——它没有入账。可以用同一请求直接重试兑换，不会重复扣账。" } : prev);
+      }
+    },
+    onError: () => {
+      setStage((prev) => prev.kind === "unconfirmed" ? { ...prev, lookupNote: "查询也失败了，请稍后再查。在确认结果之前，不要重新发起新的兑换。" } : prev);
+    },
+  });
+
+  const data = rewards.data;
+  const balance = data?.balance ?? 0;
+
+  const openPreview = async (reward: RewardItem) => {
+    // Pin the preview to a FRESH read: the reward's current revision
+    // and price, the current saved balance, and the current balance
+    // version — exactly what redeemReward re-checks server-side.
+    let fresh: RewardsState | undefined;
+    try {
+      fresh = await queryClient.fetchQuery({ queryKey: ["rewards"], queryFn: () => api.getRewards({}) });
+    } catch {
+      fresh = undefined;
+    }
+    const current = fresh?.rewards.find((item) => item.id === reward.id) ?? reward;
+    const freshBalance = fresh?.balance ?? balance;
+    if (current.price > freshBalance) {
+      setNote(`金币不足：兑换「${current.name}」需要 ${numberLabel(current.price)} 金币，已保存余额 ${numberLabel(freshBalance)}，还差 ${numberLabel(current.price - freshBalance)} 金币。`);
+      return;
+    }
+    setLastReceipt(null);
+    setReceiptNote(null);
+    setNote(null);
+    setStage({
+      kind: "preview",
+      draft: {
+        requestId: newRewardRequestId(),
+        rewardId: current.id,
+        rewardRevision: current.revision,
+        name: current.name,
+        price: current.price,
+        balance: freshBalance,
+        expectedBalanceVersion: fresh?.balanceVersion ?? data?.balanceVersion ?? 0,
+      },
+    });
+  };
+
+  const submitNew = () => {
+    const price = Number(newPrice);
+    if (!newName.trim()) { setNote("先给奖励起个名字。"); return; }
+    if (!Number.isInteger(price) || price < 1) { setNote("价格需要是正整数金币。"); return; }
+    saveReward.mutate({ id: null, name: newName.trim(), price });
+  };
+
+  const submitEdit = (reward: RewardItem) => {
+    const price = Number(editPrice);
+    if (!editName.trim()) { setNote("奖励名称不能为空。"); return; }
+    if (!Number.isInteger(price) || price < 1) { setNote("价格需要是正整数金币。"); return; }
+    saveReward.mutate({ id: reward.id, name: editName.trim(), price });
+  };
+
+  return (
+    <section className="game-panel" aria-labelledby="game-rewards-title">
+      <div className="section-line"><h3 id="game-rewards-title">奖励</h3><span>已保存金币 {numberLabel(balance)} · 自设清单</span></div>
+      {rewards.isPending ? (
+        <p className="game-note" role="status">正在读取奖励清单…</p>
+      ) : rewards.isError || !data || data.forbidden ? (
+        <p className="game-note">奖励清单暂时读不出来，稍后重试即可；已发出的回执不会受影响。</p>
+      ) : (
+        <>
+          {data.healthState !== "ok" ? (
+            <p className="game-note">健康数据{data.healthState === "corrupt" ? "快照损坏" : "尚未同步"}{data.healthDataDate ? `（来源日期 ${fullDateLabel(data.healthDataDate)}）` : ""}：奖励清单与历史回执照常可看，已入账的真实金币仍可兑换。</p>
+          ) : data.coverageIncomplete ? (
+            <p className="game-note">今日健康数据尚未完整{data.healthDataDate ? `（来源日期 ${fullDateLabel(data.healthDataDate)}）` : ""}：清单与回执照常可看；当天未结算的预览经验不是可消费金币，余额只含已入账金币。</p>
+          ) : null}
+          <p className="game-note">余额只计算已结算入账的金币；当天未结算的预览经验不在可兑换余额内。兑换只记个人回执，不代购、不下单，不动任何真实账户。</p>
+          {note ? <p className="game-action-note" role="status">{note}</p> : null}
+
+          {lastReceipt ? (
+            <div className="reward-receipt" role="status">
+              <div className="section-line">
+                <strong><span aria-hidden="true">✓</span> 已兑换 · 回执 #{lastReceipt.id}</strong>
+                <button type="button" className="game-btn game-btn-ghost" aria-label="关闭回执" onClick={() => { setLastReceipt(null); setReceiptNote(null); }}>关闭</button>
+              </div>
+              <p className="reward-receipt-main">{lastReceipt.rewardName} · 扣除 {numberLabel(lastReceipt.goldSpent)} 金币 · 剩余已保存余额 {numberLabel(lastReceipt.balanceAfter)} 金币</p>
+              <p className="game-note">兑换时间 {updatedLabel(lastReceipt.redeemedAt)} · {fullDateLabel(lastReceipt.localDate)}</p>
+              {receiptNote ? <p className="game-note">{receiptNote}</p> : null}
+              <p className="game-note">这张回执只证明金币已兑换，不证明现实奖励已经享用。</p>
+            </div>
+          ) : null}
+
+          {stage.kind === "preview" ? (
+            <div className="reward-preview" role="group" aria-label="兑换确认预览">
+              <strong>确认兑换</strong>
+              <dl>
+                <div><dt>奖励</dt><dd>{stage.draft.name}</dd></div>
+                <div><dt>价格</dt><dd>{numberLabel(stage.draft.price)} 金币</dd></div>
+                <div><dt>当前已保存余额</dt><dd>{numberLabel(stage.draft.balance)} 金币</dd></div>
+                <div><dt>兑换后剩余</dt><dd>{numberLabel(stage.draft.balance - stage.draft.price)} 金币</dd></div>
+              </dl>
+              <p className="game-note">兑换只记个人回执，不代购、不下单，不动任何真实账户。确认后按上面固定的价格与余额版本扣账；期间价格或余额有变化会拒绝并请你重新确认，不会按新价格直接扣。</p>
+              <div className="reward-actions">
+                <button type="button" className="game-btn" aria-label={`确认兑换 ${stage.draft.name}，${stage.draft.price} 金币`} disabled={redeem.isPending} onClick={() => redeem.mutate(stage.draft)}>{redeem.isPending ? "兑换中…" : "确认兑换"}</button>
+                <button type="button" className="game-btn game-btn-ghost" aria-label="返回奖励清单" disabled={redeem.isPending} onClick={() => setStage({ kind: "list" })}>返回清单</button>
+              </div>
+            </div>
+          ) : stage.kind === "unconfirmed" ? (
+            <div className="reward-preview" role="alert">
+              <strong><span aria-hidden="true">▲</span> 兑换结果未确认</strong>
+              <p className="game-note">刚才的兑换请求没有收到回复——它可能已经入账，也可能没有。在确认之前不要重新发起新的兑换。下面用同一个请求编号查回执；查不到时可以用同一请求重试，结果只会是原回执，不会重复扣账。</p>
+              <p className="reward-receipt-main">{stage.draft.name} · {numberLabel(stage.draft.price)} 金币</p>
+              {stage.lookupNote ? <p className="game-note" role="status">{stage.lookupNote}</p> : null}
+              <div className="reward-actions">
+                <button type="button" className="game-btn" aria-label="用同一请求编号查询兑换回执" disabled={lookup.isPending} onClick={() => lookup.mutate(stage.draft.requestId)}>{lookup.isPending ? "查询中…" : "查询回执"}</button>
+                <button type="button" className="game-btn game-btn-ghost" aria-label="用同一请求重试兑换" disabled={redeem.isPending} onClick={() => redeem.mutate(stage.draft)}>用同一请求重试兑换</button>
+                <button type="button" className="game-btn game-btn-ghost" aria-label="稍后再确认兑换结果" onClick={() => setStage({ kind: "list" })}>稍后再确认</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="game-shop">
+                {data.rewards.length ? data.rewards.map((reward) => {
+                  const shortfall = reward.price - balance;
+                  const affordable = shortfall <= 0;
+                  const editing = editingId === reward.id;
+                  return (
+                    <div className="game-item" key={reward.id}>
+                      {editing ? (
+                        <div className="reward-edit">
+                          <label>奖励名称<input aria-label={`编辑奖励名称（当前 ${reward.name}）`} type="text" maxLength={60} value={editName} onChange={(event) => setEditName(event.target.value)} /></label>
+                          <label>所需金币<input aria-label={`编辑奖励所需金币（当前 ${reward.price}）`} type="number" min={1} step={1} inputMode="numeric" value={editPrice} onChange={(event) => setEditPrice(event.target.value)} /></label>
+                          <div className="reward-actions">
+                            <button type="button" className="game-btn" aria-label={`保存奖励 ${reward.name} 的修改`} disabled={saveReward.isPending} onClick={() => submitEdit(reward)}>保存</button>
+                            <button type="button" className="game-btn game-btn-ghost" aria-label="取消编辑奖励" disabled={saveReward.isPending} onClick={() => setEditingId(null)}>取消</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="game-item-main">
+                            <strong>{reward.name}</strong>
+                            <small>价格 {numberLabel(reward.price)} 金币 · 已保存余额 {numberLabel(balance)} 金币</small>
+                            <small>{affordable ? `✓ 余额足够 · 兑换后剩 ${numberLabel(balance - reward.price)} 金币` : `还差 ${numberLabel(shortfall)} 金币`}</small>
+                          </div>
+                          <div className="reward-actions">
+                            {affordable ? (
+                              <button type="button" className="game-btn" aria-label={`兑换 ${reward.name}，${reward.price} 金币`} disabled={redeem.isPending} onClick={() => void openPreview(reward)}>兑换</button>
+                            ) : (
+                              <span className="game-item-locked">还差 {numberLabel(shortfall)} 金币</span>
+                            )}
+                            <button type="button" className="game-btn game-btn-ghost" aria-label={`编辑奖励 ${reward.name}`} onClick={() => { setEditingId(reward.id); setEditName(reward.name); setEditPrice(String(reward.price)); }}>编辑</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                }) : (
+                  <p className="game-note">还没有自设奖励。用下面的表单添加第一条：名称 + 所需金币。</p>
+                )}
+              </div>
+              <form className="reward-form" onSubmit={(event) => { event.preventDefault(); submitNew(); }}>
+                <label>新奖励名称<input aria-label="新奖励名称" type="text" maxLength={60} placeholder="例如：一顿大餐" value={newName} onChange={(event) => setNewName(event.target.value)} /></label>
+                <label>所需金币<input aria-label="新奖励所需金币" type="number" min={1} step={1} inputMode="numeric" placeholder="例如：500" value={newPrice} onChange={(event) => setNewPrice(event.target.value)} /></label>
+                <button type="submit" className="game-btn" aria-label="添加奖励" disabled={saveReward.isPending}>添加奖励</button>
+              </form>
+            </>
+          )}
+
+          {data.receipts.length ? (
+            <>
+              <div className="section-line reward-history-head"><h4>兑换回执</h4><span>按时间倒序 · 改价不改旧回执</span></div>
+              <div className="game-ledger">
+                {data.receipts.map((receipt) => (
+                  <div className="game-ledger-row" key={receipt.id}>
+                    <span className="unified-date">{dateLabel(receipt.localDate)}</span>
+                    <div className="unified-main">
+                      <strong><span aria-hidden="true">✧</span> {receipt.rewardName}</strong>
+                      <small>回执 #{receipt.id} · {fullDateLabel(receipt.localDate)} · {updatedLabel(receipt.redeemedAt)} · 当时价格 {numberLabel(receipt.price)} 金币</small>
+                    </div>
+                    <span className="game-xp">−{numberLabel(receipt.goldSpent)} 金币 · 余 {numberLabel(receipt.balanceAfter)}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="game-note">回执只证明金币已兑换，不证明现实奖励已经享用；来源迟到修订或改价不会删除回执，也不会按今天的价格改动旧回执金额。</p>
+            </>
+          ) : (
+            <p className="game-note">还没有兑换回执。兑换成功后，回执会留在这里，之后改价也不会改动它。</p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function GameView() {
   const queryClient = useQueryClient();
   const game = useQuery({ queryKey: ["game"], queryFn: () => api.getGameState({}) });
   const [actionNote, setActionNote] = useState<string | null>(null);
   const onMutationDone = (result: { ok: boolean; message: string }) => {
     setActionNote(result.message);
-    if (result.ok) void queryClient.invalidateQueries({ queryKey: ["game"] });
+    if (result.ok) {
+      void queryClient.invalidateQueries({ queryKey: ["game"] });
+      // A purchase/allocation moves the same profile the rewards
+      // preview pins (balance + balance version): refresh the rewards
+      // section too, so its pins never go stale silently.
+      void queryClient.invalidateQueries({ queryKey: ["rewards"] });
+    }
   };
   const allocate = useMutation({ mutationFn: (args: { attribute: GameAttributeKey; count: number }) => api.allocateAttribute(args), onSuccess: onMutationDone });
   const buy = useMutation({ mutationFn: (itemId: string) => api.buyEquipment({ itemId }), onSuccess: onMutationDone });
@@ -2138,6 +2432,8 @@ function GameView() {
         <p className="game-note">每槽位只能装备一件，换装直接替换；装备效果与属性加成叠加，只对之后的新结算生效。无抽卡、无随机词缀、无真实付费。</p>
       </section>
 
+      <RewardsPanel />
+
       <section className="game-panel" aria-labelledby="game-daily-title">
         <div className="section-line"><h3 id="game-daily-title">每日额外任务</h3><span>每日 3 个 · 达标自动入账</span></div>
         <div className="game-tasks">
@@ -2221,9 +2517,9 @@ function GameView() {
                   <span className="unified-date">{dateLabel(entry.localDate)}</span>
                   <div className="unified-main">
                     <strong><span aria-hidden="true">{meta.symbol}</span> {label}</strong>
-                    <small>{fullDateLabel(entry.localDate)} · 已结算 · 规则 v{entry.ruleVersion}</small>
+                    <small>{fullDateLabel(entry.localDate)} · {entry.category === "reward_redeem" ? "兑换流水 · 已入账" : `已结算 · 规则 v${entry.ruleVersion}`}</small>
                   </div>
-                  <span className="game-xp">+{entry.xp} XP{entry.gold > 0 ? ` · +${entry.gold} 金币` : ""}</span>
+                  <span className="game-xp">{entry.category === "reward_redeem" ? `−${numberLabel(-entry.gold)} 金币` : `+${entry.xp} XP${entry.gold > 0 ? ` · +${numberLabel(entry.gold)} 金币` : entry.gold < 0 ? ` · −${numberLabel(-entry.gold)} 金币` : ""}`}</span>
                 </div>
               );
             })}
