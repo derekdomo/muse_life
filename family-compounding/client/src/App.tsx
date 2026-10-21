@@ -264,6 +264,17 @@ function MonthCalendar({ data }: { data: Dashboard }) {
 
 /* ---------------- record form ---------------- */
 
+// The exact draft a submission carried, passed along as a mutation
+// variable so the success handler can tell whether the owner kept
+// editing while the request was in flight. `minutes: undefined` marks
+// an unparseable minutes field (it can never match a snapshot).
+type SubmittedDraft = {
+  date: string;
+  typeName: string;
+  minutes: number | null | undefined;
+  note: string | null;
+};
+
 function RecordForm({ data }: { data: Dashboard }) {
   const queryClient = useQueryClient();
   const [date, setDate] = useState(data.today);
@@ -275,35 +286,99 @@ function RecordForm({ data }: { data: Dashboard }) {
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [conflictPending, setConflictPending] = useState(false);
   const requestKeyRef = useRef<string>(newRequestKey());
+  // Live mirrors of the form fields. The mutation's onSuccess reads
+  // these (not the render-scope state, which its closure may predate)
+  // to compare the in-flight draft against what is on screen now.
+  const dateRef = useRef(data.today);
+  const pickedTypeRef = useRef<string | null>(null);
+  const customTypeRef = useRef("");
+  const minutesTextRef = useRef("");
+  const noteRef = useRef("");
 
   const typeNames = data.types.map((t) => t.name);
   const effectiveType =
     pickedType && typeNames.includes(pickedType) ? pickedType : (typeNames[0] ?? "");
 
+  // The draft exactly as the form currently stands, normalized the
+  // same way submitDraft normalizes a submission.
+  function currentDraft(): SubmittedDraft {
+    const picked = pickedTypeRef.current;
+    const pickedName =
+      picked && typeNames.includes(picked) ? picked : (typeNames[0] ?? "");
+    const typeName = typeNames.length > 0 ? pickedName : customTypeRef.current.trim();
+    const mt = minutesTextRef.current.trim();
+    let minutes: number | null | undefined = null;
+    if (mt !== "") {
+      const parsed = Number(mt);
+      minutes = Number.isInteger(parsed) ? parsed : undefined;
+    }
+    const trimmedNote = noteRef.current.trim();
+    return {
+      date: dateRef.current,
+      typeName,
+      minutes,
+      note: trimmedNote === "" ? null : trimmedNote,
+    };
+  }
+
+  function draftMatchesSnapshot(submittedSnapshot: SubmittedDraft): boolean {
+    const cur = currentDraft();
+    return (
+      cur.date === submittedSnapshot.date &&
+      cur.typeName === submittedSnapshot.typeName &&
+      cur.minutes === submittedSnapshot.minutes &&
+      cur.note === submittedSnapshot.note
+    );
+  }
+
+  function clearFlexibleFields() {
+    setMinutesText("");
+    minutesTextRef.current = "";
+    setNote("");
+    noteRef.current = "";
+  }
+
   const add = useMutation({
-    mutationFn: (payload: {
+    mutationFn: (vars: {
       date: string;
       typeName: string;
       minutes: number | null;
       note: string | null;
       requestKey: string;
-    }) => api.addActivity(payload),
-    onSuccess: (res) => {
+      submittedSnapshot: SubmittedDraft;
+    }) =>
+      api.addActivity({
+        date: vars.date,
+        typeName: vars.typeName,
+        minutes: vars.minutes,
+        note: vars.note,
+        requestKey: vars.requestKey,
+      }),
+    onSuccess: (res, variables) => {
       if (res.ok && res.duplicate) {
-        setSavedMsg("这条已经记过了——重复提交没有重复计数。");
         setError(null);
         setConflictPending(false);
         requestKeyRef.current = newRequestKey();
-        setMinutesText("");
-        setNote("");
+        if (draftMatchesSnapshot(variables.submittedSnapshot)) {
+          setSavedMsg("这条已经记过了——重复提交没有重复计数。");
+          clearFlexibleFields();
+        } else {
+          // The owner edited the draft while this save was in flight:
+          // keep every field as it now stands — the new content is a
+          // separate, still-unsaved draft under the fresh key.
+          setSavedMsg("这条已经记过了——重复提交没有重复计数。（你刚修改的新内容已保留，还没保存。）");
+        }
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       } else if (res.ok) {
-        setSavedMsg("已记下。");
         setError(null);
         setConflictPending(false);
         requestKeyRef.current = newRequestKey();
-        setMinutesText("");
-        setNote("");
+        if (draftMatchesSnapshot(variables.submittedSnapshot)) {
+          setSavedMsg("已记下。");
+          clearFlexibleFields();
+        } else {
+          setSavedMsg("已记下。（你刚修改的新内容已保留，还没保存。）");
+        }
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       } else if (res.conflict) {
         // Same submission, different content: keep the whole draft and
@@ -320,8 +395,7 @@ function RecordForm({ data }: { data: Dashboard }) {
         setError(null);
         setConflictPending(false);
         requestKeyRef.current = newRequestKey();
-        setMinutesText("");
-        setNote("");
+        clearFlexibleFields();
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       } else if (res.future) {
         setError("日期在今天之后，还没发生的事不能记为已完成；填写内容已保留。");
@@ -355,12 +429,20 @@ function RecordForm({ data }: { data: Dashboard }) {
     }
     setError(null);
     setConflictPending(false);
+    const noteValue = note.trim() === "" ? null : note.trim();
+    const submittedSnapshot: SubmittedDraft = {
+      date,
+      typeName,
+      minutes,
+      note: noteValue,
+    };
     add.mutate({
       date,
       typeName,
       minutes,
-      note: note.trim() === "" ? null : note.trim(),
+      note: noteValue,
       requestKey: requestKeyRef.current,
+      submittedSnapshot,
     });
   }
 
@@ -387,7 +469,10 @@ function RecordForm({ data }: { data: Dashboard }) {
           type="date"
           value={date}
           max={data.today}
-          onChange={(e) => setDate(e.target.value)}
+          onChange={(e) => {
+            setDate(e.target.value);
+            dateRef.current = e.target.value;
+          }}
           className={inputCls}
           required
         />
@@ -405,7 +490,10 @@ function RecordForm({ data }: { data: Dashboard }) {
                   key={t.id}
                   type="button"
                   aria-pressed={active}
-                  onClick={() => setPickedType(t.name)}
+                  onClick={() => {
+                    setPickedType(t.name);
+                    pickedTypeRef.current = t.name;
+                  }}
                   className={`rounded-full border px-3.5 py-2 text-sm ${
                     active
                       ? "border-[var(--accent)] bg-[var(--surface-2)] font-bold text-[var(--text)]"
@@ -422,7 +510,10 @@ function RecordForm({ data }: { data: Dashboard }) {
           <input
             aria-labelledby="type-label"
             value={customType}
-            onChange={(e) => setCustomType(e.target.value)}
+            onChange={(e) => {
+              setCustomType(e.target.value);
+              customTypeRef.current = e.target.value;
+            }}
             placeholder="类型名，如 一起吃饭"
             maxLength={20}
             className={inputCls}
@@ -440,7 +531,10 @@ function RecordForm({ data }: { data: Dashboard }) {
           min={1}
           max={1440}
           value={minutesText}
-          onChange={(e) => setMinutesText(e.target.value)}
+          onChange={(e) => {
+            setMinutesText(e.target.value);
+            minutesTextRef.current = e.target.value;
+          }}
           placeholder="留空表示未知"
           className={inputCls}
         />
@@ -453,7 +547,10 @@ function RecordForm({ data }: { data: Dashboard }) {
           id="activity-note"
           type="text"
           value={note}
-          onChange={(e) => setNote(e.target.value)}
+          onChange={(e) => {
+            setNote(e.target.value);
+            noteRef.current = e.target.value;
+          }}
           placeholder="如 去公园骑了车"
           maxLength={80}
           className={inputCls}
@@ -743,7 +840,7 @@ export function App() {
               {dashboard.data.futureRecordCount > 0 ? (
                 <p className="mt-2 text-sm text-[var(--dim)]">
                   有 <span className="tnum">{dashboard.data.futureRecordCount}</span>{" "}
-                  条记录日期在今天之后，未计入累计；可以在最近记录里删除，或等日期到达后重新记录。
+                  条记录日期在今天之后，未计入累计；这些记录会在日期到达后自动计入累计，无需重新记录，也可以直接在最近记录里删除。
                 </p>
               ) : null}
             </section>
