@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import {
 Area,
@@ -1644,6 +1644,150 @@ export function observationRelationText(relation: string, attempt: number | null
   return "归属未知";
 }
 
+// F0.7-OBS-001 (B-class presentation increment): the read-only
+// 「检查进度」 check. One channel's outcome of a single manual
+// progress check: whether THIS session actually received a fresh
+// response, when the local device received it (epoch ms — a
+// client-side receipt instant, never a server update time), the
+// refresh status that response carried, whether it carried
+// successful data, and the attempt start it reported.
+export type ProgressReadOutcome = {
+  ok: boolean;
+  receivedAt: number | null;
+  refreshStatus: RefreshStatus | null;
+  hasData: boolean;
+  startedAt: string | null;
+};
+
+export type ProgressReadRaw = {
+  refreshStatus: RefreshStatus | null;
+  hasData: boolean;
+  startedAt: string | null;
+};
+
+export type CheckProgressFeedback = {
+  anyRead: boolean;
+  allRead: boolean;
+  headline: string;
+  dashboardLine: string;
+  observationsLine: string;
+  waitedText: string | null;
+  note: string;
+};
+
+// Runs ONE manual progress check: exactly the two read-only
+// refetches (dashboard + observations), in parallel, each settled
+// independently so one channel's failure never fails the other.
+// The shared gate makes a double-click a no-op (returns null)
+// instead of a second pair of reads; the gate is released when
+// the check settles, so a later click checks again. There is no
+// mutation path here at all — no refresh is started, no task is
+// spawned, no new generation is created. A failed channel keeps
+// receivedAt null: the "最近读取" time is only ever stamped by a
+// response this session actually received.
+export async function performProgressCheck(args: {
+  gate: { inFlight: boolean };
+  readDashboard: () => Promise<ProgressReadRaw>;
+  readObservations: () => Promise<ProgressReadRaw>;
+  now: () => number;
+}): Promise<{ dashboard: ProgressReadOutcome; observations: ProgressReadOutcome } | null> {
+  if (args.gate.inFlight) return null;
+  args.gate.inFlight = true;
+  const settle = async (read: () => Promise<ProgressReadRaw>): Promise<ProgressReadOutcome> => {
+    try {
+      const raw = await read();
+      return {
+        ok: true,
+        receivedAt: args.now(),
+        refreshStatus: raw.refreshStatus,
+        hasData: raw.hasData,
+        startedAt: raw.startedAt,
+      };
+    } catch {
+      return { ok: false, receivedAt: null, refreshStatus: null, hasData: false, startedAt: null };
+    }
+  };
+  try {
+    const dashboardRead = settle(args.readDashboard);
+    const observationsRead = settle(args.readObservations);
+    return { dashboard: await dashboardRead, observations: await observationsRead };
+  } finally {
+    args.gate.inFlight = false;
+  }
+}
+
+// Pure feedback wording for one manual progress check. Each
+// channel is reported on its own line with its own result and
+// its own local receipt time; a partial read is never merged
+// into an "all verified" claim. The terminal/running conclusion
+// follows the status the successful read actually returned —
+// reading successfully is never worded as the refresh having
+// succeeded, let alone as a bank reconciliation. The waited
+// duration is only computed from a present, parseable attempt
+// start that is not in the future; a missing or invalid
+// startedAt yields no waited claim at all.
+export function checkProgressFeedback(input: {
+  dashboard: ProgressReadOutcome;
+  observations: ProgressReadOutcome;
+  nowMs: number;
+  formatTime: (ms: number) => string;
+}): CheckProgressFeedback {
+  const { dashboard, observations } = input;
+  const readLine = (label: string, read: ProgressReadOutcome): string => {
+    if (!read.ok || read.receivedAt == null) {
+      return `${label}：▲ 未读出（读取失败，最近读取时间未更新，保留此前显示）`;
+    }
+    const statusText = read.refreshStatus == null
+      ? "状态未提供"
+      : refreshStatusText(read.refreshStatus, read.hasData);
+    return `${label}：✓ 已读取 · 最近读取状态：${input.formatTime(read.receivedAt)}（仅本次会话；本机收到响应的时刻，非服务器更新时间）· 当时状态：${statusText}`;
+  };
+  const status = dashboard.ok ? dashboard.refreshStatus : observations.ok ? observations.refreshStatus : null;
+  let headline: string;
+  if (!dashboard.ok && !observations.ok) {
+    headline = "进度暂未读出，尚不能确认本次更新结果";
+  } else if (!dashboard.ok) {
+    headline = "看板状态暂未读出，尚不能确认本次更新结果（观测记录一路已读出，见下方分路结果，不合成全部已核实）";
+  } else if (status === "running") {
+    headline = dashboard.hasData
+      ? "状态已读取，本次尝试仍未观测到终态；当前显示上次成功数据"
+      : "状态已读取，本次尝试仍未观测到终态；尚无成功数据";
+  } else if (status === "error") {
+    headline = dashboard.hasData
+      ? "状态已读取：最近一次尝试已失败（终态）；当前显示上次成功数据"
+      : "状态已读取：最近一次尝试已失败（终态）；尚无成功数据";
+  } else if (status === "idle") {
+    headline = dashboard.hasData
+      ? "状态已读取：最近一次尝试已完成（终态）；当前显示最后成功快照"
+      : "状态已读取：当前无进行中的更新；尚无成功数据";
+  } else {
+    headline = "状态已读取，但返回中未包含刷新状态，尚不能确认本次更新结果";
+  }
+  if (dashboard.ok && !observations.ok) {
+    headline += "；观测记录一路未读出（见下方分路结果）";
+  }
+  let waitedText: string | null = null;
+  if (status === "running") {
+    const startedAt = dashboard.ok ? dashboard.startedAt : observations.ok ? observations.startedAt : null;
+    if (startedAt) {
+      const startMs = new Date(startedAt).getTime();
+      if (!Number.isNaN(startMs) && input.nowMs >= startMs) {
+        const minutes = Math.floor((input.nowMs - startMs) / 60000);
+        waitedText = minutes >= 1 ? `本次尝试已等待约 ${minutes} 分钟（按尝试开始时刻计）` : "本次尝试已等待不足 1 分钟（按尝试开始时刻计）";
+      }
+    }
+  }
+  return {
+    anyRead: dashboard.ok || observations.ok,
+    allRead: dashboard.ok && observations.ok,
+    headline,
+    dashboardLine: readLine("看板状态", dashboard),
+    observationsLine: readLine("观测记录", observations),
+    waitedText,
+    note: "读取成功只表示本机读到了当时的状态，不等于刷新成功，也不等于银行对账成功。",
+  };
+}
+
 // F0.7 observability panel: an expandable, read-only view of the
 // refresh chain's recorded events, rendered inside the status
 // band. It distinguishes the three failures the band alone cannot
@@ -1657,12 +1801,11 @@ export function observationRelationText(relation: string, attempt: number | null
 // unrelated events, each row carrying a text relation tag —
 // older generations' events are never presented as evidence
 // about the current attempt.
-function RefreshObservationsPanel() {
-  const observations = useQuery({
-    queryKey: ["finance-refresh-observations"],
-    queryFn: () => api.getRefreshObservations({}),
-    refetchInterval: (query) => query.state.data?.state?.status === "running" ? 3000 : false,
-  });
+function RefreshObservationsPanel({
+  observations,
+}: {
+  observations: UseQueryResult<ApiResponse<typeof api, "getRefreshObservations">>;
+}) {
   const result = observations.data;
   const formatInstant = (value: string): string => {
     const date = new Date(value);
@@ -1744,10 +1887,18 @@ function RefreshStatusBand({
   data,
   refresh,
   message,
+  observations,
+  checking,
+  checkFeedback,
+  onCheckProgress,
 }: {
   data: Dashboard | null;
   refresh: { status: RefreshStatus; updatedAt: string | null; startedAt: string | null };
   message: string | null;
+  observations: UseQueryResult<ApiResponse<typeof api, "getRefreshObservations">>;
+  checking: boolean;
+  checkFeedback: CheckProgressFeedback | null;
+  onCheckProgress: () => void;
 }) {
   const hasData = data != null;
   const formatInstant = (value: string | null, dateOnly: boolean): string => {
@@ -1774,6 +1925,28 @@ function RefreshStatusBand({
         <p className="refresh-band__note">{hasData ? "正在更新，当前显示上次成功数据；合法落盘保存后才会替换。" : "正在更新，尚无成功数据可显示。"}</p>
       ) : null}
       {message ? <p className="refresh-band__note">{message}</p> : null}
+      <div className="refresh-band__check">
+        <button
+          type="button"
+          className="refresh-band__check-button"
+          onClick={onCheckProgress}
+          disabled={checking}
+          aria-label="检查进度（只读：只重新读取当前状态，不启动更新）"
+        >
+          {checking ? "正在检查…" : "检查进度"}
+        </button>
+        <span>只读检查：只重新读取状态，不启动更新、不生成新代次</span>
+      </div>
+      {checking ? <p className="refresh-band__note">正在检查…</p> : null}
+      {checkFeedback ? (
+        <div className="refresh-band__check-feedback">
+          <p><strong>{checkFeedback.headline}</strong></p>
+          <p>{checkFeedback.dashboardLine}</p>
+          <p>{checkFeedback.observationsLine}</p>
+          {checkFeedback.waitedText ? <p>{checkFeedback.waitedText}</p> : null}
+          <p>{checkFeedback.note}</p>
+        </div>
+      ) : null}
       {facts.length > 0 ? (
         <div className="refresh-band__facts">
           {facts.map((fact) => (
@@ -1794,7 +1967,7 @@ function RefreshStatusBand({
           ))}
         </div>
       </details>
-      <RefreshObservationsPanel />
+      <RefreshObservationsPanel observations={observations} />
     </section>
   );
 }
@@ -1813,6 +1986,66 @@ export function App() {
       queryClient.invalidateQueries({ queryKey: ["finance-refresh-observations"] });
     },
   });
+  // The observations query lives here (not in the panel) so the
+  // manual 「检查进度」 check refetches the exact same two read-only
+  // queries the page already polls. Owner-only: it stays disabled
+  // until the dashboard read has confirmed owner access, and the
+  // server independently rejects non-owners with zero data.
+  const observations = useQuery({
+    queryKey: ["finance-refresh-observations"],
+    queryFn: () => api.getRefreshObservations({}),
+    enabled: dashboard.data?.access === "owner",
+    refetchInterval: (query) => query.state.data?.state?.status === "running" ? 3000 : false,
+  });
+  // 「检查进度」 session state: the gate blocks a double-click from
+  // starting a second pair of reads (only this check's own button
+  // is disabled meanwhile — nothing else is locked), and the last
+  // check's per-channel outcomes stay visible until the next check.
+  const checkGateRef = useRef({ inFlight: false });
+  const [checking, setChecking] = useState(false);
+  const [checkReads, setCheckReads] = useState<{ dashboard: ProgressReadOutcome; observations: ProgressReadOutcome } | null>(null);
+  const handleCheckProgress = () => {
+    if (checkGateRef.current.inFlight) return;
+    setChecking(true);
+    void performProgressCheck({
+      gate: checkGateRef.current,
+      readDashboard: async () => {
+        const result = await dashboard.refetch();
+        if (result.isError || !result.data || result.data.access !== "owner") {
+          throw new Error("dashboard progress read failed");
+        }
+        return {
+          refreshStatus: result.data.refresh.status,
+          hasData: result.data.data != null,
+          startedAt: result.data.refresh.startedAt,
+        };
+      },
+      readObservations: async () => {
+        const result = await observations.refetch();
+        if (result.isError || !result.data || result.data.access !== "owner") {
+          throw new Error("observations progress read failed");
+        }
+        return {
+          refreshStatus: result.data.state?.status ?? null,
+          hasData: false,
+          startedAt: result.data.state?.startedAt ?? null,
+        };
+      },
+      now: () => Date.now(),
+    }).then((reads) => {
+      if (reads) setCheckReads(reads);
+    }).finally(() => {
+      setChecking(false);
+    });
+  };
+  const checkFeedback = checkReads
+    ? checkProgressFeedback({
+        dashboard: checkReads.dashboard,
+        observations: checkReads.observations,
+        nowMs: Date.now(),
+        formatTime: (ms) => timestampLabel.format(new Date(ms)),
+      })
+    : null;
 
   const response = dashboard.data;
   const status: RefreshStatus = response?.refresh.status ?? "idle";
@@ -1842,6 +2075,10 @@ export function App() {
             data={response.data}
             refresh={response.refresh}
             message={visibleMessage}
+            observations={observations}
+            checking={checking}
+            checkFeedback={checkFeedback}
+            onCheckProgress={handleCheckProgress}
           />
         ) : null}
 
