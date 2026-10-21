@@ -124,6 +124,27 @@ check(
   clientSrc.includes('res.code === "project_deleted"') &&
     clientSrc.includes("所选项目已被删除，这条记录没有保存。填写内容已保留"),
 );
+check(
+  "source: week points carry the two fact lines separately (entries + stages, new + cumulative)",
+  serverSrc.includes("newEntries: z.number()") &&
+    serverSrc.includes("cumulativeEntries: z.number()") &&
+    serverSrc.includes("newStages: z.number()") &&
+    serverSrc.includes("cumulativeStages: z.number()") &&
+    serverSrc.includes("newEntriesByWeek") &&
+    serverSrc.includes("newStagesByWeek"),
+);
+check(
+  "client: chart draws both lines — solid entries + dashed stages (line style, not color alone)",
+  clientSrc.includes("strokeDasharray") &&
+    clientSrc.includes("cumulativeEntries") &&
+    clientSrc.includes("cumulativeStages"),
+);
+check(
+  "client: legend names both lines with their meanings and current counts",
+  clientSrc.includes("累计成果记录（实线 · 圆点）") &&
+    clientSrc.includes("已标记的阶段里程碑（虚线 · 方点）") &&
+    clientSrc.includes("不等于真实用户或收入增长"),
+);
 
 /* ---------------- 2. behavior against real handlers ---------------- */
 
@@ -605,6 +626,102 @@ for (const [label, viewer] of [["non-owner", NON_OWNER], ["anonymous", ANON]]) {
     "legacy: owner can delete a duplicate entry by hand; the progress group then leaves the reconciliation list",
     manual.ok === true && dash2.reconciliation.filter((g) => g.kind === "progress").length === 0 &&
       dash2.totals.totalEntries === 2,
+  );
+}
+
+/* ----- two fact lines: entries vs stage milestones (CMP-CREATE-001) ----- */
+
+{
+  const two = await makeDb();
+  const { ctx: twoOwner } = makeCtx(two.db, OWNER);
+
+  const emptyDash = await call("getDashboard", twoOwner, {});
+  check(
+    "two-lines: no records at all -> empty series (honest empty state, no invented points)",
+    emptyDash.series.length === 0 && emptyDash.totals.totalEvents === 0,
+  );
+
+  const tp = await call("addProject", twoOwner, { name: "双线验证项目" });
+  // Week of Mon 2026-09-28: one entry + one stage.
+  await call("addProgress", twoOwner, {
+    projectId: tp.id, date: "2026-09-29", description: "双线产出 A", evidence: "证据 A",
+  });
+  await call("setStage", twoOwner, { projectId: tp.id, stage: "idea", date: "2026-09-30" });
+  // Week of Mon 2026-10-05: nothing at all (gap week).
+  // Week of Mon 2026-10-12: two entries + one stage, same week.
+  await call("addProgress", twoOwner, {
+    projectId: tp.id, date: "2026-10-13", description: "双线产出 B", evidence: "证据 B",
+  });
+  await call("addProgress", twoOwner, {
+    projectId: tp.id, date: "2026-10-14", description: "双线产出 C", evidence: "证据 C",
+  });
+  await call("setStage", twoOwner, { projectId: tp.id, stage: "first_version", date: "2026-10-15" });
+
+  const dash = await call("getDashboard", twoOwner, {});
+  const at = (ws) => dash.series.find((p) => p.weekStart === ws);
+  const w1 = at("2026-09-28");
+  check(
+    "two-lines: week 1 counts each kind on its own line (1 new entry, 1 new stage)",
+    w1?.newEntries === 1 && w1?.cumulativeEntries === 1 && w1?.newStages === 1 && w1?.cumulativeStages === 1,
+    JSON.stringify(w1),
+  );
+  check(
+    "two-lines: combined fields preserved as the sum of both lines (newCount 2, cumulative 2)",
+    w1?.newCount === 2 && w1?.cumulative === 2,
+    JSON.stringify(w1),
+  );
+  const gap = at("2026-10-05");
+  check(
+    "two-lines: gap week stays in the series with both lines flat, nothing backfilled",
+    gap?.newEntries === 0 && gap?.newStages === 0 &&
+      gap?.cumulativeEntries === 1 && gap?.cumulativeStages === 1 && gap?.newCount === 0,
+    JSON.stringify(gap),
+  );
+  const w3 = at("2026-10-12");
+  check(
+    "two-lines: same week with both kinds accumulates each line separately (entries 3, stages 2)",
+    w3?.newEntries === 2 && w3?.cumulativeEntries === 3 &&
+      w3?.newStages === 1 && w3?.cumulativeStages === 2 &&
+      w3?.newCount === 3 && w3?.cumulative === 5,
+    JSON.stringify(w3),
+  );
+
+  // Clearing a stage moves ONLY the stage line.
+  const cleared = await call("clearStage", twoOwner, { projectId: tp.id, stage: "first_version" });
+  const dash2 = await call("getDashboard", twoOwner, {});
+  const w3b = dash2.series.find((p) => p.weekStart === "2026-10-12");
+  check(
+    "two-lines: clearStage drops the stage line only — entries line unchanged",
+    cleared.ok === true &&
+      w3b?.newStages === 0 && w3b?.cumulativeStages === 1 &&
+      w3b?.newEntries === 2 && w3b?.cumulativeEntries === 3 &&
+      w3b?.cumulative === 4,
+    JSON.stringify(w3b),
+  );
+
+  // A duplicate output is still arbitrated: not re-counted on either line.
+  const dup = await call("addProgress", twoOwner, {
+    projectId: tp.id, date: "2026-10-13", description: "双线产出 B", evidence: "证据 B",
+  });
+  const dash3 = await call("getDashboard", twoOwner, {});
+  const lastPoint = dash3.series[dash3.series.length - 1];
+  check(
+    "two-lines: duplicate entry refused and not re-counted on either line",
+    dup.duplicate === true && lastPoint?.cumulativeEntries === 3 && lastPoint?.cumulativeStages === 1,
+    JSON.stringify(lastPoint),
+  );
+
+  // Re-marking a stage on a different date moves the stage line's week,
+  // never the entries line.
+  await call("setStage", twoOwner, { projectId: tp.id, stage: "idea", date: "2026-10-13" });
+  const dash4 = await call("getDashboard", twoOwner, {});
+  const w1c = dash4.series.find((p) => p.weekStart === "2026-09-28");
+  const w3c = dash4.series.find((p) => p.weekStart === "2026-10-12");
+  check(
+    "two-lines: moving a stage date shifts only the stage line's week",
+    w1c?.newStages === 0 && w1c?.newEntries === 1 &&
+      w3c?.newStages === 1 && w3c?.cumulativeStages === 1 && w3c?.cumulativeEntries === 3,
+    JSON.stringify({ w1c, w3c }),
   );
 }
 

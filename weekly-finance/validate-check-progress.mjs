@@ -45,12 +45,19 @@ const { checkProgressFeedback, performProgressCheck } = api;
 const fmt = (ms) => `T${ms}`;
 const okRead = (over = {}) => ({
   ok: true, receivedAt: 5000, refreshStatus: "running", hasData: true, startedAt: null,
-  message: null, asOf: null, diagnosisCode: null, diagnosisAttempt: null, ...over,
+  message: null, asOf: null, diagnosisCode: null, diagnosisAttempt: null, diagnosisText: null, ...over,
 });
 const failRead = () => ({
   ok: false, receivedAt: null, refreshStatus: null, hasData: false, startedAt: null,
-  message: null, asOf: null, diagnosisCode: null, diagnosisAttempt: null,
+  message: null, asOf: null, diagnosisCode: null, diagnosisAttempt: null, diagnosisText: null,
 });
+// The server's own current-generation diagnosis texts (verbatim
+// from deriveRefreshDiagnosis): under code awaiting_callback the
+// arrived variant states the current generation's callback has
+// arrived; the default variant states none of this generation
+// has. Only the text distinguishes them — the code is the same.
+const ARRIVED_TEXT = "等待当前代终态：当前代回调已到达，终态未知（结果事件尚未记录）";
+const NOT_ARRIVED_TEXT = "等待当前代回调，执行终态未知（当前尝试尚无本代回调到达；任务可能仍在执行，也可能回调尚未投递）";
 const allText = (fb) => [fb.headline, fb.dashboardLine, fb.observationsLine, fb.refreshResultLine, fb.dataFactLine, fb.waitedText ?? "", fb.note].join("\n");
 const START = "2026-10-20T10:00:00.000Z";
 const START_MS = new Date(START).getTime();
@@ -202,6 +209,89 @@ check("(a) projected error + raw running: refresh result says 超过等待窗口
 check("(a) projected error + raw running: waited duration survives the projection (observations startedAt)",
   projectedStale.waitedText != null && projectedStale.waitedText.includes("约 125 分钟"));
 
+// --- (a2) current generation's callback ARRIVED, still running ---
+// Same code awaiting_callback, but the diagnosis text states this
+// generation's callback_received is on record and only the result
+// event is missing. The feedback must surface the arrival as
+// progress — never hide it as "still waiting for the callback" —
+// while still claiming no terminal (not saved, not finished).
+const arrivedRunning = checkProgressFeedback({
+  dashboard: okRead({ refreshStatus: "running", hasData: true, startedAt: START, asOf: ASOF }),
+  observations: okRead({ refreshStatus: "running", hasData: false, startedAt: START, diagnosisCode: "awaiting_callback", diagnosisAttempt: 6, diagnosisText: ARRIVED_TEXT }),
+  nowMs: START_MS + 4 * 60000,
+  formatTime: fmt,
+});
+check("(a2) arrived + running (in window): refresh result states 本代回调已到达，正在等待处理结果 with the terminal unconfirmed",
+  arrivedRunning.refreshResultLine.includes("本代回调已到达，正在等待处理结果") && arrivedRunning.refreshResultLine.includes("终态尚不能确认"));
+check("(a2) arrived + running (in window): NEVER worded as still waiting for the callback, and no saved/finished claim",
+  !arrivedRunning.refreshResultLine.includes("正在等待当前代回调") && !arrivedRunning.refreshResultLine.includes("已保存")
+  && !allText(arrivedRunning).includes("失败（终态）") && !allText(arrivedRunning).includes("已完成（终态）"));
+check("(a2) arrived + running (in window): waited duration still shown (the attempt is not over)",
+  arrivedRunning.waitedText != null && arrivedRunning.waitedText.includes("约 4 分钟"));
+
+// --- (a3) arrived + running, projected past the wait window ---
+// The timeout projection must keep the arrival fact too: arrived,
+// past the window, terminal still unconfirmed — never a fallback
+// to "仍在等待回调" and never a failure terminal.
+const arrivedStale = checkProgressFeedback({
+  dashboard: okRead({ refreshStatus: "error", hasData: true, startedAt: START, asOf: ASOF, message: "上次更新未完成，可以重新更新" }),
+  observations: okRead({ refreshStatus: "running", hasData: false, startedAt: START, diagnosisCode: "awaiting_callback", diagnosisAttempt: 6, diagnosisText: ARRIVED_TEXT }),
+  nowMs: START_MS + 130 * 60000,
+  formatTime: fmt,
+});
+check("(a3) arrived + projected error: refresh result keeps 本代回调已到达 with 超过等待窗口，终态尚不能确认",
+  arrivedStale.refreshResultLine.includes("本代回调已到达，正在等待处理结果")
+  && arrivedStale.refreshResultLine.includes("超过等待窗口，终态尚不能确认"));
+check("(a3) arrived + projected error: NO 仍在等待回调 and NO 失败（终态） anywhere in the feedback",
+  !allText(arrivedStale).includes("仍在等待回调") && !allText(arrivedStale).includes("失败（终态）"));
+
+// --- (a4) same generation, callback NOT arrived (contrast) ---
+// The default diagnosis text for the same generation states no
+// callback of this generation has arrived: the original waiting
+// wording stays, and no arrival is claimed.
+const notArrived = checkProgressFeedback({
+  dashboard: okRead({ refreshStatus: "running", hasData: true, startedAt: START, asOf: ASOF }),
+  observations: okRead({ refreshStatus: "running", hasData: false, startedAt: START, diagnosisCode: "awaiting_callback", diagnosisAttempt: 6, diagnosisText: NOT_ARRIVED_TEXT }),
+  nowMs: START_MS + 4 * 60000,
+  formatTime: fmt,
+});
+check("(a4) not arrived (explicit current-gen text): original 正在等待当前代回调 wording kept, no arrival claimed",
+  notArrived.refreshResultLine.includes("正在等待当前代回调") && !notArrived.refreshResultLine.includes("本代回调已到达"));
+
+// --- (a5) only a HISTORICAL generation's callback arrived ---
+// The server diagnosis is scoped to the current generation, so a
+// history-only callback_received yields the not-arrived text (or
+// no text at all on a legacy payload). The wiring must never
+// promote history into a current-generation arrival claim.
+const historyOnlyText = checkProgressFeedback({
+  dashboard: okRead({ refreshStatus: "running", hasData: true, startedAt: START, asOf: ASOF }),
+  observations: okRead({ refreshStatus: "running", hasData: false, startedAt: START, diagnosisCode: "awaiting_callback", diagnosisAttempt: 7, diagnosisText: NOT_ARRIVED_TEXT }),
+  nowMs: START_MS + 60000,
+  formatTime: fmt,
+});
+const noTextAtAll = checkProgressFeedback({
+  dashboard: okRead({ refreshStatus: "running", hasData: true, startedAt: START, asOf: ASOF }),
+  observations: okRead({ refreshStatus: "running", hasData: false, startedAt: START, diagnosisCode: "awaiting_callback", diagnosisAttempt: 7, diagnosisText: null }),
+  nowMs: START_MS + 60000,
+  formatTime: fmt,
+});
+check("(a5) history-only arrival / missing text: current generation is never credited with an arrival",
+  !historyOnlyText.refreshResultLine.includes("本代回调已到达") && historyOnlyText.refreshResultLine.includes("正在等待当前代回调")
+  && !noTextAtAll.refreshResultLine.includes("本代回调已到达") && noTextAtAll.refreshResultLine.includes("正在等待当前代回调"));
+
+// --- (a6) business idle + this generation's callback arrived,
+// result event unrecorded: the settled_success_unrecorded branch
+// is unchanged by the arrival fact riding in the text ---
+const unrecordedArrived = checkProgressFeedback({
+  dashboard: okRead({ refreshStatus: "idle", hasData: true, asOf: ASOF }),
+  observations: okRead({ refreshStatus: "idle", hasData: false, diagnosisCode: "settled_success_unrecorded", diagnosisAttempt: 8, diagnosisText: "当前尝试已成功收尾（以业务状态为准）：本代回调已到达，终态结果事件未记录（观测写入可能丢失）" }),
+  nowMs: START_MS,
+  formatTime: fmt,
+});
+check("(a6) idle + arrived + result row missing: still settled per business state with the event unrecorded (branch unchanged)",
+  unrecordedArrived.refreshResultLine.includes("已成功收尾") && unrecordedArrived.refreshResultLine.includes("终态事件未记录")
+  && !unrecordedArrived.refreshResultLine.includes("正在等待处理结果"));
+
 // --- (b) corrupted saved payload projected as error ---
 // Dashboard: projected "error", no data, message naming the
 // saved data corrupted. Raw state still running. The refresh
@@ -348,6 +438,18 @@ check("channel fields pass through settle (diagnosis code/attempt carried; absen
   mixed.observations.diagnosisCode === "settled_success" && mixed.observations.diagnosisAttempt === 7
   && mixed.dashboard.message === null && mixed.dashboard.asOf === null && mixed.dashboard.diagnosisCode === null);
 
+// --- performProgressCheck: the diagnosis TEXT passes through too ---
+const textCarried = await performProgressCheck({
+  gate: { inFlight: false },
+  readDashboard: async () => ({ refreshStatus: "running", hasData: true, startedAt: START }),
+  readObservations: async () => ({ refreshStatus: "running", hasData: false, startedAt: START, diagnosisCode: "awaiting_callback", diagnosisAttempt: 9, diagnosisText: ARRIVED_TEXT }),
+  now: () => 3131,
+});
+check("diagnosis text passes through settle verbatim (the arrival fact reaches the feedback intact)",
+  textCarried.observations.diagnosisText === ARRIVED_TEXT && textCarried.dashboard.diagnosisText === null);
+check("failed channel carries no diagnosis text (a failed read never fabricates an arrival fact)",
+  mixed.dashboard.diagnosisText === null && mixed.observations.diagnosisText === null);
+
 // --- wiring (real App.tsx source) ---
 check("wiring: the 检查进度 button lives in the refresh band, read-only labelled",
   appSrc.includes('aria-label="检查进度（只读：只重新读取当前状态，不启动更新）"')
@@ -376,6 +478,14 @@ check("wiring: the check handler consumes the existing fields (dashboard message
   handlerSrc.includes("message: result.data.refresh.message") && handlerSrc.includes("asOf: result.data.data?.asOf ?? null")
   && handlerSrc.includes("diagnosisCode: result.data.diagnosis?.code ?? null")
   && handlerSrc.includes("diagnosisAttempt: result.data.diagnosis?.attempt ?? null"));
+check("wiring: the check handler maps the diagnosis TEXT from the same diagnosis object (current generation only)",
+  handlerSrc.includes("diagnosisText: result.data.diagnosis?.text ?? null"));
+const feedbackStart = appSrc.indexOf("export function checkProgressFeedback");
+const feedbackEnd = appSrc.indexOf("\n}\n", feedbackStart);
+const feedbackSrc = appSrc.slice(feedbackStart, feedbackEnd);
+check("wiring: arrival is read ONLY from the current generation's diagnosis text (no inference from event rows)",
+  feedbackSrc.includes('observations.diagnosisText.includes("当前代回调已到达")')
+  && !feedbackSrc.includes("callback_received") && !feedbackSrc.includes(".event"));
 check("wiring: the band renders all three feedback layers and the honesty note via checkProgressFeedback",
   appSrc.includes("checkFeedback.dashboardLine") && appSrc.includes("checkFeedback.observationsLine")
   && appSrc.includes("checkFeedback.refreshResultLine") && appSrc.includes("checkFeedback.dataFactLine")
