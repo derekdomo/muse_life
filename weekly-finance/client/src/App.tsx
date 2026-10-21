@@ -1654,11 +1654,16 @@ export function observationRelationText(relation: string, attempt: number | null
 // dashboard channel additionally carries its own message (the
 // only client-visible signal that a saved payload is unreadable)
 // and the stored payload's asOf; the observations channel
-// additionally carries the CURRENT generation's diagnosis code
-// and attempt ordinal, because the dashboard's status is only a
-// projection (a stored "running" past the wait window, or an
-// unreadable saved payload, both surface as "error" without any
-// state write) and must never be read as a terminal verdict.
+// additionally carries the CURRENT generation's diagnosis code,
+// attempt ordinal, and diagnosis text, because the dashboard's
+// status is only a projection (a stored "running" past the wait
+// window, or an unreadable saved payload, both surface as "error"
+// without any state write) and must never be read as a terminal
+// verdict. The diagnosis text is the server's own current-
+// generation wording: under code "awaiting_callback" it alone
+// distinguishes "this generation's callback has arrived, its
+// result event is not yet recorded" from "no callback of this
+// generation has arrived" — the code by itself cannot.
 export type ProgressReadOutcome = {
   ok: boolean;
   receivedAt: number | null;
@@ -1669,6 +1674,7 @@ export type ProgressReadOutcome = {
   asOf: string | null;
   diagnosisCode: string | null;
   diagnosisAttempt: number | null;
+  diagnosisText: string | null;
 };
 
 export type ProgressReadRaw = {
@@ -1679,6 +1685,7 @@ export type ProgressReadRaw = {
   asOf?: string | null;
   diagnosisCode?: string | null;
   diagnosisAttempt?: number | null;
+  diagnosisText?: string | null;
 };
 
 export type CheckProgressFeedback = {
@@ -1724,6 +1731,7 @@ export async function performProgressCheck(args: {
         asOf: raw.asOf ?? null,
         diagnosisCode: raw.diagnosisCode ?? null,
         diagnosisAttempt: raw.diagnosisAttempt ?? null,
+        diagnosisText: raw.diagnosisText ?? null,
       };
     } catch {
       return {
@@ -1736,6 +1744,7 @@ export async function performProgressCheck(args: {
         asOf: null,
         diagnosisCode: null,
         diagnosisAttempt: null,
+        diagnosisText: null,
       };
     }
   };
@@ -1839,6 +1848,18 @@ export function checkProgressFeedback(input: {
         refreshResultLine = `刷新结果${attemptTag}：${symbol} 当前尝试的回调已到达但被忽略（未落盘保存）`;
         break;
       case "awaiting_callback": {
+        // The code alone cannot say whether THIS generation's
+        // callback has arrived: the server's diagnosis text can
+        // (its arrived variant states 当前代回调已到达; the
+        // default variant states no callback of this generation
+        // has arrived). The text is scoped to the current
+        // generation by the server — a historical generation's
+        // received-callback event never reaches this diagnosis,
+        // and nothing here infers arrival from event rows. Arrival
+        // is progress, not a terminal: never word it as saved
+        // or finished.
+        const callbackArrived = observations.diagnosisText != null
+          && observations.diagnosisText.includes("当前代回调已到达");
         // Raw state still running while the dashboard projects
         // "error": the stored attempt has outlived the wait
         // window — its execution terminal is unconfirmed, and
@@ -1846,9 +1867,15 @@ export function checkProgressFeedback(input: {
         const projectedPastWindow = dashboard.ok
           && dashboard.refreshStatus === "error"
           && observations.refreshStatus === "running";
-        refreshResultLine = projectedPastWindow
-          ? `刷新结果${attemptTag}：${symbol} 当前尝试仍在等待回调：已超过等待窗口，执行终态尚不能确认（看板状态为投影，原始状态仍为进行中）`
-          : `刷新结果${attemptTag}：${symbol} 正在等待当前代回调，终态尚不能确认`;
+        if (callbackArrived) {
+          refreshResultLine = projectedPastWindow
+            ? `刷新结果${attemptTag}：${symbol} 本代回调已到达，正在等待处理结果：已超过等待窗口，终态尚不能确认（看板状态为投影，原始状态仍为进行中）`
+            : `刷新结果${attemptTag}：${symbol} 本代回调已到达，正在等待处理结果，终态尚不能确认`;
+        } else {
+          refreshResultLine = projectedPastWindow
+            ? `刷新结果${attemptTag}：${symbol} 当前尝试仍在等待回调：已超过等待窗口，执行终态尚不能确认（看板状态为投影，原始状态仍为进行中）`
+            : `刷新结果${attemptTag}：${symbol} 正在等待当前代回调，终态尚不能确认`;
+        }
         break;
       }
       case "unattributed_history":
@@ -2178,6 +2205,7 @@ export function App() {
           startedAt: result.data.state?.startedAt ?? null,
           diagnosisCode: result.data.diagnosis?.code ?? null,
           diagnosisAttempt: result.data.diagnosis?.attempt ?? null,
+          diagnosisText: result.data.diagnosis?.text ?? null,
         };
       },
       now: () => Date.now(),

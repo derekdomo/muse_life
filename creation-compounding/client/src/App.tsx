@@ -75,14 +75,22 @@ function AccumulationChart({ series }: { series: WeekPoint[] }) {
       </p>
     );
   }
-  const maxY = Math.max(1, ...series.map((p) => p.cumulative));
+  // Two fact lines on one week axis, distinguished by line style AND
+  // marker shape AND legend text — never by color alone (色弱合规):
+  // 成果记录 = solid line + filled circles (Okabe-Ito sky blue);
+  // 阶段里程碑 = dashed line + hollow squares (Okabe-Ito orange).
+  const maxY = Math.max(
+    1,
+    ...series.map((p) => Math.max(p.cumulativeEntries, p.cumulativeStages)),
+  );
   const n = series.length;
   const x = (i: number) =>
     n === 1 ? padL + (W - padL - padR) / 2 : padL + (i * (W - padL - padR)) / (n - 1);
   const y = (v: number) => padT + (H - padT - padB) * (1 - v / maxY);
-  const path = series
-    .map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.cumulative).toFixed(1)}`)
-    .join(" ");
+  const linePath = (pick: (p: WeekPoint) => number) =>
+    series
+      .map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(pick(p)).toFixed(1)}`)
+      .join(" ");
   const last = series[n - 1];
   const gridVals = [0, Math.round(maxY / 2), maxY];
   return (
@@ -91,7 +99,7 @@ function AccumulationChart({ series }: { series: WeekPoint[] }) {
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label={`里程碑积累曲线：累计 ${last?.cumulative ?? 0} 个里程碑与产出`}
+        aria-label={`积累曲线（双线）：累计成果记录（实线）${last?.cumulativeEntries ?? 0} 条；已标记的阶段里程碑（虚线）${last?.cumulativeStages ?? 0} 个`}
       >
         {gridVals.map((v) => (
           <g key={v}>
@@ -101,20 +109,52 @@ function AccumulationChart({ series }: { series: WeekPoint[] }) {
             </text>
           </g>
         ))}
-        <path d={path} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
+        <path
+          d={linePath((p) => p.cumulativeStages)}
+          fill="none"
+          stroke="var(--accent-2)"
+          strokeWidth="2.5"
+          strokeDasharray="7 5"
+        />
+        <path d={linePath((p) => p.cumulativeEntries)} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
         {series.map((p, i) =>
-          p.newCount > 0 ? (
-            <g key={p.weekStart}>
-              <circle cx={x(i)} cy={y(p.cumulative)} r="4" fill="var(--accent)" />
+          p.newEntries > 0 ? (
+            <g key={`e-${p.weekStart}`}>
+              <circle cx={x(i)} cy={y(p.cumulativeEntries)} r="4" fill="var(--accent)" />
               <text
                 x={x(i)}
-                y={y(p.cumulative) - 10}
+                y={y(p.cumulativeEntries) - 10}
                 textAnchor="middle"
                 fontSize="11"
                 fill="var(--dim)"
                 className="tnum"
               >
-                +{p.newCount}
+                +{p.newEntries}
+              </text>
+            </g>
+          ) : null,
+        )}
+        {series.map((p, i) =>
+          p.newStages > 0 ? (
+            <g key={`s-${p.weekStart}`}>
+              <rect
+                x={x(i) - 4}
+                y={y(p.cumulativeStages) - 4}
+                width="8"
+                height="8"
+                fill="var(--surface)"
+                stroke="var(--accent-2)"
+                strokeWidth="2"
+              />
+              <text
+                x={x(i)}
+                y={y(p.cumulativeStages) + 20}
+                textAnchor="middle"
+                fontSize="11"
+                fill="var(--dim)"
+                className="tnum"
+              >
+                +{p.newStages}
               </text>
             </g>
           ) : null,
@@ -126,14 +166,29 @@ function AccumulationChart({ series }: { series: WeekPoint[] }) {
           {last?.weekStart ?? ""}
         </text>
       </svg>
-      <p className="mt-1 text-sm text-[var(--dim)]">
-        <span
-          aria-hidden="true"
-          className="mr-1 inline-block h-0 w-6 border-t-[3px] border-solid align-middle"
-          style={{ borderColor: "var(--accent)" }}
-        />
-        累计里程碑 + 产出（实线）{last?.cumulative ?? 0} 个 · 圆点与 +N 标出当周新增；没有新增的周曲线走平，不补数据。
-      </p>
+      <div className="mt-1 space-y-1.5 text-sm text-[var(--dim)]">
+        <p>
+          <span
+            aria-hidden="true"
+            className="mr-1.5 inline-block h-0 w-6 border-t-[3px] border-solid align-middle"
+            style={{ borderColor: "var(--accent)" }}
+          />
+          <span className="tnum">累计成果记录（实线 · 圆点）{last?.cumulativeEntries ?? 0} 条</span>
+          — 账本里逐条记下的可验证产出，+N 是当周新增条数。
+        </p>
+        <p>
+          <span
+            aria-hidden="true"
+            className="mr-1.5 inline-block h-0 w-6 border-t-[3px] border-dashed align-middle"
+            style={{ borderColor: "var(--accent-2)" }}
+          />
+          <span className="tnum">已标记的阶段里程碑（虚线 · 方点）{last?.cumulativeStages ?? 0} 个</span>
+          — 各项目阶段标尺上已标达成的阶段日期，+N 是当周新标记数；撤销阶段标记只回落这条线。
+        </p>
+        <p>
+          两条线各数各的：一条阶段标记只是项目推进的记号，不等于真实用户或收入增长；没有新增的周两条线都走平，不补数据。
+        </p>
+      </div>
     </div>
   );
 }
@@ -1000,9 +1055,9 @@ export function App() {
               </section>
             ) : null}
 
-            <section aria-label="里程碑积累曲线" className="mt-6">
+            <section aria-label="积累曲线" className="mt-6">
               <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
-                <h2 className="font-display text-base font-bold">里程碑积累曲线（按周）</h2>
+                <h2 className="font-display text-base font-bold">积累曲线（按周）：成果记录 × 阶段里程碑</h2>
                 <div className="mt-2">
                   <AccumulationChart series={data.series} />
                 </div>

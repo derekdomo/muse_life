@@ -333,6 +333,19 @@ function ActionCard({ data }: { data: Dashboard }) {
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [doneText, setDoneText] = useState<string | null>(null);
+  // Save receipt: the FULL saveOutput response exactly as the server
+  // returned it, plus the identity of the input that was saved. On an
+  // alreadyConverted result these are the WINNER's facts (first
+  // convertedAt, the stored outputType/outputNote) — never the draft
+  // currently in the form, which may differ from what actually won.
+  const [receipt, setReceipt] = useState<{
+    inputId: number;
+    topic: string;
+    alreadyConverted: boolean;
+    convertedAt: string | null;
+    outputType: OutputType | null;
+    outputNote: string | null;
+  } | null>(null);
   // One requestId per save flow: a failed save keeps the draft AND the
   // same requestId, so the retry can never double-count the conversion.
   const requestIdRef = useRef<string | null>(null);
@@ -359,6 +372,7 @@ function ActionCard({ data }: { data: Dashboard }) {
     setNote("");
     setError(null);
     setDoneText(null);
+    setReceipt(null);
     requestIdRef.current = null;
   };
 
@@ -378,16 +392,16 @@ function ActionCard({ data }: { data: Dashboard }) {
   });
 
   const save = useMutation({
-    mutationFn: (inputId: number) => {
+    mutationFn: (vars: { inputId: number; topic: string }) => {
       if (!requestIdRef.current) requestIdRef.current = newRequestId();
       return api.saveOutput({
-        inputId,
+        inputId: vars.inputId,
         requestId: requestIdRef.current,
         outputType,
         outputNote: note.trim(),
       });
     },
-    onSuccess: (res) => {
+    onSuccess: (res, vars) => {
       if (res.forbidden) {
         setError("当前身份无权保存产出。草稿还在，可以重试。");
         return;
@@ -413,6 +427,17 @@ function ActionCard({ data }: { data: Dashboard }) {
           ? "这条输入此前已经记过产出了，没有重复计数。"
           : "已保存为产出，这条输入正式计为一次转化。",
       );
+      // Receipt facts come from the server response only — on
+      // alreadyConverted they are the earlier winner's output and
+      // first conversion instant, not this form's draft.
+      setReceipt({
+        inputId: vars.inputId,
+        topic: vars.topic,
+        alreadyConverted: res.alreadyConverted,
+        convertedAt: res.convertedAt,
+        outputType: res.outputType,
+        outputNote: res.outputNote,
+      });
       setPhase("done");
       setNote("");
       setError(null);
@@ -454,6 +479,42 @@ function ActionCard({ data }: { data: Dashboard }) {
       {phase === "done" ? (
         <div className="mt-4 border-t border-[var(--border)] pt-3">
           <p className="text-sm font-medium">✓ {doneText}</p>
+          {receipt ? (
+            <dl aria-label="保存回执" className="mt-3 space-y-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-sm">
+              <div className="flex flex-wrap gap-x-2">
+                <dt className="shrink-0 text-[var(--dim)]">原输入</dt>
+                <dd className="min-w-0">
+                  {receipt.topic}
+                  <span className="tnum text-[var(--dim)]">（账本 #{receipt.inputId}，可在输入账本中按此定位）</span>
+                </dd>
+              </div>
+              <div className="flex flex-wrap gap-x-2">
+                <dt className="shrink-0 text-[var(--dim)]">首次转化日期</dt>
+                <dd className="tnum">
+                  {receipt.convertedAt ? laDayOf(receipt.convertedAt) : "未记录"}
+                  <span className="text-[var(--dim)]">（America/Los_Angeles）</span>
+                </dd>
+              </div>
+              <div className="flex flex-wrap gap-x-2">
+                <dt className="shrink-0 text-[var(--dim)]">产出</dt>
+                <dd className="min-w-0">
+                  {receipt.outputType == null && !receipt.outputNote ? (
+                    "历史产出未记录"
+                  ) : (
+                    <>
+                      {receipt.outputType ? OUTPUT_LABEL[receipt.outputType] : "类型未记录"}
+                      {receipt.outputNote ? `：${receipt.outputNote}` : ""}
+                    </>
+                  )}
+                </dd>
+              </div>
+              {receipt.alreadyConverted ? (
+                <p className="text-xs text-[var(--dim)]">
+                  以上为服务端记录的首次转化事实；本次表单里选的类型与备注没有覆盖它。
+                </p>
+              ) : null}
+            </dl>
+          ) : null}
           <button
             type="button"
             onClick={() => resetPick(0)}
@@ -519,7 +580,7 @@ function ActionCard({ data }: { data: Dashboard }) {
                 <button
                   type="button"
                   disabled={save.isPending || !note.trim()}
-                  onClick={() => save.mutate(current.id)}
+                  onClick={() => save.mutate({ inputId: current.id, topic: current.topic })}
                   className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b1520] disabled:opacity-50"
                 >
                   {save.isPending ? "保存中…" : "保存为产出"}

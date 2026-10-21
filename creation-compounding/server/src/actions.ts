@@ -122,6 +122,14 @@ const weekPointSchema = z.object({
   newCount: z.number(),
   // Cumulative total at end of that week.
   cumulative: z.number(),
+  // The two fact lines, counted separately on the same week axis:
+  // progress entries (成果记录) and marked stage dates (阶段里程碑).
+  // newCount = newEntries + newStages and cumulative =
+  // cumulativeEntries + cumulativeStages, kept for existing consumers.
+  newEntries: z.number(),
+  cumulativeEntries: z.number(),
+  newStages: z.number(),
+  cumulativeStages: z.number(),
 });
 
 // One duplicated identity found in the stored rows. Duplicates can only
@@ -279,27 +287,49 @@ export const Actions = {
         }));
 
       // Weekly accumulation series: one point per week from the first
-      // event's week through the current week. Weeks with no events stay
-      // in the series with newCount 0 and a flat cumulative — real gaps,
-      // never backfilled with invented data.
+      // event's week through the current week, with TWO fact lines on
+      // the same week axis — progress entries and marked stage dates
+      // accumulate separately (a stage mark is a project marker, never
+      // an entry). Weeks with no events stay in the series with 0 new
+      // and flat cumulatives on both lines — real gaps, never
+      // backfilled with invented data. Clearing a stage removes its
+      // row, so the stage line falls back while the entries line is
+      // untouched. The combined newCount/cumulative fields are the sum
+      // of the two lines, kept for existing consumers.
       const eventDates: string[] = [
         ...entryRows.map((e) => e.date),
         ...stageRows.map((s) => s.date),
       ].sort();
       const series: Dashboard["series"] = [];
       if (eventDates.length > 0) {
-        const newByWeek = new Map<string, number>();
-        for (const d of eventDates) {
-          const ws = weekStartOf(d);
-          newByWeek.set(ws, (newByWeek.get(ws) ?? 0) + 1);
+        const newEntriesByWeek = new Map<string, number>();
+        for (const e of entryRows) {
+          const ws = weekStartOf(e.date);
+          newEntriesByWeek.set(ws, (newEntriesByWeek.get(ws) ?? 0) + 1);
+        }
+        const newStagesByWeek = new Map<string, number>();
+        for (const s of stageRows) {
+          const ws = weekStartOf(s.date);
+          newStagesByWeek.set(ws, (newStagesByWeek.get(ws) ?? 0) + 1);
         }
         let cursor = weekStartOf(eventDates[0] ?? today);
-        let cumulative = 0;
+        let cumulativeEntries = 0;
+        let cumulativeStages = 0;
         // Cap the walk so a stray far-future date cannot spin forever.
         for (let i = 0; i < 520 && cursor <= weekStart; i += 1) {
-          const added = newByWeek.get(cursor) ?? 0;
-          cumulative += added;
-          series.push({ weekStart: cursor, newCount: added, cumulative });
+          const newEntries = newEntriesByWeek.get(cursor) ?? 0;
+          const newStages = newStagesByWeek.get(cursor) ?? 0;
+          cumulativeEntries += newEntries;
+          cumulativeStages += newStages;
+          series.push({
+            weekStart: cursor,
+            newCount: newEntries + newStages,
+            cumulative: cumulativeEntries + cumulativeStages,
+            newEntries,
+            cumulativeEntries,
+            newStages,
+            cumulativeStages,
+          });
           cursor = shiftDay(cursor, 7);
         }
       }
