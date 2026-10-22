@@ -1159,3 +1159,11 @@
 
 - (1) `CMP-READ-IMPORT-001` 存储形态：主条目「迁移 0004 新增 book_imports 代际账本（request_id 主键、完整指纹、supersedes_gen、promoted_book_id、staging_file_key）」表述不准，更正为——迁移 0004 为纯加法：新增 import_staged_chapters 暂存表（含 (book_id, gen, idx) 唯一索引）＋books 两可空列 import_gen／import_blob_key；代际＝beginImport 的 requestId 存于 books.import_gen，暂存文件指针存 import_blob_key（epub-stage/<bookId>/<gen>），幂等仲裁走既有请求账本（resolveImportBinding 在任何删除/状态变更前仲裁、指纹口径不变）；finish 切换为受代际守卫（import_gen＋processing）的单 batch，守卫失配整批零行返回 conflict。机制结论（原键重放零破坏、旧代晚到全拒、失败保好副本）与验证计数 69/69 不变。
 - (2) `CMP-READ-001` 出处闭环换绑出口：续条目「用户显式选择『仍按原讨论保存』（同键＋forceQaBinding 重试）」表述不准，更正为——来源版本已更新时不能按旧快照直接落卡（卡出处只能来自存活片段行），显式出口是所有者点「改用当前片段出处保存」换绑当前版本后保存，旧引用快照仍固定在该轮 turn 与面板内可查；turns 只存本会话面板状态、未新增聊天持久化（续条目已注明）。其余结论与计数（reading-qa 107/107 等）不变。
+
+## 2026-10-22（muse-life-plans-sync 09:13 轮次：无新提交、F0.7 只读续查、面板同步）
+
+- 队列来源：git pull 已最新，基线 d2a7df5 与 HEAD 一致，无 plans.md 新 diff、无新编号条目/PM bug 单/新需求入队。
+- `F0.7`（P0，只读续查，遵所有者裁决丙(ii)，未触发 run、未清冻/重置）：09:13 PDT 经 space-3 `getRefreshObservations`——access=owner、currentAttempt=1、status=running、diagnosis=awaiting_callback，观测行仅 refresh_started(claimed)＋spawn_attached（2026-10-20T18:27:22Z），state.updatedAt 冻结于 2026-10-20T18:27:22Z，距启动约 45¾ 小时无本代 callback_received/终态行、新快照未核实，断点未变（平台任务执行/回调段）。
+- 队列核对：`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T 均待所有者确认，不执行；旧 H 系列（L1-RACE-001/H-UNITS-001/H-SOURCE-001/H-WORKOUTS-001 等）源码返工已关闭、整项为运行待验，缺平台/owner 证据不可推进；READ 首片 validate-reading/knowledge/reader/reviews 脚本经实查在已发布树（ts-spaces/space-15）与仓库 reading-compounding/ 均不存在，EVID 残项如实保留。
+- 进度面板（静态 artifact「Life 进度」slug life）：已定向更新 F0.7 bullet 时长 43¾→约 45¾ 小时与页脚截至时间 2026-10-22 09:13 PDT，构建回传已在 index.html 源码核验两处替换、其余条目未动。
+- 本轮无代码改动、无用户可见增量；未提交 app.db/.env/任何真实数据。sync-state muse_life.last_seen_sha 保持 d2a7df5（HEAD 未变，无需更新）。
