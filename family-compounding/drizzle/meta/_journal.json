@@ -43,6 +43,13 @@
       "when": 1792614180293,
       "tag": "0006_preset_key_identity_for_activity_types",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792635906224,
+      "tag": "0007_add_source_column_to_family_activities",
+      "breakpoints": true
     }
   ]
 }

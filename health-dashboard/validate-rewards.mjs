@@ -1,6 +1,9 @@
 // CWEB-MVP-001·S3 personal rewards validation, extended by
 // CWEB-REDEEM-SAFE-001 (atomic redemption adjudication) and the S3
-// 余项 (next-reward goal + balance three-state). Runs the REAL
+// 余项 (next-reward goal + balance three-state), and by the
+// REDEEM-SAFE follow-up (per-request completion proof, whole-scope
+// pin verification, reconciliation-gated redemption, truly
+// read-only snapshot, journal rebuildability). Runs the REAL
 // production handler cores (handleGetRewards /
 // handleSaveReward / handleRedeemReward / handleGetRedemptionReceipt
 // / handleSetRewardGoal
@@ -163,6 +166,53 @@ check('source: client offers 设为下一奖励 per reward, the character-screen
   && clientSrc.includes('保留该目标') && clientSrc.includes('选择下一项')
   && clientSrc.includes('api.setRewardGoal'));
 
+// ------------------------------------------ REDEEM-SAFE follow-up checks
+const migration0015 = './drizzle/0015_add_redemption_completion_proof.sql';
+check('source: migration 0015 additively adds the per-request completion proof column (no existing table rebuilt)',
+  existsSync(new URL(migration0015, import.meta.url))
+  && readFileSync(new URL(migration0015, import.meta.url), 'utf8').includes('ALTER TABLE `game_reward_redemptions` ADD `completion_proof` integer')
+  && !/DROP TABLE|DELETE FROM/.test(readFileSync(new URL(migration0015, import.meta.url), 'utf8')));
+check('source: schema carries the completion proof and the receipt maps it to a verification state (never inferred)',
+  schemaSrc.includes('completionProof: integer("completion_proof")')
+  && serverSrc.includes('verification: row.completionProof !== null ? "verified" : "unverified"')
+  && serverSrc.includes('status: "unverified"'));
+check('source: the atomic batch receipt insert records the completion proof (the watermark the batch itself produces)',
+  serverSrc.includes('${nowMs}, ${watermarkAfter}`'));
+check('source: the read-only snapshot handler performs no settlement, no profile save, no batch, and no task spawn',
+  (() => {
+    const body = extractHandlerFunction(serverSrc, 'handleGetRewardsSnapshot');
+    return !body.includes('settleGame') && !body.includes('saveGameProfile')
+      && !body.includes('spawnTask') && !body.includes('.batch(') && !body.includes('db.update') && !body.includes('db.insert');
+  })());
+check('source: the snapshot action is wired separately from the settle-on-read getRewards',
+  serverSrc.includes('handler: handleGetRewardsSnapshot') && serverSrc.includes('getRewardsSnapshot: defineAction({'));
+check('source: redeem revalidates the pin after the ledger SUM read and gates on settle failure / post-settle reconciliation',
+  serverSrc.includes('const pinCheck = await loadGameStateRow(ctx);')
+  && serverSrc.includes('pinCheck.revision !== pin.revision')
+  && serverSrc.includes('return redemptionBusyResult(')
+  && serverSrc.includes('afterSettle.profile.goldLedgerSum !== settledLedgerGoldSum')
+  && serverSrc.indexOf('const pinCheck = await loadGameStateRow(ctx);') > serverSrc.indexOf('const storedLedgerTotals = await db.select(')
+  && serverSrc.indexOf('const pinCheck = await loadGameStateRow(ctx);') < serverSrc.indexOf('// (4) The redemption itself, as ONE atomic batch'));
+check('source: the commit loop base starts at the commit base (pin advanced only by own settle), not at null',
+  serverSrc.includes('let lastAttemptRead: { revision: number; gold: number; goldLedgerSum: number | null } = { revision: commitBase.revision, gold: commitBase.gold, goldLedgerSum: commitBase.goldLedgerSum };')
+  && serverSrc.includes('row.revision !== lastAttemptRead.revision'));
+check('source: client 只读重查 goes through the genuinely read-only snapshot action (both buttons)',
+  clientSrc.includes('api.getRewardsSnapshot({})')
+  && (clientSrc.match(/recheckStoredRewards\(queryClient\)/g) ?? []).length >= 2);
+check('source: client openPreview routes a pending intent back into its unconfirmed flow before any fresh read or new key',
+  (() => {
+    const start = clientSrc.indexOf('const openPreview = async');
+    const slice = clientSrc.slice(start, start + 3400);
+    return slice.includes('loadPendingRedemption()') && slice.includes('kind: "unconfirmed", draft: pending')
+      && slice.indexOf('loadPendingRedemption()') < slice.indexOf('newRewardRequestId()');
+  })());
+check('source: client submit never overwrites a different pending recovery identity',
+  clientSrc.includes('if (!existing || existing.requestId === draft.requestId) storePendingRedemption(draft);'));
+check('source: client labels receipt verification as text (✓ 已完成 / ▲ 未核实), never color alone',
+  clientSrc.includes('"✓ 已完成" : "▲ 未核实（无逐笔完成证明）"')
+  && clientSrc.includes('未核实 · 历史回执')
+  && clientSrc.includes('result.status === "unverified"'));
+
 // ------------------------------------------------------------ harness
 async function loadHarnessDeps() {
   try {
@@ -211,24 +261,28 @@ async function buildHarness() {
     'compareSourceVersions', 'sourceVersionSqlBefore', 'planLedgerAction', 'buildGamePlan',
     'bookLedgerRow', 'settleLedgerRow', 'evaluateDailyTasks', 'settleGame',
     'rewardItemFromRow', 'rewardReceiptFromRow', 'loadRedemptionByRequestId', 'loadRewardGoalId', 'sameRedemptionContent',
-    'handleGetRewards', 'handleSaveReward', 'handleRedeemReward', 'handleGetRedemptionReceipt', 'handleSetRewardGoal',
+    'unverifiedReceiptResult', 'redemptionBusyResult',
+    'handleGetRewards', 'handleGetRewardsSnapshot', 'handleSaveReward', 'handleRedeemReward', 'handleGetRedemptionReceipt', 'handleSetRewardGoal',
   ];
   const code = [
     ...constNames.map((n) => extractConst(serverSrc, n)),
     ...fnNames.map((n) => extractHandlerFunction(serverSrc, n)),
   ].join('\n');
   const fns = new Function('schema', 'eq', 'and', 'sql', 'desc', 'asc', 'lte', 'z',
-    `${stripTypeScriptTypes(code)}\nreturn { handleGetRewards, handleSaveReward, handleRedeemReward, handleGetRedemptionReceipt, handleSetRewardGoal, settleGame, loadHealthSnapshot, loadGameStateRow };`)
+    `${stripTypeScriptTypes(code)}\nreturn { handleGetRewards, handleGetRewardsSnapshot, handleSaveReward, handleRedeemReward, handleGetRedemptionReceipt, handleSetRewardGoal, settleGame, loadHealthSnapshot, loadGameStateRow };`)
     (schema, eq, and, sql, desc, asc, lte, z);
   const migrationFiles = readdirSync(new URL('./drizzle/', import.meta.url)).filter((f) => f.endsWith('.sql')).sort();
-  async function makeDb() {
+  async function dbFromFiles(files) {
     const client = createClient({ url: ':memory:' });
-    for (const file of migrationFiles) {
+    for (const file of files) {
       await client.executeMultiple(readFileSync(new URL(`./drizzle/${file}`, import.meta.url), 'utf8'));
     }
     return { client, db: drizzle(client) };
   }
-  return { ...fns, schema, makeDb, migrationFiles };
+  async function makeDb() {
+    return dbFromFiles(migrationFiles);
+  }
+  return { ...fns, schema, makeDb, dbFromFiles, migrationFiles };
 }
 
 function laTodayString(now = new Date()) {
@@ -354,6 +408,9 @@ if (H) {
       && redeemed.receipt.goldSpent === 500 && redeemed.receipt.balanceAfter === 500
       && redeemed.receipt.balanceVersion === V && redeemed.receipt.localDate === TODAY
       && redeemed.balance === 500);
+    const storedReceiptRow = (await db.select().from(H.schema.gameRewardRedemptions).where(eq(H.schema.gameRewardRedemptions.requestId, REQ1)))[0];
+    check('proof: the batch recorded a per-request completion proof (the watermark it produced, -500) and the receipt reads verified',
+      storedReceiptRow?.completionProof === -500 && redeemed.receipt.verification === 'verified');
     const afterRedeem = await rawState(db);
     check('redeem: profile gold and watermark both drop by the price; one reward_redeem ledger flow of -500 (xp 0)',
       afterRedeem.gold === 500 && afterRedeem.goldLedgerSum === -500

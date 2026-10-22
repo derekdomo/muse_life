@@ -92,6 +92,20 @@
       "when": 1792600599644,
       "tag": "0013_add_game_rewards_and_redemptions",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1792614852088,
+      "tag": "0014_add_game_reward_goal",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1792636215772,
+      "tag": "0015_add_redemption_completion_proof",
+      "breakpoints": true
     }
   ]
 }

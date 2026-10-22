@@ -50,7 +50,7 @@ check(
   !/viewer\s*===\s*(undefined|null)/.test(serverSrc) && !serverSrc.includes("isOwnerOr"),
 );
 
-const ACTION_NAMES = ["getDashboard", "addActivity", "deleteActivity", "addType", "deleteType"];
+const ACTION_NAMES = ["getDashboard", "addActivity", "recordFamilyActivityFromChat", "deleteActivity", "addType", "deleteType"];
 function actionSlice(src, name) {
   const start = src.indexOf(`  ${name}: defineAction({`);
   if (start < 0) throw new Error(`action ${name} not found`);
@@ -66,28 +66,35 @@ for (const name of ACTION_NAMES) {
   check(`source: ${name} gate precedes any ctx.db access`, gateIdx > -1 && (dbIdx === -1 || gateIdx < dbIdx));
 }
 {
-  const add = actionSlice(serverSrc, "addActivity");
+  // CMP-FAMILY-AUTOLOG-001: the arbitration pipeline moved out of
+  // addActivity into the shared saveActivityRecord, which BOTH write
+  // paths delegate to — the wiring checks below target that shared
+  // pipeline (same invariants: one atomic batch, conflict no-ops,
+  // one adjudication), plus the two thin entry points themselves.
+  const pipeStart = serverSrc.indexOf("async function saveActivityRecord");
+  const pipeEnd = serverSrc.indexOf("/* ---------------- actions", pipeStart);
+  const pipe = pipeStart >= 0 && pipeEnd > pipeStart ? serverSrc.slice(pipeStart, pipeEnd) : "";
   check(
-    "source: addActivity fresh save is one db.batch of builder statements (ledger claim + activity insert)",
-    add.includes("db.batch") &&
-      add.includes("insert(schema.familyRequestKeys)") &&
-      add.includes("insert(schema.familyActivities)"),
+    "source: the shared save pipeline's fresh save is one db.batch of builder statements (ledger claim + activity insert)",
+    pipe.includes("db.batch") &&
+      pipe.includes("insert(schema.familyRequestKeys)") &&
+      pipe.includes("insert(schema.familyActivities)"),
   );
   check(
-    "source: addActivity claim, activity insert and legacy backfill all use onConflictDoNothing",
-    (add.match(/onConflictDoNothing/g) ?? []).length >= 3,
+    "source: pipeline claim, activity insert and legacy backfill all use onConflictDoNothing",
+    (pipe.match(/onConflictDoNothing/g) ?? []).length >= 3,
   );
   check(
     "source: the shared adjudication reports the existing row on duplicate",
-    serverSrc.includes("async function adjudicateSave") && add.includes("adjudicateSave(db, args.requestKey, payload"),
+    serverSrc.includes("async function adjudicateSave") && pipe.includes("adjudicateSave(db, input.requestKey, content"),
   );
   check(
     "source: request_key carries a UNIQUE index in the migration",
     migrationSql.includes("CREATE UNIQUE INDEX") && migrationSql.includes("request_key"),
   );
   check(
-    "source: unknown minutes stay NULL (no 0-fill anywhere in addActivity)",
-    !/minutes\s*\?\?/.test(add) && !add.includes("|| 0"),
+    "source: unknown minutes stay NULL (no 0-fill anywhere in the save pipeline)",
+    !/minutes\s*\?\?/.test(pipe) && !pipe.includes("|| 0"),
   );
 }
 check(
@@ -122,9 +129,12 @@ check(
   const add = actionSlice(serverSrc, "addActivity");
   const adjudStart = serverSrc.indexOf("async function adjudicateSave");
   const adjud = adjudStart >= 0 ? serverSrc.slice(adjudStart, serverSrc.indexOf("/* ---------------- actions", adjudStart)) : "";
+  const pipeStart = serverSrc.indexOf("async function saveActivityRecord");
+  const pipeEnd = serverSrc.indexOf("/* ---------------- actions", pipeStart);
+  const pipe = pipeStart >= 0 && pipeEnd > pipeStart ? serverSrc.slice(pipeStart, pipeEnd) : "";
   check(
-    "source(save): addActivity adjudicates via the request-key ledger and can refuse as conflict/deleted",
-    add.includes("familyRequestKeys") && add.includes("adjudicateSave") &&
+    "source(save): the shared pipeline adjudicates via the request-key ledger and can refuse as conflict/deleted",
+    pipe.includes("familyRequestKeys") && pipe.includes("adjudicateSave") &&
       adjud.includes("familyRequestKeys") && adjud.includes("conflict: true") && adjud.includes("deleted: true"),
   );
   check(
@@ -204,6 +214,48 @@ check(
     addT.includes("INSERT INTO activity_types") && addT.includes("NOT EXISTS") && addT.includes("activity_types WHERE name"),
   );
 }
+/* ---- CMP-FAMILY-AUTOLOG-001 source wiring ---- */
+check(
+  "source(autolog): migration 0007 adds the source column additively, with NO backfill of existing rows",
+  migrationSql.includes("ALTER TABLE family_activities ADD COLUMN source TEXT") &&
+    !/UPDATE\s+family_activities\s+SET\s+source/i.test(migrationSql),
+);
+{
+  const add = actionSlice(serverSrc, "addActivity");
+  const chat = actionSlice(serverSrc, "recordFamilyActivityFromChat");
+  const addReq = add.slice(add.indexOf("request: z.object({"), add.indexOf("}),", add.indexOf("request: z.object({")));
+  const chatReq = chat.slice(chat.indexOf("request: z.object({"), chat.indexOf("}),", chat.indexOf("request: z.object({")));
+  check(
+    "source(autolog): neither write path's request schema carries a source field (provenance is server-decided)",
+    !addReq.includes("source") && !chatReq.includes("source"),
+  );
+  check(
+    "source(autolog): manual path stamps SOURCE_MANUAL, chat path stamps SOURCE_CHAT, both via the one shared pipeline",
+    add.includes("saveActivityRecord(ctx, args, schema.SOURCE_MANUAL)") &&
+      chat.includes("saveActivityRecord(ctx, args, schema.SOURCE_CHAT)"),
+  );
+  check(
+    "source(autolog): the canonical fingerprint includes the source, and adjudication compares it (payloadMatches)",
+    serverSrc.includes("source: schema.ActivitySource") &&
+      serverSrc.includes("function payloadMatches") &&
+      serverSrc.includes('if ("source" in p) return p.source === incoming.source;'),
+  );
+  check(
+    "source(autolog): the chat receipt schema carries the locatable fields (id, date, typeName, minutes, source)",
+    serverSrc.includes("const chatRecordResponse = z.object({") &&
+      serverSrc.includes('source: z.enum(["手动", "聊天记录"]).nullable()'),
+  );
+}
+check(
+  "client(autolog): every recent row shows a text source label （手动 / 聊天记录 / 旧来源未记录）",
+  clientSrc.includes("来源：") && clientSrc.includes("旧来源未记录") && clientSrc.includes("row.source"),
+);
+check(
+  "client(autolog): the empty ledger hints at chat auto-record WITHOUT claiming the channel is verified",
+  clientSrc.includes("也可以在聊天里告诉 Muse，由 Muse 代记（来源会标为聊天记录）") &&
+    !/已验证|已开通|已可用/.test(clientSrc),
+);
+
 check(
   "client(save): conflict keeps the draft and offers an explicit save-as-new action",
   clientSrc.includes("作为新的一条保存") && clientAll.includes("conflict"),
@@ -282,6 +334,13 @@ async function applyMigrations(client, prefixes) {
 async function makeLegacyDb() {
   const client = createClient({ url: ":memory:" });
   await applyMigrations(client, ["0001", "0002", "0003", "0004"]);
+  return { client, db: drizzle(client, { schema }) };
+}
+// A database current through 0006 — i.e. production-shaped BEFORE
+// the source column existed (CMP-FAMILY-AUTOLOG-001 upgrade tests).
+async function makePreSourceDb() {
+  const client = createClient({ url: ":memory:" });
+  await applyMigrations(client, ["0001", "0002", "0003", "0004", "0005", "0006"]);
   return { client, db: drizzle(client, { schema }) };
 }
 
@@ -1286,12 +1345,12 @@ for (const mode of ["single-gate", "both-gated"]) {
   });
   let upgradeError = null;
   try {
-    await applyMigrations(client, ["0005", "0006"]);
+    await applyMigrations(client, ["0005", "0006", "0007"]);
   } catch (e) {
     upgradeError = e;
   }
   check(
-    "upgrade-dup: a 0001–0004 database with two exact-same-name types upgrades through 0005+0006 without error",
+    "upgrade-dup: a 0001–0004 database with two exact-same-name types upgrades through 0005–0007 without error",
     upgradeError === null,
     upgradeError ? String(upgradeError) : "",
   );
@@ -1361,12 +1420,12 @@ for (const mode of ["single-gate", "both-gated"]) {
   });
   let upgradeError = null;
   try {
-    await applyMigrations(client, ["0006"]);
+    await applyMigrations(client, ["0006", "0007"]);
   } catch (e) {
     upgradeError = e;
   }
   check(
-    "upgrade-0005: a database that applied the original global-index 0005 upgrades through 0006 without error",
+    "upgrade-0005: a database that applied the original global-index 0005 upgrades through 0006+0007 without error",
     upgradeError === null,
     upgradeError ? String(upgradeError) : "",
   );
@@ -1439,6 +1498,291 @@ for (const mode of ["single-gate", "both-gated"]) {
   check(
     "rollback-ctl: dropping only the new preset_key index leaves every row of every table byte-identical",
     before === after && Number(idxGone.rows[0].c) === 0,
+  );
+}
+
+/* ---- AUTOLOG-001: chat auto-record — provenance, shared arbitration,
+   strict owner gate, and the pre-source upgrade ---- */
+{
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  await call("getDashboard", ctx, {}); // seed presets
+  const chatArgs = { date: TODAY, typeName: "陪玩", minutes: 35, note: "搭乐高", requestKey: "chat-rec-key-00001" };
+  const rec = await call("recordFamilyActivityFromChat", ctx, chatArgs);
+  check(
+    "autolog: chat record succeeds with a locatable receipt (id, date, type, minutes, source fixed 聊天记录）",
+    rec.ok === true && rec.duplicate === false && rec.id !== null &&
+      rec.date === TODAY && rec.typeName === "陪玩" && rec.minutes === 35 && rec.source === "聊天记录" &&
+      rec.conflict === false && rec.deleted === false && rec.future === false && rec.forbidden === false,
+  );
+  const storedSrc = await client.execute({
+    sql: "SELECT source FROM family_activities WHERE id = ?",
+    args: [rec.id],
+  });
+  check(
+    "autolog: the stored row itself carries source 聊天记录 (server-stamped, not echoed)",
+    storedSrc.rows.length === 1 && storedSrc.rows[0].source === "聊天记录",
+  );
+  let dash = await call("getDashboard", ctx, {});
+  check(
+    "autolog: the chat record counts exactly once and shows its source in recentActivities",
+    dash.totalCount === 1 && dash.totalKnownMinutes === 35 &&
+      dash.recentActivities.find((r) => r.id === rec.id)?.source === "聊天记录",
+  );
+  const replay = await call("recordFamilyActivityFromChat", ctx, chatArgs);
+  dash = await call("getDashboard", ctx, {});
+  check(
+    "autolog: same-key same-content chat retry replays as duplicate — still exactly one row",
+    replay.ok === true && replay.duplicate === true && replay.id === rec.id && dash.totalCount === 1,
+  );
+  const edited = await call("recordFamilyActivityFromChat", ctx, { ...chatArgs, minutes: 40 });
+  check(
+    "autolog: same-key different content via chat is a typed conflict, receipt fields nulled",
+    edited.ok === false && edited.conflict === true && edited.id === null && edited.source === null,
+  );
+  // Cross-path: identical content under the same key through the
+  // MANUAL path differs only in source → conflict, never a merge.
+  const cross = await call("addActivity", ctx, chatArgs);
+  const rawCount = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  check(
+    "autolog: same key + same content via the manual path conflicts on source alone (no silent merge, still one row)",
+    cross.ok === false && cross.conflict === true && Number(rawCount.rows[0].c) === 1,
+  );
+  // And the mirror: a manual record replayed through chat conflicts.
+  const manArgs = { date: TODAY, typeName: "阅读", minutes: 20, note: null, requestKey: "chat-rec-key-00002" };
+  const man = await call("addActivity", ctx, manArgs);
+  const manStored = await client.execute({
+    sql: "SELECT source FROM family_activities WHERE id = ?",
+    args: [man.id],
+  });
+  const crossBack = await call("recordFamilyActivityFromChat", ctx, manArgs);
+  check(
+    "autolog: manual saves stamp 手动； the same key replayed via chat conflicts on source",
+    man.ok === true && manStored.rows[0].source === "手动" &&
+      crossBack.ok === false && crossBack.conflict === true,
+  );
+  dash = await call("getDashboard", ctx, {});
+  check(
+    "autolog: dashboard labels the manual row 手动 and the chat row 聊天记录 (text, not color)",
+    dash.recentActivities.find((r) => r.id === man.id)?.source === "手动" &&
+      dash.recentActivities.find((r) => r.id === rec.id)?.source === "聊天记录",
+  );
+}
+{
+  // minutes null = unknown: stored NULL, counted as an activity,
+  // never folded into the known-duration total as 0.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const rec = await call("recordFamilyActivityFromChat", ctx, {
+    date: TODAY, typeName: "一起吃饭", minutes: null, note: null, requestKey: "chat-null-min-0001",
+  });
+  const stored = await client.execute({
+    sql: "SELECT minutes FROM family_activities WHERE id = ?",
+    args: [rec.id],
+  });
+  const dash = await call("getDashboard", ctx, {});
+  check(
+    "autolog: minutes=null is stored as NULL (unknown) and counted as an activity, not as 0 minutes",
+    rec.ok === true && rec.minutes === null && stored.rows[0].minutes === null &&
+      dash.totalCount === 1 && dash.totalKnownMinutes === 0 && dash.unknownMinutesCount === 1 &&
+      dash.recentActivities[0]?.minutes === null && dash.recentActivities[0]?.source === "聊天记录",
+  );
+}
+{
+  // Future date + invalid date via chat: typed refusals, zero writes.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const fut = await call("recordFamilyActivityFromChat", ctx, {
+    date: TOMORROW, typeName: "陪玩", minutes: 30, note: null, requestKey: "chat-future-00001",
+  });
+  const bad = await call("recordFamilyActivityFromChat", ctx, {
+    date: "2026-02-30", typeName: "陪玩", minutes: 30, note: null, requestKey: "chat-baddate-0001",
+  });
+  const acts = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  const keys = await client.execute("SELECT COUNT(*) AS c FROM family_request_keys");
+  check(
+    "autolog: future date refused as future via chat, invalid date refused plainly — zero rows, zero ledger entries",
+    fut.ok === false && fut.future === true && fut.id === null &&
+      bad.ok === false && bad.future === false && bad.conflict === false &&
+      Number(acts.rows[0].c) === 0 && Number(keys.rows[0].c) === 0,
+  );
+  let threw = false;
+  try {
+    Actions.recordFamilyActivityFromChat.request.parse({
+      date: TODAY, typeName: "陪玩", minutes: 30, note: null, requestKey: "short",
+    });
+  } catch {
+    threw = true;
+  }
+  check("autolog: a requestKey shorter than 8 chars is rejected at the request boundary", threw);
+}
+{
+  // Delete a chat-recorded entry, then the chat retry arrives late:
+  // typed deleted, nothing resurrects; a manual retry of the same
+  // key is likewise refused (source conflict against the tombstone).
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const args = { date: TODAY, typeName: "户外", minutes: 50, note: null, requestKey: "chat-del-key-00001" };
+  const rec = await call("recordFamilyActivityFromChat", ctx, args);
+  const del = await call("deleteActivity", ctx, { id: rec.id });
+  const late = await call("recordFamilyActivityFromChat", ctx, args);
+  const lateManual = await call("addActivity", ctx, args);
+  const acts = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  const led = await client.execute({
+    sql: "SELECT state FROM family_request_keys WHERE request_key = ?",
+    args: ["chat-del-key-00001"],
+  });
+  const dash = await call("getDashboard", ctx, {});
+  check(
+    "autolog: deleted chat record — late chat retry is typed deleted and resurrects nothing",
+    del.ok === true && late.ok === false && late.deleted === true && late.id === null &&
+      Number(acts.rows[0].c) === 0 && dash.totalCount === 0 &&
+      led.rows.length === 1 && led.rows[0].state === "deleted",
+  );
+  check(
+    "autolog: a manual retry of the deleted chat key is also refused (no cross-path resurrection)",
+    lateManual.ok === false && lateManual.id === null && Number(acts.rows[0].c) === 0,
+  );
+}
+{
+  // Forgery: the manual request schema has no source field — a
+  // client that sends source:'聊天记录' anyway gets it stripped;
+  // the stored row is stamped 手动 by the server.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const forged = await call("addActivity", ctx, {
+    date: TODAY, typeName: "陪玩", minutes: 15, note: null,
+    requestKey: "forge-key-0000001", source: "聊天记录",
+  });
+  const stored = await client.execute({
+    sql: "SELECT source FROM family_activities WHERE id = ?",
+    args: [forged.id],
+  });
+  const parsed = Actions.addActivity.request.parse({
+    date: TODAY, typeName: "陪玩", minutes: 15, note: null,
+    requestKey: "forge-key-0000002", source: "聊天记录",
+  });
+  check(
+    "autolog: a forged source in a manual request is stripped by the schema and the row is stamped 手动",
+    forged.ok === true && stored.rows[0].source === "手动" && !("source" in parsed),
+  );
+}
+{
+  // Strict owner gate on the chat path: non-owner, anonymous and
+  // missing (null) viewers are all refused BEFORE any db access,
+  // with zero rows and zero ledger entries afterwards.
+  const { db, client } = await makeDb();
+  for (const [label, viewer] of [["non-owner", NON_OWNER], ["anonymous", ANON], ["null viewer", null]]) {
+    const { ctx, state } = makeCtx(db, viewer);
+    const res = await call("recordFamilyActivityFromChat", ctx, {
+      date: TODAY, typeName: "陪玩", minutes: 30, note: null, requestKey: `chat-gate-${label.replace(/\s/g, "")}-01`,
+    });
+    check(
+      `autolog-gate: ${label} chat record is forbidden with a fully nulled receipt`,
+      res.ok === false && res.forbidden === true && res.id === null && res.source === null &&
+        res.date === null && res.typeName === null,
+    );
+    check(`autolog-gate: ${label} chat record never touches the db`, state.dbCalls === 0);
+  }
+  const acts = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  const keys = await client.execute("SELECT COUNT(*) AS c FROM family_request_keys");
+  check(
+    "autolog-gate: refused chat records wrote zero rows and zero ledger entries",
+    Number(acts.rows[0].c) === 0 && Number(keys.rows[0].c) === 0,
+  );
+}
+{
+  // Pre-source production shape (migrations through 0006) upgrades
+  // additively: rows, dates, minutes, deletion state and totals are
+  // untouched; old rows read source NULL → 旧来源未记录； a
+  // same-content retry of a pre-source key still replays as a
+  // duplicate (its fingerprint predates provenance); deleting a
+  // pre-source row tombstones it and its key stays dead; and
+  // withdrawing the migration (dropping the column) loses nothing.
+  const { client, db } = await makePreSourceDb();
+  const nowTs = Date.now();
+  const legacyPayload = JSON.stringify({ date: TODAY, typeName: "陪玩", minutes: 45, note: "老记录" });
+  const insA = await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, '陪玩', 45, '老记录', 'pre-src-key-00001', ?) RETURNING id",
+    args: [TODAY, nowTs],
+  });
+  const idA = Number(insA.rows[0].id);
+  await client.execute({
+    sql: "INSERT INTO family_request_keys (request_key, payload, activity_id, state, created_at, updated_at) VALUES ('pre-src-key-00001', ?, ?, 'saved', ?, ?)",
+    args: [legacyPayload, idA, nowTs, nowTs],
+  });
+  const insB = await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, '阅读', NULL, NULL, 'pre-src-key-00002', ?) RETURNING id",
+    args: [shiftDay(TODAY, -2), nowTs],
+  });
+  const idB = Number(insB.rows[0].id);
+  const rowsBefore = await client.execute(
+    "SELECT id, date, type_name, minutes, note, request_key, created_at FROM family_activities ORDER BY id",
+  );
+  let upgradeError = null;
+  try {
+    await applyMigrations(client, ["0007"]);
+  } catch (e) {
+    upgradeError = e;
+  }
+  check("autolog-upgrade: a through-0006 database upgrades through 0007 without error", upgradeError === null, upgradeError ? String(upgradeError) : "");
+  const rowsAfter = await client.execute(
+    "SELECT id, date, type_name, minutes, note, request_key, created_at, source FROM family_activities ORDER BY id",
+  );
+  check(
+    "autolog-upgrade: every pre-source row is preserved field-for-field and its source stays NULL (never backfilled)",
+    JSON.stringify(rowsAfter.rows.map((r) => [r.id, r.date, r.type_name, r.minutes, r.note, r.request_key, r.created_at])) ===
+      JSON.stringify(rowsBefore.rows.map((r) => [r.id, r.date, r.type_name, r.minutes, r.note, r.request_key, r.created_at])) &&
+      rowsAfter.rows.every((r) => r.source === null),
+  );
+  const { ctx } = makeCtx(db, OWNER);
+  const dash = await call("getDashboard", ctx, {});
+  check(
+    "autolog-upgrade: totals unchanged after upgrade (2 records, 45 known minutes, 1 unknown) and old rows read source null （旧来源未记录）",
+    dash.totalCount === 2 && dash.totalKnownMinutes === 45 && dash.unknownMinutesCount === 1 &&
+      dash.recentActivities.every((r) => r.source === null) && dash.recentActivities.length === 2,
+  );
+  const retryA = await call("addActivity", ctx, {
+    date: TODAY, typeName: "陪玩", minutes: 45, note: "老记录", requestKey: "pre-src-key-00001",
+  });
+  check(
+    "autolog-upgrade: a same-content retry of a pre-source key still replays as duplicate (legacy fingerprint has no source to conflict on)",
+    retryA.ok === true && retryA.duplicate === true && retryA.id === idA && retryA.conflict === false,
+  );
+  const delB = await call("deleteActivity", ctx, { id: idB });
+  const retryB = await call("addActivity", ctx, {
+    date: shiftDay(TODAY, -2), typeName: "阅读", minutes: null, note: null, requestKey: "pre-src-key-00002",
+  });
+  const ledB = await client.execute({
+    sql: "SELECT state FROM family_request_keys WHERE request_key = 'pre-src-key-00002'",
+  });
+  check(
+    "autolog-upgrade: deleting a pre-source row tombstones it; a late retry is typed deleted, not resurrected",
+    delB.ok === true && ledB.rows.length === 1 && ledB.rows[0].state === "deleted" &&
+      retryB.ok === false && retryB.deleted === true,
+  );
+  // Rollback readability: dropping ONLY the new column loses no data.
+  const snapAll = async (withSource) => {
+    const types = await client.execute("SELECT id, name, is_preset, preset_key, created_at FROM activity_types ORDER BY id");
+    const acts = await client.execute(
+      withSource
+        ? "SELECT id, date, type_name, minutes, note, request_key, created_at, source FROM family_activities ORDER BY id"
+        : "SELECT id, date, type_name, minutes, note, request_key, created_at FROM family_activities ORDER BY id",
+    );
+    const meta = await client.execute("SELECT key, value FROM ledger_meta ORDER BY key");
+    const keys = await client.execute("SELECT request_key, payload, activity_id, state, created_at, updated_at FROM family_request_keys ORDER BY request_key");
+    return { types: types.rows, acts: acts.rows, meta: meta.rows, keys: keys.rows };
+  };
+  const beforeDrop = await snapAll(true);
+  await client.execute("ALTER TABLE family_activities DROP COLUMN source");
+  const afterDrop = await snapAll(false);
+  const stripped = beforeDrop.acts.map(({ source, ...rest }) => rest);
+  check(
+    "autolog-upgrade: rollback (drop only the source column) preserves every row of every table",
+    JSON.stringify(afterDrop.acts) === JSON.stringify(stripped) &&
+      JSON.stringify(afterDrop.types) === JSON.stringify(beforeDrop.types) &&
+      JSON.stringify(afterDrop.meta) === JSON.stringify(beforeDrop.meta) &&
+      JSON.stringify(afterDrop.keys) === JSON.stringify(beforeDrop.keys),
   );
 }
 

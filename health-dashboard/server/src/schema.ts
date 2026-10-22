@@ -189,6 +189,20 @@ export const gameRewardRedemptions = sqliteTable("game_reward_redemptions", {
   balanceAfter: integer("balance_after").notNull(),
   localDate: text("local_date").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  // Per-request completion proof (CWEB-REDEEM-SAFE-001 follow-up,
+  // migration 0015): the gold-ledger watermark the atomic redemption
+  // batch produced for THIS request, written by the receipt insert
+  // inside that same batch — so the value exists only when the
+  // deduction, the watermark advance, and the ledger flow committed
+  // with the receipt. Receipts issued before this column existed (or
+  // by any half-completed legacy write) carry NULL: they cannot be
+  // proven complete per-request — not from the current balance and
+  // not from any per-day ledger aggregate, since reward_redeem flows
+  // accumulate per (date, reward) — and every surface (lookup, list,
+  // replay, UI) must present them as 未核实, never as a completed
+  // redemption. The column is only ever written at issuance; legacy
+  // rows are never backfilled, re-based, or deleted.
+  completionProof: integer("completion_proof"),
 });
 
 // LIFE-C1 S3 余项 (CWEB-MVP-001·S3): the owner's single "next reward"
