@@ -303,11 +303,17 @@ const addTypeResponse = z.object({
   duplicate: z.boolean(),
 });
 
-// Chat auto-record receipt (CMP-FAMILY-AUTOLOG-001): on success the
-// caller gets a locatable receipt — the new (or replayed) record's id
-// plus the exact stored content, source included — so the agent can
-// report back precisely what was recorded. Failures are the same
-// typed refusals the manual path uses, plus the receipt fields nulled.
+// Chat auto-record receipt (CMP-FAMILY-AUTOLOG-001 / RECEIPT-001):
+// on success the caller gets a locatable receipt — the new (or
+// replayed) record's id plus its content READ BACK FROM THE STORED
+// ROW by the shared adjudication, source included — so the agent can
+// report back precisely what stands in the ledger. The receipt is
+// never assembled from the request or from the entry point's source
+// constant: a replay that resolves to a pre-source row (source NULL)
+// reports source null (旧来源未记录), exactly as the dashboard shows
+// it — the retrying path's stamp is never projected onto a row that
+// does not carry it. Failures are the same typed refusals the manual
+// path uses, plus the receipt fields nulled.
 const chatRecordResponse = z.object({
   ok: z.boolean(),
   forbidden: z.boolean(),
@@ -383,6 +389,27 @@ function payloadMatches(stored: string, incoming: SaveContent): boolean {
   return true;
 }
 
+// The stored record a successful save resolved to, read back from
+// family_activities itself: the row's id plus its exact stored
+// content, provenance included (normalized through knownSource, so a
+// pre-source row reads source null — 旧来源未记录 — never a guessed
+// stamp). Receipts are built from THIS row and nothing else.
+interface StoredActivity {
+  id: number;
+  date: string;
+  typeName: string;
+  minutes: number | null;
+  note: string | null;
+  source: schema.ActivitySource | null;
+}
+
+// A save's verdict plus, on success, the actual stored row it
+// resolved to (stored is non-null exactly when result.ok).
+interface SaveOutcome {
+  result: AddActivityResult;
+  stored: StoredActivity | null;
+}
+
 // The one adjudication rule, applied identically by every addActivity
 // path (ledger fast path, legacy backfill, fresh-save re-read, and the
 // re-read after a failed batch): the stored ledger row and the stored
@@ -394,39 +421,54 @@ function payloadMatches(stored: string, incoming: SaveContent): boolean {
 //   ledger state 'deleted'   → typed deleted
 //   'saved' but no activity  → typed deleted (converged: the record is
 //                              gone, whatever removed it)
-//   'saved' with the row     → ok, the row's id; `duplicate` comes from
-//                              the caller (the fast paths always replay
-//                              an earlier save → true; the fresh path
-//                              passes whether its activity row already
-//                              existed before its batch ran)
+//   'saved' with the row     → ok, the row's id, and the row itself
+//                              read back in full; `duplicate` comes
+//                              from the caller (the fast paths always
+//                              replay an earlier save → true; the fresh
+//                              path passes whether its activity row
+//                              already existed before its batch ran)
 async function adjudicateSave(
   db: Db,
   requestKey: string,
   incoming: SaveContent,
   duplicate: boolean,
-): Promise<AddActivityResult | null> {
+): Promise<SaveOutcome | null> {
   const ledgerRows = await db
     .select()
     .from(schema.familyRequestKeys)
     .where(eq(schema.familyRequestKeys.requestKey, requestKey));
   const ledger = ledgerRows[0];
   if (!ledger) return null;
-  if (!payloadMatches(ledger.payload, incoming)) return addRefusal({ conflict: true });
-  if (ledger.state === "deleted") return addRefusal({ deleted: true });
+  if (!payloadMatches(ledger.payload, incoming)) {
+    return { result: addRefusal({ conflict: true }), stored: null };
+  }
+  if (ledger.state === "deleted") {
+    return { result: addRefusal({ deleted: true }), stored: null };
+  }
   const activityRows = await db
-    .select({ id: schema.familyActivities.id })
+    .select()
     .from(schema.familyActivities)
     .where(eq(schema.familyActivities.requestKey, requestKey));
   const activity = activityRows[0];
-  if (!activity) return addRefusal({ deleted: true });
+  if (!activity) return { result: addRefusal({ deleted: true }), stored: null };
   return {
-    ok: true,
-    forbidden: false,
-    id: activity.id,
-    duplicate,
-    conflict: false,
-    deleted: false,
-    future: false,
+    result: {
+      ok: true,
+      forbidden: false,
+      id: activity.id,
+      duplicate,
+      conflict: false,
+      deleted: false,
+      future: false,
+    },
+    stored: {
+      id: activity.id,
+      date: activity.date,
+      typeName: activity.typeName,
+      minutes: activity.minutes,
+      note: activity.note,
+      source: knownSource(activity.source),
+    },
   };
 }
 
@@ -451,7 +493,7 @@ async function saveActivityRecord(
     requestKey: string;
   },
   source: schema.ActivitySource,
-): Promise<AddActivityResult> {
+): Promise<SaveOutcome> {
   const db = ctx.db<typeof schema>();
   const note = input.note && input.note.length > 0 ? input.note : null;
   const content: SaveContent = {
@@ -497,7 +539,7 @@ async function saveActivityRecord(
     const verdict = await adjudicateSave(db, input.requestKey, content, true);
     // A vanished verdict (no ledger row at all) cannot happen after
     // a successful backfill; refuse plainly rather than guess.
-    return verdict ?? addRefusal({});
+    return verdict ?? { result: addRefusal({}), stored: null };
   }
 
   // (c) Fresh key: ONE db.batch, two builder statements —
@@ -554,7 +596,7 @@ async function saveActivityRecord(
   }
   const verdict = await adjudicateSave(db, input.requestKey, content, existedBefore);
   if (verdict) {
-    if (verdict.ok && !verdict.duplicate) ctx.invalidateQueries();
+    if (verdict.result.ok && !verdict.result.duplicate) ctx.invalidateQueries();
     return verdict;
   }
   // No ledger row after the batch: either the batch threw before
@@ -562,7 +604,7 @@ async function saveActivityRecord(
   // concurrent delete removed… the ledger is never deleted, so in
   // practice this is the thrown-batch case. Plain refusal.
   void batchThrew;
-  return addRefusal({});
+  return { result: addRefusal({}), stored: null };
 }
 
 /* ---------------- actions ---------------- */
@@ -758,7 +800,8 @@ export const Actions = {
       if (!isRealDateKey(args.date)) return addRefusal({});
       // A future date is not a completed fact: refuse, write nothing.
       if (args.date > todayKey()) return addRefusal({ future: true });
-      return saveActivityRecord(ctx, args, schema.SOURCE_MANUAL);
+      const { result } = await saveActivityRecord(ctx, args, schema.SOURCE_MANUAL);
+      return result;
     },
   }),
 
@@ -785,8 +828,8 @@ export const Actions = {
       if (!isOwner(ctx)) return chatRefusal({ forbidden: true });
       if (!isRealDateKey(args.date)) return chatRefusal({});
       if (args.date > todayKey()) return chatRefusal({ future: true });
-      const result = await saveActivityRecord(ctx, args, schema.SOURCE_CHAT);
-      if (!result.ok) {
+      const { result, stored } = await saveActivityRecord(ctx, args, schema.SOURCE_CHAT);
+      if (!result.ok || !stored) {
         return chatRefusal({
           forbidden: result.forbidden,
           conflict: result.conflict,
@@ -794,18 +837,26 @@ export const Actions = {
           future: result.future,
         });
       }
+      // The receipt quotes the STORED row the shared adjudication
+      // read back — id, date, type and minutes as they actually
+      // stand, and the source as it actually stands. A fresh chat
+      // save reads 聊天记录 because that is what was stored; a
+      // replay that resolved to a pre-source row reads null
+      // (旧来源未记录) — the receipt never upgrades an unrecorded
+      // provenance into this path's stamp, and the stored row is
+      // never edited to match the receipt.
       return {
         ok: true,
         forbidden: false,
-        id: result.id,
+        id: stored.id,
         duplicate: result.duplicate,
         conflict: false,
         deleted: false,
         future: false,
-        date: args.date,
-        typeName: args.typeName,
-        minutes: args.minutes,
-        source: schema.SOURCE_CHAT,
+        date: stored.date,
+        typeName: stored.typeName,
+        minutes: stored.minutes,
+        source: stored.source,
       };
     },
   }),

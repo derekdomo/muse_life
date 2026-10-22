@@ -213,6 +213,44 @@ check('source: client labels receipt verification as text (✓ 已完成 / ▲ �
   && clientSrc.includes('未核实 · 历史回执')
   && clientSrc.includes('result.status === "unverified"'));
 
+// --------------------------------- REDEEM-SAFE P0-1/P0-2 + S3 recovery checks
+check('source: settleGame returns the state its own CAS save committed (revision/balance/watermark + the SUM it reconciled against)',
+  serverSrc.includes('committedRevision: row.revision + 1')
+  && serverSrc.includes('committedGold: profile.gold')
+  && serverSrc.includes('committedGoldLedgerSum: profile.goldLedgerSum')
+  && serverSrc.includes('committedLedgerGoldSum: ledgerGoldSum'));
+check('source: redeem commitBase is built ONLY from the settlement return value — the afterSettle re-read never feeds it',
+  serverSrc.includes('commitBase = { revision: settled.committedRevision, gold: settled.committedGold, goldLedgerSum: settled.committedGoldLedgerSum };')
+  && !extractHandlerFunction(serverSrc, 'handleRedeemReward').includes('commitBase = { revision: afterSettle.revision'));
+check('source: every terminal rejection in redeem passes the durable receipt arbitration first (resolveCommittedReceipt)',
+  (() => {
+    const body = extractHandlerFunction(serverSrc, 'handleRedeemReward');
+    return (body.match(/const resolved = await resolveCommittedReceipt\(ctx, args\);/g) ?? []).length >= 6
+      && body.includes('if (resolved) return resolved;');
+  })());
+check('source: client clearPending is compare-by-requestId (redeem and lookup callbacks clear only their own intent)',
+  clientSrc.includes('const clearPending = (requestId: string) => {')
+  && clientSrc.includes('if (existing && existing.requestId === requestId) storePendingRedemption(null);')
+  && clientSrc.includes('clearPending(draft.requestId);')
+  && clientSrc.includes('clearPending(requestId);'));
+check('source: client re-checks the pending identity at send time and never sends over a different stored intent',
+  clientSrc.includes('class PendingBlockedError extends Error')
+  && clientSrc.includes('if (existing && existing.requestId !== draft.requestId) throw new PendingBlockedError(existing);')
+  && clientSrc.includes('error instanceof PendingBlockedError'));
+check('source: character screen renders the pending strip (original name + fixed price + 未确认 text) above the goal, with a same-key 继续确认 route into the panel',
+  clientSrc.includes('先确认这笔兑换')
+  && clientSrc.includes('pendingIntent.name')
+  && clientSrc.includes('结果未确认')
+  && (clientSrc.match(/OPEN_PENDING_REDEMPTION_EVENT/g) ?? []).length >= 3
+  && clientSrc.includes('window.dispatchEvent(new Event(OPEN_PENDING_REDEMPTION_EVENT))')
+  && clientSrc.includes('window.addEventListener(OPEN_PENDING_REDEMPTION_EVENT, openPending)'));
+check('source: receipt 选择下一项 scrolls to the reward list and focuses the goal pick, keeping the saved goal',
+  clientSrc.includes('const chooseNextGoal = () => {')
+  && clientSrc.includes('onClick={chooseNextGoal}')
+  && clientSrc.includes('id="game-rewards-list"')
+  && clientSrc.includes('data-goal-pick="true"')
+  && clientSrc.includes("button[data-goal-pick='true']"));
+
 // ------------------------------------------------------------ harness
 async function loadHarnessDeps() {
   try {
@@ -261,7 +299,7 @@ async function buildHarness() {
     'compareSourceVersions', 'sourceVersionSqlBefore', 'planLedgerAction', 'buildGamePlan',
     'bookLedgerRow', 'settleLedgerRow', 'evaluateDailyTasks', 'settleGame',
     'rewardItemFromRow', 'rewardReceiptFromRow', 'loadRedemptionByRequestId', 'loadRewardGoalId', 'sameRedemptionContent',
-    'unverifiedReceiptResult', 'redemptionBusyResult',
+    'unverifiedReceiptResult', 'redemptionBusyResult', 'resolveCommittedReceipt',
     'handleGetRewards', 'handleGetRewardsSnapshot', 'handleSaveReward', 'handleRedeemReward', 'handleGetRedemptionReceipt', 'handleSetRewardGoal',
   ];
   const code = [
@@ -518,6 +556,41 @@ if (H) {
       },
     });
   }
+
+  // Thenable gates for deterministic race injection: wrap a drizzle
+  // builder/query chain so `cb` runs exactly once — gateBefore:
+  // before the terminal query executes; gateAfter: after it
+  // resolves. Chained builder calls (.set/.where/.from/.limit/…)
+  // are re-wrapped so the gate survives to the awaited terminal.
+  function gateWrap(q, cb, when) {
+    let fired = false;
+    const fire = async () => { if (!fired) { fired = true; await cb(); } };
+    const wrap = (target) => new Proxy(target, {
+      get(t, p) {
+        if (p === 'then') {
+          return (resolve, reject) => {
+            void (async () => {
+              if (when === 'before') { await fire(); return t; }
+              const result = await t;
+              await fire();
+              return result;
+            })().then(resolve, reject);
+          };
+        }
+        const v = t[p];
+        if (typeof v === 'function') {
+          return (...args) => {
+            const r = v.apply(t, args);
+            return r && typeof r === 'object' && typeof r.then === 'function' ? wrap(r) : r;
+          };
+        }
+        return v;
+      },
+    });
+    return wrap(q);
+  }
+  const gateBefore = (q, cb) => gateWrap(q, cb, 'before');
+  const gateAfter = (q, cb) => gateWrap(q, cb, 'after');
 
   await scenario('atomic commit: failure injection at the batch write point', async () => {
     const { client, db } = await H.makeDb();
@@ -832,6 +905,184 @@ if (H) {
     check('own-settle: the redemption still commits (own settle is entitled to advance the base) — balance 200 - 60 = 140, watermark reconciled, verified receipt',
       res.status === 'redeemed' && res.receipt?.balanceAfter === 140 && res.receipt?.verification === 'verified'
       && state.gold === 140 && state.goldLedgerSum === 40 && state.redeemGoldSum === -60, `status=${res.status}`);
+  });
+
+  // ----------------------- P0-1: the settle window must not absorb external writes
+  // Shared setup: balance 100 / watermark 0, a +50 ledger row the
+  // preview settles (balance 150, watermark 50), then a further +50
+  // re-strands (ledger SUM 100 against watermark 50) so the redeem's
+  // OWN settlement must run and advance the revision before commit.
+  async function settleWindowSetup() {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    await client.execute({
+      sql: 'INSERT INTO game_settlements (local_date, category, detail, xp, gold, rule_version, source_date, source_updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)',
+      args: [TODAY, 'steps', '', 50, 50, 2, TODAY, Date.now()],
+    });
+    const reward = await H.handleSaveReward(owner, { id: null, name: '结算窗口', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    await client.execute({
+      sql: 'UPDATE game_settlements SET gold = 100, xp = 100 WHERE local_date = ? AND category = ?',
+      args: [TODAY, 'steps'],
+    });
+    return { client, db, owner, reward, pinnedVersion: list.balanceVersion, pinnedBalance: list.balance };
+  }
+
+  await scenario('P0-1: an external write landing AFTER the settle save (before its result is used) is stale, never absorbed', async () => {
+    const { client, db, owner, reward, pinnedVersion, pinnedBalance } = await settleWindowSetup();
+    check('P0-1 after-save setup: the preview settled to 150 and the redeem will need its own settle (watermark lags the ledger)',
+      pinnedBalance === 150, `balance=${pinnedBalance}`);
+    // The handler's own settle is the only game_state UPDATE in this
+    // call: gate AFTER it resolves — the exact P0-1 window (settle
+    // saved, handler has not yet consumed the result) — and land an
+    // external write there: gold −20, revision +1, watermark
+    // untouched. The old code re-read this state as its commit base
+    // and charged over it.
+    let fired = false;
+    const windowDb = wrapDb(db, {
+      update: (table) => {
+        const builder = db.update(table);
+        if (table !== H.schema.gameState) return builder;
+        return gateAfter(builder, async () => {
+          if (fired) return;
+          fired = true;
+          await client.execute({ sql: 'UPDATE game_state SET gold = gold - 20, revision = revision + 1 WHERE id = 1', args: [] });
+        });
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(windowDb, OWNER), { requestId: 'req-p01-after-01', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: pinnedVersion });
+    const state = await rawState(db);
+    check('P0-1 after-save: the old confirmation is rejected as stale with ZERO redemption writes — the settle result (200) and the external write (−20) both stand exactly as they landed',
+      res.status === 'stale' && res.receipt === null
+      && state.gold === 180 && state.revision === pinnedVersion + 2 && state.goldLedgerSum === 100
+      && state.redemptionCount === 0 && state.redeemRowCount === 0 && state.redeemGoldSum === 0, `status=${res.status} gold=${state.gold} rev=${state.revision}`);
+    const list2 = await H.handleGetRewards(owner);
+    const fresh = await H.handleRedeemReward(owner, { requestId: 'req-p01-after-02', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list2.balanceVersion });
+    const state2 = await rawState(db);
+    check('P0-1 after-save: a fresh preview against the real stored balance (180) redeems exactly from it (180 − 60 = 120, verified)',
+      list2.balance === 180 && fresh.status === 'redeemed' && fresh.receipt?.balanceAfter === 120 && fresh.receipt?.verification === 'verified'
+      && state2.gold === 120 && state2.redeemGoldSum === -60);
+  });
+
+  await scenario('P0-1: an external write landing BEFORE the settle CAS loses the CAS, the settle retries on top of it, and the base stays the settle own commit', async () => {
+    const { client, db, owner, reward, pinnedVersion } = await settleWindowSetup();
+    // Gate BEFORE the settle's profile UPDATE executes: the
+    // external write (gold −20, revision +1) lands first, the
+    // settle's CAS (pinned to its pre-write read revision) misses,
+    // the settle re-reads and reconciles on top of the winner —
+    // its committed result, and only that, becomes the commit base.
+    // The write lands exactly once: later CAS attempts proceed
+    // against the state the first attempt reconciled onto.
+    let fired = false;
+    const windowDb = wrapDb(db, {
+      update: (table) => {
+        const builder = db.update(table);
+        if (table !== H.schema.gameState) return builder;
+        return gateBefore(builder, async () => {
+          if (fired) return;
+          fired = true;
+          await client.execute({ sql: 'UPDATE game_state SET gold = gold - 20, revision = revision + 1 WHERE id = 1', args: [] });
+        });
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(windowDb, OWNER), { requestId: 'req-p01-before-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: pinnedVersion });
+    const state = await rawState(db);
+    check('P0-1 before-CAS: the redemption still commits exactly once on the settle own reconciled result (150 − 20 + 50 − 60 = 120) — not staled by the contention, not charged over the unconfirmed version',
+      res.status === 'redeemed' && res.receipt?.balanceAfter === 120 && res.receipt?.verification === 'verified'
+      && state.gold === 120 && state.goldLedgerSum === 40 && state.redemptionCount === 1 && state.redeemGoldSum === -60, `status=${res.status} gold=${state.gold}`);
+  });
+
+  // ----------------------- P0-2(a): rejection vs same-key success arbitration
+  await scenario('P0-2: a same-key commit landing at the ledger SUM pause resolves the in-flight handler — never a terminal stale', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '同键仲裁甲', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    const args = { requestId: 'req-p02-sum-pause', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion };
+    let winner = null;
+    let armed = true;
+    // Handler A pauses at its pre-commit ledger SUM read; while it
+    // is paused, handler B (same requestId, same content) submits
+    // and fully commits. A's pinCheck then reads the moved profile
+    // — without arbitration A returns stale with no receipt and the
+    // client would terminally clear a completed intent.
+    const pauseDb = wrapDb(db, {
+      select: (...a) => {
+        const fields = a[0];
+        if (armed && fields && typeof fields === 'object' && 'goldTotal' in fields && !('total' in fields) && !('xpTotal' in fields)) {
+          return {
+            from: (table) => ({
+              then: (resolve, reject) => {
+                void (async () => {
+                  armed = false;
+                  winner = await H.handleRedeemReward(owner, args);
+                  resolve(await db.select(...a).from(table));
+                })().catch(reject);
+              },
+            }),
+          };
+        }
+        return db.select(...a);
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(pauseDb, OWNER), args);
+    const state = await rawState(db);
+    check('P0-2 SUM pause: B redeemed; A returns already_resolved with B verified receipt (NOT stale, receipt present) and the key was charged exactly once',
+      winner?.status === 'redeemed' && res.status === 'already_resolved'
+      && res.receipt !== null && res.receipt.id === winner.receipt.id && res.receipt.verification === 'verified'
+      && state.gold === 40 && state.redemptionCount === 1 && state.redeemGoldSum === -60, `A=${res.status} B=${winner?.status}`);
+    const replay = await H.handleRedeemReward(owner, args);
+    check('P0-2 SUM pause: the arbitration is durable — a later replay of the same key returns the same original receipt, still exactly one charge',
+      replay.status === 'already_resolved' && replay.receipt?.id === winner.receipt.id
+      && (await rawState(db)).redemptionCount === 1);
+  });
+
+  await scenario('P0-2: a same-key commit landing before the pre-validation profile read resolves the in-flight handler at step (2)', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '同键仲裁乙', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    const args = { requestId: 'req-p02-step2-01', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion };
+    let winner = null;
+    let fired = false;
+    // Gate the FIRST gameState read of A's redeem (its step-(2)
+    // stored profile read): B commits in full before that read
+    // executes, so A reads the post-commit profile — version
+    // advanced past the pin, gold already spent. Without the final
+    // arbitration A returns stale/insufficient with no receipt.
+    const stepDb = wrapDb(db, {
+      select: (...a) => {
+        const builder = db.select(...a);
+        if (a[0] !== undefined) return builder;
+        return new Proxy(builder, {
+          get(t, p) {
+            if (p === 'from') {
+              return (table) => {
+                const q = t.from(table);
+                if (!fired && table === H.schema.gameState) {
+                  return gateBefore(q, async () => {
+                    fired = true;
+                    winner = await H.handleRedeemReward(owner, args);
+                  });
+                }
+                return q;
+              };
+            }
+            const v = t[p];
+            return typeof v === 'function' ? v.bind(t) : v;
+          },
+        });
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(stepDb, OWNER), args);
+    const state = await rawState(db);
+    check('P0-2 step-2: B redeemed; A classifies from the durable receipt (already_resolved, same receipt id) instead of a terminal stale — exactly one charge under the key',
+      winner?.status === 'redeemed' && res.status === 'already_resolved'
+      && res.receipt !== null && res.receipt.id === winner.receipt.id
+      && state.gold === 40 && state.redemptionCount === 1 && state.redeemGoldSum === -60, `A=${res.status} B=${winner?.status}`);
   });
 
   // --------------------------------- reconciliation gate (follow-up #3)

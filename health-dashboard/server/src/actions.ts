@@ -1745,7 +1745,7 @@ function evaluateDailyTasks(health: Snapshot | null, strength: StrengthTraining 
 // their gold then. The same reconciliation is the failure boundary for
 // a save that throws mid-pass: rows booked, watermark not advanced →
 // the next open pays the stranded delta, never twice.
-async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[]; dailyTasks: z.infer<typeof gameDailyTaskSchema>[]; profile: GameProfile }> {
+async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[]; dailyTasks: z.infer<typeof gameDailyTaskSchema>[]; profile: GameProfile; committedRevision: number; committedGold: number; committedGoldLedgerSum: number | null; committedLedgerGoldSum: number }> {
   const db = ctx.db<typeof schema>();
   for (let attempt = 0; attempt < PROFILE_CAS_ATTEMPTS; attempt++) {
     const row = await loadGameStateRow(ctx);
@@ -1864,6 +1864,23 @@ async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthT
       settledThroughDate,
       dailyTasks,
       profile,
+      // The state THIS settlement actually committed (CWEB-REDEEM-
+      // SAFE-001 P0-1): the CAS save above landed exactly this draft
+      // at exactly this revision — the update path matched the read
+      // revision and advanced it by one inside the same statement,
+      // and the insert path wrote revision 1 over a non-existent row
+      // (read revision 0). A caller that needs a commit base (the
+      // redemption handler) must use THESE values, never a post-
+      // settle re-read: a re-read taken after the save can absorb an
+      // external write that landed in between and mistake it for
+      // this settlement's own result. committedLedgerGoldSum is the
+      // ledger SUM this attempt reconciled against, so the caller
+      // can verify the committed watermark against the settlement's
+      // own books, not against a later state of the world.
+      committedRevision: row.revision + 1,
+      committedGold: profile.gold,
+      committedGoldLedgerSum: profile.goldLedgerSum,
+      committedLedgerGoldSum: ledgerGoldSum,
       ledger: ledgerRows.map((ledgerRow) => ({
         localDate: ledgerRow.localDate,
         category: ledgerRow.category,
@@ -2261,6 +2278,32 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
 // writes. The redemption path never spends from an unreconciled
 // balance and never floors an overdraft away.
 //
+// Own-settle commit base (P0-1, next follow-up): settleGame returns
+// the revision / balance / watermark its own CAS save actually
+// committed (plus the ledger SUM that attempt reconciled against),
+// and redeem's commitBase is built ONLY from that return value. The
+// earlier shape — re-reading the profile after the settle and
+// adopting whatever it showed as the base — let an external write
+// landing between the settlement's save and the re-read (gold moved,
+// revision advanced) be absorbed into the base, so the old
+// confirmation charged straight over a balance version the owner
+// never confirmed. Now such a write is seen by the commit loop's
+// first-read movement check against the settlement's own commit and
+// rejects the confirmation as stale with zero redemption writes;
+// the post-settle re-read survives only as the reconciliation gate
+// (a watermark/SUM mismatch is a busy, never a base).
+//
+// Rejection/success arbitration (P0-2, same follow-up): a terminal
+// rejection of a request is durable-arbitrated against that
+// request's success — every rejection path re-reads the receipt
+// table as its last step (resolveCommittedReceipt) and classifies
+// from a receipt found there instead of emitting the rejection. A
+// same-requestId handler that fully commits while this handler is
+// in flight therefore resolves the in-flight handler to the
+// winner's verified receipt, never to a stale/insufficient verdict
+// that would terminally clear a completed intent; a rejection is
+// emitted only when no receipt exists at that final read.
+//
 // Read-only snapshot (S3 余项 follow-up): getRewardsSnapshot returns
 // the STORED rewards state — balance, balance version, goal,
 // rewards, receipts — with no settlement, no profile save, and no
@@ -2487,6 +2530,36 @@ function redemptionBusyResult(message: string): z.infer<typeof redeemRewardRespo
   return { forbidden: false, status: "busy", message, receipt: null, balance: null, balanceVersion: null };
 }
 
+// Durable arbitration between a terminal rejection and an in-flight
+// success (CWEB-REDEEM-SAFE-001 P0-2): a rejection of THIS request is
+// only terminal when the durable receipt table holds no receipt for
+// its requestId at decision time. A same-requestId commit can land
+// after this handler's replay read — a concurrent submit that fully
+// committed while this handler was paused at a pre-validation read,
+// the ledger SUM read, or its own settlement — and a rejection
+// computed from the moved profile (version advanced, gold spent)
+// would then falsely declare a completed redemption "not charged"
+// and terminally clear the client's pending intent. So EVERY
+// terminal rejection path re-reads the receipt as its last step:
+// a receipt found there classifies the intent (verified same
+// content → already_resolved with the original receipt; proof-less
+// → unverified; different content → request_conflict) and the
+// rejection is never emitted. Returns null only when no receipt
+// exists at this final read, in which case the caller's rejection
+// stands on the current stored state.
+async function resolveCommittedReceipt(ctx: Ctx, args: RedeemRewardArgs): Promise<z.infer<typeof redeemRewardResponse> | null> {
+  const receipt = await loadRedemptionByRequestId(ctx, args.requestId);
+  if (!receipt) return null;
+  const row = await loadGameStateRow(ctx);
+  if (!sameRedemptionContent(receipt, args)) {
+    return { forbidden: false, status: "request_conflict", message: "同一个请求编号已用于另一笔兑换，本次提交已拒绝，未扣账", receipt: null, balance: row.profile.gold, balanceVersion: row.revision };
+  }
+  if (receipt.verification !== "verified") {
+    return unverifiedReceiptResult(receipt, row);
+  }
+  return { forbidden: false, status: "already_resolved", message: "这笔兑换已经完成，返回原回执，未重复扣账", receipt, balance: row.profile.gold, balanceVersion: row.revision };
+}
+
 // Truly read-only stored rewards state (S3 余项 follow-up): reads
 // the profile row, the ledger SUM, the reward list, the receipts,
 // and the goal — and writes NOTHING: no settlement, no profile save,
@@ -2599,16 +2672,28 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
     const rewardRows = await db.select().from(schema.gameRewards).where(eq(schema.gameRewards.id, args.rewardId)).limit(1);
     const reward = rewardRows[0];
     const stored = await loadGameStateRow(ctx);
+    // Every rejection below passes the durable arbitration first
+    // (P0-2): the profile just read may have been moved by a
+    // same-requestId commit that landed after the replay read — in
+    // that case the intent is already resolved, not rejected.
     if (!reward) {
+      const resolved = await resolveCommittedReceipt(ctx, args);
+      if (resolved) return resolved;
       return { forbidden: false, status: "reward_not_found", message: "这条奖励已不存在，未扣账", receipt: null, balance: stored.profile.gold, balanceVersion: stored.revision };
     }
     if (reward.revision !== args.rewardRevision || reward.price !== args.price) {
+      const resolved = await resolveCommittedReceipt(ctx, args);
+      if (resolved) return resolved;
       return { forbidden: false, status: "stale", message: "奖励的名称或价格已经变化，未扣账；请重新预览确认", receipt: null, balance: stored.profile.gold, balanceVersion: stored.revision };
     }
     if (stored.revision !== args.expectedBalanceVersion) {
+      const resolved = await resolveCommittedReceipt(ctx, args);
+      if (resolved) return resolved;
       return { forbidden: false, status: "stale", message: "金币余额已经变化，未扣账；请重新预览确认", receipt: null, balance: stored.profile.gold, balanceVersion: stored.revision };
     }
     if (stored.profile.goldInitialized && stored.profile.gold < args.price) {
+      const resolved = await resolveCommittedReceipt(ctx, args);
+      if (resolved) return resolved;
       return { forbidden: false, status: "insufficient_funds", message: `金币不足：兑换需要 ${args.price} 金币，已保存余额 ${stored.profile.gold}，还差 ${args.price - stored.profile.gold} 金币，未扣账`, receipt: null, balance: stored.profile.gold, balanceVersion: stored.revision };
     }
     // The confirmed pin, captured from the state step (2) just
@@ -2637,6 +2722,11 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
     // before any settlement or commit of ours can absorb the change.
     const pinCheck = await loadGameStateRow(ctx);
     if (pinCheck.revision !== pin.revision || pinCheck.profile.gold !== pin.gold || pinCheck.profile.goldLedgerSum !== pin.goldLedgerSum) {
+      // The mover may be this very intent's own concurrent commit
+      // (P0-2): arbitrate against the durable receipt before
+      // declaring the confirmation stale.
+      const resolved = await resolveCommittedReceipt(ctx, args);
+      if (resolved) return resolved;
       return { forbidden: false, status: "stale", message: "金币余额已经变化，未扣账；请重新预览确认", receipt: null, balance: pinCheck.profile.gold, balanceVersion: pinCheck.revision };
     }
     // The state the commit loop's first attempt must start from: the
@@ -2654,8 +2744,9 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
       const strengthLoad = await loadStrengthSnapshot(ctx);
       const health = healthLoad.state === "ok" ? healthLoad.snapshot : null;
       const strength = effectiveStrength(healthLoad, strengthLoad);
+      let settled: Awaited<ReturnType<typeof settleGame>>;
       try {
-        await settleGame(ctx, health, strength, todayLA);
+        settled = await settleGame(ctx, health, strength, todayLA);
       } catch {
         // Reconciliation gate: a failed settlement means the stored
         // balance cannot be certified against the ledger. The
@@ -2665,17 +2756,39 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
         // redemption writes; the intent stays retryable as-is.
         return redemptionBusyResult("金币结算没有完成，余额尚未对账，本次兑换未执行、未扣账；请稍后用同一请求重试。");
       }
+      // The settlement's own books must reconcile: the watermark it
+      // committed is the ledger SUM it reconciled against in the
+      // same attempt. (Both values come from the settlement's
+      // return — its own committed result — never from a later
+      // re-read of the profile.)
+      if (!settled.profile.goldInitialized || settled.committedGoldLedgerSum === null || settled.committedGoldLedgerSum !== settled.committedLedgerGoldSum) {
+        return redemptionBusyResult("金币余额与账本仍不一致，本次兑换未执行、未扣账；请稍后用同一请求重试确认。");
+      }
       // Post-settle reconciliation proof: the stored watermark must
       // now equal the ledger gold SUM exactly. Any residual mismatch
-      // (a save that reported success without reconciling) aborts
-      // the redemption the same way — typed busy, zero writes.
+      // (a save that reported success without reconciling, or a
+      // ledger flow that landed after the settlement's own SUM
+      // read) aborts the redemption the same way — typed busy, zero
+      // writes. This re-read is a GATE ONLY: it never feeds the
+      // commit base below.
       const afterSettle = await loadGameStateRow(ctx);
       const settledTotals = await db.select({ goldTotal: sql`COALESCE(SUM(${schema.gameSettlements.gold}), 0)` }).from(schema.gameSettlements);
       const settledLedgerGoldSum = Number(settledTotals[0]?.goldTotal ?? 0);
       if (!afterSettle.profile.goldInitialized || afterSettle.profile.goldLedgerSum === null || afterSettle.profile.goldLedgerSum !== settledLedgerGoldSum) {
         return redemptionBusyResult("金币余额与账本仍不一致，本次兑换未执行、未扣账；请稍后用同一请求重试确认。");
       }
-      commitBase = { revision: afterSettle.revision, gold: afterSettle.profile.gold, goldLedgerSum: afterSettle.profile.goldLedgerSum };
+      // P0-1: the commit base is EXACTLY what this handler's own
+      // settlement committed — the revision, balance, and watermark
+      // its CAS save landed — taken from the settlement's return
+      // value. It is never the post-settle re-read above: an
+      // external write landing after the settlement's save (gold
+      // moved, revision advanced) would otherwise be absorbed into
+      // the base and the old confirmation would charge straight
+      // over it. With the base fixed at the settlement's own
+      // commit, the commit loop's first-read movement check sees
+      // that external write for what it is and rejects the old
+      // confirmation as stale with zero redemption writes.
+      commitBase = { revision: settled.committedRevision, gold: settled.committedGold, goldLedgerSum: settled.committedGoldLedgerSum };
     }
     // (4) The redemption itself, as ONE atomic batch
     // (CWEB-REDEEM-SAFE-001). Each attempt re-reads the freshest
@@ -2747,15 +2860,24 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
         // commit spent gold, a settlement credited new gold, or any
         // other external write): the pinned confirmation no longer
         // describes the balance — reject it instead of re-basing
-        // the charge.
+        // the charge. But the mover may be THIS intent's own
+        // concurrent commit landing between the raced-receipt read
+        // above and this read (P0-2): the durable arbitration gets
+        // the last word before any terminal rejection.
+        const resolved = await resolveCommittedReceipt(ctx, args);
+        if (resolved) return resolved;
         return { forbidden: false, status: "stale", message: "金币余额已经变化，未扣账；请重新预览确认", receipt: null, balance: row.profile.gold, balanceVersion: row.revision };
       }
       const freshRewardRows = await db.select().from(schema.gameRewards).where(eq(schema.gameRewards.id, args.rewardId)).limit(1);
       const freshReward = freshRewardRows[0];
       if (!freshReward) {
+        const resolved = await resolveCommittedReceipt(ctx, args);
+        if (resolved) return resolved;
         return { forbidden: false, status: "reward_not_found", message: "这条奖励已不存在，未扣账", receipt: null, balance: row.profile.gold, balanceVersion: row.revision };
       }
       if (freshReward.revision !== args.rewardRevision || freshReward.price !== args.price) {
+        const resolved = await resolveCommittedReceipt(ctx, args);
+        if (resolved) return resolved;
         return { forbidden: false, status: "stale", message: "奖励的名称或价格已经变化，未扣账；请重新预览确认", receipt: null, balance: row.profile.gold, balanceVersion: row.revision };
       }
       const profile = row.profile;
@@ -2763,6 +2885,8 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
         return { forbidden: false, status: "busy", message: "金币账本尚未就绪，未扣账；请稍后再试", receipt: null, balance: profile.gold, balanceVersion: row.revision };
       }
       if (profile.gold < args.price) {
+        const resolved = await resolveCommittedReceipt(ctx, args);
+        if (resolved) return resolved;
         return { forbidden: false, status: "insufficient_funds", message: `金币不足：兑换需要 ${args.price} 金币，已保存余额 ${profile.gold}，还差 ${args.price - profile.gold} 金币，未扣账`, receipt: null, balance: profile.gold, balanceVersion: row.revision };
       }
       const readRevision = row.revision;
