@@ -49,6 +49,15 @@ function BookCard({
     void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
   };
 
+  // Live-copy readability is separate from import-task state
+  // (CMP-READ-IMPORT-001 live-copy slice): a complete saved copy
+  // (live chapters present) stays readable while a newer import is
+  // processing or after it failed — the import status alone never
+  // gates the read entry.
+  const hasLiveCopy = book.chapterCount > 0;
+  const importInProgress = book.importStatus === "processing";
+  const importFailed = book.importStatus === "failed";
+
   const save = useMutation({
     mutationFn: () =>
       api.updateBook({
@@ -99,22 +108,39 @@ function BookCard({
         </span>
       </div>
       <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--dim)]">
-        <span>
-          导入状态：{IMPORT_STATUS_LABEL[book.importStatus]}
-          {book.importStatus === "ready" ? `（共 ${book.chapterCount} 章）` : ""}
-        </span>
+        {hasLiveCopy ? (
+          <span>
+            已保存版本：共 {book.chapterCount} 章
+            {book.versionLabel ? ` · ${book.versionLabel}` : ""}
+          </span>
+        ) : (
+          <span>导入状态：{IMPORT_STATUS_LABEL[book.importStatus]}</span>
+        )}
         {book.progressValue != null && (
           <span>
             进度：读到第 {book.progressValue} {book.progressUnit === "chapter" ? "章" : "页"}
           </span>
         )}
-        {book.importStatus === "ready" && (
+        {hasLiveCopy && (
           <span>
             上次读到：第 {book.curChapter + 1} 章
           </span>
         )}
       </p>
-      {book.importStatus === "failed" && book.importError && (
+      {hasLiveCopy && importInProgress && (
+        <p className="mt-1 text-xs text-[var(--dim)]">
+          新版本正在导入
+          {book.pendingVersionLabel ? `：${book.pendingVersionLabel}` : ""}
+          ，导入完成前仍读已保存版本。
+        </p>
+      )}
+      {hasLiveCopy && importFailed && (
+        <p className="mt-1 text-xs text-[var(--dim)]">
+          新版本未替换成功，旧版本仍可用
+          {book.pendingVersionLabel ? `（未导入：${book.pendingVersionLabel}）` : ""}。
+        </p>
+      )}
+      {importFailed && book.importError && (
         <p className="mt-1 text-xs text-[var(--accent2)]">失败原因：{book.importError}</p>
       )}
       {book.note && <p className="mt-2 text-sm leading-relaxed">{book.note}</p>}
@@ -192,25 +218,36 @@ function BookCard({
         </div>
       ) : (
         <div className="mt-3 flex flex-wrap gap-2">
-          {book.importStatus === "ready" && (
+          {hasLiveCopy && (
             <button
               type="button"
               onClick={() => onOpenReader(book)}
               className="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white"
             >
-              打开阅读
+              {importInProgress || importFailed ? "继续阅读已保存版本" : "打开阅读"}
             </button>
           )}
-          {(book.importStatus === "pending" || book.importStatus === "failed" || book.importStatus === "none") && (
-            <button
-              type="button"
-              disabled={importing}
-              onClick={() => onImportFile(book)}
-              className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm disabled:opacity-50"
-            >
-              {book.importStatus === "failed" ? "重新导入 EPUB" : "导入 EPUB"}
-            </button>
-          )}
+          {!importInProgress &&
+            (hasLiveCopy
+              ? importFailed || book.importStatus === "ready"
+              : book.importStatus === "pending" ||
+                book.importStatus === "failed" ||
+                book.importStatus === "none") && (
+              <button
+                type="button"
+                disabled={importing}
+                onClick={() => onImportFile(book)}
+                className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm disabled:opacity-50"
+              >
+                {hasLiveCopy
+                  ? importFailed
+                    ? "重试新版本"
+                    : "导入新版本"
+                  : importFailed
+                    ? "重试导入"
+                    : "导入 EPUB"}
+              </button>
+            )}
           <button
             type="button"
             onClick={() => setEditing(true)}
@@ -260,6 +297,7 @@ export function Books({
 
   const [importPhase, setImportPhase] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importNote, setImportNote] = useState<string | null>(null);
 
   // Add-book form
   const [showAdd, setShowAdd] = useState(false);
@@ -352,6 +390,7 @@ export function Books({
   const runImport = async (file: File) => {
     const target = importTargetRef.current;
     setImportError(null);
+    setImportNote(null);
     // One import attempt = one generation key (CMP-READ-IMPORT-001).
     // Every write of this attempt — begin, file upload, chapter
     // chunks, finish — carries this key, so retrying any step under
@@ -361,7 +400,11 @@ export function Books({
     // for existing books too.
     const importRequestId = newRequestId();
     let begunBookId: number | null = null;
-    const targetWasReady = target?.importStatus === "ready";
+    // A complete saved copy exists: a successful import switches
+    // the book to the new version wholesale, and a failed one must
+    // be recorded as failed (the server keeps the saved copy fully
+    // readable — body, file, label, position — either way).
+    const targetHadLiveCopy = target != null && target.chapterCount > 0;
     try {
       setImportPhase("正在本机解析 EPUB…");
       const parsed = await parseEpub(file);
@@ -418,16 +461,27 @@ export function Books({
       });
       if (!finished.ok) throw new Error("导入收尾失败");
       setImportPhase(null);
+      if (targetHadLiveCopy) {
+        // Promotion switched body, contents, file and version label
+        // to the new version in one step. The saved reading
+        // position belonged to the old version's chapters and does
+        // not carry over — say so plainly instead of implying it
+        // migrated.
+        setImportNote(
+          `《${target?.title ?? parsed.title}》已切换到新版本「${file.name}」，将从头开始阅读。`,
+        );
+      }
       invalidate();
     } catch (e) {
       const message = e instanceof Error ? e.message : "导入失败";
       // Record the failure against the generation this attempt began
-      // (bound by its key, so it can never disturb a newer import or
-      // a readable copy) — and only when the book was not already
-      // readable, matching the old rule that a failed retry never
-      // marks a good copy failed. A failed import keeps the previous
-      // chapters, file and reading position untouched server-side.
-      if (begunBookId != null && !targetWasReady) {
+      // (bound by its key, so it can never disturb a newer import).
+      // This runs even when the book already has a readable copy:
+      // the server's failure finish moves only the import status —
+      // the saved copy's chapters, file, version label and reading
+      // position stay exactly as they were, and the book card keeps
+      // offering 继续阅读已保存版本 alongside 重试新版本.
+      if (begunBookId != null) {
         try {
           const { dataBase64 } = await fileToBase64(file);
           await api.uploadImportFile({
@@ -506,6 +560,11 @@ export function Books({
         {importError && (
           <p role="alert" className="mt-2 text-sm text-[var(--accent2)]">
             导入失败：{importError}。原文件与原阅读位置都保留着，可以重试。
+          </p>
+        )}
+        {importNote && (
+          <p role="status" className="mt-2 text-sm text-[var(--accent)]">
+            {importNote}
           </p>
         )}
         {showAdd && (

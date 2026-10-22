@@ -181,9 +181,9 @@ const ERROR_TEXT: Record<string, string> = {
 interface Draft {
   requestId: string;
   entryId: number | null; // null = new record
-  // Content version of the entry as read when this edit was opened (or as
-  // last confirmed after a stale_conflict). The server applies the edit
-  // only while the stored row still carries this base version.
+  // Revision of the entry as read when this edit was opened (or as last
+  // confirmed after a stale_conflict). The server applies the edit only
+  // while the stored row still carries this base revision.
   baseVersion: string | null;
   category: string;
   startLocal: string;

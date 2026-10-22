@@ -22,15 +22,21 @@
 //   original key can therefore never duplicate a time fact. A batch failure
 //   is re-resolved against the committed ledger (replay / conflict / deleted)
 //   before surfacing, and only a failure that left no ledger trace rethrows.
-// - Updates additionally carry a BASE: the content version (entryDto.version)
-//   of the entry as the editor read it. The server applies an edit only
-//   while the stored row still equals that base, arbitrated atomically
-//   inside the batch (base content in the UPDATE's WHERE, ledger INSERT
-//   gated on the post-update row). A base that has moved — or a legacy
-//   caller carrying no base at all — gets a typed "stale_conflict" with the
-//   current stored row attached and ZERO writes, so a failed edit retried
-//   late can never roll a newer saved edit back. Only a key already in the
-//   ledger replays without writing (resolveCommittedKey above).
+// - Updates additionally carry a BASE: the revision (entryDto.version) of
+//   the entry as the editor read it. The revision is a persistent integer
+//   that increments on EVERY successful mutation and never regresses, so
+//   it distinguishes states a content fingerprint cannot (an A→B→A edit
+//   cycle returns the content to A but at a strictly higher revision —
+//   content equality is not version equality). The server applies an edit
+//   only while the stored row still carries that base revision, arbitrated
+//   atomically inside the batch (base revision in the UPDATE's WHERE,
+//   ledger INSERT gated on the post-update revision in the same batch, so
+//   the CAS check and the ledger success record commit or roll back
+//   together). A base that has moved — or a legacy caller carrying no base
+//   at all — gets a typed "stale_conflict" with the current stored row
+//   attached and ZERO writes, so a failed edit retried late can never roll
+//   a newer saved edit back. Only a key already in the ledger replays
+//   without writing (resolveCommittedKey above).
 // - Every read and write requires the owner (ctx.viewer?.isOwner === true).
 //   Guests / anonymous / missing viewer get a typed forbidden with zero data.
 
@@ -238,26 +244,18 @@ async function fingerprint(payload: unknown): Promise<string> {
 
 // ------------------------------------------------------------------- DTOs
 
-// Content version of an entry: a stable fingerprint of exactly the fields
-// an edit can change. The client reads it with the entry (entryDto.version)
-// when it opens the editor and echoes it back as updateEntry's baseVersion;
-// the server applies the edit only while the stored row still hashes to
-// that version. FNV-1a 64-bit over the canonical field tuple — a change
-// detector for arbitration, not a security hash. Exported so the offline
+// Version of an entry: its persistent, monotonically non-regressing
+// revision, rendered as an opaque token. The client reads it with the
+// entry (entryDto.version) when it opens the editor and echoes it back as
+// updateEntry's baseVersion; the server applies the edit only while the
+// stored row still carries that exact revision. Because the revision
+// increments on every successful mutation, two states with IDENTICAL
+// content (an edit cycle that returns a field to an earlier value) still
+// carry different versions — a content fingerprint cannot tell them apart
+// and must never be used as the version. Exported so the offline
 // validators can name the base of a row they seeded directly in SQL.
-export function contentVersion(row: {
-  category: string;
-  startMs: number;
-  endMs: number;
-  note: string;
-}): string {
-  const s = JSON.stringify([row.category, row.startMs, row.endMs, row.note]);
-  let h = 0xcbf29ce484222325n;
-  for (let i = 0; i < s.length; i++) {
-    h ^= BigInt(s.charCodeAt(i));
-    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
-  }
-  return h.toString(16).padStart(16, "0");
+export function entryVersion(row: { revision: number }): string {
+  return `rev-${row.revision}`;
 }
 
 const entryDto = z.object({
@@ -278,7 +276,7 @@ function toDto(row: typeof schema.timeEntries.$inferSelect): EntryDto {
     startMs: row.startMs,
     endMs: row.endMs,
     note: row.note,
-    version: contentVersion(row),
+    version: entryVersion(row),
   };
 }
 
@@ -652,12 +650,13 @@ export const Actions = {
       startMs: z.number().int(),
       endMs: z.number().int(),
       note: z.string().max(500).default(""),
-      // The content version of the entry as the editor read it
+      // The revision of the entry as the editor read it
       // (entryDto.version at open time): the edit applies only while the
-      // stored row still carries this base. Optional in the schema ONLY so
-      // pre-version clients still parse — a base-less update is rejected as
-      // stale_conflict below and can never silently overwrite a stored row
-      // that may have moved since that client last read it.
+      // stored row still carries this base revision. Optional in the
+      // schema ONLY so pre-version clients still parse — a base-less
+      // update is rejected as stale_conflict below and can never silently
+      // overwrite a stored row that may have moved since that client last
+      // read it.
       baseVersion: z.string().min(1).max(64).optional(),
     }),
     response: mutationResponse,
@@ -694,28 +693,35 @@ export const Actions = {
       if (!current) return entryGoneResponse(db, args.entryId);
 
       // Base arbitration, pre-check: the edit intent names the exact
-      // content version it was drafted against. Arrival order is NOT intent
+      // revision it was drafted against. Arrival order is NOT intent
       // order: a retry of an edit that FAILED earlier carries the base from
       // before a newer edit was saved, and must not win just for arriving
-      // last. A moved base — or no base at all (legacy caller) — is a typed
-      // stale_conflict carrying the current stored row, with zero body
-      // writes and zero ledger writes for this key.
+      // last — even when the newer edits cycled the content back to
+      // exactly what the stale base saw (A→B→A), because the revision has
+      // moved on even though the content has not. A moved base — or no
+      // base at all (legacy caller) — is a typed stale_conflict carrying
+      // the current stored row, with zero body writes and zero ledger
+      // writes for this key.
       if (
         args.baseVersion == null ||
-        contentVersion(current) !== args.baseVersion
+        entryVersion(current) !== args.baseVersion
       ) {
         return { ok: false, error: "stale_conflict", entry: toDto(current) };
       }
 
       // Atomic arbitration inside ONE batch, closing the race between the
-      // pre-check above and the write: the body UPDATE only matches while
-      // the stored row still equals the verified base content (all four
-      // editable fields in its WHERE), and the ledger INSERT is an
-      // INSERT ... SELECT that only lands when the row now equals this
-      // intent's payload. If the base moved — or the entry was deleted —
-      // inside that window, both statements write zero rows and the batch
-      // still commits clean; if either write point fails, the batch rolls
-      // both back.
+      // pre-check above and the write: the body UPDATE is a compare-and-
+      // swap that only matches while the stored row still carries the
+      // verified base revision, and as part of the same statement bumps the
+      // revision to base+1; the ledger INSERT is an INSERT ... SELECT that
+      // only lands when the row now carries exactly base+1 — i.e. only
+      // when THIS batch's CAS is the write that produced the new revision.
+      // The CAS and the ledger success record therefore commit or roll back
+      // together: no interleaving can leave one without the other. If the
+      // base moved — or the entry was deleted — inside that window, both
+      // statements write zero rows and the batch still commits clean; if
+      // either write point fails, the batch rolls both back.
+      const baseRevision = current.revision;
       const now = new Date();
       const nowMs = now.getTime();
       try {
@@ -727,15 +733,13 @@ export const Actions = {
               startMs: args.startMs,
               endMs: args.endMs,
               note: args.note,
+              revision: sql`${schema.timeEntries.revision} + 1`,
               updatedAt: now,
             })
             .where(
               and(
                 eq(schema.timeEntries.id, args.entryId),
-                eq(schema.timeEntries.category, current.category),
-                eq(schema.timeEntries.startMs, current.startMs),
-                eq(schema.timeEntries.endMs, current.endMs),
-                eq(schema.timeEntries.note, current.note),
+                eq(schema.timeEntries.revision, baseRevision),
               ),
             ),
           db.run(sql`
@@ -743,6 +747,7 @@ export const Actions = {
             SELECT ${args.requestId}, ${fp}, id, 0, ${nowMs}
             FROM time_entries
             WHERE id = ${args.entryId}
+              AND revision = ${baseRevision + 1}
               AND category = ${args.category}
               AND start_ms = ${args.startMs}
               AND end_ms = ${args.endMs}

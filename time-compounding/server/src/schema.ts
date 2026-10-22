@@ -16,6 +16,11 @@ export const timeEntries = sqliteTable("time_entries", {
   startMs: integer("start_ms").notNull(),
   endMs: integer("end_ms").notNull(),
   note: text("note").notNull().default(""),
+  // Monotonic per-entry revision: starts at 1 on insert and increments by
+  // exactly 1 on every successful update. It NEVER regresses and is never
+  // reused, so two states of an entry with identical content still carry
+  // different revisions (content equality is not version equality).
+  revision: integer("revision").notNull().default(1),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

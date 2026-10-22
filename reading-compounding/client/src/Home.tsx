@@ -173,7 +173,7 @@ export function Home({
               >
                 {savor.internalized ? "↩ 取消内化" : "✓ 标为已内化"}
               </button>
-              {savorBook?.importStatus === "ready" && (
+              {savorBook != null && savorBook.chapterCount > 0 && (
                 <button
                   type="button"
                   onClick={() =>

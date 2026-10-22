@@ -1,6 +1,16 @@
 // CMP-READ-IMPORT-001 validation — import original-key / generation
 // protection for EXISTING books (and the new-book path).
 //
+// Extended for the P0 remainder (PM 2026-10-22): schedule (1) closed-
+// generation file immutability, schedule (2) unbound writes never
+// completing a bound generation, schedule (3) commit-point
+// re-verification under begin/save, begin/promotion and
+// begin/upload interleavings, schedule (6) pending-label staging +
+// snippet provenance, and the live-copy matrix data. NOTE: the old
+// expectation that an unbound (no-importId) write binds to the
+// book's current generation was WRONG and has been corrected to a
+// typed-conflict expectation.
+//
 // Reproduces the PM's repro against the REAL handlers
 // (server/src/actions.ts) on a throwaway in-memory libsql database
 // (schema applied from drizzle/*.sql) with a synthetic blob store:
@@ -88,6 +98,48 @@ function actionSlice(src, name) {
   check(
     "client: finishImport reports the parsed chapter count for server-side validation",
     booksSrc.includes("chapterCount: parsed.chapters.length"),
+  );
+  check(
+    "source: beginImport stages the pending edition label with the generation and NEVER overwrites the live versionLabel",
+    (begin.match(/importVersionLabel: args\.versionLabel \|\| null/g) ?? []).length === 2 &&
+      (begin.match(/versionLabel: args\.versionLabel \|\| null/g) ?? []).length === 2 &&
+      !begin.includes("versionLabel: args.versionLabel || book.versionLabel"),
+  );
+  check(
+    "source: finishImport promotes the staged label from the fresh commit-point row (label switches with body/file)",
+    fin.includes("fresh.importVersionLabel ?? fresh.versionLabel") &&
+      fin.includes("versionLabel: promotedVersionLabel") &&
+      fin.includes("importVersionLabel: null"),
+  );
+  const upload = actionSlice(serverSrc, "uploadImportFile");
+  check(
+    "source: uploadImportFile arbitrates a generation's file on its recorded content fingerprint (bytesHash + importFileHash)",
+    upload.includes("bytesHash(bytes)") &&
+      upload.includes("book.importFileHash === hash") &&
+      upload.includes("importFileHash: hash"),
+  );
+  check(
+    "source: saveImportChapters re-verifies generation + processing INSIDE the batch (guarded statements + post-batch re-read)",
+    save.includes("import_gen = ${gen}") &&
+      save.includes("import_status = 'processing'") &&
+      save.includes("now.importGen !== gen"),
+  );
+  check(
+    "source: unbound writes are refused when a generation is bound (no presumption of belonging)",
+    serverSrc.includes("if (book.importGen != null)") &&
+      serverSrc.includes("must NOT be presumed"),
+  );
+  check(
+    "client: the book card separates live-copy readability from import state (saved-version read entry, pending/failed lines, labels apart)",
+    booksSrc.includes("继续阅读已保存版本") &&
+      booksSrc.includes("新版本正在导入") &&
+      booksSrc.includes("新版本未替换成功，旧版本仍可用") &&
+      booksSrc.includes("重试新版本") &&
+      booksSrc.includes("hasLiveCopy"),
+  );
+  check(
+    "client: a successful re-import states the new version starts from the beginning (position never claimed to migrate)",
+    booksSrc.includes("将从头开始阅读"),
   );
 }
 
@@ -258,6 +310,10 @@ check(
     "PM: the import key IS in the ledger from the start (result points at the book)",
     key != null && key.kind === "import-book" && key.resultTable === "books" && key.resultId === bookId,
   );
+  check(
+    "PM (schedule 6): begin stages the edition label with the generation — the LIVE versionLabel is untouched",
+    row?.importVersionLabel === "v1.epub" && row?.versionLabel == null,
+  );
 }
 
 const up1 = await call("uploadImportFile", owner, {
@@ -309,6 +365,10 @@ const fin1 = await call("finishImport", owner, {
       row?.blobKey === `epub-stage/${bookId}/${K1}` &&
       row?.importBlobKey === null &&
       (await stagedChapters(bookId)).length === 0,
+  );
+  check(
+    "PM (schedule 6): promotion moves the staged label into the LIVE versionLabel and clears the staging slot, atomically with body/file",
+    row?.versionLabel === "v1.epub" && row?.importVersionLabel === null,
   );
 }
 
@@ -877,6 +937,528 @@ const replay = await call("beginImport", owner, {
   );
 }
 
+/* ----- schedule (1): a closed generation's file is immutable ----- */
+{
+  const addedS1 = await call("addBook", owner, {
+    requestId: "s1-add",
+    title: "封闭代之书",
+    source: "owner",
+    status: "want",
+    importStatus: "pending",
+  });
+  const b = addedS1.id;
+  const G = "s1-gen";
+  await call("beginImport", owner, {
+    requestId: G,
+    title: "封闭代之书",
+    source: "owner",
+    versionLabel: "ORIGINAL.epub",
+    existingBookId: b,
+  });
+  await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("ORIGINAL FILE"),
+  });
+  const putsAfterFirst = blobCalls.put;
+  const sameMid = await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("ORIGINAL FILE"),
+  });
+  const diffMid = await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("DIFFERENT FILE"),
+  });
+  check(
+    "schedule 1 (open gen): a same-bytes re-upload is idempotent (zero blob writes); a different-bytes upload conflicts and the staged bytes stand",
+    sameMid.ok === true && sameMid.status === "saved" &&
+      diffMid.ok === false && diffMid.status === "conflict" &&
+      blobCalls.put === putsAfterFirst &&
+      blobStore.get(`epub-stage/${b}/${G}`) === "ORIGINAL FILE",
+  );
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G,
+    chapters: [{ idx: 0, title: "一", html: "<p>GOOD</p>" }],
+  });
+  const finS1 = await call("finishImport", owner, {
+    bookId: b,
+    importId: G,
+    ok: true,
+    chapterCount: 1,
+  });
+  const rowReady = await bookRow(b);
+  check(
+    "schedule 1 setup: generation completes — the live pointer IS the generation key, the label is promoted, the file fingerprint is recorded",
+    finS1.ok === true && rowReady?.importStatus === "ready" &&
+      rowReady?.blobKey === `epub-stage/${b}/${G}` &&
+      rowReady?.versionLabel === "ORIGINAL.epub" &&
+      rowReady?.importVersionLabel === null &&
+      rowReady?.importFileHash != null,
+  );
+  const putsClosed = blobCalls.put;
+  const diffClosed = await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("REPLACEMENT FILE"),
+  });
+  const rowAfterDiff = await bookRow(b);
+  check(
+    "schedule 1: uploading a DIFFERENT file under the CLOSED generation's key is a typed conflict — live blob bytes, pointers, fingerprint and status all untouched, zero blob writes",
+    diffClosed.ok === false && diffClosed.status === "conflict" &&
+      blobCalls.put === putsClosed &&
+      blobStore.get(`epub-stage/${b}/${G}`) === "ORIGINAL FILE" &&
+      rowAfterDiff?.blobKey === `epub-stage/${b}/${G}` &&
+      rowAfterDiff?.importBlobKey === null &&
+      rowAfterDiff?.importStatus === "ready" &&
+      rowAfterDiff?.importFileHash === rowReady?.importFileHash,
+  );
+  const sameClosed = await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("ORIGINAL FILE"),
+  });
+  check(
+    "schedule 1: re-uploading the SAME bytes under the closed generation's key is an idempotent no-op (saved, zero blob writes)",
+    sameClosed.ok === true && sameClosed.status === "saved" &&
+      blobCalls.put === putsClosed &&
+      blobStore.get(`epub-stage/${b}/${G}`) === "ORIGINAL FILE",
+  );
+}
+
+/* ----- schedule (2): unbound writes never complete a bound generation ----- */
+{
+  const addedS2 = await call("addBook", owner, {
+    requestId: "s2-add",
+    title: "无绑定之书",
+    source: "owner",
+    status: "reading",
+    importStatus: "pending",
+  });
+  const b = addedS2.id;
+  const G = "s2-gen-g";
+  await call("beginImport", owner, {
+    requestId: G,
+    title: "无绑定之书",
+    source: "owner",
+    versionLabel: "old.epub",
+    existingBookId: b,
+  });
+  await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("OLD-FILE"),
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G,
+    chapters: [{ idx: 0, title: null, html: "<p>OLD</p>" }],
+  });
+  await call("finishImport", owner, {
+    bookId: b,
+    importId: G,
+    ok: true,
+    chapterCount: 1,
+  });
+  await call("savePosition", owner, { bookId: b, chapterIdx: 0, charOffset: 11 });
+  const H = "s2-gen-h";
+  await call("beginImport", owner, {
+    requestId: H,
+    title: "无绑定之书",
+    source: "owner",
+    versionLabel: "new.epub",
+    existingBookId: b,
+  });
+  await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: H,
+    dataBase64: b64("NEW-FILE"),
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: H,
+    chapters: [{ idx: 0, title: null, html: "<p>NEW</p>" }],
+  });
+  const putsBeforeS2 = blobCalls.put;
+  const unboundSave = await call("saveImportChapters", owner, {
+    bookId: b,
+    chapters: [{ idx: 0, title: null, html: "<p>OLD</p>" }],
+  });
+  const unboundFin = await call("finishImport", owner, { bookId: b, ok: true });
+  const unboundUp = await call("uploadImportFile", owner, {
+    bookId: b,
+    dataBase64: b64("OLD-FILE"),
+  });
+  const rowMidS2 = await bookRow(b);
+  const viewMidS2 = await call("getChapter", owner, { bookId: b, idx: 0 });
+  check(
+    "schedule 2: unbound save/finish/upload against a book with a bound generation are ALL typed conflicts",
+    unboundSave.ok === false && unboundSave.status === "conflict" &&
+      unboundFin.ok === false && unboundFin.status === "conflict" &&
+      unboundUp.ok === false && unboundUp.status === "conflict",
+  );
+  check(
+    "schedule 2: the unbound writes caused ZERO current-generation writes — H still owns the book in processing, its staging holds only NEW, the reader still serves OLD, position kept, zero blob writes",
+    rowMidS2?.importGen === H && rowMidS2?.importStatus === "processing" &&
+      contentOf(await stagedChapters(b, H)) === "0:<p>NEW</p>" &&
+      (await stagedChapters(b)).length === 1 &&
+      viewMidS2.found === true && viewMidS2.html === "<p>OLD</p>" &&
+      rowMidS2?.curOffset === 11 && blobCalls.put === putsBeforeS2,
+  );
+  const finH = await call("finishImport", owner, {
+    bookId: b,
+    importId: H,
+    ok: true,
+    chapterCount: 1,
+  });
+  const viewAfterS2 = await call("getChapter", owner, { bookId: b, idx: 0 });
+  check(
+    "schedule 2: the bound generation H still completes normally afterwards (content + file pointer switch together)",
+    finH.ok === true && viewAfterS2.html === "<p>NEW</p>" &&
+      (await bookRow(b))?.blobKey === `epub-stage/${b}/${H}` &&
+      blobStore.get(`epub-stage/${b}/${H}`) === "NEW-FILE",
+  );
+}
+
+/* ----- schedule (3): commit-point re-verification under interleaving ----- */
+{
+  // A ctx whose db() hands the handler a Proxy that runs
+  // `interleave` exactly once, just before the handler's first
+  // db.batch executes — i.e. after every pre-check has passed, at
+  // the commit point itself. This is the PM's schedule: the bound
+  // call passes its binding check, THEN a newer begin commits,
+  // THEN the bound call's batch runs.
+  function raceCtx(interleave) {
+    const { ctx } = makeCtx(OWNER);
+    let fired = false;
+    const proxied = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (items) => {
+            if (!fired) {
+              fired = true;
+              await interleave();
+            }
+            return target.batch(items);
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    return { ...ctx, db: () => proxied };
+  }
+
+  const addedS3 = await call("addBook", owner, {
+    requestId: "s3-add",
+    title: "竞态之书",
+    source: "owner",
+    status: "want",
+    importStatus: "pending",
+  });
+  const b = addedS3.id;
+  const G = "s3-gen-g";
+  await call("beginImport", owner, {
+    requestId: G,
+    title: "竞态之书",
+    source: "owner",
+    versionLabel: "g.epub",
+    existingBookId: b,
+  });
+  const H = "s3-gen-h";
+  const raceSave = raceCtx(async () => {
+    await call("beginImport", owner, {
+      requestId: H,
+      title: "竞态之书",
+      source: "owner",
+      versionLabel: "h.epub",
+      existingBookId: b,
+    });
+  });
+  const racedSave = await call("saveImportChapters", raceSave, {
+    bookId: b,
+    importId: G,
+    chapters: [{ idx: 0, title: null, html: "<p>竞态旧代章</p>" }],
+  });
+  const rowRaceSave = await bookRow(b);
+  check(
+    "schedule 3 (chapters): a G-bound save whose batch commits AFTER begin H answers conflict and leaves ZERO staged rows anywhere — the guard was re-verified inside the atomic unit",
+    racedSave.ok === false && racedSave.status === "conflict" &&
+      rowRaceSave?.importGen === H &&
+      (await stagedChapters(b)).length === 0 &&
+      (await liveChapters(b)).length === 0,
+  );
+
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: H,
+    chapters: [{ idx: 0, title: null, html: "<p>H代正文</p>" }],
+  });
+  const I = "s3-gen-i";
+  const raceFin = raceCtx(async () => {
+    await call("beginImport", owner, {
+      requestId: I,
+      title: "竞态之书",
+      source: "owner",
+      versionLabel: "i.epub",
+      existingBookId: b,
+    });
+  });
+  const racedFin = await call("finishImport", raceFin, {
+    bookId: b,
+    importId: H,
+    ok: true,
+    chapterCount: 1,
+  });
+  const rowRaceFin = await bookRow(b);
+  check(
+    "schedule 3 (promotion): a finish whose promotion batch commits AFTER begin I answers conflict — nothing promoted, nothing live, I owns the book",
+    racedFin.ok === false && racedFin.status === "conflict" &&
+      rowRaceFin?.importGen === I && rowRaceFin?.importStatus === "processing" &&
+      (await liveChapters(b)).length === 0,
+  );
+
+  // Upload interleave: the blob store's put runs begin J first, so
+  // the upload's guarded pointer update commits after J owns the
+  // book. The update must match zero rows and answer conflict.
+  const J = "s3-gen-j";
+  const { ctx: upBase } = makeCtx(OWNER);
+  let putFired = false;
+  const upCtx = {
+    ...upBase,
+    blobs: {
+      ...upBase.blobs,
+      put: async (key, data, opts) => {
+        if (!putFired) {
+          putFired = true;
+          await call("beginImport", owner, {
+            requestId: J,
+            title: "竞态之书",
+            source: "owner",
+            versionLabel: "j.epub",
+            existingBookId: b,
+          });
+        }
+        return upBase.blobs.put(key, data, opts);
+      },
+    },
+  };
+  const racedUp = await call("uploadImportFile", upCtx, {
+    bookId: b,
+    importId: I,
+    dataBase64: b64("I-FILE"),
+  });
+  const rowRaceUp = await bookRow(b);
+  check(
+    "schedule 3 (upload): an upload whose pointer update commits AFTER begin J answers conflict — J owns the book, no staged/live pointer or fingerprint moved",
+    racedUp.ok === false && racedUp.status === "conflict" &&
+      rowRaceUp?.importGen === J &&
+      rowRaceUp?.importBlobKey === null && rowRaceUp?.importFileHash === null &&
+      rowRaceUp?.blobKey === null,
+  );
+}
+
+/* ----- schedule (6) + live-copy matrix data: labels, provenance, position ----- */
+{
+  const addedS4 = await call("addBook", owner, {
+    requestId: "s4-add",
+    title: "版本之书",
+    source: "owner",
+    status: "reading",
+    importStatus: "pending",
+  });
+  const b = addedS4.id;
+  const G1 = "s4-gen-1";
+  await call("beginImport", owner, {
+    requestId: G1,
+    title: "版本之书",
+    source: "owner",
+    versionLabel: "OLD EDITION",
+    existingBookId: b,
+  });
+  await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G1,
+    dataBase64: b64("OLD-FILE"),
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G1,
+    chapters: [{ idx: 0, title: "旧章", html: "<p>旧版正文一句话</p>" }],
+  });
+  await call("finishImport", owner, {
+    bookId: b,
+    importId: G1,
+    ok: true,
+    chapterCount: 1,
+  });
+  await call("savePosition", owner, { bookId: b, chapterIdx: 0, charOffset: 5 });
+  const snipOld = await call("createSnippet", owner, {
+    requestId: "s4-snip-1",
+    bookId: b,
+    text: "旧版正文一句话",
+    chapterLabel: "旧章",
+  });
+  const libAfterG1 = await call("getLibrary", owner, {});
+  const snipOldRow = libAfterG1.snippets.find((s) => s.id === snipOld.id);
+  check(
+    "provenance setup: a snippet saved from the live copy snapshots the LIVE edition label",
+    snipOld.ok === true && snipOldRow?.versionLabel === "OLD EDITION",
+  );
+  const G2 = "s4-gen-2";
+  await call("beginImport", owner, {
+    requestId: G2,
+    title: "版本之书",
+    source: "owner",
+    versionLabel: "NEW EDITION",
+    existingBookId: b,
+  });
+  const rowMidS4 = await bookRow(b);
+  check(
+    "schedule 6: beginImport stages NEW EDITION with the generation — the live label, body, file pointer and reading position are all untouched",
+    rowMidS4?.versionLabel === "OLD EDITION" &&
+      rowMidS4?.importVersionLabel === "NEW EDITION" &&
+      rowMidS4?.blobKey === `epub-stage/${b}/${G1}` &&
+      rowMidS4?.curOffset === 5 &&
+      contentOf(await liveChapters(b)) === "0:<p>旧版正文一句话</p>",
+  );
+  const libMidS4 = await call("getLibrary", owner, {});
+  const bookMidS4 = libMidS4.books.find((x) => x.id === b);
+  check(
+    "live-copy matrix (processing): the library keeps the live copy countable/readable with live and pending labels SEPARATE",
+    bookMidS4?.importStatus === "processing" && bookMidS4?.chapterCount === 1 &&
+      bookMidS4?.versionLabel === "OLD EDITION" &&
+      bookMidS4?.pendingVersionLabel === "NEW EDITION",
+  );
+  const snipMid = await call("createSnippet", owner, {
+    requestId: "s4-snip-2",
+    bookId: b,
+    text: "旧版正文一句话",
+    chapterLabel: "旧章",
+  });
+  const libMid2S4 = await call("getLibrary", owner, {});
+  const snipMidRow = libMid2S4.snippets.find((s) => s.id === snipMid.id);
+  check(
+    "schedule 6: a snippet created from the still-live OLD body during the new import is stamped OLD EDITION — never the pending label",
+    snipMid.ok === true && snipMidRow?.versionLabel === "OLD EDITION",
+  );
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G2,
+    chapters: [{ idx: 0, title: "新章", html: "<p>新版正文</p>" }],
+  });
+  await call("finishImport", owner, {
+    bookId: b,
+    importId: G2,
+    ok: false,
+    error: "新版解析失败",
+  });
+  const rowFailedS4 = await bookRow(b);
+  const libFailedS4 = await call("getLibrary", owner, {});
+  const bookFailedS4 = libFailedS4.books.find((x) => x.id === b);
+  const viewFailedS4 = await call("getChapter", owner, { bookId: b, idx: 0 });
+  check(
+    "live-copy matrix (failed): the failed new import leaves the old copy fully readable — live label, body, position, and the pending label recorded apart",
+    rowFailedS4?.importStatus === "failed" &&
+      rowFailedS4?.versionLabel === "OLD EDITION" &&
+      rowFailedS4?.importVersionLabel === "NEW EDITION" &&
+      rowFailedS4?.curOffset === 5 &&
+      viewFailedS4.found === true && viewFailedS4.html === "<p>旧版正文一句话</p>" &&
+      bookFailedS4?.chapterCount === 1 &&
+      bookFailedS4?.pendingVersionLabel === "NEW EDITION",
+  );
+  const G3 = "s4-gen-3";
+  await call("beginImport", owner, {
+    requestId: G3,
+    title: "版本之书",
+    source: "owner",
+    versionLabel: "NEW EDITION",
+    existingBookId: b,
+  });
+  await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G3,
+    dataBase64: b64("NEW-FILE"),
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G3,
+    chapters: [{ idx: 0, title: "新章", html: "<p>新版正文</p>" }],
+  });
+  const finG3 = await call("finishImport", owner, {
+    bookId: b,
+    importId: G3,
+    ok: true,
+    chapterCount: 1,
+  });
+  const rowPromoted = await bookRow(b);
+  const libPromoted = await call("getLibrary", owner, {});
+  const snipOldAfter = libPromoted.snippets.find((s) => s.id === snipOld.id);
+  check(
+    "promotion: body, file and live label switch together exactly once; the position restarts at the beginning (never carried over); old snippets keep their OLD EDITION provenance",
+    finG3.ok === true && rowPromoted?.importStatus === "ready" &&
+      rowPromoted?.versionLabel === "NEW EDITION" &&
+      rowPromoted?.importVersionLabel === null &&
+      rowPromoted?.blobKey === `epub-stage/${b}/${G3}` &&
+      blobStore.get(`epub-stage/${b}/${G3}`) === "NEW-FILE" &&
+      contentOf(await liveChapters(b)) === "0:<p>新版正文</p>" &&
+      rowPromoted?.curChapter === 0 && rowPromoted?.curOffset === 0 &&
+      snipOldAfter?.versionLabel === "OLD EDITION",
+  );
+  check(
+    "ledger: every generation key of this book is recorded exactly once, pointing at the book",
+    (await ledgerCount(G1)) === 1 && (await ledgerCount(G2)) === 1 &&
+      (await ledgerCount(G3)) === 1 && (await ledgerRow(G3))?.resultId === b,
+  );
+}
+
+/* ----- unbound writes vs a pre-generation book WITH a live copy ----- */
+{
+  const legacyReady = await db
+    .insert(schema.books)
+    .values({
+      title: "老成品之书",
+      source: "owner",
+      status: "reading",
+      importStatus: "ready",
+      requestId: null,
+    })
+    .returning({ id: schema.books.id });
+  const lb = legacyReady[0]?.id ?? -1;
+  await db.insert(schema.bookChapters).values({
+    bookId: lb,
+    idx: 0,
+    title: null,
+    html: "<p>老成品正文</p>",
+    charCount: 12,
+  });
+  const putsBeforeLegacy = blobCalls.put;
+  const uSave = await call("saveImportChapters", owner, {
+    bookId: lb,
+    chapters: [{ idx: 0, title: null, html: "<p>覆盖尝试</p>" }],
+  });
+  const uUp = await call("uploadImportFile", owner, {
+    bookId: lb,
+    dataBase64: b64("X"),
+  });
+  const uFin = await call("finishImport", owner, {
+    bookId: lb,
+    ok: false,
+    error: "无绑定收尾",
+  });
+  check(
+    "unbound vs live copy: a pre-generation book WITH a complete live copy refuses unbound save/upload/finish — the copy stands, status stays ready, zero blob writes",
+    uSave.ok === false && uSave.status === "conflict" &&
+      uUp.ok === false && uUp.status === "conflict" &&
+      uFin.ok === false && uFin.status === "conflict" &&
+      contentOf(await liveChapters(lb)) === "0:<p>老成品正文</p>" &&
+      (await bookRow(lb))?.importStatus === "ready" &&
+      blobCalls.put === putsBeforeLegacy,
+  );
+}
+
 /* ----- deleted book: imports never resurrect ----- */
 {
   const del = await call("deleteBook", owner, { id: bookId });
@@ -946,8 +1528,12 @@ const replay = await call("beginImport", owner, {
       (await bookRow(legacyId))?.importStatus === "ready",
   );
 
-  // Old client against a generation-owned book: unbound writes bind
-  // to the CURRENT generation (the only one it can mean) and stage.
+  // Old client against a generation-owned book: unbound writes are
+  // NOT presumed to belong to the current generation (the previous
+  // suite treated this as success — that expectation was WRONG and
+  // is corrected here, per PM schedule 2). They are typed conflicts
+  // with zero writes, and the bound generation completes normally
+  // afterwards.
   const addedOld = await call("addBook", owner, {
     requestId: "imp-old-add",
     title: "老客户端之书",
@@ -964,20 +1550,40 @@ const replay = await call("beginImport", owner, {
     existingBookId: oldId,
   });
   check("legacy: keyed begin on the old-client book", begunKeyed.ok === true);
+  const putsBeforeUnbound = blobCalls.put;
   const saveUnbound = await call("saveImportChapters", owner, {
     bookId: oldId,
     chapters: [{ idx: 0, title: null, html: "<p>老客户端章节</p>" }],
   });
-  check(
-    "legacy: an unbound chapter save binds the current generation and STAGES (live untouched)",
-    saveUnbound.ok === true &&
-      (await stagedChapters(oldId, "imp-old-gen")).length === 1 &&
-      (await liveChapters(oldId)).length === 0,
-  );
+  const upUnbound = await call("uploadImportFile", owner, {
+    bookId: oldId,
+    dataBase64: b64("UNBOUND-FILE"),
+  });
   const finUnbound = await call("finishImport", owner, { bookId: oldId, ok: true });
+  const rowUnbound = await bookRow(oldId);
   check(
-    "legacy: an unbound finish promotes the current generation",
-    finUnbound.ok === true && contentOf(await liveChapters(oldId)) === "0:<p>老客户端章节</p>",
+    "legacy (corrected): unbound save/upload/finish against a generation-owned book are typed conflicts with ZERO writes — the generation still owns the book in processing",
+    saveUnbound.ok === false && saveUnbound.status === "conflict" &&
+      upUnbound.ok === false && upUnbound.status === "conflict" &&
+      finUnbound.ok === false && finUnbound.status === "conflict" &&
+      blobCalls.put === putsBeforeUnbound &&
+      (await stagedChapters(oldId)).length === 0 &&
+      (await liveChapters(oldId)).length === 0 &&
+      rowUnbound?.importGen === "imp-old-gen" && rowUnbound?.importStatus === "processing",
+  );
+  await call("saveImportChapters", owner, {
+    bookId: oldId,
+    importId: "imp-old-gen",
+    chapters: [{ idx: 0, title: null, html: "<p>老客户端章节</p>" }],
+  });
+  const finBound = await call("finishImport", owner, {
+    bookId: oldId,
+    importId: "imp-old-gen",
+    ok: true,
+  });
+  check(
+    "legacy (corrected): the bound generation completes normally after the unbound refusals",
+    finBound.ok === true && contentOf(await liveChapters(oldId)) === "0:<p>老客户端章节</p>",
   );
 
   // The old client's stable per-book key pattern: first use works;
@@ -1015,10 +1621,11 @@ const replay = await call("beginImport", owner, {
     chapters: [{ idx: 0, title: null, html: "<p>不该写入</p>" }],
   });
   check(
-    "legacy: replaying the finished stable key is a zero-write replay; writing against the closed generation is explicitly refused, good copy intact",
+    "legacy: replaying the finished stable key is a zero-write replay; an unbound write against the closed generation is explicitly refused, good copy intact",
     secondUse.ok === true && secondUse.status === "replayed" &&
       writeAfterReplay.ok === false && writeAfterReplay.status === "conflict" &&
       contentOf(await liveChapters(oldId)) === "0:<p>稳定键第二版</p>" &&
+      (await stagedChapters(oldId)).length === 0 &&
       (await bookRow(oldId))?.importStatus === "ready",
   );
 }

@@ -36,6 +36,13 @@
       "when": 1792681195360,
       "tag": "0005_card_qa_discussion_binding",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792693939970,
+      "tag": "0006_import_pending_label_and_file_hash",
+      "breakpoints": true
     }
   ]
 }
