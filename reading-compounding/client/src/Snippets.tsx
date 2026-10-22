@@ -1176,7 +1176,7 @@ function SnippetCard({
         >
           {snippet.internalized ? "↩ 取消内化" : "✓ 标为已内化"}
         </button>
-        {book?.importStatus === "ready" && snippet.chapterIdx != null && (
+        {book != null && book.chapterCount > 0 && snippet.chapterIdx != null && (
           <button
             type="button"
             onClick={() => onOpenReader(book, snippet.chapterIdx ?? undefined, snippet.charOffset ?? undefined)}

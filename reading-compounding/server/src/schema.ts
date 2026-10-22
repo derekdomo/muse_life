@@ -71,9 +71,31 @@ export const books = sqliteTable("books", {
   // successful finishImport; a failed import leaves blobKey — the
   // previous good file — untouched.
   importBlobKey: text("import_blob_key"),
-  // Edition/version label of the imported file (e.g. EPUB filename or
-  // the version the owner names), snapshotted onto snippets.
+  // Edition/version label of the LIVE imported file (e.g. EPUB
+  // filename or the version the owner names), snapshotted onto
+  // snippets. This moves ONLY when a generation is promoted by a
+  // successful finishImport — never at beginImport — so a snippet
+  // saved from the still-live old body is always stamped with the
+  // label of the version it was actually read from.
   versionLabel: text("version_label"),
+  // The PENDING edition label, staged with the current generation
+  // by beginImport (migration 0006). Invisible to provenance: it is
+  // promoted into versionLabel atomically with the body/file at
+  // finishImport and cleared there; a failed import leaves it
+  // recorded so the UI can name the version that did not replace
+  // the live copy.
+  importVersionLabel: text("import_version_label"),
+  // Content fingerprint of the original-file bytes belonging to
+  // generation import_gen (migration 0006): the staged file while
+  // the generation is processing, the LIVE file once that
+  // generation has been promoted. Recorded by uploadImportFile in
+  // the same guarded update that moves the pointer, cleared by the
+  // next beginImport. It makes a generation's file immutable:
+  // a same-generation upload retry carrying the same bytes is an
+  // idempotent no-op, and one carrying different bytes is a typed
+  // conflict with zero blob/pointer writes — even after the
+  // generation has closed, when its staged key IS the live key.
+  importFileHash: text("import_file_hash"),
   // Stable reading position: chapter index + char offset inside it.
   curChapter: integer("cur_chapter").notNull().default(0),
   curOffset: integer("cur_offset").notNull().default(0),

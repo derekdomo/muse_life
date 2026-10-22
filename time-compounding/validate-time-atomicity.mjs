@@ -18,13 +18,19 @@
 //      真实零（空库）时 hasRecords=false 且覆盖/分类和/重叠同为 0
 //   S9 迁移保行：迁移前风格的旧记录（无 ledger 行）迁移后逐行保留、可被
 //      dashboard 读到、可被新键 update（与 ledger 同批落行）
-//   S10 基准仲裁（CMP-TIME-SAVE-001 余项）：编辑意图携带打开时读到的内容
-//      版本（baseVersion）；失败的旧编辑在较新编辑落行后重试 → typed
+//   S10 基准仲裁（CMP-TIME-SAVE-001 余项）：编辑意图携带打开时读到的版本
+//      （baseVersion）；失败的旧编辑在较新编辑落行后重试 → typed
 //      stale_conflict + 当前存行、条目仍为新稿、账本无旧键成功行（主体/账本
 //      两写点失败都试）；无竞争时原键原样重试可恢复；旧 update 在途暂停后
 //      恢复、同键异 payload 竞争、丢响应重试、delete 交错、无基准的旧客户
 //      端调用（不得静默覆盖，一律 stale_conflict）、以新基准显式确认后保存、
 //      冲突后周统计与存行一致
+//   S11 ABA 回归（CMP-TIME-SAVE-001 P0 余项，PM 2026-10-22 复核）：版本是
+//      持久单调 revision，不是内容指纹——条目写 A（版本 V）→ 旧 update
+//      （base=V，OLD FAILED DRAFT）在 ledger 写点失败回滚 → 新编辑写 B →
+//      再写回 A（内容与 V 时完全相同，但 revision 已前进）→ 原失败旧键原样
+//      重试必须 stale_conflict、存行仍为 A、旧键账本零成功行；随后已提交键
+//      replay、以新基准显式保存仍成功；无竞争时失败原键原样重试仍可恢复
 //
 // 只用内存库 + SYNTHETIC 数据，绝不触碰生产 app.db。
 // 用法：bun validate-time-atomicity.mjs；退出码 0 = 全部通过。
@@ -35,7 +41,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "./server/src/schema.ts";
-import { Actions, contentVersion } from "./server/src/actions.ts";
+import { Actions, entryVersion } from "./server/src/actions.ts";
 
 let passed = 0;
 let failed = 0;
@@ -88,9 +94,9 @@ async function count(client, table) {
 }
 async function entryRows(client) {
   const r = await client.execute(
-    "SELECT id, category, start_ms AS startMs, end_ms AS endMs, note FROM time_entries ORDER BY id",
+    "SELECT id, category, start_ms AS startMs, end_ms AS endMs, note, revision FROM time_entries ORDER BY id",
   );
-  return r.rows.map((x) => ({ ...x, id: Number(x.id), startMs: Number(x.startMs), endMs: Number(x.endMs) }));
+  return r.rows.map((x) => ({ ...x, id: Number(x.id), startMs: Number(x.startMs), endMs: Number(x.endMs), revision: Number(x.revision) }));
 }
 async function ledgerRow(client, requestId) {
   const r = await client.execute({
@@ -563,7 +569,7 @@ function unionMinutes(intervals) {
   const upd = await Actions.updateEntry.handler(ctx, {
     requestId: "s9-upd-key-0001", entryId: legacyId,
     category: "家庭陪伴", startMs: legacyStart, endMs: legacyStart + 45 * 60_000, note: "LEGACY-EDITED",
-    baseVersion: contentVersion(beforeRows[0]),
+    baseVersion: entryVersion(beforeRows[0]),
   });
   eq("S9 旧记录可被新键 update", upd.ok, true);
   eq("S9 update 后仍 1 行（不新增）", await count(client, "time_entries"), 1);
@@ -822,6 +828,117 @@ function unionMinutes(intervals) {
   const catOf2 = Object.fromEntries(dash2.detail.summary.byCategory.map((c) => [c.category, c.minutes]));
   eq("S10i 确认后统计：学习 30 分钟", catOf2["学习"], 30);
   eq("S10i 确认后统计：coverage 30", dash2.detail.summary.coverageMinutes, 30);
+}
+
+// ------------------------------------------------------------ S11: ABA — a failed old edit must never regain write authority after A→B→A
+{
+  // Exact PM schedule (2026-10-22 review): the entry is written with
+  // note=A at version V; an old update (baseVersion=V, note=OLD FAILED
+  // DRAFT) FAILS at the ledger write point and rolls back; a newer edit
+  // then writes B, and another writes the content back to A. Under the old
+  // content-fingerprint version the row again "equaled" V, so retrying the
+  // original failed key returned ok=true and overwrote the explicitly
+  // saved A with OLD FAILED DRAFT. With a persistent monotonic revision
+  // the base V is spent forever: the retry must be stale_conflict, the
+  // stored row must remain A, and the old key's ledger must record zero
+  // successful writes.
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s11-add-key-0001", ...ADD, note: "A" });
+  const entryId = add.entry.id;
+  const V = add.entry.version;
+  eq("S11 初始落行 note=A", (await entryRows(client))[0]?.note, "A");
+  eq("S11 初始 revision 为 1", (await entryRows(client))[0]?.revision, 1);
+
+  // The old update fails (ledger write point blocked for exactly this key)
+  // and rolls back completely.
+  await client.execute(
+    "CREATE TRIGGER fail_aba BEFORE INSERT ON request_ledger WHEN NEW.request_id = 's11-upd-old-0001' BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END;",
+  );
+  let threw = false;
+  try {
+    await Actions.updateEntry.handler(ctx, { requestId: "s11-upd-old-0001", entryId, ...ADD, note: "OLD FAILED DRAFT", baseVersion: V });
+  } catch {
+    threw = true;
+  }
+  eq("S11 旧 update 在 ledger 写点失败抛错", threw, true);
+  eq("S11 失败后条目仍为 A", (await entryRows(client))[0]?.note, "A");
+  eq("S11 失败后 revision 未前进", (await entryRows(client))[0]?.revision, 1);
+  eq("S11 失败旧键未落 ledger", await ledgerRow(client, "s11-upd-old-0001"), null);
+  await client.execute("DROP TRIGGER fail_aba");
+
+  // Two newer successful edits: A → B → A (content returns to exactly A).
+  const toB = await Actions.updateEntry.handler(ctx, { requestId: "s11-upd-to-b-001", entryId, ...ADD, note: "B", baseVersion: V });
+  eq("S11 新编辑写 B ok", toB.ok, true);
+  check("S11 写 B 后 version 已不同于 V", toB.entry.version !== V);
+  const backToA = await Actions.updateEntry.handler(ctx, { requestId: "s11-upd-back-a-01", entryId, ...ADD, note: "A", baseVersion: toB.entry.version });
+  eq("S11 再写回 A ok", backToA.ok, true);
+  eq("S11 存行内容已回到 A", (await entryRows(client))[0]?.note, "A");
+  eq("S11 写回 A 后 revision 为 3（单调前进）", (await entryRows(client))[0]?.revision, 3);
+  check(
+    "S11 内容相同但 version 不同于 V（内容相等 ≠ 版本相等）",
+    backToA.entry.version !== V && backToA.entry.version !== toB.entry.version,
+  );
+
+  // The original failed old key retried with its original payload/base:
+  // must NOT regain write authority.
+  const abaRetry = await Actions.updateEntry.handler(ctx, { requestId: "s11-upd-old-0001", entryId, ...ADD, note: "OLD FAILED DRAFT", baseVersion: V });
+  eq("S11 ABA 后旧键重试为 stale_conflict", abaRetry.error, "stale_conflict");
+  eq("S11 stale_conflict 附当前存行（显式保存的 A）", abaRetry.entry?.note, "A");
+  eq("S11 旧重试未覆盖存行 A", (await entryRows(client))[0]?.note, "A");
+  eq("S11 旧重试未改 revision", (await entryRows(client))[0]?.revision, 3);
+  eq("S11 旧键 ledger 仍零成功行", await ledgerRow(client, "s11-upd-old-0001"), null);
+  eq("S11 entries 仍 1 行", await count(client, "time_entries"), 1);
+  eq("S11 ledger 恰 3 行（add+B+A）", await count(client, "request_ledger"), 3);
+
+  // Committed-key replay in the ABA world: retrying the SUCCESSFUL
+  // write-back key replays the current row with zero writes.
+  const replay = await Actions.updateEntry.handler(ctx, { requestId: "s11-upd-back-a-01", entryId, ...ADD, note: "A", baseVersion: toB.entry.version });
+  eq("S11 已提交键 replay ok", replay.ok, true);
+  eq("S11 replay 返回当前行 A", replay.entry?.note, "A");
+  eq("S11 replay 后 ledger 仍 3 行", await count(client, "request_ledger"), 3);
+  eq("S11 replay 后 revision 仍 3", (await entryRows(client))[0]?.revision, 3);
+
+  // Explicit save with a fresh base still succeeds after the ABA cycle.
+  const fresh = await Actions.updateEntry.handler(ctx, {
+    requestId: "s11-upd-fresh-001", entryId, ...ADD, note: "A-CONFIRMED",
+    baseVersion: abaRetry.entry.version,
+  });
+  eq("S11 以新基准显式保存 ok", fresh.ok, true);
+  eq("S11 显式保存已落行", (await entryRows(client))[0]?.note, "A-CONFIRMED");
+  eq("S11 显式保存后 revision 为 4", (await entryRows(client))[0]?.revision, 4);
+  eq("S11 显式保存后 ledger 4 行", await count(client, "request_ledger"), 4);
+  // …and the ABA-stale old key STILL has no authority afterwards.
+  const abaRetry2 = await Actions.updateEntry.handler(ctx, { requestId: "s11-upd-old-0001", entryId, ...ADD, note: "OLD FAILED DRAFT", baseVersion: V });
+  eq("S11 显式保存后旧键重试仍为 stale_conflict", abaRetry2.error, "stale_conflict");
+  eq("S11 存行仍为显式保存稿", (await entryRows(client))[0]?.note, "A-CONFIRMED");
+  eq("S11 旧键 ledger 始终零成功行", await ledgerRow(client, "s11-upd-old-0001"), null);
+}
+{
+  // S11b: no contention — the SAME failed old key retried as-is, with no
+  // intervening edit at all, recovers cleanly even when its payload equals
+  // the current content except for the note (base never moved).
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s11b-add-key-001", ...ADD, note: "A" });
+  const entryId = add.entry.id;
+  const V = add.entry.version;
+  await client.execute(
+    "CREATE TRIGGER fail_aba2 BEFORE INSERT ON request_ledger WHEN NEW.request_id = 's11b-upd-key-001' BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END;",
+  );
+  let threw = false;
+  try {
+    await Actions.updateEntry.handler(ctx, { requestId: "s11b-upd-key-001", entryId, ...ADD, note: "RECOVERED", baseVersion: V });
+  } catch {
+    threw = true;
+  }
+  eq("S11b 首次尝试失败抛错", threw, true);
+  await client.execute("DROP TRIGGER fail_aba2");
+  const retry = await Actions.updateEntry.handler(ctx, { requestId: "s11b-upd-key-001", entryId, ...ADD, note: "RECOVERED", baseVersion: V });
+  eq("S11b 无竞争时原键原样重试 ok", retry.ok, true);
+  eq("S11b 重试内容已落行", (await entryRows(client))[0]?.note, "RECOVERED");
+  eq("S11b 重试后 revision 为 2", (await entryRows(client))[0]?.revision, 2);
+  eq("S11b 旧键已落 ledger", (await ledgerRow(client, "s11b-upd-key-001"))?.entryId, entryId);
 }
 
 // ------------------------------------------------------------ report

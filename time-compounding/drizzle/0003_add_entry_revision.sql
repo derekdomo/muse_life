@@ -1,0 +1,1 @@
+ALTER TABLE time_entries ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
