@@ -111,8 +111,8 @@ type BatchItem = DrizzleBatchItem<"sqlite">;
 type Claim =
   | { state: "fresh" }
   | { state: "replay"; resultId: number | null }
-  | { state: "conflict" }
-  | { state: "deleted" };
+  | { state: "conflict"; resultId: number | null }
+  | { state: "deleted"; resultId: number | null };
 
 // Tables a ledger row can point at (the ledger's result_table values).
 const RESULT_TABLE_SQL = {
@@ -248,10 +248,10 @@ async function arbitrateCreate(
     .limit(1);
   const row = rows[0];
   if (!row) return { state: "fresh" };
-  if (row.kind !== kind || row.payloadHash !== hash) return { state: "conflict" };
-  if (row.deleted === 1) return { state: "deleted" };
+  if (row.kind !== kind || row.payloadHash !== hash) return { state: "conflict", resultId: row.resultId };
+  if (row.deleted === 1) return { state: "deleted", resultId: row.resultId };
   if (!(await entityAlive(db, row.resultTable, row.resultId))) {
-    return { state: "deleted" };
+    return { state: "deleted", resultId: row.resultId };
   }
   return { state: "replay", resultId: row.resultId };
 }
@@ -259,11 +259,15 @@ async function arbitrateCreate(
 function claimToResult(claim: Claim): z.infer<typeof createResult> | null {
   switch (claim.state) {
     case "conflict":
-      return { ok: false, forbidden: false, status: "conflict", id: null };
+      // The ledger's recorded resultId IS the authoritative result
+      // for this key (the row the original save actually committed).
+      // Clients locate that exact row by id — never by guessing
+      // from a snippet or a list position.
+      return { ok: false, forbidden: false, status: "conflict", id: null, resultId: claim.resultId };
     case "deleted":
-      return { ok: false, forbidden: false, status: "deleted", id: null };
+      return { ok: false, forbidden: false, status: "deleted", id: null, resultId: claim.resultId };
     case "replay":
-      return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
+      return { ok: true, forbidden: false, status: "replayed", id: claim.resultId, resultId: claim.resultId };
     default:
       return null;
   }
@@ -396,6 +400,12 @@ const createResult = z.object({
   forbidden: z.boolean(),
   status: saveStatus,
   id: z.number().nullable(),
+  // The ledger's recorded result id for this request key: on a
+  // replay it equals id; on a payload conflict it is the id of the
+  // row the ORIGINAL save committed (null when the ledger has no
+  // recorded result), so the client can locate exactly that row
+  // instead of guessing one by snippet or list position.
+  resultId: z.number().nullable(),
 });
 
 const okResult = z.object({
@@ -405,7 +415,7 @@ const okResult = z.object({
 });
 
 function refusedCreate(): z.infer<typeof createResult> {
-  return { ok: false, forbidden: true, status: "refused", id: null };
+  return { ok: false, forbidden: true, status: "refused", id: null, resultId: null };
 }
 function refusedOk(): z.infer<typeof okResult> {
   return { ok: false, forbidden: true, status: "refused" };
@@ -898,7 +908,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 
@@ -1059,7 +1069,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 
@@ -1121,7 +1131,7 @@ export const Actions = {
           )
           .limit(1);
         const book = found[0];
-        if (!book) return { ok: false, forbidden: false, status: "notFound", id: null };
+        if (!book) return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
         // Chapter wipe + status flip commit together: a failure can
         // never leave a "processing" book whose chapters are gone.
         await db.batch([
@@ -1137,7 +1147,7 @@ export const Actions = {
             .where(eq(schema.books.id, book.id)),
         ] as [BatchItem, ...BatchItem[]]);
         ctx.invalidateQueries();
-        return { ok: true, forbidden: false, status: "saved", id: book.id };
+        return { ok: true, forbidden: false, status: "saved", id: book.id, resultId: book.id };
       }
       const hash = payloadHash({
         k: "import-book",
@@ -1172,7 +1182,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 
@@ -1430,7 +1440,7 @@ export const Actions = {
         .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
         .limit(1);
       const book = bookRows[0];
-      if (!book) return { ok: false, forbidden: false, status: "notFound", id: null };
+      if (!book) return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
       const outcome = await commitCreate(db, args.requestId, "snippet", hash, [
         db
           .insert(schema.snippets)
@@ -1457,7 +1467,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 
@@ -1510,7 +1520,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 
@@ -2010,7 +2020,7 @@ export const Actions = {
         // snippet never lends its provenance to a card — the save is
         // refused as notFound and nothing is written under this key.
         if (!snip || snip.status !== "saved") {
-          return { ok: false, forbidden: false, status: "notFound", id: null };
+          return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
         }
         snippetId = snip.id;
         sourceLabel = snip.chapterLabel
@@ -2052,7 +2062,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 
@@ -2150,7 +2160,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, cardIndex);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 
@@ -2299,7 +2309,7 @@ export const Actions = {
           ),
         )
         .limit(1);
-      if (cardRows.length === 0) return { ok: false, forbidden: false, status: "notFound", id: null };
+      if (cardRows.length === 0) return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
       const outcome = await commitCreate(db, args.requestId, "reuse", hash, [
         db
           .insert(schema.cardReuses)
@@ -2321,7 +2331,7 @@ export const Actions = {
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
     },
   }),
 } satisfies ActionsModule;

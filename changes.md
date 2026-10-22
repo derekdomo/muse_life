@@ -1117,3 +1117,11 @@
 - (1) `CMP-READ-SAVE-001`：validate-save-atomicity 实为在**真实 drizzle/libsql 上实跑 113/113**——构建方先以探针脚本实证 db.batch 四项语义（账本插入触发器 abort 时整批回滚、.returning()+SQL 子查询回填 resultId、同键并发恰一提交、删除批原子回滚），再逐项覆盖 PM 四复现、七入口 fresh/replay/conflict、每个写点触发器注入失败与恢复、legacy 兼容、guest/anon 零 db 访问；server/client 均过 tsc strict。主条目「25/25 源码/结构层、运行时注入驱动在本平台结构性不可行、运行时终证待 PM 复验」作废，改为：实现方已具真实 handler/内存库层证据 113/113，PM 独立复验仍以其评审记录为准。validate-reading-qa 57/57 不变。
 - (2) `CMP-TIME-SAVE-001`：validate-time-atomicity 独立计数为 **114/114**（真实 handler＋实际迁移内存库，含 PM 原 repro、查询屏障并发、update 两写点失败回滚、旧重试不回滚新稿、墓碑三键、guest 零读写、DST 167/169 三值一致、旧记录保行）；且**无 schema 变更、无新迁移**——同键仲裁靠 request_ledger 主键与同批写入。主条目「构建方称新增迁移 0002、镜像未见落盘列 EVID 残项」作废：不存在该迁移，无此残项；「143/143 合计」口径以本勘误的 114/114 独立计数为准（不与首片计数相加）。
 - (3) 新增未关闭项（同轮内容评审 P1，随本勘误入队）：`CMP-READ-001` 问答面板异载荷冲突回执靠猜——冲突分支忽略服务端结果 ID、refetch 后取同片段最后一张卡冒充权威结果，同片段多卡时定位错卡。已派 space-15 修复（服务端冲突响应返回原键账本 resultId、客户端按 cardId 精确定位、拿不到明说无法定位不猜），交付后另行登记。其余结论不变。
+
+
+## 2026-10-22（05:13 轮次续：CMP-READ-001 冲突回执 P1 修复交付）
+
+- 来源：05:13 主轮内容评审 P1（问答面板异载荷冲突回执靠猜），已在勘误条目入队，本续轮交付。
+- 改了什么（space-15 先改 artifact）：服务端所有创建动作的冲突响应新增 `createResult.resultId`，返回原请求键账本中记录的 resultId（原键实际落卡的 cardId），仲裁/指纹/原子 batch 语义未动；问答面板冲突分支改为只按该 resultId 精确定位并展示那张卡，不再按 snippetId 取同片段最后一张；resultId 缺失或按 ID 回读不到时明说「已保存，但暂时无法定位这张卡」并提供只读重试（只 refetch 按 ID 查找，不重建卡、不拿同片段其他卡代替）。其余创建路径经排查无同类按片段/列表位置猜测权威结果的冲突处理。
+- 涉及文件（reading-compounding/）：server/src/actions.ts、client/src/Snippets.tsx、client/src/Cards.tsx、validate-save-atomicity.mjs、validate-reading-qa.mjs、DATA-PLAN.md（已回灌本仓）。
+- 验证证据：构建方以内存库/synthetic 实跑 validate-save-atomicity **123/123**（原 113 无回归＋10 新：冲突按 resultId 精确定位、缺失不猜测的源码与行为断言，含同片段三张卡时精确定位原键卡、账本无 resultId 返回 null）、validate-reading-qa **64/64**（原 57＋7 新）；构建审计 pass；生产未动（books=1 种子、其余 0 行）。局限：所有者视角以本人打开为准。回滚：revert 本条构建。

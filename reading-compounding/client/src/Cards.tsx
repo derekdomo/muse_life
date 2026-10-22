@@ -324,7 +324,13 @@ function CardItem({
   );
 }
 
-export function Cards({ library }: { library: Library }) {
+export function Cards({
+  library,
+  focusId,
+}: {
+  library: Library;
+  focusId?: number | null;
+}) {
   const queryClient = useQueryClient();
   const cardKeyRef = useRef<string>(newRequestId());
   const [core, setCore] = useState("");
@@ -362,6 +368,18 @@ export function Cards({ library }: { library: Library }) {
   const savedSnippets = library.snippets.filter((s) => s.status === "saved");
   const cards = [...library.cards].reverse();
   const allReuses = [...library.reuses].reverse();
+  const focusMissing = focusId != null && !library.cards.some((c) => c.id === focusId);
+
+  // Arriving from a receipt's 「查看这张卡」: scroll to exactly that
+  // card. If it is not in the library it was deleted — say so plainly
+  // instead of silently landing on the full list.
+  useEffect(() => {
+    if (focusId == null) return;
+    const t = window.setTimeout(() => {
+      document.getElementById(`card-${focusId}`)?.scrollIntoView({ block: "center" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [focusId]);
 
   return (
     <div className="space-y-6">
@@ -407,13 +425,18 @@ export function Cards({ library }: { library: Library }) {
         <h2 className="text-xs font-medium tracking-wide text-[var(--dim)]">
           全部知识卡（{cards.length}）
         </h2>
+        {focusMissing && (
+          <p role="status" className="rounded-xl border border-[var(--accent2)] p-4 text-sm text-[var(--accent2)]">
+            ▲ 要定位的那张卡已不存在（可能已被删除），出处不可用。下面是现有的全部知识卡。
+          </p>
+        )}
         {cards.length === 0 && (
           <p className="rounded-xl border border-dashed border-[var(--border)] p-4 text-sm text-[var(--dim)]">
             还没有知识卡。从一条片段「写成知识卡」，或在和 Muse 聊书时让它把讨论沉淀成卡。
           </p>
         )}
         {cards.map((c) => (
-          <CardItem key={c.id} card={c} library={library} />
+          <CardItem key={c.id} card={c} library={library} highlighted={focusId === c.id} />
         ))}
       </section>
 

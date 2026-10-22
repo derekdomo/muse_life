@@ -8,6 +8,7 @@ newRequestId,
 sourceLabelOf,
 statusMessage,
 type Book,
+type Card,
 type Library,
 type Snippet,
 } from "./lib";
@@ -138,8 +139,31 @@ interface QaTurn {
 // ask keeps the question in the textarea (draft preserved) and the
 // pinned 原文 stays put; nothing becomes a knowledge card until the
 // owner taps 存为知识卡， which goes through the same request-key
-// ledger as every other card save.
-function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
+// ledger as every other card save. Each question carries its own
+// questionRequestId (a retry of the same question reuses it) and the
+// version of the snippet row it pins as 原文， so an answer is bound
+// to exactly one ask against exactly one stored text.
+//
+// After a save the panel keeps a RECEIPT (CMP-READ-001): the server's
+// actual cardId + this snippet's id, the stored row's 一句话核心 and
+// 出处 read back from the library, and buttons that jump to that
+// exact card / back to this exact snippet. A failed read-back says
+// 「已保存，详情暂未读出」 and retries READ-ONLY — it never re-creates
+// the card under a new key.
+interface QaReceipt {
+  cardId: number;
+  replayed: boolean;
+}
+
+function SnippetQaPanel({
+  snippet,
+  cards,
+  onViewCard,
+}: {
+  snippet: Snippet;
+  cards: Card[];
+  onViewCard: (cardId: number) => void;
+}) {
   const queryClient = useQueryClient();
   const [turns, setTurns] = useState<QaTurn[]>([]);
   const [question, setQuestion] = useState("");
@@ -147,18 +171,39 @@ function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
   const [core, setCore] = useState("");
   const [annotation, setAnnotation] = useState("");
   const [cardMsg, setCardMsg] = useState<string | null>(null);
-  const [cardDone, setCardDone] = useState(false);
+  const [receipt, setReceipt] = useState<QaReceipt | null>(null);
+  // The receipt's card was saved but a fresh read says it is gone
+  // (deleted since): stated plainly, never rebuilt from the answer.
+  const [receiptGone, setReceiptGone] = useState(false);
+  const [readbackBusy, setReadbackBusy] = useState(false);
+  // On a payload conflict the authoritative stored result for this
+  // key is surfaced (the card the original save committed), while
+  // the current inputs stay untouched below. That card is located
+  // ONLY by the ledger resultId the server returns for this key —
+  // never by guessing another card from this snippet or from a
+  // list position. When no resultId comes back, or the card cannot
+  // be read back by that exact id, the panel says so plainly
+  // (已保存，但暂时无法定位这张卡) and offers a read-only retry.
+  const [conflictCardId, setConflictCardId] = useState<number | null>(null);
+  const [conflictUnlocated, setConflictUnlocated] = useState(false);
+  const [conflictReadbackBusy, setConflictReadbackBusy] = useState(false);
+  const [snippetGone, setSnippetGone] = useState(false);
   const cardKeyRef = useRef<string>(newRequestId());
+  const questionKeyRef = useRef<string>(newRequestId());
 
   const ask = useMutation({
     mutationFn: (q: string) =>
       api.askSnippetQuestion({
         snippetId: snippet.id,
         question: q,
+        questionRequestId: questionKeyRef.current,
+        snippetVersion: snippet.version,
         history: turns.slice(-6).map((t) => ({ question: t.question, answer: t.answer })),
       }),
     onSuccess: (res, q) => {
       if (res.ok) {
+        // The question is consumed: the next one gets a fresh id.
+        questionKeyRef.current = newRequestId();
         setTurns((prev) => [
           ...prev,
           { question: q, answer: res.answer, suggestedCore: res.suggestedCore },
@@ -168,11 +213,14 @@ function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
         // Prefill the card core with the latest suggestion; the owner
         // can still rewrite it before saving.
         if (res.suggestedCore) setCore(res.suggestedCore);
-        setCardDone(false);
+        setReceipt(null);
+        setReceiptGone(false);
+        setConflictCardId(null);
+        setConflictUnlocated(false);
       } else if (res.forbidden) {
         setAskError("当前身份无权提问（仅所有者可用）。问题草稿还在输入框里。");
       } else {
-        setAskError("这段片段暂时无法提问（可能已被删除）。问题草稿还在输入框里。");
+        setAskError("这段片段暂时无法提问（可能已被删除或已更新）。问题草稿还在输入框里。");
       }
     },
     // Failure/timeout: the draft is NOT cleared and no turn is added,
@@ -190,19 +238,100 @@ function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
         annotation: annotation.trim() || undefined,
       }),
     onSuccess: (res) => {
-      if (res.ok) {
+      if (res.ok && res.id != null) {
         cardKeyRef.current = newRequestId();
-        setCardDone(true);
+        // Keep the receipt bound to the SERVER's actual card id and
+        // this snippet — not to anything the model suggested.
+        setReceipt({ cardId: res.id, replayed: res.status === "replayed" });
+        setReceiptGone(false);
+        setConflictCardId(null);
+        setConflictUnlocated(false);
         setCardMsg(null);
         void queryClient.invalidateQueries({ queryKey: ["library"] });
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else if (res.status === "conflict") {
+        // Same key, different payload: the original save IS on the
+        // server. Keep the current inputs exactly as they are and
+        // surface that authoritative stored card — located ONLY by
+        // the ledger resultId the server returns for this key
+        // (res.resultId), never by guessing another card from this
+        // snippet or from a list position.
+        setCardMsg("这个保存键先前已经存下过一张卡（内容和这次输入不同），你的输入保留在下面，没有被覆盖。");
+        const authoritativeId = res.resultId;
+        if (authoritativeId != null) {
+          setConflictCardId(authoritativeId);
+          setConflictUnlocated(false);
+          void (async () => {
+            await queryClient.refetchQueries({ queryKey: ["library"] });
+            const lib = queryClient.getQueryData<Library>(["library"]);
+            if (!lib?.cards.some((c) => c.id === authoritativeId)) {
+              setConflictUnlocated(true);
+            }
+          })();
+        } else {
+          setConflictCardId(null);
+          setConflictUnlocated(true);
+        }
       } else {
-        // Conflict/failure: core + annotation stay in the form.
+        // Deleted / notFound / refused: inputs stay in the form.
         setCardMsg(statusMessage(res.status) ?? "保存知识卡失败，输入还在下面。");
       }
     },
-    onError: () => setCardMsg("保存知识卡失败，输入还在下面，可以重试。"),
+    // A lost response does NOT rotate the key: retrying replays the
+    // same save instead of creating a second card.
+    onError: () => setCardMsg("保存知识卡失败，输入还在下面，可以重试（会沿用同一次保存，不会重复建卡）。"),
   });
+
+  // Read-only receipt read-back: refetch the library and look the
+  // card up by its real id. Never calls createCard again.
+  const readback = async () => {
+    if (!receipt) return;
+    setReadbackBusy(true);
+    try {
+      await queryClient.refetchQueries({ queryKey: ["library"] });
+      const lib = queryClient.getQueryData<Library>(["library"]);
+      if (lib && !lib.cards.some((c) => c.id === receipt.cardId)) {
+        setReceiptGone(true);
+      }
+    } finally {
+      setReadbackBusy(false);
+    }
+  };
+
+  // Read-only retry for a conflict whose authoritative card could
+  // not be located: refetch the library and look up ONLY the exact
+  // ledger resultId again. It never re-creates a card, and never
+  // substitutes another card from this snippet. With no resultId
+  // there is no exact id to look up, so it stays unlocated.
+  const conflictReadback = async () => {
+    if (conflictCardId == null) {
+      setConflictUnlocated(true);
+      return;
+    }
+    setConflictReadbackBusy(true);
+    try {
+      await queryClient.refetchQueries({ queryKey: ["library"] });
+      const lib = queryClient.getQueryData<Library>(["library"]);
+      setConflictUnlocated(!lib?.cards.some((c) => c.id === conflictCardId));
+    } finally {
+      setConflictReadbackBusy(false);
+    }
+  };
+
+  const backToSnippet = () => {
+    const el = document.getElementById(`snippet-${snippet.id}`);
+    if (el) {
+      setSnippetGone(false);
+      el.scrollIntoView({ block: "center" });
+    } else {
+      setSnippetGone(true);
+    }
+  };
+
+  const receiptCard = receipt ? cards.find((c) => c.id === receipt.cardId) : undefined;
+  const conflictCard = conflictCardId != null
+    ? cards.find((c) => c.id === conflictCardId)
+    : undefined;
 
   const canAsk = question.trim().length > 0 && !ask.isPending;
 
@@ -276,12 +405,104 @@ function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
         </div>
       </div>
 
-      {turns.length > 0 &&
-        (cardDone ? (
-          <p role="status" className="mt-3 text-sm text-[var(--ok)]">
-            ✓ 已沉淀为知识卡（出处：{sourceLabelOf(snippet)}），去「知识卡」页能看到它。
-          </p>
-        ) : (
+      {turns.length > 0 && receipt ? (
+        <div className="mt-3 rounded-lg border border-[var(--ok)] p-3" role="status">
+          {receiptGone ? (
+            <>
+              <p className="text-sm font-medium text-[var(--accent2)]">
+                ▲ 这张卡已不存在（可能已被删除），不会从答复里重建它。
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={backToSnippet}
+                  className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+                >
+                  回到原片段
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReceipt(null);
+                    setReceiptGone(false);
+                  }}
+                  className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+                >
+                  用当前输入另存为新卡
+                </button>
+              </div>
+            </>
+          ) : receiptCard ? (
+            <>
+              <p className="text-sm font-medium text-[var(--ok)]">
+                {receipt.replayed
+                  ? "✓ 原键已保存 — 这次保存命中的就是先前存下的那张卡，没有重复建卡。"
+                  : "✓ 已保存为知识卡。"}
+              </p>
+              <p className="font-serif-book mt-2 text-[15px] leading-relaxed">
+                {receiptCard.core}
+              </p>
+              <p className="mt-1 text-xs text-[var(--dim)]">
+                出处：{receiptCard.sourceLabel ?? sourceLabelOf(snippet)}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => onViewCard(receipt.cardId)}
+                  className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-white"
+                >
+                  查看这张卡
+                </button>
+                <button
+                  type="button"
+                  onClick={backToSnippet}
+                  className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+                >
+                  回到原片段
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReceipt(null)}
+                  className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--dim)]"
+                >
+                  再存一张新的
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium text-[var(--ok)]">
+                ✓ 已保存，详情暂未读出。
+              </p>
+              <p className="mt-1 text-xs text-[var(--dim)]">
+                卡已经存下（编号 {receipt.cardId}），只是这次没读出它的内容。重新读取只是读，不会再建一张卡。
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={readbackBusy}
+                  onClick={() => void readback()}
+                  className="rounded-lg border border-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent)] disabled:opacity-50"
+                >
+                  {readbackBusy ? "读取中…" : "重新读取详情"}
+                </button>
+                <button
+                  type="button"
+                  onClick={backToSnippet}
+                  className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+                >
+                  回到原片段
+                </button>
+              </div>
+            </>
+          )}
+          {snippetGone && (
+            <p className="mt-2 text-sm text-[var(--accent2)]">
+              ▲ 原片段已删除，出处不可用。
+            </p>
+          )}
+        </div>
+      ) : turns.length > 0 ? (
           <div className="mt-3 space-y-3 rounded-lg border border-dashed border-[var(--accent)] p-3">
             <p className="text-sm font-medium">把这次讨论沉淀为知识卡</p>
             <div>
@@ -317,6 +538,40 @@ function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
                 ▲ {cardMsg}
               </p>
             )}
+            {conflictCard && (
+              <div className="rounded-lg border border-[var(--border)] p-3">
+                <p className="text-xs text-[var(--dim)]">已存的权威结果（先前那次保存）</p>
+                <p className="font-serif-book mt-1 text-[15px] leading-relaxed">{conflictCard.core}</p>
+                <p className="mt-1 text-xs text-[var(--dim)]">
+                  出处：{conflictCard.sourceLabel ?? "无出处记录"}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onViewCard(conflictCard.id)}
+                  className="mt-2 rounded-lg border border-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent)]"
+                >
+                  查看这张卡
+                </button>
+              </div>
+            )}
+            {conflictUnlocated && !conflictCard && (
+              <div className="rounded-lg border border-[var(--border)] p-3" role="status">
+                <p className="text-sm font-medium text-[var(--accent2)]">
+                  ▲ 已保存，但暂时无法定位这张卡。
+                </p>
+                <p className="mt-1 text-xs text-[var(--dim)]">
+                  先前那次保存已经存下，只是这次没能按保存键返回的编号读到它。重新读取只是读，不会再建一张卡，也不会拿同一片段的其他卡来代替。
+                </p>
+                <button
+                  type="button"
+                  disabled={conflictReadbackBusy}
+                  onClick={() => void conflictReadback()}
+                  className="mt-2 rounded-lg border border-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent)] disabled:opacity-50"
+                >
+                  {conflictReadbackBusy ? "读取中…" : "重新读取定位"}
+                </button>
+              </div>
+            )}
             <button
               type="button"
               disabled={saveCard.isPending || !core.trim()}
@@ -326,7 +581,7 @@ function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
               {saveCard.isPending ? "保存中…" : "一键存为知识卡"}
             </button>
           </div>
-        ))}
+        ) : null}
     </section>
   );
 }
@@ -334,12 +589,16 @@ function SnippetQaPanel({ snippet }: { snippet: Snippet }) {
 function SnippetCard({
   snippet,
   books,
+  cards,
   onOpenReader,
+  onViewCard,
   highlighted,
 }: {
   snippet: Snippet;
   books: Book[];
+  cards: Card[];
   onOpenReader: (book: Book, chapter?: number, offset?: number) => void;
+  onViewCard: (cardId: number) => void;
   highlighted: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -352,6 +611,9 @@ function SnippetCard({
   const [reflectionDraft, setReflectionDraft] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // The card this form most recently saved (server id), so the
+  // success note can jump straight to that card.
+  const [lastCardId, setLastCardId] = useState<number | null>(null);
   const cardKeyRef = useRef<string>(newRequestId());
 
   const invalidate = () => {
@@ -422,11 +684,12 @@ function SnippetCard({
     onSuccess: (res) => {
       if (res.ok) {
         cardKeyRef.current = newRequestId();
+        if (res.id != null) setLastCardId(res.id);
         setShowCardForm(false);
         setCore("");
         setAnnotation("");
         setCardTags("");
-        setMsg("✓ 已写成知识卡，去「知识卡」页能看到它。");
+        setMsg(res.status === "replayed" ? "✓ 原键已保存，就是先前那张卡。" : "✓ 已写成知识卡。");
         invalidate();
       } else {
         setMsg(statusMessage(res.status) ?? "保存失败，输入还在。");
@@ -657,9 +920,22 @@ function SnippetCard({
         )}
       </div>
       {msg && (
-        <p role="status" className="mt-2 text-sm text-[var(--dim)]">{msg}</p>
+        <p role="status" className="mt-2 flex flex-wrap items-center gap-2 text-sm text-[var(--dim)]">
+          <span>{msg}</span>
+          {lastCardId != null && (
+            <button
+              type="button"
+              onClick={() => onViewCard(lastCardId)}
+              className="rounded-lg border border-[var(--accent)] px-2.5 py-1 text-sm font-medium text-[var(--accent)]"
+            >
+              查看这张卡
+            </button>
+          )}
+        </p>
       )}
-      {showQa && <SnippetQaPanel snippet={snippet} />}
+      {showQa && (
+        <SnippetQaPanel snippet={snippet} cards={cards} onViewCard={onViewCard} />
+      )}
     </article>
   );
 }
@@ -668,10 +944,12 @@ export function Snippets({
   library,
   focusId,
   onOpenReader,
+  onViewCard,
 }: {
   library: Library;
   focusId: number | null;
   onOpenReader: (book: Book, chapter?: number, offset?: number) => void;
+  onViewCard: (cardId: number) => void;
 }) {
   const queryClient = useQueryClient();
   const draftKeyRef = useRef<string>(newRequestId());
@@ -854,7 +1132,9 @@ export function Snippets({
             key={s.id}
             snippet={s}
             books={library.books}
+            cards={library.cards}
             onOpenReader={onOpenReader}
+            onViewCard={onViewCard}
             highlighted={focusId === s.id}
           />
         ))}
