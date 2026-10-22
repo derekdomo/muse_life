@@ -256,7 +256,6 @@ export function Books({
   const fileRef = useRef<HTMLInputElement | null>(null);
   const importTargetRef = useRef<Book | null>(null);
   const addKeyRef = useRef<string>(newRequestId());
-  const importKeyRef = useRef<string>(newRequestId());
   const logKeyRef = useRef<string>(newRequestId());
 
   const [importPhase, setImportPhase] = useState<string | null>(null);
@@ -353,12 +352,22 @@ export function Books({
   const runImport = async (file: File) => {
     const target = importTargetRef.current;
     setImportError(null);
+    // One import attempt = one generation key (CMP-READ-IMPORT-001).
+    // Every write of this attempt — begin, file upload, chapter
+    // chunks, finish — carries this key, so retrying any step under
+    // the same key replays safely against the ledger, and a later
+    // attempt (a new key) can never be disturbed by this attempt's
+    // late arrivals. A re-import therefore always mints a fresh key,
+    // for existing books too.
+    const importRequestId = newRequestId();
+    let begunBookId: number | null = null;
+    const targetWasReady = target?.importStatus === "ready";
     try {
       setImportPhase("正在本机解析 EPUB…");
       const parsed = await parseEpub(file);
       const versionLabel = file.name;
       const begun = await api.beginImport({
-        requestId: target ? `retry-${target.id}` : importKeyRef.current,
+        requestId: importRequestId,
         title: target?.title ?? parsed.title,
         author: target?.author ?? parsed.author ?? undefined,
         source: target?.source ?? "owner",
@@ -369,11 +378,16 @@ export function Books({
         throw new Error(statusMessage(begun.status) ?? "无法开始导入");
       }
       const bookId = begun.id;
-      if (!target) importKeyRef.current = newRequestId();
+      begunBookId = bookId;
       try {
         setImportPhase("正在保存原文件…");
         const { dataBase64 } = await fileToBase64(file);
-        await api.uploadImportFile({ bookId, dataBase64 });
+        const uploaded = await api.uploadImportFile({
+          bookId,
+          importId: importRequestId,
+          dataBase64,
+        });
+        if (!uploaded.ok) throw new Error("upload refused");
       } catch {
         // The original file could not be stored; chapters still save.
         // The failure is surfaced, not hidden.
@@ -389,26 +403,47 @@ export function Books({
           title: c.title,
           html: c.html,
         }));
-        const saved = await api.saveImportChapters({ bookId, chapters: chunk });
+        const saved = await api.saveImportChapters({
+          bookId,
+          importId: importRequestId,
+          chapters: chunk,
+        });
         if (!saved.ok) throw new Error("章节保存失败");
       }
-      const finished = await api.finishImport({ bookId, ok: true });
+      const finished = await api.finishImport({
+        bookId,
+        importId: importRequestId,
+        ok: true,
+        chapterCount: parsed.chapters.length,
+      });
       if (!finished.ok) throw new Error("导入收尾失败");
       setImportPhase(null);
       invalidate();
     } catch (e) {
       const message = e instanceof Error ? e.message : "导入失败";
-      // Record the failure against the target book when we have one and
-      // it is not currently readable — a failed retry never destroys a
-      // good copy, and never duplicates the book.
-      if (target && target.importStatus !== "ready") {
+      // Record the failure against the generation this attempt began
+      // (bound by its key, so it can never disturb a newer import or
+      // a readable copy) — and only when the book was not already
+      // readable, matching the old rule that a failed retry never
+      // marks a good copy failed. A failed import keeps the previous
+      // chapters, file and reading position untouched server-side.
+      if (begunBookId != null && !targetWasReady) {
         try {
           const { dataBase64 } = await fileToBase64(file);
-          await api.uploadImportFile({ bookId: target.id, dataBase64 });
+          await api.uploadImportFile({
+            bookId: begunBookId,
+            importId: importRequestId,
+            dataBase64,
+          });
         } catch {
           /* original file stays wherever it already was */
         }
-        await api.finishImport({ bookId: target.id, ok: false, error: message });
+        await api.finishImport({
+          bookId: begunBookId,
+          importId: importRequestId,
+          ok: false,
+          error: message,
+        });
         invalidate();
       }
       setImportPhase(null);

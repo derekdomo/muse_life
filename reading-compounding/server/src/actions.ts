@@ -35,6 +35,39 @@
 // soft-delete and the ledger tombstone stamp commit in one batch.
 // Edits carry an optimistic `version`: a stale save conflicts and the
 // newer row is never overwritten.
+//
+// Pinned citations (CMP-READ-001 closure): every successful
+// askSnippetQuestion response consumes and returns the binding of
+// exactly that ask (questionRequestId + snippet id + the stored
+// version actually read + the response-time 原文/出处 snapshot).
+// The client pins it on the turn; a card distilled from that turn
+// passes the same binding to createCard, which re-verifies it
+// against the stored snippet row before writing — a source that
+// changed since the discussion makes the save a typed conflict
+// with zero writes, never a silent re-pointing — and then stores
+// the binding on the card row itself (migration 0005), so the
+// card's citation survives every later library update.
+//
+// Import generations (CMP-READ-IMPORT-001): an import is a GENERATION
+// identified by its beginImport requestId, bound through every later
+// write (uploadImportFile / saveImportChapters / finishImport carry
+// the same key as `importId`). beginImport arbitrates through the
+// request ledger on BOTH paths (new book and existingBookId): a
+// same-key replay returns the original result and writes NOTHING —
+// it can never wipe a finished import back to "processing" — and a
+// same-key/different-payload call is a typed conflict. A fresh begin
+// only claims the book's staging area (books.import_gen): the new
+// generation's chapters stage in import_staged_chapters and its file
+// in a per-generation blob key, while readers keep seeing the live
+// book_chapters and blob_key untouched. finishImport validates the
+// staged generation, then promotes it — delete live chapters, copy
+// staged chapters in, flip the file pointer, mark ready, reset the
+// reading position — as ONE guarded db.batch, so a read at any moment
+// sees the complete old version or the complete new one. Writes from
+// a superseded generation (late begin/chapters/finish) are refused
+// with a typed conflict and change nothing. A failed finish keeps
+// the live chapters, file pointer, reading position and excerpts
+// exactly as they were.
 
 import { defineAction, z, type ActionsModule, type Ctx, type SpaceDb } from "@hatch/space-sdk";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
@@ -421,6 +454,52 @@ function refusedOk(): z.infer<typeof okResult> {
   return { ok: false, forbidden: true, status: "refused" };
 }
 
+// beginImport's result: createResult plus the generation binding.
+// `gen` echoes the generation this call owns (== the requestId on a
+// fresh save; the ledger's original key on a replay), so the client
+// binds every later import write to exactly this generation.
+const importBeginResult = createResult.extend({ gen: z.string().nullable() });
+
+type ImportBeginResult = z.infer<typeof importBeginResult>;
+
+function refusedImportBegin(): ImportBeginResult {
+  return { ok: false, forbidden: true, status: "refused", id: null, resultId: null, gen: null };
+}
+
+function importBeginFromClaim(claim: Claim, gen: string | null): ImportBeginResult | null {
+  const mapped = claimToResult(claim);
+  if (!mapped) return null;
+  return { ...mapped, gen };
+}
+
+// askSnippetQuestion's response: the answer PLUS the pinned
+// citation binding of exactly this ask (CMP-READ-001 closure). The
+// binding fields are null on every non-answered response — a
+// refused/notFound ask binds nothing.
+const askSnippetResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  status: z.enum(["answered", "refused", "notFound"]),
+  answer: z.string(),
+  // Model-suggested one-line core for the knowledge card. Always
+  // labeled 建议 in the UI and owner-editable before saving.
+  suggestedCore: z.string().nullable(),
+  // Fixed provenance snapshot of the snippet being discussed,
+  // taken from the stored row at response time.
+  sourceText: z.string(),
+  sourceLabel: z.string(),
+  // The questionRequestId this response consumed (echoed verbatim
+  // from the request; null when the caller sent none), and the
+  // snippet id + stored version the answer was actually produced
+  // against. Together with sourceText/sourceLabel these pin the
+  // turn's citation: the client stores them on the turn and shows
+  // THIS snapshot via 「查看本次原文」, even after the library row
+  // moves on.
+  questionRequestId: z.string().nullable(),
+  snippetId: z.number().nullable(),
+  snippetVersion: z.number().nullable(),
+});
+
 const bookSchema = z.object({
   id: z.number(),
   title: z.string(),
@@ -481,6 +560,14 @@ const cardSchema = z.object({
   core: z.string(),
   snippetId: z.number().nullable(),
   sourceLabel: z.string().nullable(),
+  // Q&A discussion binding: the pinned citation of the ONE ask this
+  // card was distilled from (all null for cards not made from a
+  // Q&A turn). Read back verbatim from the stored row — the panel
+  // and the cards tab show the citation the card actually carries.
+  qaQuestionRequestId: z.string().nullable(),
+  qaSnippetVersion: z.number().nullable(),
+  qaSourceText: z.string().nullable(),
+  qaSourceLabel: z.string().nullable(),
   annotation: z.string().nullable(),
   origin: z.enum(["ui", "chat"]),
   tags: z.array(tagPairSchema),
@@ -562,6 +649,10 @@ function toCard(
     core: row.core,
     snippetId: row.snippetId,
     sourceLabel: row.sourceLabel,
+    qaQuestionRequestId: row.qaQuestionRequestId,
+    qaSnippetVersion: row.qaSnippetVersion,
+    qaSourceText: row.qaSourceText,
+    qaSourceLabel: row.qaSourceLabel,
     annotation: row.annotation,
     origin: row.origin,
     tags,
@@ -756,6 +847,41 @@ function assembleLibrary(data: Awaited<ReturnType<typeof loadAll>>, today: strin
         createdAt: r.createdAt.toISOString(),
       })),
   };
+}
+
+// Generation binding for the import write points (CMP-READ-IMPORT-001).
+// A call carrying `importId` (the beginImport requestId that opened
+// the generation) binds ONLY to that generation: it must still own
+// the book, otherwise the write is a late arrival from a superseded
+// generation and is refused with a typed conflict — zero DB writes,
+// zero blob writes. A call WITHOUT importId is a legacy client: it
+// binds to the book's current generation when one exists (the only
+// generation it can mean), and to the legacy direct-write path
+// (gen === null) for books whose import predates generations.
+type ImportBinding =
+  | { bound: true; book: BookRow; gen: string | null }
+  | { bound: false; result: z.infer<typeof okResult> };
+
+async function resolveImportBinding(
+  db: Db,
+  bookId: number,
+  importId: string | undefined,
+): Promise<ImportBinding> {
+  const found = await db
+    .select()
+    .from(schema.books)
+    .where(and(eq(schema.books.id, bookId), isNull(schema.books.deletedAt)))
+    .limit(1);
+  const book = found[0];
+  if (!book) {
+    return { bound: false, result: { ok: false, forbidden: false, status: "notFound" } };
+  }
+  if (importId !== undefined && book.importGen !== importId) {
+    // Bound to a generation that no longer owns this book (or never
+    // did): refuse explicitly, touch nothing.
+    return { bound: false, result: { ok: false, forbidden: false, status: "conflict" } };
+  }
+  return { bound: true, book, gen: importId ?? book.importGen };
 }
 
 export const Actions = {
@@ -1105,6 +1231,14 @@ export const Actions = {
   // what the browser extracted (sanitized chapter HTML) plus the
   // original bytes in a private blob. No book text is ever fetched
   // from, or uploaded to, any external service.
+  //
+  // Generation discipline (CMP-READ-IMPORT-001): see the header
+  // comment. The flow is beginImport (ledger-arbitrated generation
+  // claim) → uploadImportFile + saveImportChapters (staged under the
+  // generation, invisible to readers) → finishImport (validate the
+  // staged generation, then promote it atomically). Every write
+  // point can fail or lose its response and be retried under the
+  // original key without touching the live copy.
   // -------------------------------------------------------------------
 
   beginImport: defineAction({
@@ -1118,11 +1252,26 @@ export const Actions = {
       // failed import must not create a duplicate book).
       existingBookId: z.number().int().positive().nullable().optional(),
     }),
-    response: createResult,
-    async handler(ctx, args): Promise<z.infer<typeof createResult>> {
-      if (!isOwner(ctx)) return refusedCreate();
+    response: importBeginResult,
+    async handler(ctx, args): Promise<ImportBeginResult> {
+      if (!isOwner(ctx)) return refusedImportBegin();
       const db = ctx.db<typeof schema>();
+      // Ledger arbitration comes FIRST on both paths, with a
+      // fingerprint of the full effective payload (CMP-READ-IMPORT-001:
+      // the existing-book path used to skip the ledger entirely, so a
+      // replayed begin wiped a finished import's chapters and flipped
+      // it back to "processing"). Same key + same payload → the
+      // original result, zero writes. Same key + other payload →
+      // typed conflict. Key of a since-deleted book → typed deleted.
       if (args.existingBookId != null) {
+        const hash = payloadHash({
+          k: "import-book",
+          existingBookId: args.existingBookId,
+          versionLabel: args.versionLabel || null,
+        });
+        const claim = await arbitrateCreate(db, args.requestId, "import-book", hash);
+        const early = importBeginFromClaim(claim, args.requestId);
+        if (early) return early;
         const found = await db
           .select()
           .from(schema.books)
@@ -1131,23 +1280,46 @@ export const Actions = {
           )
           .limit(1);
         const book = found[0];
-        if (!book) return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
-        // Chapter wipe + status flip commit together: a failure can
-        // never leave a "processing" book whose chapters are gone.
-        await db.batch([
-          db.delete(schema.bookChapters).where(eq(schema.bookChapters.bookId, book.id)),
+        if (!book) {
+          return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null, gen: null };
+        }
+        // Fresh generation claim, committed WITH the ledger row as
+        // one batch: claim the staging area (importGen = this key),
+        // drop any superseded generations' staged chapters, and mark
+        // the book processing. The LIVE chapters, file pointer and
+        // reading position are NOT touched — the previous good copy
+        // stays fully readable until this generation is promoted by
+        // finishImport.
+        const outcome = await commitCreate(db, args.requestId, "import-book", hash, [
+          db
+            .delete(schema.importStagedChapters)
+            .where(eq(schema.importStagedChapters.bookId, book.id)),
           db
             .update(schema.books)
             .set({
               importStatus: "processing",
               importError: null,
+              importGen: args.requestId,
+              importBlobKey: null,
               versionLabel: args.versionLabel || book.versionLabel,
               updatedAt: new Date(),
             })
-            .where(eq(schema.books.id, book.id)),
-        ] as [BatchItem, ...BatchItem[]]);
+            .where(and(eq(schema.books.id, book.id), isNull(schema.books.deletedAt))),
+          db.insert(schema.requestKeys).values({
+            requestId: args.requestId,
+            kind: "import-book",
+            payloadHash: hash,
+            resultTable: "books",
+            resultId: book.id,
+          }),
+        ]);
+        if (!outcome.committed) {
+          const mapped = importBeginFromClaim(outcome.claim, args.requestId);
+          if (mapped) return mapped;
+          throw new Error("beginImport: arbitration returned fresh after a failed commit");
+        }
         ctx.invalidateQueries();
-        return { ok: true, forbidden: false, status: "saved", id: book.id, resultId: book.id };
+        return { ok: true, forbidden: false, status: "saved", id: book.id, resultId: book.id, gen: args.requestId };
       }
       const hash = payloadHash({
         k: "import-book",
@@ -1157,7 +1329,7 @@ export const Actions = {
         versionLabel: args.versionLabel || null,
       });
       const claim = await arbitrateCreate(db, args.requestId, "import-book", hash);
-      const early = claimToResult(claim);
+      const early = importBeginFromClaim(claim, args.requestId);
       if (early) return early;
       const outcome = await commitCreate(db, args.requestId, "import-book", hash, [
         db
@@ -1169,6 +1341,7 @@ export const Actions = {
             status: "want",
             importStatus: "processing",
             versionLabel: args.versionLabel || null,
+            importGen: args.requestId,
             requestId: args.requestId,
           })
           .returning({ id: schema.books.id }),
@@ -1176,38 +1349,68 @@ export const Actions = {
         ledgerResultStmt(db, args.requestId, "books"),
       ]);
       if (!outcome.committed) {
-        const mapped = claimToResult(outcome.claim);
+        const mapped = importBeginFromClaim(outcome.claim, args.requestId);
         if (mapped) return mapped;
         throw new Error("beginImport: arbitration returned fresh after a failed commit");
       }
       const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
+      return { ok: true, forbidden: false, status: "saved", id, resultId: id, gen: args.requestId };
     },
   }),
 
   uploadImportFile: defineAction({
     request: z.object({
       bookId: z.number().int().positive(),
+      // The beginImport requestId that opened this import generation.
+      // Optional for legacy clients (see resolveImportBinding).
+      importId: z.string().trim().min(1).max(120).optional(),
       dataBase64: z.string().min(1),
     }),
     response: okResult,
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
-      const found = await db
-        .select({ id: schema.books.id })
-        .from(schema.books)
-        .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
-        .limit(1);
-      if (found.length === 0) return { ok: false, forbidden: false, status: "notFound" };
-      const key = `epub/${args.bookId}.epub`;
+      // Binding arbitration precedes ANY blob write: a stale
+      // generation's file never lands anywhere.
+      const binding = await resolveImportBinding(db, args.bookId, args.importId);
+      if (!binding.bound) return binding.result;
       const bytes = Buffer.from(args.dataBase64, "base64");
+      if (binding.gen == null) {
+        // Legacy path (book predates generations): the historical
+        // direct write to the live key.
+        const key = `epub/${args.bookId}.epub`;
+        await ctx.blobs.put(key, bytes, { contentType: "application/epub+zip" });
+        await db
+          .update(schema.books)
+          .set({ blobKey: key, updatedAt: new Date() })
+          .where(eq(schema.books.id, args.bookId));
+        return { ok: true, forbidden: false, status: "saved" };
+      }
+      // Generation path: the file stages under a per-generation key
+      // and is recorded as this generation's staged pointer. The
+      // LIVE blobKey (the previous good copy's file) is untouched
+      // until finishImport promotes this generation.
+      const key = `epub-stage/${args.bookId}/${binding.gen}`;
       await ctx.blobs.put(key, bytes, { contentType: "application/epub+zip" });
-      await db
+      const updated = await db
         .update(schema.books)
-        .set({ blobKey: key, updatedAt: new Date() })
-        .where(eq(schema.books.id, args.bookId));
+        .set({ importBlobKey: key, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.books.id, args.bookId),
+            eq(schema.books.importGen, binding.gen),
+            isNull(schema.books.deletedAt),
+          ),
+        )
+        .returning({ id: schema.books.id });
+      if (updated.length === 0) {
+        // The generation lost ownership between the binding check
+        // and this write (a newer begin committed first). The staged
+        // blob is orphaned under its generation key — never pointed
+        // at by any row — and the write is refused honestly.
+        return { ok: false, forbidden: false, status: "conflict" };
+      }
       return { ok: true, forbidden: false, status: "saved" };
     },
   }),
@@ -1215,6 +1418,9 @@ export const Actions = {
   saveImportChapters: defineAction({
     request: z.object({
       bookId: z.number().int().positive(),
+      // The beginImport requestId that opened this import generation.
+      // Optional for legacy clients (see resolveImportBinding).
+      importId: z.string().trim().min(1).max(120).optional(),
       chapters: z
         .array(
           z.object({
@@ -1230,39 +1436,83 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
-      const found = await db
-        .select({ id: schema.books.id, importStatus: schema.books.importStatus })
-        .from(schema.books)
-        .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
-        .limit(1);
-      const book = found[0];
-      if (!book) return { ok: false, forbidden: false, status: "notFound" };
+      const binding = await resolveImportBinding(db, args.bookId, args.importId);
+      if (!binding.bound) return binding.result;
+      const { book } = binding;
       if (book.importStatus !== "processing") {
         return { ok: false, forbidden: false, status: "conflict" };
       }
-      const existing = await db
-        .select({ id: schema.bookChapters.id, idx: schema.bookChapters.idx })
-        .from(schema.bookChapters)
-        .where(eq(schema.bookChapters.bookId, args.bookId));
-      const existingByIdx = new Map(existing.map((r) => [r.idx, r.id]));
+      // Duplicate idx inside one payload is arbitrated explicitly:
+      // the LAST occurrence wins, so a chunk never carries two rival
+      // versions of the same chapter position.
+      const byIdx = new Map<number, { idx: number; title: string | null; html: string }>();
+      for (const ch of args.chapters) byIdx.set(ch.idx, ch);
+      const chunk = [...byIdx.values()];
       // The whole chunk commits as one batch: a failure mid-chunk
       // stores none of it, so a retry re-sends the same chunk whole.
       const items: BatchItem[] = [];
-      for (const ch of args.chapters) {
-        const values = {
-          bookId: args.bookId,
-          idx: ch.idx,
-          title: ch.title,
-          html: ch.html,
-          charCount: ch.html.length,
-        };
-        const existingId = existingByIdx.get(ch.idx);
-        if (existingId != null) {
-          items.push(
-            db.update(schema.bookChapters).set(values).where(eq(schema.bookChapters.id, existingId)),
+      if (binding.gen == null) {
+        // Legacy path (book predates generations): chapters land
+        // directly in the live table, as imports always did.
+        const existing = await db
+          .select({ id: schema.bookChapters.id, idx: schema.bookChapters.idx })
+          .from(schema.bookChapters)
+          .where(eq(schema.bookChapters.bookId, args.bookId));
+        const existingByIdx = new Map(existing.map((r) => [r.idx, r.id]));
+        for (const ch of chunk) {
+          const values = {
+            bookId: args.bookId,
+            idx: ch.idx,
+            title: ch.title,
+            html: ch.html,
+            charCount: ch.html.length,
+          };
+          const existingId = existingByIdx.get(ch.idx);
+          if (existingId != null) {
+            items.push(
+              db.update(schema.bookChapters).set(values).where(eq(schema.bookChapters.id, existingId)),
+            );
+          } else {
+            items.push(db.insert(schema.bookChapters).values(values));
+          }
+        }
+      } else {
+        // Generation path: chapters stage in isolation under
+        // (book, gen). The live chapters are never touched here, so
+        // a half-saved or superseded generation is invisible to the
+        // reader. A re-sent idx upserts the one staged row (the
+        // unique (book, gen, idx) index backs this arbitration).
+        const gen = binding.gen;
+        const existing = await db
+          .select({ id: schema.importStagedChapters.id, idx: schema.importStagedChapters.idx })
+          .from(schema.importStagedChapters)
+          .where(
+            and(
+              eq(schema.importStagedChapters.bookId, args.bookId),
+              eq(schema.importStagedChapters.gen, gen),
+            ),
           );
-        } else {
-          items.push(db.insert(schema.bookChapters).values(values));
+        const existingByIdx = new Map(existing.map((r) => [r.idx, r.id]));
+        for (const ch of chunk) {
+          const values = {
+            bookId: args.bookId,
+            gen,
+            idx: ch.idx,
+            title: ch.title,
+            html: ch.html,
+            charCount: ch.html.length,
+          };
+          const existingId = existingByIdx.get(ch.idx);
+          if (existingId != null) {
+            items.push(
+              db
+                .update(schema.importStagedChapters)
+                .set(values)
+                .where(eq(schema.importStagedChapters.id, existingId)),
+            );
+          } else {
+            items.push(db.insert(schema.importStagedChapters).values(values));
+          }
         }
       }
       if (items.length > 0) {
@@ -1275,6 +1525,9 @@ export const Actions = {
   finishImport: defineAction({
     request: z.object({
       bookId: z.number().int().positive(),
+      // The beginImport requestId that opened this import generation.
+      // Optional for legacy clients (see resolveImportBinding).
+      importId: z.string().trim().min(1).max(120).optional(),
       ok: z.boolean(),
       error: z.string().trim().max(500).optional(),
       chapterCount: z.number().int().min(0).optional(),
@@ -1283,44 +1536,83 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
-      const found = await db
-        .select({ id: schema.books.id })
-        .from(schema.books)
-        .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
-        .limit(1);
-      if (found.length === 0) return { ok: false, forbidden: false, status: "notFound" };
-      if (args.ok) {
-        const chapters = await db
-          .select({ id: schema.bookChapters.id })
-          .from(schema.bookChapters)
-          .where(eq(schema.bookChapters.bookId, args.bookId));
-        if (chapters.length === 0) {
-          // Claiming ready with zero stored chapters would be a false
-          // state; record it as the failure it is instead.
+      const binding = await resolveImportBinding(db, args.bookId, args.importId);
+      if (!binding.bound) return binding.result;
+      const { book } = binding;
+
+      if (binding.gen == null) {
+        // Legacy path (book predates generations): the historical
+        // direct behavior against the live chapters.
+        if (args.ok) {
+          const chapters = await db
+            .select({ id: schema.bookChapters.id })
+            .from(schema.bookChapters)
+            .where(eq(schema.bookChapters.bookId, args.bookId));
+          if (chapters.length === 0) {
+            await db
+              .update(schema.books)
+              .set({
+                importStatus: "failed",
+                importError: "未存入任何章节",
+                updatedAt: new Date(),
+              })
+              .where(eq(schema.books.id, args.bookId));
+            ctx.invalidateQueries();
+            return { ok: false, forbidden: false, status: "conflict" };
+          }
+          await db
+            .update(schema.books)
+            .set({
+              importStatus: "ready",
+              importError: null,
+              curChapter: 0,
+              curOffset: 0,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.books.id, args.bookId));
+        } else {
           await db
             .update(schema.books)
             .set({
               importStatus: "failed",
-              importError: "未存入任何章节",
+              importError: args.error || "导入失败",
               updatedAt: new Date(),
             })
             .where(eq(schema.books.id, args.bookId));
-          ctx.invalidateQueries();
-          return { ok: false, forbidden: false, status: "conflict" };
         }
-        await db
-          .update(schema.books)
-          .set({
-            importStatus: "ready",
-            importError: null,
-            curChapter: 0,
-            curOffset: 0,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.books.id, args.bookId));
-      } else {
-        // Failure keeps the original blob and the previous reading
-        // position untouched; only the status changes.
+        ctx.invalidateQueries();
+        return { ok: true, forbidden: false, status: "saved" };
+      }
+
+      const gen = binding.gen;
+
+      // Idempotent replays of THIS generation's own finish (the
+      // original response was lost in transit): the outcome is
+      // already recorded, so answer from it and write nothing. A
+      // finish claiming the OPPOSITE outcome for a generation that
+      // already closed is a conflict — a late "success" must not
+      // resurrect a failed generation, and a late "failure" must
+      // never destroy a promoted good copy.
+      if (book.importStatus === "ready") {
+        return args.ok
+          ? { ok: true, forbidden: false, status: "saved" }
+          : { ok: false, forbidden: false, status: "conflict" };
+      }
+      if (book.importStatus === "failed") {
+        return !args.ok
+          ? { ok: true, forbidden: false, status: "saved" }
+          : { ok: false, forbidden: false, status: "conflict" };
+      }
+      if (book.importStatus !== "processing") {
+        return { ok: false, forbidden: false, status: "conflict" };
+      }
+
+      if (!args.ok) {
+        // Failure of the CURRENT generation: only the status moves.
+        // The live chapters, the live file pointer, the reading
+        // position and every excerpt stay exactly as they were; the
+        // staged generation is kept so the failure can be inspected
+        // or the import retried under a new key.
         await db
           .update(schema.books)
           .set({
@@ -1328,7 +1620,128 @@ export const Actions = {
             importError: args.error || "导入失败",
             updatedAt: new Date(),
           })
-          .where(eq(schema.books.id, args.bookId));
+          .where(
+            and(
+              eq(schema.books.id, args.bookId),
+              eq(schema.books.importGen, gen),
+              eq(schema.books.importStatus, "processing"),
+            ),
+          );
+        ctx.invalidateQueries();
+        return { ok: true, forbidden: false, status: "saved" };
+      }
+
+      // Validate the staged generation BEFORE anything live moves:
+      // it must contain every chapter position 0..max contiguously
+      // (a lost chunk in the middle would promote a book with a
+      // hole), and when the client reports how many chapters it
+      // parsed, the staged count must equal that report exactly.
+      const staged = await db
+        .select({ idx: schema.importStagedChapters.idx })
+        .from(schema.importStagedChapters)
+        .where(
+          and(
+            eq(schema.importStagedChapters.bookId, args.bookId),
+            eq(schema.importStagedChapters.gen, gen),
+          ),
+        )
+        .orderBy(asc(schema.importStagedChapters.idx));
+      const idxs = new Set(staged.map((r) => r.idx));
+      let complete = staged.length > 0;
+      for (let i = 0; complete && i < staged.length; i += 1) {
+        if (!idxs.has(i)) complete = false;
+      }
+      if (args.chapterCount != null && args.chapterCount !== staged.length) {
+        complete = false;
+      }
+      if (!complete) {
+        // Claiming ready over an incomplete generation would publish
+        // a broken book; record THIS generation as failed instead.
+        // The live copy is untouched, and the staged rows stay for
+        // inspection / a retry under a new key.
+        await db
+          .update(schema.books)
+          .set({
+            importStatus: "failed",
+            importError:
+              staged.length === 0 ? "未存入任何章节" : "导入不完整：章节缺失或数量不符",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.books.id, args.bookId),
+              eq(schema.books.importGen, gen),
+              eq(schema.books.importStatus, "processing"),
+            ),
+          );
+        ctx.invalidateQueries();
+        return { ok: false, forbidden: false, status: "conflict" };
+      }
+
+      // Atomic promotion, ONE batch, every statement guarded on this
+      // generation still owning the book in "processing": if a newer
+      // generation claimed the book after the binding check, every
+      // statement matches zero rows, nothing live changes, and the
+      // post-check below answers conflict. The reader therefore only
+      // ever sees the complete old version or the complete new one.
+      const ownsBook = sql`(SELECT id FROM books WHERE id = ${args.bookId} AND import_gen = ${gen} AND import_status = 'processing')`;
+      const promotedBlobKey = book.importBlobKey ?? book.blobKey;
+      const results: unknown = await db.batch([
+        db
+          .delete(schema.bookChapters)
+          .where(sql`${schema.bookChapters.bookId} IN ${ownsBook}`),
+        // Raw-SQL insert-select (columns in the live table's own
+        // order): NULL id lets the live table assign fresh ids —
+        // staged ids belong to the staging table's sequence and could
+        // collide with other books' live chapter ids.
+        db
+          .insert(schema.bookChapters)
+          .select(
+            sql`SELECT NULL, book_id, idx, title, html, char_count FROM import_staged_chapters WHERE book_id IN ${ownsBook} AND gen = ${gen}`,
+          ),
+        db
+          .delete(schema.importStagedChapters)
+          .where(
+            and(
+              eq(schema.importStagedChapters.bookId, args.bookId),
+              eq(schema.importStagedChapters.gen, gen),
+            ),
+          ),
+        db
+          .update(schema.books)
+          .set({
+            importStatus: "ready",
+            importError: null,
+            blobKey: promotedBlobKey,
+            importBlobKey: null,
+            curChapter: 0,
+            curOffset: 0,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.books.id, args.bookId),
+              eq(schema.books.importGen, gen),
+              eq(schema.books.importStatus, "processing"),
+            ),
+          )
+          .returning({ id: schema.books.id }),
+      ] as [BatchItem, ...BatchItem[]]);
+      const bookUpdate = (results as unknown[])[3] as Array<{ id: number }> | undefined;
+      if ((bookUpdate?.length ?? 0) === 0) {
+        // The generation was superseded mid-finish; the guarded
+        // statements changed nothing live.
+        return { ok: false, forbidden: false, status: "conflict" };
+      }
+      // Best-effort cleanup of the PREVIOUS generation's staged file
+      // (its pointer was just replaced). A cleanup failure never
+      // fails the promotion: the old blob is simply orphaned.
+      if (book.blobKey && book.blobKey !== promotedBlobKey) {
+        try {
+          await ctx.blobs.delete(book.blobKey);
+        } catch {
+          /* orphaned staged blob is harmless */
+        }
       }
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, status: "saved" };
@@ -1809,6 +2222,15 @@ export const Actions = {
   // the client keeps the question draft and offers a retry. Only the
   // owner's explicit 「沉淀为知识卡」 (existing createCard, with its
   // request-key ledger) turns a conclusion into a stored card.
+  //
+  // Pinned-citation binding (CMP-READ-001 closure): the response
+  // CONSUMES and RETURNS the binding of exactly this ask — the
+  // questionRequestId it was sent with, the snippet id, the snippet
+  // VERSION actually read, and the 原文/出处 snapshot taken from
+  // that stored row. The client pins all of it on the turn, so a
+  // later library update can never graft an old answer onto a newer
+  // source, and a card distilled from the turn can carry the same
+  // binding into storage (createCard re-verifies it — see there).
   askSnippetQuestion: defineAction({
     request: z.object({
       snippetId: z.number().int().positive(),
@@ -1836,27 +2258,8 @@ export const Actions = {
         .max(6)
         .optional(),
     }),
-    response: z.object({
-      ok: z.boolean(),
-      forbidden: z.boolean(),
-      status: z.enum(["answered", "refused", "notFound"]),
-      answer: z.string(),
-      // Model-suggested one-line core for the knowledge card. Always
-      // labeled 建议 in the UI and owner-editable before saving.
-      suggestedCore: z.string().nullable(),
-      // Fixed provenance snapshot of the snippet being discussed.
-      sourceText: z.string(),
-      sourceLabel: z.string(),
-    }),
-    async handler(ctx, args): Promise<{
-      ok: boolean;
-      forbidden: boolean;
-      status: "answered" | "refused" | "notFound";
-      answer: string;
-      suggestedCore: string | null;
-      sourceText: string;
-      sourceLabel: string;
-    }> {
+    response: askSnippetResponse,
+    async handler(ctx, args): Promise<z.infer<typeof askSnippetResponse>> {
       // Owner gate BEFORE any database read: a non-owner learns
       // nothing about the snippet and triggers no inference.
       if (!isOwner(ctx)) {
@@ -1868,6 +2271,9 @@ export const Actions = {
           suggestedCore: null,
           sourceText: "",
           sourceLabel: "",
+          questionRequestId: null,
+          snippetId: null,
+          snippetVersion: null,
         };
       }
       const db = ctx.db<typeof schema>();
@@ -1891,6 +2297,9 @@ export const Actions = {
           suggestedCore: null,
           sourceText: "",
           sourceLabel: "",
+          questionRequestId: null,
+          snippetId: null,
+          snippetVersion: null,
         };
       }
       if (args.snippetVersion != null && args.snippetVersion !== snip.version) {
@@ -1902,6 +2311,9 @@ export const Actions = {
           suggestedCore: null,
           sourceText: "",
           sourceLabel: "",
+          questionRequestId: null,
+          snippetId: null,
+          snippetVersion: null,
         };
       }
       const chapter = snip.chapterLabel ?? "章节不详";
@@ -1940,6 +2352,11 @@ export const Actions = {
         suggestedCore: out.suggestedCore.trim() || null,
         sourceText: snip.text,
         sourceLabel,
+        // The binding of THIS ask: the id it was sent with and the
+        // stored row version actually answered against.
+        questionRequestId: args.questionRequestId ?? null,
+        snippetId: snip.id,
+        snippetVersion: snip.version,
       };
     },
   }),
@@ -1989,17 +2406,45 @@ export const Actions = {
       snippetId: z.number().int().positive().nullable().optional(),
       annotation: z.string().trim().max(2000).optional(),
       tags: z.array(z.string().trim().min(1).max(40)).max(12).optional(),
+      // Q&A discussion binding (CMP-READ-001 pinned-citation
+      // closure): when the card is distilled from ONE Q&A turn, the
+      // panel passes that turn's pinned citation — the ask's
+      // questionRequestId, the snippet version answered against,
+      // and the response-time 原文/出处 snapshot. All four travel
+      // together or not at all; the handler re-verifies them
+      // against the stored snippet row before anything is written.
+      qaQuestionRequestId: z.string().trim().min(1).max(120).optional(),
+      qaSnippetVersion: z.number().int().positive().optional(),
+      qaSourceText: z.string().trim().min(1).max(8000).optional(),
+      qaSourceLabel: z.string().trim().min(1).max(600).optional(),
     }),
     response: createResult,
     async handler(ctx, args): Promise<z.infer<typeof createResult>> {
       if (!isOwner(ctx)) return refusedCreate();
       const db = ctx.db<typeof schema>();
+      const qa = {
+        questionRequestId: args.qaQuestionRequestId ?? null,
+        snippetVersion: args.qaSnippetVersion ?? null,
+        sourceText: args.qaSourceText ?? null,
+        sourceLabel: args.qaSourceLabel ?? null,
+      };
+      const qaGiven =
+        qa.questionRequestId != null ||
+        qa.snippetVersion != null ||
+        qa.sourceText != null ||
+        qa.sourceLabel != null;
+      const qaComplete =
+        qa.questionRequestId != null &&
+        qa.snippetVersion != null &&
+        qa.sourceText != null &&
+        qa.sourceLabel != null;
       const hash = payloadHash({
         k: "card",
         core: args.core,
         snippetId: args.snippetId ?? null,
         annotation: args.annotation || null,
         tags: [...new Set((args.tags ?? []).map((t) => t.trim()).filter(Boolean))],
+        qa,
       });
       const claim = await arbitrateCreate(db, args.requestId, "card", hash);
       const early = claimToResult(claim);
@@ -2026,6 +2471,35 @@ export const Actions = {
         sourceLabel = snip.chapterLabel
           ? `${snip.bookTitle} · ${snip.chapterLabel}`
           : snip.bookTitle;
+        if (qaGiven) {
+          // A Q&A binding must be COMPLETE and must still describe
+          // the stored snippet EXACTLY: same version, same 原文，
+          // same 出处 label (rebuilt from the stored row the same
+          // way askSnippetQuestion builds it). If the source moved
+          // since the discussion — edited, re-versioned — the save
+          // is a typed conflict and NOTHING is written under this
+          // key: the panel keeps the draft, shows the old pinned
+          // citation next to the current snippet, and only the
+          // owner's explicit choice re-binds the save to the
+          // current version. The binding is never silently
+          // re-pointed at a newer source.
+          const chapter = snip.chapterLabel ?? "章节不详";
+          const currentQaLabel = snip.versionLabel
+            ? `《${snip.bookTitle}》 · ${snip.versionLabel} · ${chapter}`
+            : `《${snip.bookTitle}》 · ${chapter}`;
+          if (
+            !qaComplete ||
+            qa.snippetVersion !== snip.version ||
+            qa.sourceText !== snip.text ||
+            qa.sourceLabel !== currentQaLabel
+          ) {
+            return { ok: false, forbidden: false, status: "conflict", id: null, resultId: null };
+          }
+        }
+      } else if (qaGiven) {
+        // A discussion binding without the snippet it discusses is
+        // meaningless — refuse rather than store a dangling claim.
+        return { ok: false, forbidden: false, status: "conflict", id: null, resultId: null };
       }
       // Card row + tag rows + ledger entry commit as ONE batch: any
       // failure leaves no card, no tags and no ledger row behind.
@@ -2037,6 +2511,12 @@ export const Actions = {
             core: args.core,
             snippetId,
             sourceLabel,
+            // The verified discussion binding, pinned on the card
+            // forever (nulls for cards not made from a Q&A turn).
+            qaQuestionRequestId: qaGiven ? qa.questionRequestId : null,
+            qaSnippetVersion: qaGiven ? qa.snippetVersion : null,
+            qaSourceText: qaGiven ? qa.sourceText : null,
+            qaSourceLabel: qaGiven ? qa.sourceLabel : null,
             annotation: args.annotation || null,
             origin: "ui",
             requestId: args.requestId,

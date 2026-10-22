@@ -31,6 +31,10 @@ function CardItem({
   const [annotation, setAnnotation] = useState(card.annotation ?? "");
   const [tagDraft, setTagDraft] = useState<string | null>(null);
   const [showReuse, setShowReuse] = useState(false);
+  // The pinned Q&A citation this card was distilled from (stored
+  // on the card row itself): shown on demand, never re-read from
+  // the live snippet, so it survives later snippet updates.
+  const [showQaRef, setShowQaRef] = useState(false);
   const [rDate, setRDate] = useState(library.today);
   const [rScene, setRScene] = useState("");
   const [rOutcome, setROutcome] = useState("");
@@ -148,6 +152,29 @@ function CardItem({
         <blockquote className="font-serif-book mt-3 border-l-2 border-[var(--border)] pl-3 text-[15px] leading-relaxed text-[var(--dim)]">
           「{snippet.text}」
         </blockquote>
+      )}
+      {card.qaSourceText != null && (
+        <div className="mt-3">
+          <button
+            type="button"
+            aria-expanded={showQaRef}
+            onClick={() => setShowQaRef((v) => !v)}
+            className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+          >
+            {showQaRef ? "收起当次讨论引用" : "查看当次讨论引用"}
+          </button>
+          {showQaRef && (
+            <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3">
+              <p className="text-xs font-semibold">
+                当次讨论引用 · 落卡时固定，不随片段更新
+              </p>
+              <p className="mt-0.5 text-xs text-[var(--dim)]">{card.qaSourceLabel}</p>
+              <blockquote className="font-serif-book mt-2 text-[15px] leading-relaxed">
+                「{card.qaSourceText}」
+              </blockquote>
+            </div>
+          )}
+        </div>
       )}
       {card.annotation && !editing && (
         <p className="mt-3 border-l-2 border-[var(--ok)] pl-3 text-[15px] leading-relaxed">

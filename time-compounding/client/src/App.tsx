@@ -168,6 +168,8 @@ const ERROR_TEXT: Record<string, string> = {
   forbidden: "只有所有者可以修改记录。",
   conflict:
     "这笔提交与先前已保存的内容不一致，已保留你的草稿、没有重复记录。请核对后重新提交。",
+  stale_conflict:
+    "这条记录在你打开修改之后又被保存了新版本，你的草稿没有覆盖它。下方列出了当前存行：核对后再次点「保存记录」，就会按你的草稿保存；也可以先把草稿改成存行内容。",
   deleted: "这条记录已被删除，无法再修改。你的草稿已保留，可以关掉后重新记一笔。",
   future_interval: "未来的时间还不能记为已发生。草稿已保留，把结束时间改到现在以前再提交。",
   invalid_range: "时间范围不对：结束时间要晚于开始时间，单条记录最长 31 天。草稿已保留。",
@@ -179,6 +181,10 @@ const ERROR_TEXT: Record<string, string> = {
 interface Draft {
   requestId: string;
   entryId: number | null; // null = new record
+  // Content version of the entry as read when this edit was opened (or as
+  // last confirmed after a stale_conflict). The server applies the edit
+  // only while the stored row still carries this base version.
+  baseVersion: string | null;
   category: string;
   startLocal: string;
   endLocal: string;
@@ -191,6 +197,7 @@ function freshDraft(nowMs: number): Draft {
   return {
     requestId: newRequestId(),
     entryId: null,
+    baseVersion: null,
     category: "工作",
     startLocal: toLocalInput(start),
     endLocal: toLocalInput(end),
@@ -212,6 +219,7 @@ function draftForWeek(
   return {
     requestId: newRequestId(),
     entryId: null,
+    baseVersion: null,
     category: "工作",
     startLocal: toLocalInput(start),
     endLocal: toLocalInput(start + 3_600_000),
@@ -380,6 +388,10 @@ export function App() {
   const queryClient = useQueryClient();
   const [detailWeekMs, setDetailWeekMs] = useState<number | undefined>(undefined);
   const [draft, setDraft] = useState<Draft | null>(null);
+  // The stored row as the server last reported it in a stale_conflict:
+  // shown next to the preserved draft so the user can compare before
+  // explicitly confirming a save over it.
+  const [conflictEntry, setConflictEntry] = useState<Entry | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
@@ -444,16 +456,29 @@ export function App() {
         : await updateMutation.mutateAsync({
             requestId: draft.requestId,
             entryId: draft.entryId,
+            baseVersion: draft.baseVersion ?? undefined,
             ...payload,
           });
     if (res.ok) {
       setDraft(null);
+      setConflictEntry(null);
       setNotice(draft.entryId == null ? "已记下这一笔。" : "修改已保存。");
     } else {
       // Draft (and its text) stays exactly as typed; only a conflict swaps in
       // a fresh requestId so the corrected resubmission can go through.
       setFormError(ERROR_TEXT[res.error ?? ""] ?? "保存失败，草稿已保留，请再试一次。");
-      if (res.error === "conflict") {
+      if (res.error === "stale_conflict" && res.entry) {
+        // The stored row moved under this draft. Keep the draft untouched,
+        // show the current stored row for comparison, and adopt its version
+        // as the draft's new base: saving again is then the user's explicit
+        // confirmation, never an automatic overwrite.
+        setConflictEntry(res.entry);
+        setDraft({
+          ...draft,
+          requestId: newRequestId(),
+          baseVersion: res.entry.version,
+        });
+      } else if (res.error === "conflict") {
         setDraft({ ...draft, requestId: newRequestId() });
       }
     }
@@ -467,7 +492,10 @@ export function App() {
     setConfirmDeleteId(null);
     if (res.ok) {
       setNotice("已删除这一笔。");
-      if (draft?.entryId === entry.id) setDraft(null);
+      if (draft?.entryId === entry.id) {
+        setDraft(null);
+        setConflictEntry(null);
+      }
     } else {
       setNotice(ERROR_TEXT[res.error ?? ""] ?? "删除失败，请再试一次。");
     }
@@ -489,6 +517,7 @@ export function App() {
     setFormError(null);
     setNotice(null);
     setConfirmDeleteId(null);
+    setConflictEntry(null);
     setDraft(
       draftForWeek(s, s.weekStartMs === data.currentWeekStartMs, Date.now()),
     );
@@ -862,6 +891,40 @@ export function App() {
                   {formError}
                 </p>
               ) : null}
+              {conflictEntry && draft.entryId != null ? (
+                <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface-alt)] p-3 text-sm">
+                  <p className="font-medium">当前存行（已保存的版本）</p>
+                  <p className="mt-1 tabular-nums">
+                    <span aria-hidden="true">
+                      {CATEGORY_META[conflictEntry.category]?.symbol}{" "}
+                    </span>
+                    {conflictEntry.category} · {fmtDateTime(conflictEntry.startMs)}{" "}
+                    – {fmtDateTime(conflictEntry.endMs)}
+                    {conflictEntry.note ? ` · ${conflictEntry.note}` : ""}
+                  </p>
+                  <p className="mt-1.5 leading-relaxed text-[var(--dim)]">
+                    你的草稿还在上面的表单里，没有被改动。核对后点「保存记录」按草稿覆盖存行；或先把草稿改成存行内容再保存。
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDraft({
+                        ...draft,
+                        category: conflictEntry.category,
+                        startLocal: toLocalInput(conflictEntry.startMs),
+                        endLocal: toLocalInput(conflictEntry.endMs),
+                        note: conflictEntry.note,
+                        baseVersion: conflictEntry.version,
+                      });
+                      setConflictEntry(null);
+                      setFormError(null);
+                    }}
+                    className="mt-2 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1"
+                  >
+                    把草稿改成存行内容
+                  </button>
+                </div>
+              ) : null}
               <div className="mt-4 flex gap-2">
                 <button
                   type="submit"
@@ -875,6 +938,7 @@ export function App() {
                   onClick={() => {
                     setDraft(null);
                     setFormError(null);
+                    setConflictEntry(null);
                   }}
                   className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm"
                 >
@@ -945,9 +1009,11 @@ export function App() {
                           setFormError(null);
                           setNotice(null);
                           setConfirmDeleteId(null);
+                          setConflictEntry(null);
                           setDraft({
                             requestId: newRequestId(),
                             entryId: e.id,
+                            baseVersion: e.version,
                             category: e.category,
                             startLocal: toLocalInput(e.startMs),
                             endLocal: toLocalInput(e.endMs),

@@ -244,6 +244,25 @@ check('source: character screen renders the pending strip (original name + fixed
   && (clientSrc.match(/OPEN_PENDING_REDEMPTION_EVENT/g) ?? []).length >= 3
   && clientSrc.includes('window.dispatchEvent(new Event(OPEN_PENDING_REDEMPTION_EVENT))')
   && clientSrc.includes('window.addEventListener(OPEN_PENDING_REDEMPTION_EVENT, openPending)'));
+check('source: settleGame carries the optional pin guard and verifies the chain head on every attempt read (first read and CAS retries alike)',
+  serverSrc.includes('todayLA: string, pinGuard?: { revision: number; gold: number; goldLedgerSum: number | null }')
+  && serverSrc.includes('let chainHead: { revision: number; gold: number; goldLedgerSum: number | null } | null = pinGuard ?? null;')
+  && serverSrc.includes('if (chainHead !== null && (row.revision !== chainHead.revision || row.profile.gold !== chainHead.gold || row.profile.goldLedgerSum !== chainHead.goldLedgerSum))')
+  && serverSrc.includes('throw settlementPinMovedError();')
+  && serverSrc.includes('if (chainHead !== null) chainHead = { revision: row.revision + 1, gold: profile.gold, goldLedgerSum: profile.goldLedgerSum };'));
+check('source: only the redeem settle is pin-bound — unguarded read settles (getRewards / getGameState) keep the absorbing CAS retry',
+  serverSrc.includes('settled = await settleGame(ctx, health, strength, todayLA, pin);')
+  && serverSrc.includes('await settleGame(ctx, health, strength, laTodayString());')
+  && (serverSrc.match(/await settleGame\(ctx, health, strength, todayLA\)/g) ?? []).length >= 1);
+check('source: a pin-moved settle abort is arbitrated against the durable receipt, then answered stale — never busy-swallowed, never charged',
+  extractHandlerFunction(serverSrc, 'handleRedeemReward').includes('if (isSettlementPinMovedError(error))')
+  && serverSrc.includes('error.name = "SettlementPinMovedError"'));
+check('source: client storePendingRedemption dispatches the same-page changed event and the pending strip subscribes to it alongside cross-tab storage',
+  clientSrc.includes('const PENDING_REDEMPTION_CHANGED_EVENT = "space4:pending-redemption-changed";')
+  && clientSrc.includes('globalThis.dispatchEvent(new Event(PENDING_REDEMPTION_CHANGED_EVENT))')
+  && clientSrc.includes('window.addEventListener(PENDING_REDEMPTION_CHANGED_EVENT, sync)')
+  && clientSrc.includes('window.removeEventListener(PENDING_REDEMPTION_CHANGED_EVENT, sync)')
+  && clientSrc.includes('window.addEventListener("storage", sync)'));
 check('source: receipt 选择下一项 scrolls to the reward list and focuses the goal pick, keeping the saved goal',
   clientSrc.includes('const chooseNextGoal = () => {')
   && clientSrc.includes('onClick={chooseNextGoal}')
@@ -287,7 +306,7 @@ async function buildHarness() {
     'GAME_QUEST_TARGET_STEPS', 'GAME_QUEST_REWARD_XP', 'GAME_STRENGTH_SESSION_XP',
     'GAME_ATTR_XP_PCT_PER_POINT', 'GAME_ATTR_DOMAIN_CAP_PCT',
     'GAME_ATTRIBUTES', 'GAME_ATTRIBUTE_DOMAIN', 'GAME_EQUIPMENT', 'GAME_EQUIPMENT_BY_ID',
-    'GAME_DAILY_TASKS', 'PROFILE_CAS_ATTEMPTS',
+    'GAME_DAILY_TASKS', 'PROFILE_CAS_ATTEMPTS', 'SETTLE_PIN_MOVED_MESSAGE',
   ];
   const fnNames = [
     'isOwner', 'laTodayString', 'shiftDate', 'clamp', 'round', 'totalSleepHours', 'timeInBedHours',
@@ -298,6 +317,7 @@ async function buildHarness() {
     'stepsXpFor', 'sleepXpFor', 'sleepStartOrderKey', 'selectMainSleep',
     'compareSourceVersions', 'sourceVersionSqlBefore', 'planLedgerAction', 'buildGamePlan',
     'bookLedgerRow', 'settleLedgerRow', 'evaluateDailyTasks', 'settleGame',
+    'settlementPinMovedError', 'isSettlementPinMovedError', 'updateGameProfile', 'applyPurchase',
     'rewardItemFromRow', 'rewardReceiptFromRow', 'loadRedemptionByRequestId', 'loadRewardGoalId', 'sameRedemptionContent',
     'unverifiedReceiptResult', 'redemptionBusyResult', 'resolveCommittedReceipt',
     'handleGetRewards', 'handleGetRewardsSnapshot', 'handleSaveReward', 'handleRedeemReward', 'handleGetRedemptionReceipt', 'handleSetRewardGoal',
@@ -307,7 +327,7 @@ async function buildHarness() {
     ...fnNames.map((n) => extractHandlerFunction(serverSrc, n)),
   ].join('\n');
   const fns = new Function('schema', 'eq', 'and', 'sql', 'desc', 'asc', 'lte', 'z',
-    `${stripTypeScriptTypes(code)}\nreturn { handleGetRewards, handleGetRewardsSnapshot, handleSaveReward, handleRedeemReward, handleGetRedemptionReceipt, handleSetRewardGoal, settleGame, loadHealthSnapshot, loadGameStateRow };`)
+    `${stripTypeScriptTypes(code)}\nreturn { handleGetRewards, handleGetRewardsSnapshot, handleSaveReward, handleRedeemReward, handleGetRedemptionReceipt, handleSetRewardGoal, settleGame, loadHealthSnapshot, loadGameStateRow, updateGameProfile, applyPurchase, GAME_EQUIPMENT_BY_ID };`)
     (schema, eq, and, sql, desc, asc, lte, z);
   const migrationFiles = readdirSync(new URL('./drizzle/', import.meta.url)).filter((f) => f.endsWith('.sql')).sort();
   async function dbFromFiles(files) {
@@ -965,15 +985,18 @@ if (H) {
       && state2.gold === 120 && state2.redeemGoldSum === -60);
   });
 
-  await scenario('P0-1: an external write landing BEFORE the settle CAS loses the CAS, the settle retries on top of it, and the base stays the settle own commit', async () => {
+  await scenario('P0-1: an external write landing BEFORE the settle CAS aborts the pin-bound settle — the old confirmation is stale, never absorbed by the CAS retry', async () => {
     const { client, db, owner, reward, pinnedVersion } = await settleWindowSetup();
     // Gate BEFORE the settle's profile UPDATE executes: the
     // external write (gold −20, revision +1) lands first, the
     // settle's CAS (pinned to its pre-write read revision) misses,
-    // the settle re-reads and reconciles on top of the winner —
-    // its committed result, and only that, becomes the commit base.
-    // The write lands exactly once: later CAS attempts proceed
-    // against the state the first attempt reconciled onto.
+    // and the retry re-read shows a state that is NOT the chain
+    // head — the pin-bound settle must abort rather than reconcile
+    // on top of the winner and let the old confirmation charge
+    // over a balance version the owner never confirmed. (This is
+    // the original contract assertion; the earlier shape of this
+    // case asserted the absorption as success, which is exactly
+    // the pre-settlement-baseline defect.)
     let fired = false;
     const windowDb = wrapDb(db, {
       update: (table) => {
@@ -988,9 +1011,135 @@ if (H) {
     });
     const res = await H.handleRedeemReward(ctxFor(windowDb, OWNER), { requestId: 'req-p01-before-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: pinnedVersion });
     const state = await rawState(db);
-    check('P0-1 before-CAS: the redemption still commits exactly once on the settle own reconciled result (150 − 20 + 50 − 60 = 120) — not staled by the contention, not charged over the unconfirmed version',
-      res.status === 'redeemed' && res.receipt?.balanceAfter === 120 && res.receipt?.verification === 'verified'
-      && state.gold === 120 && state.goldLedgerSum === 40 && state.redemptionCount === 1 && state.redeemGoldSum === -60, `status=${res.status} gold=${state.gold}`);
+    check('P0-1 before-CAS: the old confirmation is rejected as stale with ZERO redemption writes — the external write stands exactly as it landed (gold 130, watermark still unreconciled at 50, no receipt, no flow)',
+      res.status === 'stale' && res.receipt === null
+      && state.gold === 130 && state.revision === pinnedVersion + 1 && state.goldLedgerSum === 50
+      && state.redemptionCount === 0 && state.redeemRowCount === 0 && state.redeemGoldSum === 0, `status=${res.status} gold=${state.gold}`);
+    const list2 = await H.handleGetRewards(owner);
+    const fresh = await H.handleRedeemReward(owner, { requestId: 'req-p01-before-2', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list2.balanceVersion });
+    const state2 = await rawState(db);
+    check('P0-1 before-CAS: a plain read still settles the unguarded way (130 + 50 = 180) and a fresh preview redeems exactly from it (180 − 60 = 120, verified)',
+      list2.balance === 180 && fresh.status === 'redeemed' && fresh.receipt?.balanceAfter === 120 && fresh.receipt?.verification === 'verified'
+      && state2.gold === 120 && state2.redeemGoldSum === -60);
+  });
+
+  // ------------- pre-settlement baseline: the PM reproduction (real purchase)
+  // Synthetic archive exactly as independently reproduced: profile
+  // gold 1000 / watermark 0 / revision 1; the ledger holds a +50
+  // steps row; a reward priced 60 is saved and the confirmation
+  // version is taken from a real getRewards (balance 1050 at its
+  // revision); the ledger row is then raised to 100 so the redeem
+  // needs its own settlement. A REAL equipment purchase
+  // (iron_sword, 300 — the production applyPurchase through the
+  // production CAS mutation loop) lands inside the settle, and the
+  // old confirmation must NOT charge over the moved balance.
+  async function pmReproSetup() {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 1000);
+    await client.execute({
+      sql: 'INSERT INTO game_settlements (local_date, category, detail, xp, gold, rule_version, source_date, source_updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)',
+      args: [TODAY, 'steps', '', 50, 50, 2, TODAY, Date.now()],
+    });
+    const reward = await H.handleSaveReward(owner, { id: null, name: 'PM复现奖励', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    await client.execute({
+      sql: 'UPDATE game_settlements SET gold = 100, xp = 100 WHERE local_date = ? AND category = ?',
+      args: [TODAY, 'steps'],
+    });
+    const buyIronSword = async () => {
+      const def = H.GAME_EQUIPMENT_BY_ID.get('iron_sword');
+      const bought = await H.updateGameProfile(owner, (profile) => H.applyPurchase(profile, def));
+      if (!bought.ok) throw new Error(`iron_sword purchase failed: ${bought.message}`);
+    };
+    return { client, db, owner, reward, pinnedVersion: list.balanceVersion, pinnedBalance: list.balance, buyIronSword };
+  }
+
+  await scenario('pre-settle baseline: a real iron_sword purchase landing before the settle first CAS save aborts the redemption as stale', async () => {
+    const { db, owner, reward, pinnedVersion, pinnedBalance, buyIronSword } = await pmReproSetup();
+    check('PM repro setup: the confirmation pinned the settled balance 1050 (1000 + 50) and the redeem will need its own settle (ledger now 100)',
+      pinnedBalance === 1050, `balance=${pinnedBalance} V=${pinnedVersion}`);
+    // The purchase lands in front of the settle's first profile
+    // UPDATE: the settle's CAS misses, and its retry re-read shows
+    // the purchase's state (gold 750, revision +1, sword owned) —
+    // a state the pin-bound chain cannot prove is its own.
+    let fired = false;
+    const windowDb = wrapDb(db, {
+      update: (table) => {
+        const builder = db.update(table);
+        if (table !== H.schema.gameState) return builder;
+        return gateBefore(builder, async () => {
+          if (fired) return;
+          fired = true;
+          await buyIronSword();
+        });
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(windowDb, OWNER), { requestId: 'req-pm-repro-cas1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: pinnedVersion });
+    const state = await rawState(db);
+    const profileRow = await H.loadGameStateRow(owner);
+    check('PM repro before-CAS: the old confirmation returns stale with ZERO redemption writes — the purchase stands exactly (gold 750, sword owned), the settle did NOT reconcile or endorse it (watermark still 50)',
+      res.status === 'stale' && res.receipt === null
+      && state.gold === 750 && state.revision === pinnedVersion + 1 && state.goldLedgerSum === 50
+      && profileRow.profile.owned.includes('iron_sword')
+      && state.redemptionCount === 0 && state.redeemRowCount === 0 && state.redeemGoldSum === 0, `status=${res.status} gold=${state.gold}`);
+    const list2 = await H.handleGetRewards(owner);
+    const fresh = await H.handleRedeemReward(owner, { requestId: 'req-pm-repro-cas2', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list2.balanceVersion });
+    const state2 = await rawState(db);
+    check('PM repro before-CAS: a fresh preview settles the unguarded way (750 + 50 = 800) and redeems normally from it (800 − 60 = 740, verified, exactly one receipt)',
+      list2.balance === 800 && fresh.status === 'redeemed' && fresh.receipt?.balanceAfter === 740 && fresh.receipt?.verification === 'verified'
+      && state2.gold === 740 && state2.redemptionCount === 1 && state2.redeemGoldSum === -60);
+  });
+
+  await scenario('pre-settle baseline: a real iron_sword purchase landing before the settle first read aborts the redemption as stale', async () => {
+    const { db, owner, reward, pinnedVersion, buyIronSword } = await pmReproSetup();
+    // Count the handler's game_state reads: (1) the step-(2) stored
+    // read and (2) the pin revalidation read both pass BEFORE the
+    // settle; the settle's own first read is (3). Gate exactly
+    // that read: the purchase lands after every pre-settle check
+    // has passed but before the settle reads the profile — the
+    // chain-head verification on the settle's first read is what
+    // must catch it.
+    let gameStateReads = 0;
+    let fired = false;
+    const windowDb = wrapDb(db, {
+      select: (...a) => {
+        const builder = db.select(...a);
+        return new Proxy(builder, {
+          get(t, p) {
+            if (p === 'from') {
+              return (table) => {
+                const q = t.from(table);
+                if (table === H.schema.gameState) {
+                  gameStateReads++;
+                  if (gameStateReads === 3 && !fired) {
+                    return gateBefore(q, async () => {
+                      fired = true;
+                      await buyIronSword();
+                    });
+                  }
+                }
+                return q;
+              };
+            }
+            const v = t[p];
+            return typeof v === 'function' ? v.bind(t) : v;
+          },
+        });
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(windowDb, OWNER), { requestId: 'req-pm-repro-read1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: pinnedVersion });
+    const state = await rawState(db);
+    const profileRow = await H.loadGameStateRow(owner);
+    check('PM repro before-first-read: the settle first read off the chain head aborts as stale with ZERO redemption writes — the purchase stands exactly (gold 750, sword owned, watermark still 50)',
+      fired === true && res.status === 'stale' && res.receipt === null
+      && state.gold === 750 && state.revision === pinnedVersion + 1 && state.goldLedgerSum === 50
+      && profileRow.profile.owned.includes('iron_sword')
+      && state.redemptionCount === 0 && state.redeemRowCount === 0 && state.redeemGoldSum === 0, `status=${res.status} gold=${state.gold} reads=${gameStateReads}`);
+    const list2 = await H.handleGetRewards(owner);
+    const fresh = await H.handleRedeemReward(owner, { requestId: 'req-pm-repro-read2', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list2.balanceVersion });
+    check('PM repro before-first-read: a fresh preview against the real balance (800) redeems normally (740, verified)',
+      list2.balance === 800 && fresh.status === 'redeemed' && fresh.receipt?.balanceAfter === 740 && fresh.receipt?.verification === 'verified');
   });
 
   // ----------------------- P0-2(a): rejection vs same-key success arbitration
