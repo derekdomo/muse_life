@@ -50,6 +50,89 @@ check(
   serverSrc.includes("entityAlive(db, row.resultTable, row.resultId)"),
 );
 
+/* client receipt wiring (CMP-READ-001 continuation) */
+const snippetsSrc = readFileSync(new URL("./client/src/Snippets.tsx", import.meta.url), "utf8");
+const cardsSrc = readFileSync(new URL("./client/src/Cards.tsx", import.meta.url), "utf8");
+const appSrc = readFileSync(new URL("./client/src/App.tsx", import.meta.url), "utf8");
+{
+  const pStart = snippetsSrc.indexOf("function SnippetQaPanel");
+  const pEnd = snippetsSrc.indexOf("function SnippetCard", pStart);
+  const panel = pStart > -1 ? snippetsSrc.slice(pStart, pEnd > -1 ? pEnd : undefined) : "";
+  check("client: panel exists for receipt checks", panel.length > 0);
+  check(
+    "client: receipt keeps the server's actual cardId (receipt state from res.id)",
+    panel.includes("setReceipt({ cardId: res.id, replayed: res.status === \"replayed\" })"),
+  );
+  check(
+    "client: receipt distinguishes 已保存 / 原键已保存",
+    panel.includes("✓ 已保存为知识卡") && panel.includes("✓ 原键已保存"),
+  );
+  check(
+    "client: receipt shows the STORED row's core + 出处 (read back, not the model's text)",
+    panel.includes("receiptCard.core") && panel.includes("receiptCard.sourceLabel"),
+  );
+  check(
+    "client: receipt buttons jump by id — 查看这张卡 (onViewCard with the cardId) + 回到原片段",
+    panel.includes("onViewCard(receipt.cardId)") && panel.includes("查看这张卡") && panel.includes("回到原片段"),
+  );
+  check(
+    "client: failed read-back says 已保存，详情暂未读出 with a read-only retry",
+    panel.includes("✓ 已保存，详情暂未读出") && panel.includes("重新读取详情"),
+  );
+  const rbStart = panel.indexOf("const readback = async");
+  const rb = rbStart > -1 ? panel.slice(rbStart, rbStart + 600) : "";
+  check(
+    "client: read-back retry is read-only (refetch only — never createCard under a new key)",
+    rb.includes("refetchQueries") && !rb.includes("createCard"),
+  );
+  check(
+    "client: deleted receipt card is stated plainly and never rebuilt from the answer",
+    panel.includes("这张卡已不存在（可能已被删除），不会从答复里重建它"),
+  );
+  check(
+    "client: conflict keeps the inputs and surfaces the authoritative stored card",
+    panel.includes("你的输入保留在下面，没有被覆盖") && panel.includes("已存的权威结果") && panel.includes("onViewCard(conflictCard.id)"),
+  );
+  check(
+    "client: conflict locates the authoritative card ONLY by the ledger resultId from the response (res.resultId)",
+    panel.includes("const authoritativeId = res.resultId") && panel.includes("setConflictCardId(authoritativeId)"),
+  );
+  check(
+    "client: conflict never guesses by snippet or list position (no snippetId filter / last-card pick)",
+    !panel.includes("filter((c) => c.snippetId") && !panel.includes("mine[mine.length - 1]") && !panel.includes("authoritative = mine"),
+  );
+  check(
+    "client: missing/unreadable resultId says 已保存，但暂时无法定位这张卡 with a read-only retry (no guessing)",
+    panel.includes("已保存，但暂时无法定位这张卡") && panel.includes("重新读取定位") && panel.includes("不会拿同一片段的其他卡来代替"),
+  );
+  const crStart = panel.indexOf("const conflictReadback = async");
+  const cr = crStart > -1 ? panel.slice(crStart, crStart + 700) : "";
+  check(
+    "client: conflict read-back retry is read-only and looks up ONLY the exact conflictCardId",
+    cr.includes("refetchQueries") && cr.includes("c.id === conflictCardId") && !cr.includes("createCard"),
+  );
+  check(
+    "server: conflict response carries the ledger resultId (createResult.resultId + claimToResult conflict branch)",
+    serverSrc.includes("resultId: z.number().nullable()") && serverSrc.includes('status: "conflict", id: null, resultId: claim.resultId'),
+  );
+  check(
+    "client: asks carry questionRequestId + the pinned snippet version",
+    panel.includes("questionRequestId: questionKeyRef.current") && panel.includes("snippetVersion: snippet.version"),
+  );
+  check(
+    "client: App routes 查看这张卡 to the cards tab with that id focused",
+    appSrc.includes("setFocusCardId(id)") && appSrc.includes('focusId={focusCardId}') && appSrc.includes("onViewCard={goCard}"),
+  );
+  check(
+    "client: cards tab locates by id (element id + highlight) and names a deleted target",
+    cardsSrc.includes("id={`card-${card.id}`}") && cardsSrc.includes("要定位的那张卡已不存在（可能已被删除）"),
+  );
+  check(
+    "client: reuse success locates the real event by reuseId (incl. lost-response replay)",
+    cardsSrc.includes("setLastReuseId(res.id)") && cardsSrc.includes("id={`reuse-${r.id}`}") && cardsSrc.includes("刚登记的这一笔"),
+  );
+}
+
 /* ---------------- behavior: real handlers, in-memory db ---------------- */
 
 const { Actions } = await import("./server/src/actions.ts");
@@ -833,6 +916,73 @@ await triad(
   check(
     "ask binding: omitting the version still works (old-client compatible)",
     noVersion.ok === true && noVersion.status === "answered",
+  );
+}
+
+/* ----- conflict resultId: same snippet, many cards — precise location ----- */
+{
+  const first = await call("createCard", owner, {
+    requestId: "at-conflict-first",
+    core: "原键那张卡",
+    snippetId,
+  });
+  const second = await call("createCard", owner, {
+    requestId: "at-conflict-second",
+    core: "同片段第二张卡",
+    snippetId,
+  });
+  const third = await call("createCard", owner, {
+    requestId: "at-conflict-third",
+    core: "同片段最后一张卡",
+    snippetId,
+  });
+  check(
+    "conflict-location: setup saves three distinct cards on the SAME snippet",
+    first.ok === true && second.ok === true && third.ok === true &&
+      new Set([first.id, second.id, third.id]).size === 3,
+    `${first.id}/${second.id}/${third.id}`,
+  );
+  const conflict = await call("createCard", owner, {
+    requestId: "at-conflict-first",
+    core: "异载荷的核心",
+    snippetId,
+  });
+  check(
+    "conflict-location: same key + different payload returns the ledger resultId of the ORIGINAL card (not the last card on the snippet)",
+    conflict.ok === false && conflict.status === "conflict" &&
+      conflict.resultId === first.id && conflict.resultId !== second.id && conflict.resultId !== third.id,
+    `resultId=${conflict.resultId} first=${first.id} last=${third.id}`,
+  );
+  check(
+    "conflict-location: conflict keeps id null — resultId is the separate precise locator",
+    conflict.id === null,
+  );
+  const libConflict = await call("getLibrary", owner, {});
+  const located = libConflict.cards.find((c) => c.id === conflict.resultId);
+  check(
+    "conflict-location: locating by resultId yields exactly the original card's stored content",
+    located?.core === "原键那张卡",
+    located?.core ?? "not found",
+  );
+  // Ledger row with no recorded result: conflict must report
+  // resultId null so the client can say it cannot locate the card
+  // instead of guessing one from the snippet.
+  await db.insert(schema.requestKeys).values({
+    requestId: "at-conflict-noresult",
+    kind: "card",
+    payloadHash: "deadbeef",
+    resultTable: "knowledge_cards",
+    resultId: null,
+  });
+  const noResult = await call("createCard", owner, {
+    requestId: "at-conflict-noresult",
+    core: "任意核心",
+    snippetId,
+  });
+  check(
+    "conflict-location: ledger row without a resultId returns conflict with resultId null (client must not guess)",
+    noResult.ok === false && noResult.status === "conflict" && noResult.resultId === null,
+    `resultId=${noResult.resultId}`,
   );
 }
 

@@ -118,6 +118,25 @@ check(
   panel.includes("建议核心") && panel.includes('value={core}'),
 );
 check(
+  "client: conflict locates the authoritative card ONLY by the ledger resultId (res.resultId), never by snippet guess",
+  panel.includes("const authoritativeId = res.resultId") &&
+    panel.includes("setConflictCardId(authoritativeId)") &&
+    !panel.includes("filter((c) => c.snippetId") &&
+    !panel.includes("mine[mine.length - 1]"),
+);
+check(
+  "client: missing/unreadable resultId says 已保存，但暂时无法定位这张卡 with a read-only retry",
+  panel.includes("已保存，但暂时无法定位这张卡") && panel.includes("重新读取定位"),
+);
+{
+  const crStart = panel.indexOf("const conflictReadback = async");
+  const cr = crStart > -1 ? panel.slice(crStart, crStart + 700) : "";
+  check(
+    "client: conflict read-back retry is read-only and looks up ONLY the exact conflictCardId",
+    cr.includes("refetchQueries") && cr.includes("c.id === conflictCardId") && !cr.includes("createCard"),
+  );
+}
+check(
   "client: status meaning also rides on symbols/text, Okabe-Ito tokens present",
   panel.includes("▲") && panel.includes("✓") &&
     themeSrc.includes("--accent: #0072b2") && themeSrc.includes("--accent2: #d55e00"),
@@ -185,6 +204,16 @@ async function call(name, ctx, args) {
   const res = await action.handler(ctx, parsedArgs);
   action.response.parse(res);
   return res;
+}
+
+async function db2InsertNoResultKey() {
+  await db.insert(schema.requestKeys).values({
+    requestId: "qa-conflict-noresult",
+    kind: "card",
+    payloadHash: "deadbeef",
+    resultTable: "knowledge_cards",
+    resultId: null,
+  });
 }
 
 async function rowCounts() {
@@ -393,12 +422,52 @@ check("owner: createSnippetDraft ok", draft.ok === true && typeof draft.id === "
     "conflict: same key + different payload is a typed conflict, nothing written",
     conflict.ok === false && conflict.status === "conflict" && conflict.id === null,
   );
+  check(
+    "conflict: response carries the ledger resultId of the original card",
+    conflict.resultId === card1.id,
+    `resultId=${conflict.resultId} card=${card1.id}`,
+  );
   const countsAfterConflict = await rowCounts();
   check(
     "conflict: card + ledger counts unchanged",
     countsAfterConflict.cards === beforeConflict.cards && countsAfterConflict.keys === beforeConflict.keys,
   );
 
+  // Same snippet, more cards saved AFTER the original key: a later
+  // conflict on the original key must still point at the original
+  // card, never at the snippet's last card.
+  const extra1 = await call("createCard", ownerCtx, {
+    requestId: "qa-card-extra-1",
+    core: "同片段后存的卡一",
+    snippetId: snippet2Id,
+  });
+  const extra2 = await call("createCard", ownerCtx, {
+    requestId: "qa-card-extra-2",
+    core: "同片段后存的卡二",
+    snippetId: snippet2Id,
+  });
+  check(
+    "conflict-location: setup saves two more cards on the same snippet",
+    extra1.ok === true && extra2.ok === true && extra1.id !== card1.id && extra2.id !== card1.id,
+  );
+  const conflictAgain = await call("createCard", ownerCtx, { ...cardArgs, core: "又改过的核心" });
+  check(
+    "conflict-location: multi-card snippet — conflict resultId still locates the ORIGINAL key's card precisely",
+    conflictAgain.ok === false && conflictAgain.status === "conflict" &&
+      conflictAgain.resultId === card1.id && conflictAgain.resultId !== extra2.id,
+    `resultId=${conflictAgain.resultId} original=${card1.id} last=${extra2.id}`,
+  );
+  await db2InsertNoResultKey();
+  const noResult = await call("createCard", ownerCtx, {
+    requestId: "qa-conflict-noresult",
+    core: "任意核心",
+    snippetId: snippet2Id,
+  });
+  check(
+    "conflict-location: ledger row without a resultId returns resultId null (client must not guess, says it cannot locate)",
+    noResult.ok === false && noResult.status === "conflict" && noResult.resultId === null,
+    `resultId=${noResult.resultId}`,
+  );
   const delCard = await call("deleteCard", ownerCtx, { id: card1.id });
   check("owner: deleteCard ok", delCard.ok === true);
   const retryDeleted = await call("createCard", ownerCtx, cardArgs);
