@@ -2104,6 +2104,16 @@ const PENDING_REDEMPTION_KEY = "space4.pending-redemption.v1";
 // be minted by this path).
 const OPEN_PENDING_REDEMPTION_EVENT = "space4:open-pending-redemption";
 
+// Same-page counterpart of the cross-tab "storage" event: the
+// storage event fires only in OTHER tabs, so a write or clear from
+// THIS page would otherwise leave same-page subscribers (the
+// character screen's pending strip) showing a stale slot until the
+// next mount. storePendingRedemption dispatches this event after
+// every write/clear attempt, and subscribers re-read the slot
+// itself — the event carries no draft, so it can never mint or
+// alter an intent, only prompt a re-read.
+const PENDING_REDEMPTION_CHANGED_EVENT = "space4:pending-redemption-changed";
+
 function loadPendingRedemption(): RedeemDraft | null {
   try {
     const raw = globalThis.localStorage?.getItem(PENDING_REDEMPTION_KEY);
@@ -2125,6 +2135,10 @@ function storePendingRedemption(draft: RedeemDraft | null) {
     if (draft) globalThis.localStorage?.setItem(PENDING_REDEMPTION_KEY, JSON.stringify(draft));
     else globalThis.localStorage?.removeItem(PENDING_REDEMPTION_KEY);
   } catch { /* storage unavailable — ignore */ }
+  // Notify THIS page's subscribers (the storage event covers other
+  // tabs only). Dispatched even when storage is unavailable, so
+  // subscribers re-sync to whatever the slot actually holds.
+  try { globalThis.dispatchEvent(new Event(PENDING_REDEMPTION_CHANGED_EVENT)); } catch { /* no event target — ignore */ }
 }
 
 function scrollToRewardsPanel() {
@@ -2191,7 +2205,16 @@ function NextRewardGoal() {
     // Cross-tab: another tab storing or clearing the slot repaints
     // this strip (the storage event fires in every OTHER tab).
     window.addEventListener("storage", sync);
-    return () => window.removeEventListener("storage", sync);
+    // Same page: this page's own store/clear (a submit in the
+    // rewards panel below, a terminal classification clearing the
+    // slot) dispatches the changed event from storePendingRedemption,
+    // so the strip appears and disappears in step with the slot
+    // without waiting for a remount.
+    window.addEventListener(PENDING_REDEMPTION_CHANGED_EVENT, sync);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener(PENDING_REDEMPTION_CHANGED_EVENT, sync);
+    };
   }, []);
   const continuePending = () => {
     scrollToRewardsPanel();

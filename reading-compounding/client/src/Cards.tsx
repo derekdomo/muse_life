@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import {
@@ -16,7 +16,15 @@ function parseTagInput(raw: string): string[] {
   return [...new Set(raw.split(/[,，、]/).map((t) => t.trim()).filter(Boolean))];
 }
 
-function CardItem({ card, library }: { card: Card; library: Library }) {
+function CardItem({
+  card,
+  library,
+  highlighted,
+}: {
+  card: Card;
+  library: Library;
+  highlighted: boolean;
+}) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [core, setCore] = useState(card.core);
@@ -28,6 +36,10 @@ function CardItem({ card, library }: { card: Card; library: Library }) {
   const [rOutcome, setROutcome] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // The reuse event this panel most recently registered (or replayed
+  // after a lost response): located and highlighted in the list
+  // below by its real server id, never re-registered.
+  const [lastReuseId, setLastReuseId] = useState<number | null>(null);
   const reuseKeyRef = useRef<string>(newRequestId());
 
   const invalidate = () => {
@@ -83,7 +95,10 @@ function CardItem({ card, library }: { card: Card; library: Library }) {
         setShowReuse(false);
         setRScene("");
         setROutcome("");
-        setMsg(res.status === "replayed" ? "这次复用已经登记过了，没有重复计数。" : "✓ 复用已登记");
+        // Locate the actual stored event (on a replay this is the
+        // ORIGINAL event the lost response belonged to).
+        if (res.id != null) setLastReuseId(res.id);
+        setMsg(res.status === "replayed" ? "这次复用已经登记过了，没有重复计数 — 已在下方定位到那一笔。" : "✓ 复用已登记 — 已在下方定位到那一笔。");
         invalidate();
       } else {
         setMsg(statusMessage(res.status) ?? "登记失败，输入还在。");
@@ -91,6 +106,19 @@ function CardItem({ card, library }: { card: Card; library: Library }) {
     },
     onError: () => setMsg("登记失败，输入还在。"),
   });
+
+  // Scroll the just-registered event into view once the refreshed
+  // library actually contains it (once per event, not per render).
+  const reuseScrolledRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (lastReuseId == null || reuseScrolledRef.current === lastReuseId) return;
+    if (!reuses.some((r) => r.id === lastReuseId)) return;
+    reuseScrolledRef.current = lastReuseId;
+    const t = window.setTimeout(() => {
+      document.getElementById(`reuse-${lastReuseId}`)?.scrollIntoView({ block: "center" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [lastReuseId, reuses]);
 
   const del = useMutation({
     mutationFn: () => api.deleteCard({ id: card.id }),
@@ -100,7 +128,12 @@ function CardItem({ card, library }: { card: Card; library: Library }) {
   });
 
   return (
-    <article className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+    <article
+      id={`card-${card.id}`}
+      className={`rounded-xl border bg-[var(--surface)] p-4 ${
+        highlighted ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/40" : "border-[var(--border)]"
+      }`}
+    >
       <p className="font-serif-book text-[19px] font-semibold leading-snug">{card.core}</p>
       <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--dim)]">
         {card.sourceLabel && <span>出处：{card.sourceLabel}</span>}
@@ -271,10 +304,15 @@ function CardItem({ card, library }: { card: Card; library: Library }) {
       {reuses.length > 0 && (
         <ul className="mt-3 space-y-1.5 border-t border-[var(--border)] pt-3">
           {[...reuses].reverse().map((r) => (
-            <li key={r.id} className="text-sm">
+            <li
+              key={r.id}
+              id={`reuse-${r.id}`}
+              className={`text-sm ${r.id === lastReuseId ? "rounded bg-[var(--accent)]/10 px-1.5 py-0.5 font-medium" : ""}`}
+            >
               <span className="text-[var(--accent2)]">↻</span>{" "}
               <span className="tabular-nums text-[var(--dim)]">{r.date}</span> {r.scene}
               <span className="text-[var(--dim)]"> → {r.outcome}</span>
+              {r.id === lastReuseId ? <span className="text-[var(--accent)]"> · 刚登记的这一笔</span> : null}
             </li>
           ))}
         </ul>
