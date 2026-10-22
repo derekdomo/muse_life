@@ -78,14 +78,35 @@ export function Reader({
   const [fontSize, setFontSize] = useState(18);
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
   const [snippetMsg, setSnippetMsg] = useState<string | null>(null);
+  const [versionStale, setVersionStale] = useState(false);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const snippetKeyRef = useRef<string>(newRequestId());
   const restoredFor = useRef<number>(-1);
+  // The live version this reader session is actually reading. All
+  // writes (position, snippets) carry it; the server refuses them
+  // once the book's live version moves, so an old reader can never
+  // stamp its selections with a new edition's provenance or
+  // overwrite the new version's position.
+  const pinnedVersionRef = useRef<string | null | undefined>(undefined);
 
   const chapter = useQuery({
     queryKey: ["chapter", book.id, chapterIdx],
     queryFn: () => api.getChapter({ bookId: book.id, idx: chapterIdx }),
   });
+
+  // Pin the version on first load; if a later fetch shows a
+  // different live version, surface the switch banner (the text on
+  // screen is still the pinned version's — react-query keeps the
+  // per-chapter cache separate — so nothing is silently relabeled).
+  useEffect(() => {
+    const lv = chapter.data?.liveVersion;
+    if (lv === undefined) return;
+    if (pinnedVersionRef.current === undefined) {
+      pinnedVersionRef.current = lv;
+    } else if (lv !== pinnedVersionRef.current) {
+      setVersionStale(true);
+    }
+  }, [chapter.data?.liveVersion]);
 
   const safeHtml = useMemo(
     () => (chapter.data?.found ? sanitizeChapterHtml(chapter.data.html) : ""),
@@ -94,7 +115,14 @@ export function Reader({
 
   const savePosition = useMutation({
     mutationFn: (args: { chapterIdx: number; charOffset: number }) =>
-      api.savePosition({ bookId: book.id, ...args }),
+      api.savePosition({
+        bookId: book.id,
+        ...args,
+        liveVersion: pinnedVersionRef.current ?? null,
+      }),
+    onSuccess: (res) => {
+      if (!res.ok && res.status === "conflict") setVersionStale(true);
+    },
   });
 
   // Restore the saved position once per chapter load.
@@ -174,8 +202,17 @@ export function Reader({
         chapterIdx,
         chapterLabel: chapter.data?.title ?? null,
         charOffset: sel.charOffset,
+        liveVersion: pinnedVersionRef.current ?? null,
       }),
     onSuccess: (res) => {
+      if (!res.ok && res.status === "conflict") {
+        // The live version moved under this reader: the selection
+        // stays on screen (never silently re-stamped), and the
+        // banner offers the explicit switch to the new version.
+        setVersionStale(true);
+        setSnippetMsg("书籍已有新版本，这段选文属于旧版本，未保存。你可以先复制留底，再切换新版。");
+        return;
+      }
       if (res.ok) {
         setSnippetMsg(res.status === "replayed" ? "这句已经存过了。" : "✓ 已存为片段");
         setSelection(null);
@@ -213,6 +250,14 @@ export function Reader({
             className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
           >
             目录
+          </button>
+          <button
+            type="button"
+            onClick={() => void chapter.refetch()}
+            aria-label="检查新版本"
+            className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+          >
+            检查新版本
           </button>
           <div className="ml-auto flex items-center gap-1" role="group" aria-label="字号">
             <button
@@ -263,6 +308,30 @@ export function Reader({
       </div>
 
       <main className="mx-auto max-w-2xl px-5 pb-40 pt-6">
+        {versionStale && (
+          <div role="alert" className="mb-4 rounded-xl border border-[var(--accent)] px-4 py-3">
+            <p className="text-sm font-medium">书籍已有新版本</p>
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              你正在读的是旧版本正文；已经保存的片段和批注仍按旧版本出处保留，不会被改成新版本。
+              旧版本的选文和阅读位置不会写入新版本。
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                pinnedVersionRef.current = undefined;
+                setVersionStale(false);
+                setSelection(null);
+                setChapterIdx(0);
+                restoredFor.current = -1;
+                void queryClient.invalidateQueries({ queryKey: ["chapter", book.id] });
+                void queryClient.invalidateQueries({ queryKey: ["library"] });
+              }}
+              className="mt-2 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white"
+            >
+              切换新版，从头阅读
+            </button>
+          </div>
+        )}
         <p className="text-xs text-[var(--dim)]">
           《{book.title}》
           {book.versionLabel ? ` · ${book.versionLabel}` : ""}

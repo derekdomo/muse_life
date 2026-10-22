@@ -43,6 +43,13 @@
       "when": 1792693939970,
       "tag": "0006_import_pending_label_and_file_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792693939971,
+      "tag": "0007_import_freeze_and_live_gen",
+      "breakpoints": true
     }
   ]
 }
