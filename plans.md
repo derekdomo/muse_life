@@ -453,10 +453,10 @@
 
 以下是本轮真实审查游标；交付主状态、PM 事后结论和补证队列分别记录。历史“待验／唯一下一项／发布门槛”均不产生门控效力，以本文批量结案表和当前单一队列为准。
 
-- 上次已审查源 commit：`d662e1e0362739665d02b3020422936b9f1587a3`（前源6e5ff40；5f9febf为PM-only；20b36a0/bd3feb6/d662e1e三笔全SHA见本轮）
-- 上次运行：2026-10-22 03:57 PDT；初始清洁main5f9febf，起始origin/main d662e1e，安全fetch/ff；只改plans。
-- 上次结论：新增用户可见交付申报2组（TIME周回顾、READ内置提问），PM独立线上/owner新增确认0；中位等待缺queuedAt/actualStartedAt不可算。源码回灌及陪伴来源回执闭项；奖励结算后窗口/同键回执仲裁/清槽修复已验证，结算前CAS竞争仍实证有问题。READ/TIME主体与请求账本非原子、同键重试/并发重复保存两P0入队。
-- 当前应推动：Muse立即同类修CWEB-REDEEM-SAFE-001结算前基准余项、CMP-READ-SAVE-001/CMP-TIME-SAVE-001原子保存；已交TIME回顾/READ提问不重做，既有用户需求与知识卡可定位回执继续。F0.7原P0/10-18逾期仅丙(ii)只读；九图/LEVEL/H4.6 T、看房暂停/L0.1例外保持。
+- 上次已审查源 commit：`d1690668f347d491a3346536e9f2204562bdb656`（前源d662e1e；024f89b为PM-only；b2ecb7b/4c2ec52/d169066三笔全SHA见本轮）
+- 上次运行：2026-10-22 06:51 PDT；初始清洁main024f89b，起始origin/main d169066，安全fetch/ff；只改plans。
+- 上次结论：新增用户可见交付申报3组；PM独立线上/owner新增确认0，中位等待缺actualStartedAt不可算。兑换原P0窗口、READ创建/删除原子性及回执、S3同页提示已验证关闭；TIME失败旧稿重试覆盖新稿余项、READ既有书导入旧请求清章节新P0实证入队。
+- 当前应推动：Muse10-22立即同类修CMP-TIME-SAVE-001失败旧稿恢复余项与CMP-READ-IMPORT-001导入代际/原键保护；已关兑换/重复卡/半包不重做。沿CMP-READ-001原10-24推进当次讨论固定出处；健康/训练既有用户需求独立继续。F0.7原P0/10-18仅丙(ii)只读；LEVEL/九图/H4.6 T、看房暂停/L0.1例外保持。
 
 
 ### 自动审查记录
@@ -467,9 +467,55 @@
 
 ## 当前执行排序
 
-本轮明确可执行项：P0 `CWEB-REDEEM-SAFE-001`结算前原基准余项（Muse立即，原10-21不重置）、`CMP-READ-SAVE-001`与`CMP-TIME-SAVE-001`主体/请求账本原子性（Muse，本轮入队，10-22当日同类打包）；F0.7仍原P0/10-18、受683968a丙(ii)只读约束，无新触发/重置授权。随后用户READ/TIME/健康训练既有需求（READ完整首片10-23、内置提问及可定位落卡10-24、TIME10-23）、PM需求/普通bug，最后EVID缺失首片套件/平台原A证据与P2形式尾巴。来源回执、兑换结算后写入拦截/拒绝前同键仲裁/按身份清槽、S3首屏恢复与定位接线已验证对应范围，不重派已交功能、不重开旧半回执/SUM暂停点/settle失败/普通重开/真正只读/journal/INIT/SAVE/DATE/LEARN。新实证按本轮bug修；缺证据继续归EVID，不伪造成P0，不以PM/owner截图作实现上线前置。
+本轮明确可执行项：P0 `CMP-TIME-SAVE-001`失败旧稿重试不得覆盖新稿余项（Muse10-22立即，原入队不重置）与新P0 `CMP-READ-IMPORT-001`既有书导入原键/代际保护（Muse10-22立即）；原兑换P0、READ创建/软删原子性、S3通知已验证对应范围，不重派。F0.7仍原P0/10-18、683968a丙(ii)仅只读，无新触发/重置授权。随后用户READ/TIME/健康训练既有需求，CMP-READ-001当次讨论出处闭环保持原10-24；READ/TIME10-23、C完整闭环10-26 18:00不重置。证据尾巴EVID补当前健康122项脚本镜像、READ问答落卡字段事实补正、旧四套脚本及原平台A证据；没有证据不自动变成P0，不挡实现/自检上线，不要求例行owner截图。
 
 统一按 P0（数据安全／权限／管道缺陷、线上与存档级 bug）＞用户直提需求＞PM 需求与普通 bug＞证据与文档尾巴排序。W-UI 保存闭环、W-TIMER 已有缺口、健康首屏与全部运动等独立需求按真实队列连续处理，不等 PM 复验；L1/H0 刷新与来源、W0/W1 记录可靠性、H1 公式、H3/W3 周复盘等保留既有编号和业务边界，以真实技术依赖决定实现次序，不能将旧待验框当依赖。H4/W5/F3 已批准候选仍入 backlog，看房暂缓候选保持所有者决定；新方向提案与队列并行，实施先等所有者拍板。
+
+## 2026-10-22 06:51 PDT PM 增量复验与产品推进
+
+指标/新问题登记截点 **2026-10-22T13:51:12Z**。初始清洁main `024f89bd2f38fe3cc0133965edc0062e8858e9c5`，首次fetch起始origin/main **`d1690668f347d491a3346536e9f2204562bdb656`**，安全ff。前源d662e1e后024f89b为PM-only；全部新增逐笔：**`b2ecb7ba922c98646954debc3541f003b5b1254e`**（三app修复/回灌/只读观测）、**`4c2ec52ede36d42b77d5f05c6e0c64bdeee4611d`**（READ/TIME计数与迁移勘误）、d169066（READ冲突回执修复）。共13文件；先读CHARTER/root/三app AGENTS、游标/队列/原方向期限/上线事实、changes和全部增量文件，再独立沿输入→owner→并发/失败→实际ORM持久化→返回→页面消费审查。只改plans；没有builder/invoke_action，不运行本地build、不访问.space-build/app.db、不触发同步/账户操作、不向其他聊天发送消息。
+
+### 用户可见增量与两项指标
+
+- **本轮新增交付申报3组**：健康兑换绑定＋同页恢复提示、READ原子保存＋可定位卡/复用回执、TIME原子保存。均来自Muse builder build/audit/submit交付登记，READ冲突回执续修归同组、不重复计数；PM文档/勘误/镜像不计产品增量。PM独立线上观察0、所有者本轮新增打开确认0；PM本身新增业务实现0，不能把复验关闭数算产品进度。
+- **队列中位等待时长不可计算**：口径仍为入队→实际开工，明确未开工者另按截点算；本批未收到actualStartedAt，不能拿commit/构建完成时间替开工。新增完整“已开工”样本n=0、明确未开工且有入队时间样本n=0，分开不混算。TIME原queuedAt保留2026-10-22T10:57:37Z，REDEEM原2026-10-21T19:41:40Z；新READ导入bug登记于本截点，不声称其尚未开工。
+
+### 全部交付与积压逐项事后标注
+
+| ID / 交付SHA / A-B | PM独立结论与范围 | 主状态与后续 |
+| --- | --- | --- |
+| CWEB-REDEEM-SAFE-001 / b2ecb7b / P0 A | **原结算前基准余项已验证、源码关闭**。当前完整Actions＋真实Drizzle/libsql：实际buyEquipment分别落在settle首读前、首CAS前、保存后，旧确认均stale/零新回执；每窗新预览正常redeemed/verified，同键重试返回原回执。pinGuard首读/每次CAS重读及拒绝前持久仲裁在位 | 已交付，Muse申报space-4已上线；不再派原窗口修复。旧SUM/失败settle/结算后/逐笔proof/原子扣账/只读/journal关闭保持。122项镜像缺口归EVID，不因缺脚本重开源码 |
+| CWEB-S3-PENDING-001 / b2ecb7b / P2 B | **已验证并关闭**。提取真实load/store＋NextRewardGoal effect，EventTarget/合成storage五控制通过：同页存/清、跨页存/清、storage不可用；compare-by-requestId等未变接线复用已过结论 | 已交付；此为通知/状态接线实测，非React或浏览器像素实测。B审计pass为Muse材料；数据无变，对账不适用，不补owner截图门控 |
+| CMP-READ-SAVE-001 / b2ecb7b＋d169066 / P0 A | **原四反例及创建/软删原子写集已验证、该源码问题关闭**。原生save-atomicity123/123；独立实际createCard账本失败整批回滚、delete墓碑失败全旧、恢复后原键replayed/deleted、冲突resultId均符合契约。七类创建/标签/来源/账本/legacy/ACL沿123项分项证据，不把下面新导入问题混成已关重复卡重开 | 已交付，Muse申报space-15已上线；existingBookId导入绕账本为本轮真实新缺陷CMP-READ-IMPORT-001，原平台升级/EPUB完整证据仍归EVID |
+| CMP-TIME-SAVE-001 / b2ecb7b / P0 A | **原add重复/主体账本半包已验证并关闭；旧编辑失败后重试覆盖新稿仍有问题**。114/114是真实handler/迁移内存库，S5仅测已提交旧键重放；本轮独立“失败无账本→新稿提交→旧键重试”实证丢较新内容，见下单 | 已交付；只续修原“旧重试不得回滚新稿”余项，Muse10-22立即，不重做已关add/atomic batch/墓碑/DST公式 |
+| CMP-READ-001问答/回执 / b2ecb7b＋d169066 / 用户P1 A出处+B导航 | **已交回执/冲突定位源码与合成分项已验证**。qa64/64；真实resultId仲裁、按ID查卡与复用事件、只读重查、不猜同片段最后一张在位。ask带snippetVersion且服务端拒旧版本；questionRequestId虽发送但服务端不消费、不返回，QaTurn仅问题/答复/建议，无当次引用绑定；createCard也无这两字段 | 已交付子范围，原10-24继续当次讨论出处闭环。changes声称“落卡写入question_request_id＋snippet_version且首片已有列”与当前schema/actions不符，列EVID真实补正；不虚构这些列已经落盘、不据此另造P0 |
+| EVID-LIFE-001 / 4c2ec52等 / A必要证据及B形式尾巴 | **READ123/qa64、TIME114勘误已核实；TIME无新迁移已核实**。健康validate-rewards未随本批回灌（该文件本轮hash未变），原脚本111过1失败，见验证段；READ首片四套160/65/87/89仍无落盘脚本 | 证据尾巴，Muse下一同步轮补当前已发布122项脚本及正确出处事实；旧平台ACL/保存/EPUB/升级保数据/保数据回滚原要求保持，不能用源码替实测，也不以缺证据挡其他实现 |
+| F0.7 / b2ecb7b只读登记 / 原P0 A | **仍有问题：最新收到的05:13只读观测仍awaiting_callback，距启动约41¾小时，无本代回调/终态**；本PM无平台只读接口，不把旧观测延长成13:51实时状态 | Muse原10-18逾期，断点仍平台任务执行/回调段；683968a丙(ii)仅只读保持，不run/reset/clear、不再次请求同一授权。合法保存→读回→页面及私有银行对账仍未证明 |
+
+### Bug单：一个新导入P0及一个原TIME保存P0余项
+
+1. **`CMP-READ-IMPORT-001` / P0 A / d169066（起于b2ecb7b所触及链）/ reading server actions:1125–1154、客户端Books:360–395及uploadImportFile/saveImportChapters/finishImport。责任Muse，queuedAt=2026-10-22T13:51:12Z，10-22立即同类修。** 明确synthetic、真实handler＋真实迁移内存库复现：addBook(requestId=SYNTHETIC-book,title=SYNTHETIC book,source=owner)→beginImport(requestId=SYNTHETIC-import,existingBookId=该ID)→saveImportChapters(一章synthetic HTML)→finishImport(ok=true)；此时一章可读。随后**原键原参数**重放beginImport：返回ok/saved，章节从1变0、book.importStatus从ready退processing，SYNTHETIC-import账本行仍0。不是推测，也不是生产已发生损坏声明。**实际/预期与影响**：existingBookId分支在指纹/账本仲裁之前无条件删章节并改状态；原请求的晚到/重试能抹掉已可用正文，违反原键恢复及“失败不破坏好副本”。期望同一导入操作重试只读回其结果；旧代请求不清除/替换新代正文、文件、阅读位置或完成状态。**修法建议**：把导入操作ID/版本绑定贯穿begin、文件、章节与finish，既有book分支也须持久幂等仲裁；新代内容先在隔离暂存中完整验证再原子切换，保留既有可读副本，不能仅把DELETE＋status放同一batch当解决重试。**首次一次列齐判据**：新书/既有书重试、原键同/异文件载荷、同键同/异载荷并发；begin/upload/chunk/finish各写点失败/丢响应及恢复；旧begin/章节/成功或失败finish晚到不影响新代，重复chapter idx不产生歧义；读取只见完整旧版或完整新版；失败保正文/原blob/阅读位置/摘录出处，已删除不复活；guest/anon零DB/blob调用；旧书/旧账本迁移保数据及旧客户端兼容/不安全旧写明拒绝。以实际handler＋ORM/合成blob核对各代章节、内容hash、文件指针、状态与请求账本，不要用类型检查冒充。无真实损坏证据，不清理用户数据，不为修bug删除已存书。
+2. **`CMP-TIME-SAVE-001` / 原P0 A余项 / b2ecb7b→d169066 / time server actions:593–685、resolveCommittedKey:276–302。责任Muse，原queuedAt=2026-10-22T10:57:37Z、10-22立即不重置。** 独立真实handler复现：addEntry原稿→为request_ledger建仅拦SYNTHETIC-old-edit的BEFORE INSERT RAISE(ABORT)触发器→updateEntry旧键/旧草稿失败，主体回滚且账本无该键（这部分修复正确）→移除测试触发器→另一键updateEntry成功保存“SYNTHETIC newer saved”→旧键原载荷重试。实际ok=true，当前条目被改回“SYNTHETIC old draft”。**预期/影响**：失败后原键恢复不得覆盖中间已保存的新稿；目前会丢失用户较新的时间事实，并改变周分类/覆盖统计。**修法**：原编辑意图带所读版本/内容基准，持久原子比较后再同时改主体及记账本；基准已移动返回typed conflict＋当前存行，保本地草稿，用户显式比较后才以新意图保存；只有已落账本旧键才无写重放。不要以请求到达较晚等同用户意图较新。**判据沿首次矩阵补真实缺陷调度**：在主体/ledger各写点失败后的旧键重试与新键编辑、旧在途update暂停再恢复、同键竞争与丢响应、delete交错/旧客户端，不得覆盖较新内容；无竞争失败可原键恢复；冲突零主体/成功账本写入，页面保稿/当前行/统计一致，已关原子性/墓碑/DST/owner控制不重开。114套件S4与S5分别测试通过未覆盖此组合，不能以114全绿关闭该余项。
+
+### 新需求单与具体产品推进：每次讨论保留自己的出处
+
+**独立新方向/同义新功能ID 0；实质推进`CMP-READ-001` / 用户P1 / A出处+B交互 / Muse / 原10-24，首片10-23不重置。** 当前回执能找到真实卡了，但QaTurn仍只保存文本，questionRequestId在服务端未使用，保存面板不能指认具体哪次提问的上下文。产品判断：下一片应完成“这句结论来自哪次讨论”的可解释性，避免继续加卡数或连续天数奖励；与健康训练共用“事实、解释、行动分开”的准则。财务仍旧快照不能支撑当日决策，看房暂停不变；不增加跨app自动记账。
+
+- **每轮固定引用**：将每次成功响应与发出时的questionRequestId、snippetId/version及该次sourceText/sourceLabel保存在本会话turn；在该轮解释旁提供“查看本次原文”，用响应快照，不能随library更新把旧答复嫁接给新出处。重试相同问题保原ID；修改问题成为新提问，晚响应不能覆盖另一提问或清除已编辑的新草稿。对已有成功答复不要求额外存完整聊天系统，也不声称已存在新数据库列。
+- **从当次结论落卡**：点击某轮“整理这轮为卡”只把建议放入可编辑草稿，明确“我的一句话结论/我的批注”；显示该轮固定原文出处，用户确认后才走现有保存键和实际cardId回执。保存时来源版本已变，保草稿并展示“原讨论来源已更新”，可查看旧引用与当前片段后明确选择，不默默改成当前版本；实现方选择兼容的最小绑定方案，实际schema变化仍属A，不能靠补文档伪称完成。已保存卡按实际存行展示，回读失败仍只读重查。
+- **复利的下一步是一次真实应用**：例如synthetic训练方法书的一轮讨论形成“下次先核对完成组再决定加重”的卡，入口先“查看这张卡/查看本次原文”；只有用户已经在一次实际训练决策中使用并确认日期/情境后，才用现有recordCardReuse登记一次。不因提问、落卡、看原文增加训练、TIME或金币，不改变训练计划，不因连续性要求多练。合成判据覆盖两轮不同问题、失败后改问题、响应倒序、library刷新、出处更新/删除、旧键恢复及实际卡/复用计数；B导航用审计＋脚本，A来源/保存按原标准，与P0按单一优先级连续推进，不等PM复验。
+
+### 验证、期限、发布事实与交接
+
+独立原生套件：READ save-atomicity **123/123**、reading-qa **64/64**，TIME atomicity **114/114**、time-review **65/65**；前三为实际生产Actions＋真实Drizzle/libsql内存库（qa推理为synthetic stub），65为独立算法/客户端源码检查。新增独立观察为三个实际购买竞争窗口（每窗旧确认拒绝/新预览/同键回执）、一组READ create/delete失败与resultId控制、两项上述反例；另五个提取生产函数/effect的pending通知控制，不是React/平台。均不读取真实业务数据，不把反例计验收通过。
+
+健康**仓库原脚本111过1失败**：validate-rewards:292抽取依赖列表未带新增SettlementPinMovedError两个函数/消息常量，:991仍断言before-CAS旧确认应该成功；该路径运行落busy。源码文件本轮hash未变，**不能声称当前仓库122/122**。临时仅在测试loader补抽取依赖并将该断言恢复原契约（stale、零新回执，保外部购买结果）后**112/112**，这是PM适配结果，不是原生/构建方122；实际完整Actions三窗口另行通过，故不把该脚本失败误报为兑换源码P0。Muse应回灌其已发布122项版本、核对来源hash/原命令结果。question_request_id/snippet_version列缺失同归EVID作事实补正，当前实际实现是ask请求可选参数与版本校验。
+
+为真实ORM复验，只在本仓自有work安装drizzle-orm0.45.2/zod4.4.3/@libsql/client0.18.0（ignore-scripts）；Node25 registerHooks定向测试依赖、SDK defineAction身份包装重导真实Zod、补schema扩展名，平台SDK派发/ctx/模型调用未复现。未改生产依赖/lockfile/源码；首次导入独立probe因合成addBook缺必填source被Zod拒绝，补source=owner后才取得上述有效反例，前者不计产品故障。完整迁移仅用:memory:，不是实际平台升级/生产保存证明；临时依赖/工具结束清除、原work保留。未变结算/肌群公式与相应源码沿已过150/50适用范围复用，不重复无关回归。
+
+三逐笔Handoff Gate分别10文件/2脚本/8实现、2/0/0、8/2/5，聚合13/3/10及diff --check通过。 PM新增文本UUID/个人路径/email/secret窄扫零命中，仅为限定扫描证明，不声称已排除所有个人数值。没有实际schema/migration增量，TIME额外0002迁移不存在的勘误已关闭；必要原A运行证据按EVID保留。PM只维护plans，20详情/20摘要；最老18:23完整原文、固定判据与摘要迁持久索引，不丢任何原SHA/期限/未完成项。提交前fetch动态枚举/保护并发，PM-only Gate、commit/push结果记memory。
+
+方向和上线事实不改：三个app的build/audit/submit为Muse登记，PM/owner新增确认0，严禁把它写成用户已见；真实P0进入同一队列立即修，普通自检Life上线不再索批。S3原10-22本次对应范围已交，READ/TIME原10-23及问答10-24、完整养成10-26 18:00保留；LEVEL四参数/路径仍待所有者，成本已收、原10-20 18:00逾期/生产过渡XP保持；H4.6 T与28日实验起日未知，W6.2九图整批确认/写入特许未收，不接入、不重问。健康fitness重点、看房暂停、L0.1已批例外保持。本批有实质修复进展，TIME余项/READ新问题不伪作“两轮同问题无进展”；无builder平台观测继续沿既有只读裁决，不触发/重置。其余既有用户需求继续，不挂PM验收链。
 
 ## 2026-10-22 03:57 PDT PM 增量复验与产品推进
 
@@ -1392,7 +1438,11 @@ LEVEL原10-20 18:00离线模型方案与来源/单位/缺失/严格浮动/冻结
 - W最终源码/素材回灌与动作覆盖/缺图manifest沿EVID；源头已审计的B形式不阻塞。C/F/CMP源码回灌尾巴已关闭，不能要求再次整包回灌；合法owner工件写→读回/部署对应只补尚缺部分。无新用户真实值入Git，测试全为明确synthetic；0010内存重建不是对生产做删除，PM未执行线上迁移/回滚。
 - 三笔逐commit Gate通过（1/0/0、34/2/30、1/0/0文件/脚本/实现），增量diff通过；仅plans为PM提交范围。20条详情/20摘要，最旧09:03固定ID/SHA/交互/原期限迁持久索引后归档，未完矩阵与后续源码关闭事实保留。提交前再次fetch动态枚举，PM-only Gate/commit/push记memory；未本地build/安装/编辑.space-build/访问app.db。
 
-## 2026-10-19 18:23 PDT PM 增量复验与产品推进
+## 存量交付索引与固定判据（非滚动流水）
+
+### 18:23固定要求原文迁存（2026-10-22 06:51 PDT归并，后续关闭/所有者决定优先）
+
+### 2026-10-19 18:23 PDT PM 增量复验与产品推进
 
 指标/新反馈登记截点 **2026-10-20T01:23:37Z**。初始干净main7dc52a3，首次fetch起始origin/main **85e8b2e0d798ac13d4bc85fa7891ef38cabef731**，安全ff；原源游标1b939f8后7dc52a3为PM-only，其后17笔依次如下（全部只有plans/changes变动，未把申报当新源码）：
 
@@ -1472,7 +1522,11 @@ LEVEL原10-20 18:00离线模型方案与来源/单位/缺失/严格浮动/冻结
 - 20条流水：移除最旧10-17 06:00详情/摘要，但其原入队/目标/SHA、W-ACTIVE/START/FINISH/CONSISTENCY矩阵、H-LOAD-D1事实边界与EVID未完判据已迁持久索引；后续已关闭源码结论优先。仅改plans，未改changes/实现/schema/素材/业务数据；未本地build/安装依赖/读app.db。提交前再次fetch动态枚举，PM-only Gate/commit/push与最终时间记automation memory。
 
 
-## 存量交付索引与固定判据（非滚动流水）
+
+原流水摘要完整保留：
+
+> - 2026-10-19 18:23 PDT · `85e8b2e`（17笔全SHA见正文）· **4组新增交付申报全部分账；S1收到所有者使用确认，睡眠跨页P1余项实证，纯养成/S3/LEVEL/四CMP方案已交。** 干净main安全ff，起始origin85e8b2e；全增量仅plans/changes，17逐笔及聚合Gate/diff过。新源码未回灌的C/F/W/CMP只登记必要EVID，不按旧代码驳回新修复；C修复勘误33项/无结算迁移为准、0010属S2。实际normalize纯函数10项合成控制含主睡眠顺序反例，不是SDK/DB/React/工件验证。旧PM日配额/地牢要求被所有者最新决定覆盖，CWEB-RULES按新S2/LEVEL合并不重问方向；LEVEL模型输入缺口/两可选路径与离线判据已给，未造医学年龄公式。W6/H4原10-20，S3建议10-22/CMP10-21至23首片、C10-26完整养成不变；真实财务同步/对账原P0逾期继续、L1/看房暂缓/L0.1例外保持。全队列中位等待缺实际时间戳不可算，新完整已开工/确认未开工样本各0；PM独立线上0、S1确认转录1不替代后续修复确认。仅plans，20详情/20摘要，最老固定矩阵迁持久索引；不build/安装/碰app.db，提交前fetch、PM-only Gate与push见memory。
+
 
 ### 15:25固定要求原文迁存（2026-10-22 03:57 PDT归并，后续关闭/所有者决定优先）
 
@@ -1961,7 +2015,7 @@ W4.3-D1 queuedAt=2026-10-18T01:07:00Z、Muse原10-19，父W4.3旧P1上限10-20/W
 - **实现方交付登记 2026-10-19 17 时 PDT（CWEB-SETTLE-001 P0＋CWEB-SLEEP-001 P1 核验补记）**：17 时轮次派发的 space-4 合并构建经核查确认已生效——(1) 完整性门：coverageIncomplete 或健康快照缺失时 steps/quest/sleep 只预览不入账（预览注明「数据尚未完整，暂为预览」），力量按自身快照结算；(2) 修订差量：同规则版本内来源 sourceUpdatedAt 变化时按候选重算该行 xp（步数 2000→12000 总额 12→22、力量 1→2 场 10→20 均实测），同引用重复打开零变化，旧 ruleVersion 行不重算，来源降低按修订下调、不删行；(3) 主睡眠：同醒来日多行按在床时长（start/end 计算）最长确定性选择、平局取开始较早者，[主睡眠,午睡] 与 [午睡,主睡眠] 两序均按 7h 主睡眠计 10 XP；(4) 加法迁移 0010 给 game_settlements 增 source_steps/source_sessions 可空审计列（旧行按 xp 回填推导并明示：历史原始步数不可复原、属审计推导非原始事实；升级后首次打开每个类别至多一日可能按当前来源修正一次，属预期）；(5) 角色页规则区已补「数据完整后才结算；来源修订会自动按差额修正账本」。验证：validate-game-settlement 36/36、构建审计 pass、既有套件全过（routine-archive 117/117、whoop-scores 75/75、source 28/28、units 25/25、week-load 24/24、week-comparison 25/25、steps-display 全 PASS、week-coverage 23/23、week-load-coverage 21/21、all-workouts 13/20＋hero-status PASSING 11/20 与 seven-day-facts 44/52＋unified-hk 28/34 的既有失败计数与 10-18 基线逐项一致、无新回归）。CWEB-SETTLE-001、CWEB-SLEEP-001 [完成]（实现方交付，PM 结论以其评审记录为准）。仓库源码回灌（actions/schema/client/迁移 0010/validate-game-settlement）顺延为 EVID 尾巴，下轮补齐。所有者视角角色页验收以所有者本人打开为准（其 15 时已验收 S1 首片，本次结算修正待其下次打开自然生效）。
 - **勘误 2026-10-19 17 时 PDT（对上一条 CWEB-SETTLE/SLEEP 交付登记的计数与迁移说法更正）**：构建方回传与第二次独立核查到齐后更正两处：(1) validate-game-settlement 实跑为 **33/33**（含 3 项变异敏感性检查），上一条登记的「36/36」有误；(2) 本次结算修复**无数据库迁移**——现有 game_settlements 列（xp/gold/rule_version/source_updated_at）已足够，上一条登记的「迁移 0010 新增 source_steps/source_sessions 审计列、旧行按 xp 回填推导」与实际实现不符、就此作废（0010 实为 S2 角色系统迁移；现行 GAME_RULE_VERSION=2，金币按 goldDelta 差量跟随）。其余交付结论（完整性门、修订差量、主睡眠确定性选择、旧 ruleVersion 行不重算）经构建方回传＋第二次核查源码级证实不变。另记观察项（不属本单范围、留 PM 界定）：看板 readiness 路径 normalizeSleepSnapshot 的同日主睡眠选择仍为排序后取末项、未复用 selectMainSleep，是否纳入 SLEEP 口径请 PM/所有者界定，本轮不擅自扩围。
 
-- 2026-10-19 18:23 PDT · `85e8b2e`（17笔全SHA见正文）· **4组新增交付申报全部分账；S1收到所有者使用确认，睡眠跨页P1余项实证，纯养成/S3/LEVEL/四CMP方案已交。** 干净main安全ff，起始origin85e8b2e；全增量仅plans/changes，17逐笔及聚合Gate/diff过。新源码未回灌的C/F/W/CMP只登记必要EVID，不按旧代码驳回新修复；C修复勘误33项/无结算迁移为准、0010属S2。实际normalize纯函数10项合成控制含主睡眠顺序反例，不是SDK/DB/React/工件验证。旧PM日配额/地牢要求被所有者最新决定覆盖，CWEB-RULES按新S2/LEVEL合并不重问方向；LEVEL模型输入缺口/两可选路径与离线判据已给，未造医学年龄公式。W6/H4原10-20，S3建议10-22/CMP10-21至23首片、C10-26完整养成不变；真实财务同步/对账原P0逾期继续、L1/看房暂缓/L0.1例外保持。全队列中位等待缺实际时间戳不可算，新完整已开工/确认未开工样本各0；PM独立线上0、S1确认转录1不替代后续修复确认。仅plans，20详情/20摘要，最老固定矩阵迁持久索引；不build/安装/碰app.db，提交前fetch、PM-only Gate与push见memory。
+
 
 - 2026-10-19 21:27 PDT · `29820bf`（e0590e1/267afe6/29820bf全SHA见正文）· **1组真人风交付申报；学习权限与S2旧档覆盖新增2P0，原结算失败/旧版本P0及F legacy/P1/学习曲线P1入队；应用行动卡方案已交。** 源码回灌尾巴逐项关闭；33项原生脚本和44项独立合成控制通过（含反例，非平台验收），三笔Gate/diff通过。S2源码已交、S3清单可并行；W肌群/H4.6与LEVEL/S3原10-20、CMP10-21至23/C10-26保持。PM新线上/owner确认0，中位等待缺实际时间戳不可算，F真实同步仍原10-18逾期、已批观测不重问不盲刷。仅plans、20详情/20摘要，最老09:03固定要求迁持久索引；无build/安装/app.db，提交推送见memory。
 - **实现方交付登记 2026-10-19 21 时 PDT（W6.2 回灌＋CWEB 四项 10-20 文档包＋W6.2/H4.6 双构建派工，muse-life-plans-sync 21:13 轮次）**：(1) `W6.2` 19:34 AI 返工源码回灌尾巴关闭——线上 space-6 逐文件回灌本仓（ExerciseDemo.tsx 新增、assets 56 张＝真人照片 16 对＋AI 双帧 12 对、App.tsx/DATA-PLAN.md/globals.d.ts/theme.css），回灌后与线上逐文件 diff 为零（仅构建产物/仓库独有脚本差异）；覆盖核对：EXERCISE_DEMOS 28 个 key 有示范（AI 12＋照片 16），提踵两 key 按规矩只留文字、无图。(2) `validate-rest-timer.mjs` 陈旧接线断言修复（B 尾巴）：currentExercise→currentKey 变量改名后断言未跟随，HEAD 与回灌版同为 47/48、非本轮回归；按线上实际代码修正后 48/48。(3) CWEB 10-20 文档包已交（`health-dashboard/CWEB-RULES-STATUS.md`）：RULES-001 实际公式表（基础奖励/属性 +2%/点封顶 +50%/装备叠加/金币 1:1 铸造/任务平额/修订差量＋合成边界核算，未批准参数单列提案区不混入线上）、S2 逐项状态（属性/分点/金币/装备/任务/加成已上线；境界/连修利率/复利曲线未实现）、S3 设计/接口（同账本 reward_redeem 类别、原子扣账、expected_balance_version 防旧确认，首片 10-22）、LEVEL 离线对账包（候选输入字段/单位/窗口/缺项处理与逻辑层 synthetic 矩阵；阈值/年份无校准证据如实标待定案，路径 A/B 取舍待所有者决定）。(4) W6.2 余项（指南弹窗目标肌群区）＋H4.6 首闭环已双派工：space-6 侧（弹窗肌群区＋训练结束肌群事实回执）与 space-4 侧（肌群视图：末次训练/近 7 天组数，T 未定不显示恢复百分比），构建回传送达后下轮核验登记并回灌。此登记仅表示实现方已交付/派工，PM 结论以其评审记录为准。
@@ -2071,3 +2125,5 @@ W4.3-D1 queuedAt=2026-10-18T01:07:00Z、Muse原10-19，父W4.3旧P1上限10-20/W
 - **勘误 2026-10-22 05 时 PDT（同轮，构建方完整回传延迟送达）**：05 时交付登记第 (2)(3) 项证据口径以完整回传补正——`CMP-READ-SAVE-001` 的 validate-save-atomicity 实为真实 drizzle/libsql 实跑 **113/113**（含 db.batch 语义探针与 PM 四复现），「25/25 结构层/运行时不可行」作废；`CMP-TIME-SAVE-001` 独立计数为 **114/114** 且无新迁移（账本主键同批仲裁），「143 合计」与「迁移文件 EVID 残项」作废。另新增未关闭 P1：`CMP-READ-001` 问答面板异载荷冲突回执靠猜（取同片段最后一张卡冒充权威结果）——已派 space-15 修复（服务端返回原键账本 resultId、客户端按 cardId 精确定位、拿不到明说无法定位），交付后另行登记。详见 changes.md 本日勘误条目。
 
 - **实现方交付登记 2026-10-22 05 时 PDT（05:13 轮次续：CMP-READ-001 冲突回执 P1）**：问答面板异载荷冲突回执靠猜已修复并上线 space-15——服务端冲突响应新增 createResult.resultId 返回原键账本 resultId，面板按 cardId 精确定位，缺失/回读不到明说「已保存，但暂时无法定位这张卡」并只读重试、不猜测；其余创建路径排查无同类猜测。验证：validate-save-atomicity **123/123**（113 无回归＋10 新）、validate-reading-qa **64/64**（57＋7），审计 pass，生产未动，源码已回灌。详见 changes.md 本日续条。此登记仅表示实现方已交付，PM 结论以其评审记录为准。
+
+- 2026-10-22 06:51 PDT · `d169066`（b2ecb7b/4c2ec52/d169066全SHA见正文）· **3组交付申报；兑换原基准/S3通知/READ原子创建与回执关闭，TIME失败旧稿重试及新READ导入P0实证入队。** 原生123/64/114/65通过，健康原111过1失败为旧测试抽取/断言，适配112过不冒称122；完整Actions三购买窗口/五通知控制及新反例分账，SDK/线上/owner新确认0。沿READ原10-24推进每次讨论固定出处，不新建方向；中位等待缺actualStartedAt不可算，两类完整样本各0。F只读/LEVEL/九图/T与原10-23/24/C10-26保持。三逐笔及聚合13/3/10 Gate通过，仅plans、20详情/20摘要，18:23完整固定材料迁存；提交push见memory。
