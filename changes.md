@@ -1052,3 +1052,7 @@
 
 - `CMP-TIME-001`（space-14「时间复利」）构建于 2026-10-21 21:26 PDT 正式完成并提交：构建审计 verdict=pass、fix_before_attesting 为空、无 console 错误、手机宽度零溢出。终审前 repeat-order P0（settleUpdatePlan 在仅版本更新/同载荷回收结算时产生未绑定表达式无效 SQL）已修复并通过终审（中途审计回传的 fail 为修复前状态，已被终审 pass 取代）。实测证据（构建方回传）：(1) LA 周算法以与线上相同实现单独探针验证——本周 168h、2026-10-26 DST 结束周 169h、春季跳时周 167h；(2) 非所有者通道 invoke 实证 getDashboard 返回 forbidden 且 weeks/priorities/累计全空、addEntry typed forbidden 且零写入（沙箱与持久库三表均 0 行），固定验证样例中「guest 零数据」已实证；(3) 并集覆盖/重叠标注/跨周拆分/未来拒绝/删除墓碑仲裁均在服务端实现并经构建类型检查，validate-time-compounding 构建方实跑 117/117。局限：所有者会话内的记/改/删/同键重试矩阵与曲线渲染未在审计通道行使（结构性无所有者身份，与 space-6 既有口径一致，以所有者本人首次打开为准）；已发布源码树（ts-spaces/space-14）仍为脚手架版本，源码回灌 `time-compounding/` 与 validate 脚本落盘列 EVID 尾巴下轮补，与 CMP-READ-001 同批处理。回滚：删除 space-14 artifact 即回滚。
 - 本轮最终用户可见增量修正为 2 组（读书复利首片＋时间复利首片）；21:13 主条目中「CMP-TIME-001 本轮不登记交付」以本补记为准。
+
+## 2026-10-21（21:13 轮次勘误，EVID-LIFE-001：CMP-READ-001 种子与探针事实补正）
+
+- space-15 正式完成回传（21:31 PDT）补正 21:13 主条目两处：(1) 《纳瓦尔宝典》种子机制为**种子迁移写入持久库**（首轮审计 P0「预置书未进持久存储」已修复并重建），正式完成时生产 durable **books=1**（想读/待导入、注明官方 EPUB 已暂存本地待导入、未声称导入全文），其余表 0 行；主条目「书籍 0、播种在所有者首读时发生尚未触发」的表述以本勘误为准。(2) 构建方以 artifact.invoke_action 实测无所有者身份调用 getDashboard 返回 typed forbidden 且零内容零写入，ACL 前置已实证；本同步轮次当时对新建 artifact 的 invoke 返回 build-not-found 属通道时序问题，非 app 缺陷。面板 bullet 中「未声称导入全文」等实质口径不变。
