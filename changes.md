@@ -1056,3 +1056,12 @@
 ## 2026-10-21（21:13 轮次勘误，EVID-LIFE-001：CMP-READ-001 种子与探针事实补正）
 
 - space-15 正式完成回传（21:31 PDT）补正 21:13 主条目两处：(1) 《纳瓦尔宝典》种子机制为**种子迁移写入持久库**（首轮审计 P0「预置书未进持久存储」已修复并重建），正式完成时生产 durable **books=1**（想读/待导入、注明官方 EPUB 已暂存本地待导入、未声称导入全文），其余表 0 行；主条目「书籍 0、播种在所有者首读时发生尚未触发」的表述以本勘误为准。(2) 构建方以 artifact.invoke_action 实测无所有者身份调用 getDashboard 返回 typed forbidden 且零内容零写入，ACL 前置已实证；本同步轮次当时对新建 artifact 的 invoke 返回 build-not-found 属通道时序问题，非 app 缺陷。面板 bullet 中「未声称导入全文」等实质口径不变。
+
+
+## 2026-10-21（muse-life-plans-sync 23:13 轮次：FAMILY-RECEIPT-001 交付、REDEEM P0 两组余项＋S3 构建完成待证据回传、F0.7 只读续查）
+
+- 队列来源：git pull 快进 e6cbeb3→6faac19（PM 21:48 增量复验）。本轮队列：`CWEB-REDEEM-SAFE-001` 原 P0 两组余项（立即）＋同 app `CWEB-MVP-001·S3` 恢复首屏/选下一项合并构建＞`FAMILY-RECEIPT-001`（P1，10-22）＞EVID READ/TIME 镜像＞READ 内置提问（10-24）/TIME 本周回顾。
+- `FAMILY-RECEIPT-001`（P1/A 来源＋B 回执，space-13 先改 artifact）：改了什么——共用仲裁 adjudicateSave 改为读回完整存行并返回 SaveOutcome{result, stored}（来源经 knownSource 归一、旧行 NULL 读 null）；saveActivityRecord 三条路径（快速通道/旧行回填/新存重读）统一透传存行；recordFamilyActivityFromChat 回执改由 stored 的 id/日期/类型/分钟/来源逐字段构造，删除原 args＋SOURCE_CHAT 常量拼凑；旧来源不反向回填、原记录/指纹/计数不变，API nullable 兼容不变，严格 owner 不变。涉及文件（family-compounding/）：server/src/actions.ts、validate-family-ledger.mjs（新增 RECEIPT-001 一节 17 项：2 源码接线＋15 行为）。验证证据：构建方实跑 validate-family-ledger **229 passed, 0 failed**（既有 212 零回归＋新增 17），覆盖 pre-source 有/无 ledger、NULL 来源 chat/manual 重复、新来源重试回执逐字段等于存行、跨入口冲突/已删/异稿、丢响应重试回放且计数仍 1、null 身份 forbidden 且零 DB 写；构建审计 verdict=pass；生产数据未动（app.db 构建前后 md5 一致，durable 行数 类型7/活动0/请求键0/meta1 不变）。局限：审计内容评审一条 P1 仅涉其捕获的验证证据不完整（非代码缺陷，构建方回传已附完整 229 证据）；源码回灌本轮未执行（回灌通道口径待与 EVID READ/TIME 镜像同批处理），不冒称已回灌。回滚：revert 本条构建；无 schema 变更、无数据迁移。
+- `CWEB-REDEEM-SAFE-001` 两组余项＋`S3`（P0/A＋P1，space-4 合并一次构建）：构建已完成（artifact 构建完成卡已生成），实现方线上只读核验通过——getRewardsSnapshot 返回 forbidden=false、ok=true、reconciled=true、balance=28、balanceVersion=35、rewards/receipts 均空、goalRewardId=null，与生产现状一致、未动真实账本。但构建方详细 handoff 与其后派发的 artifact.inspect 事实核查在本轮结束时均未回传，validate-rewards 扩充计数/审计 verdict/生产行数前后核对三项证据缺失——本轮**不登记交付、不勾选**，下轮首位以 handoff/inspect 回传为准补登记与回灌，责任 Muse、原期限不重置。
+- `F0.7`（P0，只读续查，遵丙(ii)）：23:13 PDT 经 space-3 `getrefreshobservations`——access=owner、currentAttempt=1、status=running、diagnosis=awaiting_callback，观测行仅 refresh_started＋spawn_attached（2026-10-20T18:27:22Z），updatedAt 冻结，距启动约 35¾ 小时无本代回调/终态行、新快照未核实，断点未变。未触发 run、未清冻/重置。
+- 本轮顺延：EVID READ/TIME 源码/脚本镜像（与 family 回灌同批，下轮处理）；`CMP-READ-001` 内置提问（10-24）与 `CMP-TIME-001` 本周回顾细化未及。仍（需用户确认）：`CWEB-LEVEL-001` 四参数/路径；`W6.2-PM-IMG` 整批过目未收，不接入；`H4.6` 恢复参考 T 未定。本轮用户可见增量：1 组（陪伴来源回执修复）。未提交 app.db/.env/任何真实数据。
