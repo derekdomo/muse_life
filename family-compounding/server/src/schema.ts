@@ -4,8 +4,9 @@
 // 口径 (CMP-FAMILY-001): 只让积累可见,不 KPI 化——没有分数、没有排名、
 // 没有连续天数/断签概念。日期是所有者本地日 "YYYY-MM-DD";时长可空
 // (NULL = 未知,永不按 0 处理);类型是所有者自选的短标签,不是任何
-// 第三方姓名。不读外部日历,不接任何外部账户——全部数据由所有者
-// 手动自记。空账本开始,不预置任何记录行。
+// 第三方姓名。不读外部日历,不接任何外部账户。记录由所有者手动记,
+// 或由 Muse 按所有者在聊天里明说的内容代记 (CMP-FAMILY-AUTOLOG-001,
+// 来源列区分)。空账本开始,不预置任何记录行。
 
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
@@ -78,6 +79,19 @@ export const familyRequestKeys = sqliteTable("family_request_keys", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+// Record provenance (CMP-FAMILY-AUTOLOG-001). Who wrote the entry
+// is decided SERVER-SIDE, never by the caller: rows saved through
+// the manual form carry '手动', rows saved through the chat
+// auto-record action carry '聊天记录'. Pre-existing rows (saved
+// before this column existed) keep NULL — displayed as
+// 「旧来源未记录」, never backfilled to a guessed value.
+export type ActivitySource = "手动" | "聊天记录";
+export const SOURCE_MANUAL: ActivitySource = "手动";
+export const SOURCE_CHAT: ActivitySource = "聊天记录";
+// The only source values a row may ever carry; anything else stored
+// (nothing writes it) reads back as unknown (NULL).
+export const KNOWN_SOURCES: readonly string[] = [SOURCE_MANUAL, SOURCE_CHAT];
+
 export const familyActivities = sqliteTable("family_activities", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   // Local calendar date of the activity, "YYYY-MM-DD" (owner's local
@@ -92,6 +106,10 @@ export const familyActivities = sqliteTable("family_activities", {
   minutes: integer("minutes"),
   // Optional one-line note.
   note: text("note"),
+  // Provenance: '手动' (manual form) or '聊天记录' (chat auto-record),
+  // decided server-side at save time — the request never carries it.
+  // NULL on rows saved before the column existed (旧来源未记录).
+  source: text("source"),
   // Client-generated idempotency key: a retry of the same save carries
   // the same key and must not create a second record. Unique index in
   // the migration enforces it at the storage layer too.

@@ -83,6 +83,19 @@
 //   'future' result, and pre-existing future-dated rows are excluded
 //   from every total/series/calendar figure — counted separately as
 //   futureRecordCount and still listed so the owner can delete them.
+// - Chat auto-record (CMP-FAMILY-AUTOLOG-001): besides the manual
+//   form, Muse can record an activity the owner mentioned in chat
+//   through recordFamilyActivityFromChat. Provenance is decided
+//   SERVER-SIDE and is never a request field: manual saves stamp
+//   '手动', chat saves stamp '聊天记录', and rows saved before the
+//   source column existed keep NULL (旧来源未记录, never backfilled).
+//   The source is part of the canonical payload fingerprint, so the
+//   same request key carrying the other source is a conflict, and
+//   both write paths run the exact same arbitration pipeline and the
+//   same strict owner gate before any database access. If the
+//   runtime caller is not recognized as the owner the action refuses
+//   honestly (forbidden, zero writes) — no service identity is
+//   invented and no anonymous/sync exception is widened.
 
 import {
 defineAction,
@@ -130,15 +143,51 @@ function weekStartOf(key: string): string {
 }
 
 // Canonical payload fingerprint for a save: the exact content a
-// request key stands for. Stored in the request-key ledger so a retry
-// can be compared field-for-field against what was originally saved.
+// request key stands for, provenance included (CMP-FAMILY-AUTOLOG-001).
+// Stored in the request-key ledger so a retry can be compared
+// field-for-field against what was originally saved — and a retry of
+// the same key through the OTHER write path (different source) is a
+// conflict, never a silent merge or duplicate.
 function canonicalPayload(
   date: string,
   typeName: string,
   minutes: number | null,
   note: string | null,
+  source: schema.ActivitySource,
 ): string {
-  return JSON.stringify({ date, typeName, minutes, note });
+  return JSON.stringify({ date, typeName, minutes, note, source });
+}
+
+// Normalize a stored source value to the two known values; anything
+// else (including the NULL of pre-source rows) reads as unknown/null.
+function knownSource(value: string | null | undefined): schema.ActivitySource | null {
+  return value === schema.SOURCE_MANUAL || value === schema.SOURCE_CHAT ? value : null;
+}
+
+// The payload a stored row stands for, used when backfilling the
+// ledger from a pre-ledger row and when writing a delete tombstone.
+// Rows saved before the source column existed carry no source: their
+// fingerprint uses the legacy 4-field shape (no source key), so a
+// ledger row backfilled or tombstoned back then stays comparable
+// with fingerprints stored in that era. A row WITH a known source
+// fingerprints with it, matching what its save stored.
+function legacyPayloadOf(row: {
+  date: string;
+  typeName: string;
+  minutes: number | null;
+  note: string | null;
+  source: string | null;
+}): string {
+  const source = knownSource(row.source);
+  if (source === null) {
+    return JSON.stringify({
+      date: row.date,
+      typeName: row.typeName,
+      minutes: row.minutes,
+      note: row.note,
+    });
+  }
+  return canonicalPayload(row.date, row.typeName, row.minutes, row.note, source);
 }
 
 // A date key must be a real calendar date, not just shaped like one.
@@ -158,6 +207,8 @@ const activitySchema = z.object({
   typeName: z.string(),
   minutes: z.number().nullable(),
   note: z.string().nullable(),
+  // '手动' | '聊天记录' | null (null = pre-source row, 旧来源未记录).
+  source: z.enum(["手动", "聊天记录"]).nullable(),
 });
 
 const typeSchema = z.object({
@@ -252,9 +303,85 @@ const addTypeResponse = z.object({
   duplicate: z.boolean(),
 });
 
+// Chat auto-record receipt (CMP-FAMILY-AUTOLOG-001): on success the
+// caller gets a locatable receipt — the new (or replayed) record's id
+// plus the exact stored content, source included — so the agent can
+// report back precisely what was recorded. Failures are the same
+// typed refusals the manual path uses, plus the receipt fields nulled.
+const chatRecordResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  id: z.number().nullable(),
+  duplicate: z.boolean(),
+  conflict: z.boolean(),
+  deleted: z.boolean(),
+  future: z.boolean(),
+  date: z.string().nullable(),
+  typeName: z.string().nullable(),
+  minutes: z.number().nullable(),
+  source: z.enum(["手动", "聊天记录"]).nullable(),
+});
+
+type ChatRecordResult = z.infer<typeof chatRecordResponse>;
+
+function chatRefusal(flags: Partial<ChatRecordResult>): ChatRecordResult {
+  return {
+    ok: false,
+    forbidden: false,
+    id: null,
+    duplicate: false,
+    conflict: false,
+    deleted: false,
+    future: false,
+    date: null,
+    typeName: null,
+    minutes: null,
+    source: null,
+    ...flags,
+  };
+}
+
 /* ---------------- request-key adjudication ---------------- */
 
 type Db = SpaceDb<typeof schema>;
+
+// The content a save stands for, provenance included.
+interface SaveContent {
+  date: string;
+  typeName: string;
+  minutes: number | null;
+  note: string | null;
+  source: schema.ActivitySource;
+}
+
+// Does a stored ledger fingerprint match an incoming save? The four
+// content fields must always match exactly. A fingerprint stored
+// WITH a source (every save since CMP-FAMILY-AUTOLOG-001) must also
+// match on source: the same key arriving through the other write
+// path is a different draft. A legacy fingerprint carries no source
+// key at all — that row's provenance is unrecorded, not '手动', so
+// it cannot conflict on source and the content fields decide. An
+// unparseable fingerprint matches nothing (typed conflict upstream).
+function payloadMatches(stored: string, incoming: SaveContent): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const p = parsed as Record<string, unknown>;
+  if (
+    p.date !== incoming.date ||
+    p.typeName !== incoming.typeName ||
+    p.minutes !== incoming.minutes ||
+    p.note !== incoming.note
+  ) {
+    return false;
+  }
+  if ("source" in p) return p.source === incoming.source;
+  return true;
+}
 
 // The one adjudication rule, applied identically by every addActivity
 // path (ledger fast path, legacy backfill, fresh-save re-read, and the
@@ -275,7 +402,7 @@ type Db = SpaceDb<typeof schema>;
 async function adjudicateSave(
   db: Db,
   requestKey: string,
-  payload: string,
+  incoming: SaveContent,
   duplicate: boolean,
 ): Promise<AddActivityResult | null> {
   const ledgerRows = await db
@@ -284,7 +411,7 @@ async function adjudicateSave(
     .where(eq(schema.familyRequestKeys.requestKey, requestKey));
   const ledger = ledgerRows[0];
   if (!ledger) return null;
-  if (ledger.payload !== payload) return addRefusal({ conflict: true });
+  if (!payloadMatches(ledger.payload, incoming)) return addRefusal({ conflict: true });
   if (ledger.state === "deleted") return addRefusal({ deleted: true });
   const activityRows = await db
     .select({ id: schema.familyActivities.id })
@@ -301,6 +428,141 @@ async function adjudicateSave(
     deleted: false,
     future: false,
   };
+}
+
+/* ---------------- shared save pipeline ---------------- */
+
+// The ONE save pipeline, shared by the manual form (addActivity,
+// source '手动') and the chat auto-record action
+// (recordFamilyActivityFromChat, source '聊天记录'). The source is a
+// server-side constant chosen by the entry point — it is never read
+// from the request — and it is part of the canonical payload, so the
+// two paths arbitrate against each other exactly like two saves of
+// one path do. Callers run their owner gate and request validation
+// BEFORE calling this; everything from the ledger fast path down is
+// identical for both paths.
+async function saveActivityRecord(
+  ctx: Ctx,
+  input: {
+    date: string;
+    typeName: string;
+    minutes: number | null;
+    note: string | null;
+    requestKey: string;
+  },
+  source: schema.ActivitySource,
+): Promise<AddActivityResult> {
+  const db = ctx.db<typeof schema>();
+  const note = input.note && input.note.length > 0 ? input.note : null;
+  const content: SaveContent = {
+    date: input.date,
+    typeName: input.typeName,
+    minutes: input.minutes,
+    note,
+    source,
+  };
+  const payload = canonicalPayload(input.date, input.typeName, input.minutes, note, source);
+  const now = Date.now();
+
+  // (a) Ledger fast path: a stored ledger row already decides this
+  // key — payload conflict, deleted refusal, or the original save
+  // replayed as a duplicate. A 'saved' ledger row whose activity
+  // row no longer exists converges to the deleted refusal.
+  const fastPath = await adjudicateSave(db, input.requestKey, content, true);
+  if (fastPath) return fastPath;
+
+  // (b) No ledger row, but a pre-ledger activity already carries
+  // this key: backfill the ledger from the stored row's own
+  // fields (ON CONFLICT DO NOTHING — a concurrent backfill of the
+  // same key is a no-op, never a UNIQUE error), then re-read and
+  // adjudicate against the ledger row that actually landed.
+  const legacyRows = await db
+    .select()
+    .from(schema.familyActivities)
+    .where(eq(schema.familyActivities.requestKey, input.requestKey));
+  const legacy = legacyRows[0];
+  if (legacy) {
+    const storedPayload = legacyPayloadOf(legacy);
+    await db
+      .insert(schema.familyRequestKeys)
+      .values({
+        requestKey: input.requestKey,
+        payload: storedPayload,
+        activityId: legacy.id,
+        state: "saved",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing();
+    const verdict = await adjudicateSave(db, input.requestKey, content, true);
+    // A vanished verdict (no ledger row at all) cannot happen after
+    // a successful backfill; refuse plainly rather than guess.
+    return verdict ?? addRefusal({});
+  }
+
+  // (c) Fresh key: ONE db.batch, two builder statements —
+  //   1. claim the request key in the ledger
+  //      (INSERT … ON CONFLICT DO NOTHING, activityId filled by
+  //      nobody — the activity row is found by its unique
+  //      request_key on re-read);
+  //   2. insert the activity, stamped with this path's source
+  //      (INSERT … ON CONFLICT DO NOTHING on the request_key
+  //      UNIQUE index).
+  // Whichever statement a concurrent same-key save beats us to
+  // simply no-ops; the batch commits or rolls back as a unit, so
+  // the ledger and the activity can never half-exist. Whether the
+  // activity row already existed before this batch decides the
+  // duplicate flag. After the batch (or after it throws — e.g. the
+  // migration-0004 trigger aborting our activity insert because a
+  // delete committed first), re-read and adjudicate from stored
+  // state; only an undecidable re-read after a thrown batch is a
+  // plain refusal.
+  const preExisting = await db
+    .select({ id: schema.familyActivities.id })
+    .from(schema.familyActivities)
+    .where(eq(schema.familyActivities.requestKey, input.requestKey));
+  const existedBefore = preExisting.length > 0;
+  let batchThrew = false;
+  try {
+    await db.batch([
+      db
+        .insert(schema.familyRequestKeys)
+        .values({
+          requestKey: input.requestKey,
+          payload,
+          activityId: null,
+          state: "saved",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoNothing(),
+      db
+        .insert(schema.familyActivities)
+        .values({
+          date: input.date,
+          typeName: input.typeName,
+          minutes: input.minutes,
+          note,
+          source,
+          requestKey: input.requestKey,
+          createdAt: new Date(now),
+        })
+        .onConflictDoNothing(),
+    ]);
+  } catch {
+    batchThrew = true;
+  }
+  const verdict = await adjudicateSave(db, input.requestKey, content, existedBefore);
+  if (verdict) {
+    if (verdict.ok && !verdict.duplicate) ctx.invalidateQueries();
+    return verdict;
+  }
+  // No ledger row after the batch: either the batch threw before
+  // anything landed (rolled back — nothing half-written), or a
+  // concurrent delete removed… the ledger is never deleted, so in
+  // practice this is the thrown-batch case. Plain refusal.
+  void batchThrew;
+  return addRefusal({});
 }
 
 /* ---------------- actions ---------------- */
@@ -453,6 +715,7 @@ export const Actions = {
           typeName: r.typeName,
           minutes: r.minutes ?? null,
           note: r.note ?? null,
+          source: knownSource(r.source),
         }));
 
       return {
@@ -478,6 +741,10 @@ export const Actions = {
   }),
 
   addActivity: defineAction({
+    // Manual entry. The request deliberately has NO source field:
+    // provenance is the server's decision ('手动' for this path), and
+    // a client that sends one anyway gets it stripped by the schema —
+    // a forged '聊天记录' can never reach the stored row.
     request: z.object({
       date: z.string().regex(dateKeyRe),
       typeName: z.string().trim().min(1).max(20),
@@ -491,113 +758,55 @@ export const Actions = {
       if (!isRealDateKey(args.date)) return addRefusal({});
       // A future date is not a completed fact: refuse, write nothing.
       if (args.date > todayKey()) return addRefusal({ future: true });
-      const db = ctx.db<typeof schema>();
-      const note = args.note && args.note.length > 0 ? args.note : null;
-      const payload = canonicalPayload(args.date, args.typeName, args.minutes, note);
-      const now = Date.now();
+      return saveActivityRecord(ctx, args, schema.SOURCE_MANUAL);
+    },
+  }),
 
-      // (a) Ledger fast path: a stored ledger row already decides this
-      // key — payload conflict, deleted refusal, or the original save
-      // replayed as a duplicate. A 'saved' ledger row whose activity
-      // row no longer exists converges to the deleted refusal.
-      const fastPath = await adjudicateSave(db, args.requestKey, payload, true);
-      if (fastPath) return fastPath;
-
-      // (b) No ledger row, but a pre-ledger activity already carries
-      // this key: backfill the ledger from the stored row's own
-      // fields (ON CONFLICT DO NOTHING — a concurrent backfill of the
-      // same key is a no-op, never a UNIQUE error), then re-read and
-      // adjudicate against the ledger row that actually landed.
-      const legacyRows = await db
-        .select()
-        .from(schema.familyActivities)
-        .where(eq(schema.familyActivities.requestKey, args.requestKey));
-      const legacy = legacyRows[0];
-      if (legacy) {
-        const storedPayload = canonicalPayload(
-          legacy.date,
-          legacy.typeName,
-          legacy.minutes,
-          legacy.note,
-        );
-        await db
-          .insert(schema.familyRequestKeys)
-          .values({
-            requestKey: args.requestKey,
-            payload: storedPayload,
-            activityId: legacy.id,
-            state: "saved",
-            createdAt: now,
-            updatedAt: now,
-          })
-          .onConflictDoNothing();
-        const verdict = await adjudicateSave(db, args.requestKey, payload, true);
-        // A vanished verdict (no ledger row at all) cannot happen after
-        // a successful backfill; refuse plainly rather than guess.
-        return verdict ?? addRefusal({});
+  recordFamilyActivityFromChat: defineAction({
+    // Chat auto-record (CMP-FAMILY-AUTOLOG-001): Muse records an
+    // activity the owner stated in chat. Same strict owner gate
+    // BEFORE any database access — a caller the runtime does not
+    // recognize as the owner gets an honest forbidden refusal with
+    // zero writes; no service identity is claimed. Minutes may be
+    // null (the owner didn't say how long): unknown stays unknown,
+    // never 0 and never guessed. The request key is generated by the
+    // caller from the originating message and carried persistently,
+    // so a retry of the same message replays instead of duplicating.
+    // Source is fixed '聊天记录' server-side.
+    request: z.object({
+      date: z.string().regex(dateKeyRe),
+      typeName: z.string().trim().min(1).max(20),
+      minutes: z.number().int().min(1).max(1440).nullable(),
+      note: z.string().trim().max(80).nullable(),
+      requestKey: z.string().min(8).max(64),
+    }),
+    response: chatRecordResponse,
+    async handler(ctx, args): Promise<ChatRecordResult> {
+      if (!isOwner(ctx)) return chatRefusal({ forbidden: true });
+      if (!isRealDateKey(args.date)) return chatRefusal({});
+      if (args.date > todayKey()) return chatRefusal({ future: true });
+      const result = await saveActivityRecord(ctx, args, schema.SOURCE_CHAT);
+      if (!result.ok) {
+        return chatRefusal({
+          forbidden: result.forbidden,
+          conflict: result.conflict,
+          deleted: result.deleted,
+          future: result.future,
+        });
       }
-
-      // (c) Fresh key: ONE db.batch, two builder statements —
-      //   1. claim the request key in the ledger
-      //      (INSERT … ON CONFLICT DO NOTHING, activityId filled by
-      //      nobody — the activity row is found by its unique
-      //      request_key on re-read);
-      //   2. insert the activity (INSERT … ON CONFLICT DO NOTHING on
-      //      the request_key UNIQUE index).
-      // Whichever statement a concurrent same-key save beats us to
-      // simply no-ops; the batch commits or rolls back as a unit, so
-      // the ledger and the activity can never half-exist. Whether the
-      // activity row already existed before this batch decides the
-      // duplicate flag. After the batch (or after it throws — e.g. the
-      // migration-0004 trigger aborting our activity insert because a
-      // delete committed first), re-read and adjudicate from stored
-      // state; only an undecidable re-read after a thrown batch is a
-      // plain refusal.
-      const preExisting = await db
-        .select({ id: schema.familyActivities.id })
-        .from(schema.familyActivities)
-        .where(eq(schema.familyActivities.requestKey, args.requestKey));
-      const existedBefore = preExisting.length > 0;
-      let batchThrew = false;
-      try {
-        await db.batch([
-          db
-            .insert(schema.familyRequestKeys)
-            .values({
-              requestKey: args.requestKey,
-              payload,
-              activityId: null,
-              state: "saved",
-              createdAt: now,
-              updatedAt: now,
-            })
-            .onConflictDoNothing(),
-          db
-            .insert(schema.familyActivities)
-            .values({
-              date: args.date,
-              typeName: args.typeName,
-              minutes: args.minutes,
-              note,
-              requestKey: args.requestKey,
-              createdAt: new Date(now),
-            })
-            .onConflictDoNothing(),
-        ]);
-      } catch {
-        batchThrew = true;
-      }
-      const verdict = await adjudicateSave(db, args.requestKey, payload, existedBefore);
-      if (verdict) {
-        if (verdict.ok && !verdict.duplicate) ctx.invalidateQueries();
-        return verdict;
-      }
-      // No ledger row after the batch: either the batch threw before
-      // anything landed (rolled back — nothing half-written), or a
-      // concurrent delete removed… the ledger is never deleted, so in
-      // practice this is the thrown-batch case. Plain refusal.
-      void batchThrew;
-      return addRefusal({});
+      return {
+        ok: true,
+        forbidden: false,
+        id: result.id,
+        duplicate: result.duplicate,
+        conflict: false,
+        deleted: false,
+        future: false,
+        date: args.date,
+        typeName: args.typeName,
+        minutes: args.minutes,
+        source: schema.SOURCE_CHAT,
+      };
     },
   }),
 
@@ -636,12 +845,7 @@ export const Actions = {
             .insert(schema.familyRequestKeys)
             .values({
               requestKey: target.requestKey,
-              payload: canonicalPayload(
-                target.date,
-                target.typeName,
-                target.minutes,
-                target.note,
-              ),
+              payload: legacyPayloadOf(target),
               activityId: target.id,
               state: "deleted",
               createdAt: now,

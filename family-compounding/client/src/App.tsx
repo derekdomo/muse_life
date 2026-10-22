@@ -582,6 +582,9 @@ function ActivityItem({ row, today }: { row: ActivityRow; today: string }) {
           </span>
         </p>
         <p className="mt-0.5 text-sm text-[var(--dim)]">{formatDay(row.date, today)}</p>
+        <p className="mt-0.5 text-xs text-[var(--faint)]">
+          来源：{row.source === null ? "旧来源未记录" : row.source}
+        </p>
         {row.note ? <p className="mt-0.5 break-words text-sm text-[var(--dim)]">{row.note}</p> : null}
         {del.isError || (del.isSuccess && !del.data.ok) ? (
           <p role="alert" className="mt-1 text-sm text-[var(--accent-2)]">
@@ -807,6 +810,11 @@ export function App() {
                   ? "账本还是空的。记下第一条家庭活动，积累从这里开始。"
                   : `本月共 ${dashboard.data.thisMonthCount} 次家庭活动，累计 ${dashboard.data.totalCount} 次——一次一次记下来，就是在长。`}
               </p>
+              {dashboard.data.totalCount === 0 ? (
+                <p className="mt-2 text-sm text-[var(--dim)]">
+                  也可以在聊天里告诉 Muse，由 Muse 代记（来源会标为聊天记录）。
+                </p>
+              ) : null}
               {dashboard.data.futureRecordCount > 0 ? (
                 <p className="mt-2 text-sm text-[var(--dim)]">
                   有 <span className="tnum">{dashboard.data.futureRecordCount}</span>{" "}
@@ -836,7 +844,9 @@ export function App() {
             <section className={sectionCls} aria-label="最近记录">
               <h2 className="font-display text-lg font-bold">最近记录</h2>
               {dashboard.data.recentActivities.length === 0 ? (
-                <p className="py-4 text-sm text-[var(--dim)]">还没有任何记录。</p>
+                <p className="py-4 text-sm text-[var(--dim)]">
+                  还没有任何记录。用上面的表单记一条，或在聊天里告诉 Muse，由 Muse 代记（来源会标为聊天记录）。
+                </p>
               ) : (
                 <>
                   <ul>

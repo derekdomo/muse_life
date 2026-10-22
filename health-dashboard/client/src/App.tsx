@@ -2038,6 +2038,28 @@ const GAME_SLOT_META: { slot: "weapon" | "armor" | "accessory"; label: string; s
 // is persisted on submit, so reopening the page offers a recovery
 // entry for the same identity instead of minting a new key. Failed
 // saves/redemptions keep the list and the drafts.
+//
+// Single-pending-intent rule: while one redemption is unconfirmed,
+// NO entry point may mint a new intent — openPreview first routes
+// back into the pending intent's unconfirmed flow along its original
+// requestId (it never generates a new key and never overwrites the
+// one recovery slot), and the submit hook refuses to store a
+// different draft over a pending one. List edits and goal selection
+// stay available throughout; only a new redemption waits until the
+// pending intent reaches a terminal classification.
+//
+// Receipt verification is a text label, never color alone: a receipt
+// carrying its per-request completion proof reads ✓ 已完成; a
+// historical receipt without one reads ▲ 未核实 on the list, on the
+// receipt card, and in lookup results — it is never presented as a
+// completed redemption, and it is never silently charged, deleted,
+// or rewritten.
+//
+// 只读重查 (the goal card's and this panel's) calls
+// getRewardsSnapshot — a genuinely read-only stored-state read (no
+// settlement, no save, no task spawn) — and paints its result into
+// the ["rewards"] cache. getRewards itself settles on read and is
+// never described as read-only.
 interface RedeemDraft {
   requestId: string;
   rewardId: number;
@@ -2089,6 +2111,33 @@ function scrollToRewardsPanel() {
   document.getElementById("game-rewards-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+// 真只读重查: fetch the stored rewards state through the read-only
+// snapshot action (the server settles nothing, saves nothing, and
+// spawns nothing for it) and paint it into the ["rewards"] cache.
+// The snapshot's own `ok` is the stored reconciliation fact, so the
+// three balance states stay distinct after a recheck: reconciled →
+// verified (a stored 0 is a true zero), unreconciled → 余额暂不可核实
+// with the stored goal, list, and receipts all still shown, and a
+// failed read keeps whatever the panel already shows.
+async function recheckStoredRewards(queryClient: ReturnType<typeof useQueryClient>): Promise<void> {
+  try {
+    const snap = await api.getRewardsSnapshot({});
+    if (snap.forbidden) return;
+    queryClient.setQueryData<RewardsState>(["rewards"], {
+      forbidden: snap.forbidden,
+      ok: snap.ok,
+      balance: snap.balance,
+      balanceVersion: snap.balanceVersion,
+      healthState: snap.healthState,
+      healthDataDate: snap.healthDataDate,
+      coverageIncomplete: snap.coverageIncomplete,
+      goalRewardId: snap.goalRewardId,
+      rewards: snap.rewards,
+      receipts: snap.receipts,
+    });
+  } catch { /* a failed recheck leaves the last known state on screen */ }
+}
+
 // 下一奖励目标 on the character first screen (S3 余项): the owner's
 // one explicitly chosen next reward, read from the same ["rewards"]
 // query the rewards panel uses — the goal's CURRENT name and price
@@ -2099,6 +2148,7 @@ function scrollToRewardsPanel() {
 // toward the balance shown here. With no preference saved, the strip
 // invites a choice instead of inventing a default reward.
 function NextRewardGoal() {
+  const queryClient = useQueryClient();
   const rewards = useQuery({ queryKey: ["rewards"], queryFn: () => api.getRewards({}) });
   const data = rewards.data;
   const goalReward = data && data.goalRewardId !== null ? data.rewards.find((reward) => reward.id === data.goalRewardId) ?? null : null;
@@ -2116,7 +2166,7 @@ function NextRewardGoal() {
         <>
           <p className="game-goal-main">{goalReward.name} · 当前价格 {numberLabel(goalReward.price)} 金币</p>
           {!data.ok ? (
-            <p className="game-note">余额暂不可核实：目标与清单都保留着，核实后会显示还差多少。<button type="button" className="game-btn game-btn-ghost" aria-label="只读重查金币余额" disabled={rewards.isFetching} onClick={() => void rewards.refetch()}>只读重查</button></p>
+            <p className="game-note">余额暂不可核实：目标与清单都保留着，核实后会显示还差多少。<button type="button" className="game-btn game-btn-ghost" aria-label="只读重查金币余额" disabled={rewards.isFetching} onClick={() => void recheckStoredRewards(queryClient)}>只读重查</button></p>
           ) : data.balance >= goalReward.price ? (
             <p className="game-note"><span aria-hidden="true">✓</span> 可兑换 · 已保存金币 {numberLabel(data.balance)} 金币，去奖励清单按当前版本预览确认。</p>
           ) : (
@@ -2189,12 +2239,33 @@ function RewardsPanel() {
 
   const redeem = useMutation({
     mutationFn: (draft: RedeemDraft) => api.redeemReward({ requestId: draft.requestId, rewardId: draft.rewardId, rewardRevision: draft.rewardRevision, price: draft.price, expectedBalanceVersion: draft.expectedBalanceVersion }),
-    onMutate: (draft) => { storePendingRedemption(draft); },
+    onMutate: (draft) => {
+      // The recovery slot holds ONE identity: never overwrite a
+      // different pending intent with a new draft — the pending one
+      // would become unrecoverable and could be charged twice.
+      const existing = loadPendingRedemption();
+      if (!existing || existing.requestId === draft.requestId) storePendingRedemption(draft);
+    },
     onSuccess: (result, draft) => {
       if ((result.status === "redeemed" || result.status === "already_resolved") && result.receipt) {
         clearPending();
         setLastReceipt(result.receipt);
         setReceiptNote(result.status === "already_resolved" ? "这笔兑换此前已经入账，下面是原回执，未重复扣账。" : null);
+        setNote(null);
+        setStage({ kind: "list" });
+        invalidateRewards();
+        return;
+      }
+      if (result.status === "unverified" && result.receipt) {
+        // A historical receipt exists under this requestId but has
+        // no per-request completion proof: it is NOT a success and
+        // must not be shown as one. The intent is terminally
+        // classified (the server charged nothing and changed
+        // nothing), so the pending identity clears and the receipt
+        // is displayed with its 未核实 label.
+        clearPending();
+        setLastReceipt(result.receipt);
+        setReceiptNote("这张历史回执未核实：没有逐笔完成证明，不能确认这笔兑换已经扣账。本次没有重复扣账，也没有改动原回执。");
         setNote(null);
         setStage({ kind: "list" });
         invalidateRewards();
@@ -2235,7 +2306,9 @@ function RewardsPanel() {
       if (result.receipt) {
         clearPending();
         setLastReceipt(result.receipt);
-        setReceiptNote("已确认：这笔兑换已经入账，下面是原回执，未重复扣账。");
+        setReceiptNote(result.receipt.verification === "verified"
+          ? "已确认：这笔兑换已经入账，下面是原回执，未重复扣账。"
+          : "查到了这张回执，但它未核实：没有逐笔完成证明，不能确认这笔兑换已经扣账。");
         setNote(null);
         setStage({ kind: "list" });
         invalidateRewards();
@@ -2259,6 +2332,22 @@ function RewardsPanel() {
   const balanceVerified = !!data && data.ok;
 
   const openPreview = async (reward: RewardItem) => {
+    // Single-pending-intent rule: while an earlier redemption is
+    // still unconfirmed, this entry point must NOT mint a new
+    // intent — a fresh requestId here would, on submit, overwrite
+    // the one recovery slot and orphan the pending intent (which
+    // could then land late and be charged again). Route back into
+    // the pending intent's unconfirmed flow along its ORIGINAL
+    // requestId instead; list editing and goal selection remain
+    // available, and a new redemption opens only after the pending
+    // intent reaches a terminal classification.
+    const pending = loadPendingRedemption() ?? pendingRecovery;
+    if (pending) {
+      setPendingRecovery(pending);
+      setNote("有一笔兑换结果还没有确认，先处理完它再发起新的兑换。");
+      setStage({ kind: "unconfirmed", draft: pending, lookupNote: null });
+      return;
+    }
     // Pin the preview to a FRESH read: the reward's current revision
     // and price, the current saved balance, and the current balance
     // version — exactly what redeemReward re-checks server-side.
@@ -2321,7 +2410,7 @@ function RewardsPanel() {
         <>
           {!balanceVerified ? (
             <p className="game-note">金币余额暂不可核实：奖励清单、下一奖励目标与历史回执仍可查看，但暂时不能发起新的兑换。
-              <button type="button" className="game-btn game-btn-ghost" aria-label="只读重查金币余额" disabled={rewards.isFetching} onClick={() => void rewards.refetch()}>只读重查</button>
+              <button type="button" className="game-btn game-btn-ghost" aria-label="只读重查金币余额" disabled={rewards.isFetching} onClick={() => void recheckStoredRewards(queryClient)}>只读重查</button>
             </p>
           ) : null}
           {data.healthState !== "ok" ? (
@@ -2335,13 +2424,19 @@ function RewardsPanel() {
           {lastReceipt ? (
             <div className="reward-receipt" role="status">
               <div className="section-line">
-                <strong><span aria-hidden="true">✓</span> 已兑换 · 回执 #{lastReceipt.id}</strong>
+                <strong>{lastReceipt.verification === "verified"
+                  ? <><span aria-hidden="true">✓</span> 已兑换 · 回执 #{lastReceipt.id}</>
+                  : <><span aria-hidden="true">▲</span> 未核实 · 历史回执 #{lastReceipt.id}</>}</strong>
                 <button type="button" className="game-btn game-btn-ghost" aria-label="关闭回执" onClick={() => { setLastReceipt(null); setReceiptNote(null); }}>关闭</button>
               </div>
               <p className="reward-receipt-main">{lastReceipt.rewardName} · 扣除 {numberLabel(lastReceipt.goldSpent)} 金币 · 剩余已保存余额 {numberLabel(lastReceipt.balanceAfter)} 金币</p>
               <p className="game-note">兑换时间 {updatedLabel(lastReceipt.redeemedAt)} · {fullDateLabel(lastReceipt.localDate)}</p>
               {receiptNote ? <p className="game-note">{receiptNote}</p> : null}
-              <p className="game-note">这张回执只证明金币已兑换，不证明现实奖励已经享用。</p>
+              {lastReceipt.verification === "verified" ? (
+                <p className="game-note">这张回执只证明金币已兑换，不证明现实奖励已经享用。</p>
+              ) : (
+                <p className="game-note">这张回执未核实：没有逐笔完成证明，不能确认上面的扣账已经完成；它保留原样，不会被补扣、删除或改写。</p>
+              )}
               {data.goalRewardId === lastReceipt.rewardId ? (
                 <div className="reward-actions">
                   <button type="button" className="game-btn" aria-label="保留这条奖励为下一目标" onClick={() => { setLastReceipt(null); setReceiptNote(null); }}>保留该目标</button>
@@ -2449,13 +2544,13 @@ function RewardsPanel() {
                     <span className="unified-date">{dateLabel(receipt.localDate)}</span>
                     <div className="unified-main">
                       <strong><span aria-hidden="true">✧</span> {receipt.rewardName}</strong>
-                      <small>回执 #{receipt.id} · {fullDateLabel(receipt.localDate)} · {updatedLabel(receipt.redeemedAt)} · 当时价格 {numberLabel(receipt.price)} 金币</small>
+                      <small>回执 #{receipt.id} · {fullDateLabel(receipt.localDate)} · {updatedLabel(receipt.redeemedAt)} · 当时价格 {numberLabel(receipt.price)} 金币 · {receipt.verification === "verified" ? "✓ 已完成" : "▲ 未核实（无逐笔完成证明）"}</small>
                     </div>
                     <span className="game-xp">−{numberLabel(receipt.goldSpent)} 金币 · 余 {numberLabel(receipt.balanceAfter)}</span>
                   </div>
                 ))}
               </div>
-              <p className="game-note">回执只证明金币已兑换，不证明现实奖励已经享用；来源迟到修订或改价不会删除回执，也不会按今天的价格改动旧回执金额。</p>
+              <p className="game-note">标「✓ 已完成」的回执只证明金币已兑换，不证明现实奖励已经享用；标「▲ 未核实」的历史回执没有逐笔完成证明，不能确认扣账已经完成。来源迟到修订或改价不会删除回执，也不会按今天的价格改动旧回执金额。</p>
             </>
           ) : (
             <p className="game-note">还没有兑换回执。兑换成功后，回执会留在这里，之后改价也不会改动它。</p>
