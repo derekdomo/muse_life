@@ -22,11 +22,20 @@
 //   original key can therefore never duplicate a time fact. A batch failure
 //   is re-resolved against the committed ledger (replay / conflict / deleted)
 //   before surfacing, and only a failure that left no ledger trace rethrows.
+// - Updates additionally carry a BASE: the content version (entryDto.version)
+//   of the entry as the editor read it. The server applies an edit only
+//   while the stored row still equals that base, arbitrated atomically
+//   inside the batch (base content in the UPDATE's WHERE, ledger INSERT
+//   gated on the post-update row). A base that has moved — or a legacy
+//   caller carrying no base at all — gets a typed "stale_conflict" with the
+//   current stored row attached and ZERO writes, so a failed edit retried
+//   late can never roll a newer saved edit back. Only a key already in the
+//   ledger replays without writing (resolveCommittedKey above).
 // - Every read and write requires the owner (ctx.viewer?.isOwner === true).
 //   Guests / anonymous / missing viewer get a typed forbidden with zero data.
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 // ---------------------------------------------------------------- categories
@@ -229,12 +238,35 @@ async function fingerprint(payload: unknown): Promise<string> {
 
 // ------------------------------------------------------------------- DTOs
 
+// Content version of an entry: a stable fingerprint of exactly the fields
+// an edit can change. The client reads it with the entry (entryDto.version)
+// when it opens the editor and echoes it back as updateEntry's baseVersion;
+// the server applies the edit only while the stored row still hashes to
+// that version. FNV-1a 64-bit over the canonical field tuple — a change
+// detector for arbitration, not a security hash. Exported so the offline
+// validators can name the base of a row they seeded directly in SQL.
+export function contentVersion(row: {
+  category: string;
+  startMs: number;
+  endMs: number;
+  note: string;
+}): string {
+  const s = JSON.stringify([row.category, row.startMs, row.endMs, row.note]);
+  let h = 0xcbf29ce484222325n;
+  for (let i = 0; i < s.length; i++) {
+    h ^= BigInt(s.charCodeAt(i));
+    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return h.toString(16).padStart(16, "0");
+}
+
 const entryDto = z.object({
   id: z.number(),
   category: z.string(),
   startMs: z.number(),
   endMs: z.number(),
   note: z.string(),
+  version: z.string(),
 });
 
 type EntryDto = z.infer<typeof entryDto>;
@@ -246,13 +278,16 @@ function toDto(row: typeof schema.timeEntries.$inferSelect): EntryDto {
     startMs: row.startMs,
     endMs: row.endMs,
     note: row.note,
+    version: contentVersion(row),
   };
 }
 
 const mutationResponse = z.object({
   ok: z.boolean(),
   // null on success; otherwise one of: forbidden | conflict | deleted |
-  // future_interval | invalid_range | invalid_category | not_found
+  // stale_conflict | future_interval | invalid_range | invalid_category |
+  // not_found. On stale_conflict, entry carries the CURRENT stored row so
+  // the page can show it next to the preserved draft.
   error: z.string().nullable(),
   entry: entryDto.nullable(),
 });
@@ -310,6 +345,25 @@ function resolutionToResponse(
     case "absent":
       return null;
   }
+}
+
+// An update target that is not in time_entries: "deleted" when the ledger
+// remembers the entry (a tombstone exists for it), "not_found" when the id
+// never existed.
+async function entryGoneResponse(
+  db: Db,
+  entryId: number,
+): Promise<{ ok: boolean; error: string; entry: null }> {
+  const tombstone = await db
+    .select()
+    .from(schema.requestLedger)
+    .where(eq(schema.requestLedger.entryId, entryId))
+    .limit(1);
+  return {
+    ok: false,
+    error: tombstone[0] ? "deleted" : "not_found",
+    entry: null,
+  };
 }
 
 // ------------------------------------------------------------- week summary
@@ -598,6 +652,13 @@ export const Actions = {
       startMs: z.number().int(),
       endMs: z.number().int(),
       note: z.string().max(500).default(""),
+      // The content version of the entry as the editor read it
+      // (entryDto.version at open time): the edit applies only while the
+      // stored row still carries this base. Optional in the schema ONLY so
+      // pre-version clients still parse — a base-less update is rejected as
+      // stale_conflict below and can never silently overwrite a stored row
+      // that may have moved since that client last read it.
+      baseVersion: z.string().min(1).max(64).optional(),
     }),
     response: mutationResponse,
     async handler(ctx, args) {
@@ -612,11 +673,13 @@ export const Actions = {
         startMs: args.startMs,
         endMs: args.endMs,
         note: args.note,
+        base: args.baseVersion ?? null,
       });
       const db = getDb(ctx);
-      // Replay of an already-applied update reports the entry as it NOW
+      // Replay of an already-committed key reports the entry as it NOW
       // stands (a newer edit may have superseded this payload) and never
-      // writes again — a stale retry cannot roll a newer edit back.
+      // writes again — the only no-write replay path, kept for committed
+      // keys regardless of base.
       const prior = resolutionToResponse(
         await resolveCommittedKey(db, args.requestId, fp),
       );
@@ -627,24 +690,34 @@ export const Actions = {
         .from(schema.timeEntries)
         .where(eq(schema.timeEntries.id, args.entryId))
         .limit(1);
-      if (!rows[0]) {
-        // The entry is gone: if the ledger remembers it, it was deleted;
-        // otherwise the id never existed.
-        const tombstone = await db
-          .select()
-          .from(schema.requestLedger)
-          .where(eq(schema.requestLedger.entryId, args.entryId))
-          .limit(1);
-        return {
-          ok: false,
-          error: tombstone[0] ? "deleted" : "not_found",
-          entry: null,
-        };
+      const current = rows[0];
+      if (!current) return entryGoneResponse(db, args.entryId);
+
+      // Base arbitration, pre-check: the edit intent names the exact
+      // content version it was drafted against. Arrival order is NOT intent
+      // order: a retry of an edit that FAILED earlier carries the base from
+      // before a newer edit was saved, and must not win just for arriving
+      // last. A moved base — or no base at all (legacy caller) — is a typed
+      // stale_conflict carrying the current stored row, with zero body
+      // writes and zero ledger writes for this key.
+      if (
+        args.baseVersion == null ||
+        contentVersion(current) !== args.baseVersion
+      ) {
+        return { ok: false, error: "stale_conflict", entry: toDto(current) };
       }
 
-      // Body update + ledger key in ONE atomic batch: a failure at either
-      // write point leaves the entry untouched and the key unrecorded, so
-      // the same key can be retried cleanly and can never half-apply.
+      // Atomic arbitration inside ONE batch, closing the race between the
+      // pre-check above and the write: the body UPDATE only matches while
+      // the stored row still equals the verified base content (all four
+      // editable fields in its WHERE), and the ledger INSERT is an
+      // INSERT ... SELECT that only lands when the row now equals this
+      // intent's payload. If the base moved — or the entry was deleted —
+      // inside that window, both statements write zero rows and the batch
+      // still commits clean; if either write point fails, the batch rolls
+      // both back.
+      const now = new Date();
+      const nowMs = now.getTime();
       try {
         await db.batch([
           db
@@ -654,17 +727,31 @@ export const Actions = {
               startMs: args.startMs,
               endMs: args.endMs,
               note: args.note,
-              updatedAt: new Date(),
+              updatedAt: now,
             })
-            .where(eq(schema.timeEntries.id, args.entryId)),
-          db.insert(schema.requestLedger).values({
-            requestId: args.requestId,
-            fingerprint: fp,
-            entryId: args.entryId,
-            deleted: 0,
-          }),
+            .where(
+              and(
+                eq(schema.timeEntries.id, args.entryId),
+                eq(schema.timeEntries.category, current.category),
+                eq(schema.timeEntries.startMs, current.startMs),
+                eq(schema.timeEntries.endMs, current.endMs),
+                eq(schema.timeEntries.note, current.note),
+              ),
+            ),
+          db.run(sql`
+            INSERT INTO request_ledger (request_id, fingerprint, entry_id, deleted, created_at)
+            SELECT ${args.requestId}, ${fp}, id, 0, ${nowMs}
+            FROM time_entries
+            WHERE id = ${args.entryId}
+              AND category = ${args.category}
+              AND start_ms = ${args.startMs}
+              AND end_ms = ${args.endMs}
+              AND note = ${args.note}
+          `),
         ]);
       } catch (err) {
+        // Rolled back. If a concurrent same-key write committed first, this
+        // call resolves against that committed key instead of erroring.
         const after = resolutionToResponse(
           await resolveCommittedKey(db, args.requestId, fp),
         );
@@ -674,16 +761,27 @@ export const Actions = {
         }
         throw err; // genuine failure, zero partial state (batch rolled back)
       }
-      const after = await db
+      const committed = resolutionToResponse(
+        await resolveCommittedKey(db, args.requestId, fp),
+      );
+      if (committed) {
+        if (committed.ok) ctx.invalidateQueries();
+        return committed;
+      }
+      // The batch committed with zero writes: the base moved (or the entry
+      // was deleted) inside the race window. Report against the row as it
+      // now stands — still zero body writes, zero ledger writes.
+      const afterRows = await db
         .select()
         .from(schema.timeEntries)
         .where(eq(schema.timeEntries.id, args.entryId))
         .limit(1);
-      // A delete may have landed between the existence check and the batch;
-      // the update then touched no row and the entry stays deleted.
-      if (!after[0]) return { ok: false, error: "deleted", entry: null };
-      ctx.invalidateQueries();
-      return { ok: true, error: null, entry: toDto(after[0]) };
+      if (!afterRows[0]) return entryGoneResponse(db, args.entryId);
+      return {
+        ok: false,
+        error: "stale_conflict",
+        entry: toDto(afterRows[0]),
+      };
     },
   }),
 

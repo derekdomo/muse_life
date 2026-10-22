@@ -128,6 +128,20 @@ interface QaTurn {
   question: string;
   answer: string;
   suggestedCore: string | null;
+  // The pinned citation of THIS ask (CMP-READ-001 closure), bound
+  // from the server response that produced this turn: the
+  // questionRequestId the ask was sent with, the snippet id and the
+  // stored version actually answered against, and the response-time
+  // 原文/出处 snapshot. 「查看本次原文」 shows THIS snapshot — it
+  // never re-reads the library, so a later snippet update can never
+  // graft this answer onto a newer source. Null only for a response
+  // that carried no binding (defensive; the server always sends
+  // one for an answered ask).
+  questionRequestId: string | null;
+  snippetId: number | null;
+  snippetVersion: number | null;
+  sourceText: string;
+  sourceLabel: string;
 }
 
 // 「对这段提问」 panel. Three blocks are always kept apart:
@@ -138,18 +152,25 @@ interface QaTurn {
 // The exchange lives only in this panel's state. A failed/timed-out
 // ask keeps the question in the textarea (draft preserved) and the
 // pinned 原文 stays put; nothing becomes a knowledge card until the
-// owner taps 存为知识卡， which goes through the same request-key
-// ledger as every other card save. Each question carries its own
-// questionRequestId (a retry of the same question reuses it) and the
-// version of the snippet row it pins as 原文， so an answer is bound
-// to exactly one ask against exactly one stored text.
+// owner taps 整理这轮为卡 on ONE turn, edits that turn's draft
+// （我的一句话结论 / 我的批注 kept apart), and confirms the save —
+// which goes through the same request-key ledger as every other
+// card save, carrying the turn's pinned citation as its binding.
 //
-// After a save the panel keeps a RECEIPT (CMP-READ-001): the server's
-// actual cardId + this snippet's id, the stored row's 一句话核心 and
-// 出处 read back from the library, and buttons that jump to that
-// exact card / back to this exact snippet. A failed read-back says
-// 「已保存，详情暂未读出」 and retries READ-ONLY — it never re-creates
-// the card under a new key.
+// Ask identity discipline: each question text is bound to one
+// questionRequestId. A retry of the SAME text reuses the id;
+// editing the text makes it a NEW question with a fresh id (even
+// while an earlier ask is still in flight). A response is applied
+// only while it is still the in-flight ask — a late response for a
+// superseded question is dropped, and a response never clears a
+// question draft the owner has since edited.
+//
+// After a save the panel keeps a RECEIPT (CMP-READ-001): the
+// server's actual cardId + this snippet's id, the stored row's
+// 一句话核心 and 出处 read back from the library, and buttons that
+// jump to that exact card / back to this exact snippet. A failed
+// read-back says 「已保存，详情暂未读出」 and retries READ-ONLY —
+// it never re-creates the card under a new key.
 interface QaReceipt {
   cardId: number;
   replayed: boolean;
@@ -168,8 +189,18 @@ function SnippetQaPanel({
   const [turns, setTurns] = useState<QaTurn[]>([]);
   const [question, setQuestion] = useState("");
   const [askError, setAskError] = useState<string | null>(null);
+  // Per-turn card draft: which turn is being distilled, and the
+  // owner's own words for it. The conclusion starts from that
+  // turn's suggestion (labeled 建议） but is the owner's to rewrite;
+  // the annotation is always the owner's own, never prefilled.
+  const [draftTurn, setDraftTurn] = useState<number | null>(null);
   const [core, setCore] = useState("");
   const [annotation, setAnnotation] = useState("");
+  // The draft's source moved since its turn was answered, and the
+  // owner has NOT yet chosen: the save button is replaced by the
+  // explicit choice UI (old pinned citation vs current snippet).
+  const [sourceChoicePending, setSourceChoicePending] = useState(false);
+  const [sourceCompare, setSourceCompare] = useState<"pinned" | "current">("pinned");
   const [cardMsg, setCardMsg] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<QaReceipt | null>(null);
   // The receipt's card was saved but a fresh read says it is gone
@@ -188,8 +219,29 @@ function SnippetQaPanel({
   const [conflictUnlocated, setConflictUnlocated] = useState(false);
   const [conflictReadbackBusy, setConflictReadbackBusy] = useState(false);
   const [snippetGone, setSnippetGone] = useState(false);
+  // Which turn's pinned citation is expanded (「查看本次原文」).
+  const [sourceOpenTurn, setSourceOpenTurn] = useState<number | null>(null);
   const cardKeyRef = useRef<string>(newRequestId());
   const questionKeyRef = useRef<string>(newRequestId());
+  // The question text the current questionKeyRef is bound to, the
+  // in-flight ask's id + text, and a mirror of the textarea so a
+  // late response can tell whether the owner has edited since.
+  const keyBoundTextRef = useRef<string>("");
+  const pendingAskRef = useRef<{ id: string; text: string } | null>(null);
+  const questionRef = useRef<string>("");
+
+  const onQuestionChange = (value: string) => {
+    setQuestion(value);
+    questionRef.current = value;
+    // Editing the question makes it a NEW question: it gets a
+    // fresh id, so a retry of the edited text never reuses the
+    // previous question's id — and an in-flight ask for the old
+    // text keeps its own id and cannot claim the new draft.
+    if (value.trim() !== keyBoundTextRef.current) {
+      questionKeyRef.current = newRequestId();
+      keyBoundTextRef.current = value.trim();
+    }
+  };
 
   const ask = useMutation({
     mutationFn: (q: string) =>
@@ -201,54 +253,160 @@ function SnippetQaPanel({
         history: turns.slice(-6).map((t) => ({ question: t.question, answer: t.answer })),
       }),
     onSuccess: (res, q) => {
+      // Late-response guard: apply the answer only if this ask is
+      // still the in-flight one AND the response's consumed binding
+      // is that ask's id. A superseded response is dropped whole —
+      // it adds no turn and clears nothing.
+      const pending = pendingAskRef.current;
+      if (!pending || pending.text !== q) return;
+      if (res.ok && res.questionRequestId !== pending.id) return;
+      pendingAskRef.current = null;
       if (res.ok) {
         // The question is consumed: the next one gets a fresh id.
         questionKeyRef.current = newRequestId();
+        keyBoundTextRef.current = "";
         setTurns((prev) => [
           ...prev,
-          { question: q, answer: res.answer, suggestedCore: res.suggestedCore },
+          {
+            question: q,
+            answer: res.answer,
+            suggestedCore: res.suggestedCore,
+            questionRequestId: res.questionRequestId,
+            snippetId: res.snippetId,
+            snippetVersion: res.snippetVersion,
+            sourceText: res.sourceText,
+            sourceLabel: res.sourceLabel,
+          },
         ]);
-        setQuestion("");
+        // Clear the textarea ONLY if the owner has not edited it
+        // since submitting — an edited new draft is never cleared
+        // by a late answer.
+        if (questionRef.current.trim() === q) {
+          setQuestion("");
+          questionRef.current = "";
+        }
         setAskError(null);
-        // Prefill the card core with the latest suggestion; the owner
-        // can still rewrite it before saving.
-        if (res.suggestedCore) setCore(res.suggestedCore);
-        setReceipt(null);
-        setReceiptGone(false);
-        setConflictCardId(null);
-        setConflictUnlocated(false);
       } else if (res.forbidden) {
         setAskError("当前身份无权提问（仅所有者可用）。问题草稿还在输入框里。");
       } else {
         setAskError("这段片段暂时无法提问（可能已被删除或已更新）。问题草稿还在输入框里。");
       }
     },
-    // Failure/timeout: the draft is NOT cleared and no turn is added,
-    // so there is never a half-finished exchange or half a card.
-    onError: () =>
-      setAskError("提问失败或超时。问题草稿还在输入框里，原文上下文没有丢，可以直接重试。"),
+    // Failure/timeout: the draft is NOT cleared and no turn is
+    // added, so there is never a half-finished exchange or half a
+    // card. The question key is NOT rotated either: a retry of the
+    // same text re-asks under the same questionRequestId.
+    onError: (_err, q) => {
+      const pending = pendingAskRef.current;
+      if (!pending || pending.text !== q) return;
+      pendingAskRef.current = null;
+      setAskError("提问失败或超时。问题草稿还在输入框里，原文上下文没有丢，可以直接重试。");
+    },
   });
 
+  const submitAsk = () => {
+    const q = question.trim();
+    if (!q || ask.isPending) return;
+    // The ask is sent under the id currently bound to this exact
+    // text (a retry after a failure reuses it, because neither the
+    // text nor the key changed).
+    keyBoundTextRef.current = q;
+    pendingAskRef.current = { id: questionKeyRef.current, text: q };
+    ask.mutate(q);
+  };
+
+  // Open ONE turn's conclusion as an editable card draft. Only the
+  // suggestion is carried in (as the editable conclusion, labeled
+  // 建议）; the annotation starts empty — it is the owner's own
+  // words or nothing.
+  const openTurnDraft = (index: number) => {
+    const t = turns[index];
+    if (!t) return;
+    setDraftTurn(index);
+    setCore(t.suggestedCore ?? "");
+    setAnnotation("");
+    setCardMsg(null);
+    setSourceChoicePending(false);
+    setSourceCompare("pinned");
+    setConflictCardId(null);
+    setConflictUnlocated(false);
+    setReceipt(null);
+    setReceiptGone(false);
+    // A new save intent gets a fresh save key.
+    cardKeyRef.current = newRequestId();
+  };
+
+  const draftData = draftTurn != null ? turns[draftTurn] : undefined;
+  // Has the live snippet moved away from the draft turn's pinned
+  // citation? Compared on the live library row (version + 原文 +
+  // 出处 label) against the turn's response-time snapshot.
+  const draftSourceMoved =
+    draftData != null &&
+    draftData.snippetVersion != null &&
+    (draftData.snippetVersion !== snippet.version ||
+      draftData.sourceText !== snippet.text ||
+      draftData.sourceLabel !== sourceLabelOf(snippet));
+
   const saveCard = useMutation({
-    mutationFn: () =>
-      api.createCard({
+    mutationFn: (useCurrentSource: boolean) => {
+      const t = draftTurn != null ? turns[draftTurn] : undefined;
+      // The save carries the turn's pinned citation as its binding.
+      // When the owner explicitly chose the current source after a
+      // move, the binding is re-based on the CURRENT stored row —
+      // by their tap, never silently. A turn without a binding
+      // saves as a plain card, exactly like before.
+      const binding =
+        t && t.questionRequestId != null && t.snippetVersion != null
+          ? useCurrentSource
+            ? {
+                qaQuestionRequestId: t.questionRequestId,
+                qaSnippetVersion: snippet.version,
+                qaSourceText: snippet.text,
+                qaSourceLabel: sourceLabelOf(snippet),
+              }
+            : {
+                qaQuestionRequestId: t.questionRequestId,
+                qaSnippetVersion: t.snippetVersion,
+                qaSourceText: t.sourceText,
+                qaSourceLabel: t.sourceLabel,
+              }
+          : {};
+      return api.createCard({
         requestId: cardKeyRef.current,
         core: core.trim(),
         snippetId: snippet.id,
         annotation: annotation.trim() || undefined,
-      }),
-    onSuccess: (res) => {
+        ...binding,
+      });
+    },
+    onSuccess: (res, useCurrentSource) => {
       if (res.ok && res.id != null) {
         cardKeyRef.current = newRequestId();
         // Keep the receipt bound to the SERVER's actual card id and
         // this snippet — not to anything the model suggested.
         setReceipt({ cardId: res.id, replayed: res.status === "replayed" });
         setReceiptGone(false);
+        setDraftTurn(null);
+        setSourceChoicePending(false);
         setConflictCardId(null);
         setConflictUnlocated(false);
         setCardMsg(null);
         void queryClient.invalidateQueries({ queryKey: ["library"] });
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else if (
+        res.status === "conflict" &&
+        res.resultId == null &&
+        !useCurrentSource &&
+        draftSourceMoved
+      ) {
+        // The server refused the pinned binding: the source moved
+        // since this discussion. NOTHING was written under this
+        // key. Keep the draft exactly as it is and make the owner
+        // choose — old pinned citation vs the current snippet —
+        // before any save goes out under a binding again.
+        setSourceChoicePending(true);
+        setSourceCompare("pinned");
+        setCardMsg(null);
       } else if (res.status === "conflict") {
         // Same key, different payload: the original save IS on the
         // server. Keep the current inputs exactly as they are and
@@ -362,6 +520,37 @@ function SnippetQaPanel({
               Muse 的解释 · 模型生成，不是原文
             </p>
             <p className="mt-1 whitespace-pre-wrap text-[15px] leading-relaxed">{t.answer}</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                aria-expanded={sourceOpenTurn === i}
+                onClick={() => setSourceOpenTurn(sourceOpenTurn === i ? null : i)}
+                className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+              >
+                {sourceOpenTurn === i ? "收起本次原文" : "查看本次原文"}
+              </button>
+              <button
+                type="button"
+                onClick={() => openTurnDraft(i)}
+                className="rounded-lg border border-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent)]"
+              >
+                整理这轮为卡
+              </button>
+            </div>
+            {sourceOpenTurn === i && (
+              <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3">
+                <p className="text-xs font-semibold">
+                  本次原文 · 这轮回答时的固定快照
+                </p>
+                <p className="mt-0.5 text-xs text-[var(--dim)]">{t.sourceLabel}</p>
+                <blockquote className="font-serif-book mt-2 text-[15px] leading-relaxed">
+                  「{t.sourceText}」
+                </blockquote>
+                <p className="mt-2 text-xs text-[var(--dim)]">
+                  这是这轮讨论被回答时引用的原文，固定在本轮上；片段之后被更新也不会改写这里。
+                </p>
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -373,7 +562,7 @@ function SnippetQaPanel({
         <textarea
           id={`qa-q-${snippet.id}`}
           value={question}
-          onChange={(e) => setQuestion(e.target.value)}
+          onChange={(e) => onQuestionChange(e.target.value)}
           rows={3}
           placeholder="例如：这句话里的「想要」和「需要」怎么区分？"
           className={inputCls}
@@ -387,7 +576,7 @@ function SnippetQaPanel({
           <button
             type="button"
             disabled={!canAsk}
-            onClick={() => ask.mutate(question.trim())}
+            onClick={submitAsk}
             className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {ask.isPending ? "Muse 思考中…" : turns.length > 0 ? "继续提问" : "提问"}
@@ -396,7 +585,7 @@ function SnippetQaPanel({
             <button
               type="button"
               disabled={!canAsk}
-              onClick={() => ask.mutate(question.trim())}
+              onClick={submitAsk}
               className="rounded-lg border border-[var(--accent2)] px-4 py-2 text-sm font-medium text-[var(--accent2)] disabled:opacity-50"
             >
               重试提问
@@ -405,7 +594,7 @@ function SnippetQaPanel({
         </div>
       </div>
 
-      {turns.length > 0 && receipt ? (
+      {receipt ? (
         <div className="mt-3 rounded-lg border border-[var(--ok)] p-3" role="status">
           {receiptGone ? (
             <>
@@ -445,6 +634,19 @@ function SnippetQaPanel({
               <p className="mt-1 text-xs text-[var(--dim)]">
                 出处：{receiptCard.sourceLabel ?? sourceLabelOf(snippet)}
               </p>
+              {receiptCard.qaSourceText != null && (
+                <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3">
+                  <p className="text-xs font-semibold">
+                    当次讨论引用 · 已固定在这张卡上
+                  </p>
+                  <p className="mt-0.5 text-xs text-[var(--dim)]">
+                    {receiptCard.qaSourceLabel}
+                  </p>
+                  <blockquote className="font-serif-book mt-2 text-[15px] leading-relaxed">
+                    「{receiptCard.qaSourceText}」
+                  </blockquote>
+                </div>
+              )}
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -502,23 +704,35 @@ function SnippetQaPanel({
             </p>
           )}
         </div>
-      ) : turns.length > 0 ? (
+      ) : draftData ? (
           <div className="mt-3 space-y-3 rounded-lg border border-dashed border-[var(--accent)] p-3">
-            <p className="text-sm font-medium">把这次讨论沉淀为知识卡</p>
+            <p className="text-sm font-medium">
+              整理这轮为卡 · 第 {(draftTurn ?? 0) + 1} 轮讨论
+            </p>
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3">
+              <p className="text-xs font-semibold">这轮的固定原文出处</p>
+              <p className="mt-0.5 text-xs text-[var(--dim)]">{draftData.sourceLabel}</p>
+              <blockquote className="font-serif-book mt-2 text-[15px] leading-relaxed">
+                「{draftData.sourceText}」
+              </blockquote>
+              <p className="mt-2 text-xs text-[var(--dim)]">
+                保存后，这张卡会带着这轮讨论的固定引用 — 之后片段更新也不会改写它。
+              </p>
+            </div>
             <div>
               <label htmlFor={`qa-core-${snippet.id}`} className={labelCls}>
-                一句话核心（带「建议」的是 Muse 的提炼，可改成你自己的话）
+                我的一句话结论（带「建议」的是 Muse 的提炼，可改成你自己的话）
               </label>
               <input
                 id={`qa-core-${snippet.id}`}
                 value={core}
                 onChange={(e) => setCore(e.target.value)}
-                placeholder="用一句话写下这次讨论的结论"
+                placeholder="用一句话写下这轮讨论的结论"
                 className={inputCls}
               />
-              {turns[turns.length - 1]?.suggestedCore && (
+              {draftData.suggestedCore && (
                 <p className="mt-1 text-xs text-[var(--dim)]">
-                  建议核心：{turns[turns.length - 1]?.suggestedCore}
+                  建议核心：{draftData.suggestedCore}
                 </p>
               )}
             </div>
@@ -532,7 +746,6 @@ function SnippetQaPanel({
                 className={inputCls}
               />
             </div>
-            <p className="text-xs text-[var(--dim)]">出处会记为：{sourceLabelOf(snippet)}</p>
             {cardMsg && (
               <p role="status" className="text-sm text-[var(--accent2)]">
                 ▲ {cardMsg}
@@ -572,14 +785,86 @@ function SnippetQaPanel({
                 </button>
               </div>
             )}
-            <button
-              type="button"
-              disabled={saveCard.isPending || !core.trim()}
-              onClick={() => saveCard.mutate()}
-              className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-            >
-              {saveCard.isPending ? "保存中…" : "一键存为知识卡"}
-            </button>
+            {sourceChoicePending ? (
+              <div className="rounded-lg border border-[var(--accent2)] p-3" role="alert">
+                <p className="text-sm font-medium text-[var(--accent2)]">
+                  ▲ 原讨论来源已更新
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                  这轮讨论引用的是当时的原文；这段片段现在的内容已经不同。你的草稿保留在上面，没有按新版本默默保存。先看清两版，再由你明确选择。
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    aria-pressed={sourceCompare === "pinned"}
+                    onClick={() => setSourceCompare("pinned")}
+                    className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+                  >
+                    查看旧引用（当次讨论）
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={sourceCompare === "current"}
+                    onClick={() => setSourceCompare("current")}
+                    className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+                  >
+                    查看当前片段
+                  </button>
+                </div>
+                {sourceCompare === "pinned" ? (
+                  <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3">
+                    <p className="text-xs font-semibold">旧引用 · 这轮讨论当时的原文</p>
+                    <p className="mt-0.5 text-xs text-[var(--dim)]">{draftData.sourceLabel}</p>
+                    <blockquote className="font-serif-book mt-2 text-[15px] leading-relaxed">
+                      「{draftData.sourceText}」
+                    </blockquote>
+                  </div>
+                ) : (
+                  <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3">
+                    <p className="text-xs font-semibold">当前片段 · 现在的原文</p>
+                    <p className="mt-0.5 text-xs text-[var(--dim)]">{sourceLabelOf(snippet)}</p>
+                    <blockquote className="font-serif-book mt-2 text-[15px] leading-relaxed">
+                      「{snippet.text}」
+                    </blockquote>
+                  </div>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={saveCard.isPending || !core.trim()}
+                    onClick={() => saveCard.mutate(true)}
+                    className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  >
+                    {saveCard.isPending ? "保存中…" : "改用当前片段出处保存"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSourceChoicePending(false)}
+                    className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm"
+                  >
+                    先不保存，保留草稿
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={saveCard.isPending || !core.trim()}
+                  onClick={() => saveCard.mutate(false)}
+                  className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  {saveCard.isPending ? "保存中…" : "确认存为知识卡"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDraftTurn(null)}
+                  className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm"
+                >
+                  取消整理
+                </button>
+              </div>
+            )}
           </div>
         ) : null}
     </section>

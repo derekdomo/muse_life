@@ -18,6 +18,13 @@
 //      真实零（空库）时 hasRecords=false 且覆盖/分类和/重叠同为 0
 //   S9 迁移保行：迁移前风格的旧记录（无 ledger 行）迁移后逐行保留、可被
 //      dashboard 读到、可被新键 update（与 ledger 同批落行）
+//   S10 基准仲裁（CMP-TIME-SAVE-001 余项）：编辑意图携带打开时读到的内容
+//      版本（baseVersion）；失败的旧编辑在较新编辑落行后重试 → typed
+//      stale_conflict + 当前存行、条目仍为新稿、账本无旧键成功行（主体/账本
+//      两写点失败都试）；无竞争时原键原样重试可恢复；旧 update 在途暂停后
+//      恢复、同键异 payload 竞争、丢响应重试、delete 交错、无基准的旧客户
+//      端调用（不得静默覆盖，一律 stale_conflict）、以新基准显式确认后保存、
+//      冲突后周统计与存行一致
 //
 // 只用内存库 + SYNTHETIC 数据，绝不触碰生产 app.db。
 // 用法：bun validate-time-atomicity.mjs；退出码 0 = 全部通过。
@@ -28,7 +35,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "./server/src/schema.ts";
-import { Actions } from "./server/src/actions.ts";
+import { Actions, contentVersion } from "./server/src/actions.ts";
 
 let passed = 0;
 let failed = 0;
@@ -154,6 +161,18 @@ function makeGate(n, timeoutMs = 5000) {
   return () => ({ used: false, wait });
 }
 
+// Manual gate for barrierDb: the wrapped handler's first ledger select
+// parks until release() — an update provably IN FLIGHT (past its entry
+// point, before any write) while another edit commits underneath it.
+function manualGate() {
+  let release;
+  const hold = new Promise((r) => (release = r));
+  return {
+    gate: { used: false, wait: async () => { await hold; } },
+    release: () => release(),
+  };
+}
+
 // ------------------------------------------------------------ S1: add fails at ledger write point
 {
   const { client, db } = await makeWorld();
@@ -262,7 +281,7 @@ function makeGate(n, timeoutMs = 5000) {
   const newGate = makeGate(2);
   const ctxA = makeCtx(barrierDb(db, newGate()));
   const ctxB = makeCtx(barrierDb(db, newGate()));
-  const upd = { requestId: "s3c-upd-key-001", entryId, ...ADD, note: "UPDATED" };
+  const upd = { requestId: "s3c-upd-key-001", entryId, ...ADD, note: "UPDATED", baseVersion: add.entry.version };
   const settled = await Promise.allSettled([
     Actions.updateEntry.handler(ctxA, upd),
     Actions.updateEntry.handler(ctxB, upd),
@@ -288,7 +307,7 @@ function makeGate(n, timeoutMs = 5000) {
   );
   let threw = false;
   try {
-    await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0001", entryId, ...ADD, note: "V2" });
+    await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0001", entryId, ...ADD, note: "V2", baseVersion: add.entry.version });
   } catch {
     threw = true;
   }
@@ -296,7 +315,7 @@ function makeGate(n, timeoutMs = 5000) {
   eq("S4a 条目内容未变", (await entryRows(client))[0]?.note, "SYNTHETIC");
   eq("S4a 失败键未落 ledger", await ledgerRow(client, "s4-upd-key-0001"), null);
   await client.execute("DROP TRIGGER fail_upd");
-  const retry = await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0001", entryId, ...ADD, note: "V2" });
+  const retry = await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0001", entryId, ...ADD, note: "V2", baseVersion: add.entry.version });
   eq("S4a 原键重试 ok", retry.ok, true);
   eq("S4a 重试后内容为 V2", (await entryRows(client))[0]?.note, "V2");
   eq("S4a ledger 总行数 2", await count(client, "request_ledger"), 2);
@@ -308,7 +327,7 @@ function makeGate(n, timeoutMs = 5000) {
   );
   threw = false;
   try {
-    await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0002", entryId, ...ADD, note: "V3" });
+    await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0002", entryId, ...ADD, note: "V3", baseVersion: retry.entry.version });
   } catch {
     threw = true;
   }
@@ -316,7 +335,7 @@ function makeGate(n, timeoutMs = 5000) {
   eq("S4b 条目内容仍为 V2（更新已回滚）", (await entryRows(client))[0]?.note, "V2");
   eq("S4b 失败键未落 ledger", await ledgerRow(client, "s4-upd-key-0002"), null);
   await client.execute("DROP TRIGGER fail_led2");
-  const retry2 = await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0002", entryId, ...ADD, note: "V3" });
+  const retry2 = await Actions.updateEntry.handler(ctx, { requestId: "s4-upd-key-0002", entryId, ...ADD, note: "V3", baseVersion: retry.entry.version });
   eq("S4b 原键重试 ok", retry2.ok, true);
   eq("S4b 重试后内容为 V3", (await entryRows(client))[0]?.note, "V3");
   eq("S4b entries 仍 1 行", await count(client, "time_entries"), 1);
@@ -329,12 +348,12 @@ function makeGate(n, timeoutMs = 5000) {
   const ctx = makeCtx(db);
   const add = await Actions.addEntry.handler(ctx, { requestId: "s5-add-key-0001", ...ADD, note: "V1" });
   const entryId = add.entry.id;
-  await Actions.updateEntry.handler(ctx, { requestId: "s5-upd-key-0001", entryId, ...ADD, note: "V2" });
-  await Actions.updateEntry.handler(ctx, { requestId: "s5-upd-key-0002", entryId, ...ADD, note: "V3" });
+  const upd1 = await Actions.updateEntry.handler(ctx, { requestId: "s5-upd-key-0001", entryId, ...ADD, note: "V2", baseVersion: add.entry.version });
+  await Actions.updateEntry.handler(ctx, { requestId: "s5-upd-key-0002", entryId, ...ADD, note: "V3", baseVersion: upd1.entry.version });
   eq("S5 较新编辑已落行", (await entryRows(client))[0]?.note, "V3");
   // Late retry of the OLDER update (its response was lost): must resolve as
   // replay of the current state and must NOT roll the entry back to V2.
-  const stale = await Actions.updateEntry.handler(ctx, { requestId: "s5-upd-key-0001", entryId, ...ADD, note: "V2" });
+  const stale = await Actions.updateEntry.handler(ctx, { requestId: "s5-upd-key-0001", entryId, ...ADD, note: "V2", baseVersion: add.entry.version });
   eq("S5 旧 update 重试 ok（replay）", stale.ok, true);
   eq("S5 旧重试返回当前稿 V3", stale.entry?.note, "V3");
   eq("S5 旧重试未回滚新稿", (await entryRows(client))[0]?.note, "V3");
@@ -352,7 +371,7 @@ function makeGate(n, timeoutMs = 5000) {
   const ctx = makeCtx(db);
   const add = await Actions.addEntry.handler(ctx, { requestId: "s6-add-key-0001", ...ADD });
   const entryId = add.entry.id;
-  await Actions.updateEntry.handler(ctx, { requestId: "s6-upd-key-0001", entryId, ...ADD, note: "EDITED" });
+  await Actions.updateEntry.handler(ctx, { requestId: "s6-upd-key-0001", entryId, ...ADD, note: "EDITED", baseVersion: add.entry.version });
   const del = await Actions.deleteEntry.handler(ctx, { requestId: "s6-del-key-0001", entryId });
   eq("S6 delete ok", del.ok, true);
   eq("S6 删除后 entries 0 行", await count(client, "time_entries"), 0);
@@ -363,7 +382,7 @@ function makeGate(n, timeoutMs = 5000) {
   const lateAdd = await Actions.addEntry.handler(ctx, { requestId: "s6-add-key-0001", ...ADD });
   eq("S6 已删条目原 add 键晚重试为 deleted", lateAdd.error, "deleted");
   eq("S6 晚重试不复活条目", await count(client, "time_entries"), 0);
-  const lateUpd = await Actions.updateEntry.handler(ctx, { requestId: "s6-upd-key-0001", entryId, ...ADD, note: "EDITED" });
+  const lateUpd = await Actions.updateEntry.handler(ctx, { requestId: "s6-upd-key-0001", entryId, ...ADD, note: "EDITED", baseVersion: add.entry.version });
   eq("S6 已删条目 update 键晚重试为 deleted", lateUpd.error, "deleted");
   const lateDel = await Actions.deleteEntry.handler(ctx, { requestId: "s6-del-key-0001", entryId });
   eq("S6 delete 键 replay 仍 ok", lateDel.ok, true);
@@ -544,6 +563,7 @@ function unionMinutes(intervals) {
   const upd = await Actions.updateEntry.handler(ctx, {
     requestId: "s9-upd-key-0001", entryId: legacyId,
     category: "家庭陪伴", startMs: legacyStart, endMs: legacyStart + 45 * 60_000, note: "LEGACY-EDITED",
+    baseVersion: contentVersion(beforeRows[0]),
   });
   eq("S9 旧记录可被新键 update", upd.ok, true);
   eq("S9 update 后仍 1 行（不新增）", await count(client, "time_entries"), 1);
@@ -551,6 +571,257 @@ function unionMinutes(intervals) {
   const afterRows = await entryRows(client);
   eq("S9 旧记录时间段未被改动", afterRows[0]?.startMs, legacyStart);
   eq("S9 旧记录分类未被改动", afterRows[0]?.category, "家庭陪伴");
+}
+
+// ------------------------------------------------------------ S10: base-version arbitration (stale failed edit must not overwrite a newer saved edit)
+{
+  // S10a: PM repro, failure at the LEDGER write point. add 原稿 → old-key
+  // update fails (trigger blocks only that key's ledger insert; body +
+  // ledger roll back) → a different key saves newer content → the old key
+  // retried with its original payload must NOT overwrite the newer稿.
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10a-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const v1 = add.entry.version;
+  await client.execute(
+    "CREATE TRIGGER fail_old_led BEFORE INSERT ON request_ledger WHEN NEW.request_id = 's10a-upd-old-01' BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END;",
+  );
+  let threw = false;
+  try {
+    await Actions.updateEntry.handler(ctx, { requestId: "s10a-upd-old-01", entryId, ...ADD, note: "OLD-DRAFT", baseVersion: v1 });
+  } catch {
+    threw = true;
+  }
+  eq("S10a 旧编辑在 ledger 写点失败抛错", threw, true);
+  eq("S10a 失败后条目仍为原稿", (await entryRows(client))[0]?.note, "ORIGINAL");
+  eq("S10a 失败旧键未落 ledger", await ledgerRow(client, "s10a-upd-old-01"), null);
+  await client.execute("DROP TRIGGER fail_old_led");
+  const newer = await Actions.updateEntry.handler(ctx, { requestId: "s10a-upd-new-01", entryId, ...ADD, note: "NEWER-DRAFT", baseVersion: v1 });
+  eq("S10a 另一键新编辑 ok", newer.ok, true);
+  eq("S10a 新稿已落行", (await entryRows(client))[0]?.note, "NEWER-DRAFT");
+  check("S10a 新稿 version 已不同于基准", newer.entry.version !== v1);
+  const staleRetry = await Actions.updateEntry.handler(ctx, { requestId: "s10a-upd-old-01", entryId, ...ADD, note: "OLD-DRAFT", baseVersion: v1 });
+  eq("S10a 失败旧键重试为 stale_conflict", staleRetry.error, "stale_conflict");
+  eq("S10a stale_conflict 附当前存行（新稿）", staleRetry.entry?.note, "NEWER-DRAFT");
+  eq("S10a 旧重试未覆盖新稿", (await entryRows(client))[0]?.note, "NEWER-DRAFT");
+  eq("S10a 旧键仍无 ledger 成功行", await ledgerRow(client, "s10a-upd-old-01"), null);
+  eq("S10a entries 仍 1 行", await count(client, "time_entries"), 1);
+  eq("S10a ledger 恰 2 行（add+新编辑）", await count(client, "request_ledger"), 2);
+}
+{
+  // S10b: PM repro, failure at the BODY write point (BEFORE UPDATE trigger).
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10b-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const v1 = add.entry.version;
+  await client.execute(
+    "CREATE TRIGGER fail_body BEFORE UPDATE ON time_entries BEGIN SELECT RAISE(ABORT, 'synthetic body failure'); END;",
+  );
+  let threw = false;
+  try {
+    await Actions.updateEntry.handler(ctx, { requestId: "s10b-upd-old-01", entryId, ...ADD, note: "OLD-DRAFT", baseVersion: v1 });
+  } catch {
+    threw = true;
+  }
+  eq("S10b 旧编辑在主体写点失败抛错", threw, true);
+  eq("S10b 失败后条目仍为原稿", (await entryRows(client))[0]?.note, "ORIGINAL");
+  eq("S10b 失败旧键未落 ledger", await ledgerRow(client, "s10b-upd-old-01"), null);
+  await client.execute("DROP TRIGGER fail_body");
+  const newer = await Actions.updateEntry.handler(ctx, { requestId: "s10b-upd-new-01", entryId, ...ADD, note: "NEWER-DRAFT", baseVersion: v1 });
+  eq("S10b 另一键新编辑 ok", newer.ok, true);
+  const staleRetry = await Actions.updateEntry.handler(ctx, { requestId: "s10b-upd-old-01", entryId, ...ADD, note: "OLD-DRAFT", baseVersion: v1 });
+  eq("S10b 失败旧键重试为 stale_conflict", staleRetry.error, "stale_conflict");
+  eq("S10b stale_conflict 附当前存行（新稿）", staleRetry.entry?.note, "NEWER-DRAFT");
+  eq("S10b 旧重试未覆盖新稿", (await entryRows(client))[0]?.note, "NEWER-DRAFT");
+  eq("S10b 旧键仍无 ledger 成功行", await ledgerRow(client, "s10b-upd-old-01"), null);
+  eq("S10b ledger 恰 2 行（add+新编辑）", await count(client, "request_ledger"), 2);
+}
+{
+  // S10c: no contention — a failed old key retried as-is recovers cleanly
+  // (the base never moved, so the retry is a normal save, not a conflict).
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10c-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const v1 = add.entry.version;
+  await client.execute(
+    "CREATE TRIGGER fail_c BEFORE INSERT ON request_ledger WHEN NEW.request_id = 's10c-upd-key-01' BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END;",
+  );
+  let threw = false;
+  try {
+    await Actions.updateEntry.handler(ctx, { requestId: "s10c-upd-key-01", entryId, ...ADD, note: "RECOVERED", baseVersion: v1 });
+  } catch {
+    threw = true;
+  }
+  eq("S10c 首次尝试在 ledger 写点失败抛错", threw, true);
+  await client.execute("DROP TRIGGER fail_c");
+  const retry = await Actions.updateEntry.handler(ctx, { requestId: "s10c-upd-key-01", entryId, ...ADD, note: "RECOVERED", baseVersion: v1 });
+  eq("S10c 无竞争时原键原样重试 ok", retry.ok, true);
+  eq("S10c 重试内容已落行", (await entryRows(client))[0]?.note, "RECOVERED");
+  eq("S10c 旧键已落 ledger", (await ledgerRow(client, "s10c-upd-key-01"))?.entryId, entryId);
+  eq("S10c entries 仍 1 行", await count(client, "time_entries"), 1);
+}
+{
+  // S10d: an old update IN FLIGHT (parked at its first ledger read) while a
+  // newer edit commits; when it resumes it must hit stale_conflict, never
+  // overwrite — arrival/resume order is not intent order.
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10d-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const v1 = add.entry.version;
+  const mg = manualGate();
+  const parkedCtx = makeCtx(barrierDb(db, mg.gate));
+  const inFlight = Actions.updateEntry.handler(parkedCtx, {
+    requestId: "s10d-upd-old-01", entryId, ...ADD, note: "OLD-DRAFT", baseVersion: v1,
+  });
+  for (let i = 0; i < 200 && !mg.gate.used; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  eq("S10d 旧 update 已在途（停在 ledger 首读）", mg.gate.used, true);
+  const newer = await Actions.updateEntry.handler(ctx, { requestId: "s10d-upd-new-01", entryId, ...ADD, note: "NEWER-DRAFT", baseVersion: v1 });
+  eq("S10d 在途期间新编辑 ok", newer.ok, true);
+  mg.release();
+  const resumed = await inFlight;
+  eq("S10d 在途旧 update 恢复后为 stale_conflict", resumed.error, "stale_conflict");
+  eq("S10d 恢复的旧 update 附当前存行", resumed.entry?.note, "NEWER-DRAFT");
+  eq("S10d 存行仍为新稿", (await entryRows(client))[0]?.note, "NEWER-DRAFT");
+  eq("S10d 旧键无 ledger 成功行", await ledgerRow(client, "s10d-upd-old-01"), null);
+}
+{
+  // S10e: same key, different payloads, both based on the same read,
+  // racing behind the read barrier: exactly one wins; the loser gets a
+  // typed conflict-family error and the stored row is the winner's稿.
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10e-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const v1 = add.entry.version;
+  const newGate = makeGate(2);
+  const ctxA = makeCtx(barrierDb(db, newGate()));
+  const ctxB = makeCtx(barrierDb(db, newGate()));
+  const settled = await Promise.allSettled([
+    Actions.updateEntry.handler(ctxA, { requestId: "s10e-upd-key-01", entryId, ...ADD, note: "PAYLOAD-A", baseVersion: v1 }),
+    Actions.updateEntry.handler(ctxB, { requestId: "s10e-upd-key-01", entryId, ...ADD, note: "PAYLOAD-B", baseVersion: v1 }),
+  ]);
+  const results = settled.map((s) => (s.status === "fulfilled" ? s.value : { ok: false, error: "threw" }));
+  eq("S10e 同键竞争恰一方 ok", results.filter((r) => r.ok).length, 1);
+  eq(
+    "S10e 败者为 typed 冲突（conflict 或 stale_conflict）",
+    results.filter((r) => !r.ok && (r.error === "conflict" || r.error === "stale_conflict")).length,
+    1,
+  );
+  const winner = results.find((r) => r.ok);
+  eq("S10e 存行为赢家 payload", (await entryRows(client))[0]?.note, winner?.entry?.note);
+  eq("S10e ledger 恰 2 行（add+赢家）", await count(client, "request_ledger"), 2);
+  eq("S10e entries 仍 1 行", await count(client, "time_entries"), 1);
+}
+{
+  // S10f: lost-response retry of a COMMITTED update — the only no-write
+  // replay path: same key + same payload + same base replays the current
+  // row, adds no ledger row, changes nothing.
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10f-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const args = { requestId: "s10f-upd-key-01", entryId, ...ADD, note: "SAVED", baseVersion: add.entry.version };
+  const first = await Actions.updateEntry.handler(ctx, args);
+  eq("S10f 首次 update ok", first.ok, true);
+  const replay = await Actions.updateEntry.handler(ctx, args);
+  eq("S10f 丢响应重试 ok（replay）", replay.ok, true);
+  eq("S10f replay 返回当前行", replay.entry?.note, "SAVED");
+  eq("S10f replay 后 ledger 仍 2 行", await count(client, "request_ledger"), 2);
+  eq("S10f replay 未改内容", (await entryRows(client))[0]?.note, "SAVED");
+}
+{
+  // S10g: delete interleave — an edit (carrying the once-correct base) that
+  // arrives after the entry was deleted returns deleted and never
+  // resurrects the row; a committed update key retried after delete is
+  // likewise deleted forever.
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10g-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const v1 = add.entry.version;
+  const upd = await Actions.updateEntry.handler(ctx, { requestId: "s10g-upd-key-01", entryId, ...ADD, note: "EDITED", baseVersion: v1 });
+  eq("S10g 删除前 update ok", upd.ok, true);
+  const del = await Actions.deleteEntry.handler(ctx, { requestId: "s10g-del-key-01", entryId });
+  eq("S10g delete ok", del.ok, true);
+  const lateEdit = await Actions.updateEntry.handler(ctx, { requestId: "s10g-upd-key-02", entryId, ...ADD, note: "GHOST", baseVersion: upd.entry.version });
+  eq("S10g 删除后新键编辑为 deleted", lateEdit.error, "deleted");
+  eq("S10g 编辑未复活条目", await count(client, "time_entries"), 0);
+  eq("S10g deleted 判定不落新 ledger 行", await ledgerRow(client, "s10g-upd-key-02"), null);
+  const committedRetry = await Actions.updateEntry.handler(ctx, { requestId: "s10g-upd-key-01", entryId, ...ADD, note: "EDITED", baseVersion: v1 });
+  eq("S10g 已提交 update 键在删除后重试为 deleted", committedRetry.error, "deleted");
+  eq("S10g 条目仍不存在", await count(client, "time_entries"), 0);
+}
+{
+  // S10h: legacy caller — an update carrying NO baseVersion must never
+  // silently overwrite a stored row, even one that was never edited: it is
+  // rejected as stale_conflict with the current row attached, zero writes.
+  // (Chosen legacy behavior for CMP-TIME-SAVE-001: base-less updates always
+  // require a refresh; only already-committed keys may replay base-lessly,
+  // via the ledger, as S5/S6 show.)
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10h-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const legacy = await Actions.updateEntry.handler(ctx, { requestId: "s10h-upd-key-01", entryId, ...ADD, note: "LEGACY-WRITE" });
+  eq("S10h 无基准 update 为 stale_conflict", legacy.error, "stale_conflict");
+  eq("S10h stale_conflict 附当前存行", legacy.entry?.note, "ORIGINAL");
+  eq("S10h 存行未被无基准调用改动", (await entryRows(client))[0]?.note, "ORIGINAL");
+  eq("S10h 无基准调用未落 ledger", await ledgerRow(client, "s10h-upd-key-01"), null);
+  eq("S10h ledger 仍只有 add 一行", await count(client, "request_ledger"), 1);
+}
+{
+  // S10i: explicit confirm with the new base + stats consistency. After a
+  // stale_conflict, resubmitting the preserved draft under a FRESH key with
+  // the conflict response's version as base is the user's explicit new
+  // intent and saves; the week stats track the stored row at every step.
+  const { client, db } = await makeWorld();
+  const ctx = makeCtx(db);
+  const add = await Actions.addEntry.handler(ctx, { requestId: "s10i-add-key-01", ...ADD, note: "ORIGINAL" });
+  const entryId = add.entry.id;
+  const v1 = add.entry.version;
+  await client.execute(
+    "CREATE TRIGGER fail_i BEFORE INSERT ON request_ledger WHEN NEW.request_id = 's10i-upd-old-01' BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END;",
+  );
+  let threw = false;
+  try {
+    await Actions.updateEntry.handler(ctx, { requestId: "s10i-upd-old-01", entryId, category: "学习", startMs: T0, endMs: T1, note: "OLD-DRAFT", baseVersion: v1 });
+  } catch {
+    threw = true;
+  }
+  eq("S10i 旧编辑先失败", threw, true);
+  await client.execute("DROP TRIGGER fail_i");
+  const newer = await Actions.updateEntry.handler(ctx, {
+    requestId: "s10i-upd-new-01", entryId,
+    category: "工作", startMs: T0, endMs: T1 + 30 * 60_000, note: "NEWER-DRAFT", baseVersion: v1,
+  });
+  eq("S10i 新编辑 ok（改分类+时长）", newer.ok, true);
+  const staleRetry = await Actions.updateEntry.handler(ctx, { requestId: "s10i-upd-old-01", entryId, category: "学习", startMs: T0, endMs: T1, note: "OLD-DRAFT", baseVersion: v1 });
+  eq("S10i 旧键重试为 stale_conflict", staleRetry.error, "stale_conflict");
+  // Stats follow the STORED row (工作 60 分钟), not the rejected old draft.
+  const dash = await Actions.getDashboard.handler(ctx, { weekStartMs: T0 });
+  const catOf = Object.fromEntries(dash.detail.summary.byCategory.map((c) => [c.category, c.minutes]));
+  eq("S10i 冲突后统计：工作 60 分钟（存行口径）", catOf["工作"], 60);
+  eq("S10i 冲突后统计：无学习分类行", catOf["学习"], undefined);
+  eq("S10i 冲突后统计：coverage 60", dash.detail.summary.coverageMinutes, 60);
+  eq("S10i 冲突后统计：overlap 0", dash.detail.summary.overlapMinutes, 0);
+  // Explicit confirm: fresh key + base = the version the conflict returned.
+  const confirmed = await Actions.updateEntry.handler(ctx, {
+    requestId: "s10i-upd-confirm-1", entryId,
+    category: "学习", startMs: T0, endMs: T1, note: "OLD-DRAFT",
+    baseVersion: staleRetry.entry.version,
+  });
+  eq("S10i 以新基准显式确认后 ok", confirmed.ok, true);
+  eq("S10i 确认后存行为草稿内容", (await entryRows(client))[0]?.note, "OLD-DRAFT");
+  const dash2 = await Actions.getDashboard.handler(ctx, { weekStartMs: T0 });
+  const catOf2 = Object.fromEntries(dash2.detail.summary.byCategory.map((c) => [c.category, c.minutes]));
+  eq("S10i 确认后统计：学习 30 分钟", catOf2["学习"], 30);
+  eq("S10i 确认后统计：coverage 30", dash2.detail.summary.coverageMinutes, 30);
 }
 
 // ------------------------------------------------------------ report

@@ -8,6 +8,15 @@
 //                      and progress kept in the owner's own unit.
 //   book_chapters    — sanitized chapter HTML of an imported EPUB,
 //                      stored only in this app's private runtime DB.
+//                      This is the LIVE copy: readers only ever see
+//                      these rows, and an import replaces them in one
+//                      atomic promotion (CMP-READ-IMPORT-001).
+//   import_staged_chapters
+//                    — one import generation's chapters, staged in
+//                      isolation under (book_id, gen) where gen is the
+//                      beginImport requestId. Invisible to readers;
+//                      promoted into book_chapters by finishImport
+//                      only after the whole generation validates.
 //   reading_sessions — explicit reading records; ONLY these rows count
 //                      toward reading days / streaks / minutes. Imports,
 //                      savor views and internalized marks never create one.
@@ -45,8 +54,23 @@ export const books = sqliteTable("books", {
   }).notNull(),
   importError: text("import_error"),
   // ctx.blobs key of the original owner-supplied EPUB bytes, kept so a
-  // failed import can be retried against the same book row.
+  // failed import can be retried against the same book row. This is
+  // the LIVE file pointer: it moves only when a generation is
+  // promoted by a successful finishImport.
   blobKey: text("blob_key"),
+  // CMP-READ-IMPORT-001 generation binding: the requestId of the
+  // import generation that currently owns this book's staging area
+  // (set by beginImport, cleared never — a finished generation stays
+  // recorded so its late writes are recognized as ITS, and refused
+  // once a newer generation owns the book). NULL for books whose
+  // import predates generations; their old unbound writes follow the
+  // documented legacy path.
+  importGen: text("import_gen"),
+  // ctx.blobs key of the CURRENT generation's staged original file
+  // (epub-stage/<bookId>/<gen>). Promoted into blobKey by a
+  // successful finishImport; a failed import leaves blobKey — the
+  // previous good file — untouched.
+  importBlobKey: text("import_blob_key"),
   // Edition/version label of the imported file (e.g. EPUB filename or
   // the version the owner names), snapshotted onto snippets.
   versionLabel: text("version_label"),
@@ -81,6 +105,25 @@ export const bookChapters = sqliteTable("book_chapters", {
   // Sanitized chapter HTML (scripts, event handlers and remote
   // resources stripped client-side before upload; re-sanitized by the
   // reader's inert rendering — no remote loads, ever).
+  html: text("html").notNull(),
+  charCount: integer("char_count").notNull().default(0),
+});
+
+// One import generation's staged chapters (CMP-READ-IMPORT-001).
+// Written only by saveImportChapters calls bound to the generation
+// that currently owns the book; never read by the reader. The unique
+// (book_id, gen, idx) index makes a chapter position unambiguous
+// within a generation — a duplicate idx upserts the one staged row
+// instead of creating a rival.
+export const importStagedChapters = sqliteTable("import_staged_chapters", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  bookId: integer("book_id")
+    .notNull()
+    .references(() => books.id),
+  // The generation: the beginImport requestId that opened it.
+  gen: text("gen").notNull(),
+  idx: integer("idx").notNull(),
+  title: text("title"),
   html: text("html").notNull(),
   charCount: integer("char_count").notNull().default(0),
 });
@@ -154,6 +197,19 @@ export const knowledgeCards = sqliteTable("knowledge_cards", {
   // Human-readable source snapshot （书名 · 章节）, kept even if the
   // snippet is later removed.
   sourceLabel: text("source_label"),
+  // Q&A discussion binding (CMP-READ-001 pinned-citation closure):
+  // when a card is distilled from ONE in-app Q&A turn, these four
+  // columns pin exactly which discussion produced it — the ask's
+  // questionRequestId, the snippet version that was answered
+  // against, and the response-time 原文/出处 snapshot. All NULL for
+  // cards not made from a Q&A turn. The snapshot is immutable once
+  // saved: later snippet edits never rewrite what this card came
+  // from. Written only after the server verifies the snapshot still
+  // matches the stored snippet row (see createCard).
+  qaQuestionRequestId: text("qa_question_request_id"),
+  qaSnippetVersion: integer("qa_snippet_version"),
+  qaSourceText: text("qa_source_text"),
+  qaSourceLabel: text("qa_source_label"),
   // The owner's annotation, in the owner's words.
   annotation: text("annotation"),
   origin: text("origin", { enum: ["ui", "chat"] }).notNull(),
