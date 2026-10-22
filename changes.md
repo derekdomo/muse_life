@@ -1153,3 +1153,9 @@
 - (2) 错误码：实际为 `stale_conflict`（server 7 处、client 4 处，仓库代码无 stale_retry_conflict 字样），主条目的 `stale_retry_conflict` 作废。
 - (3) 验证计数：构建方最终实跑为 validate-time-atomicity **179/179**（原 114 不回归＋新增 S10 共 65 项：PM 复现两写点失败、无竞争恢复、在途暂停恢复、同键竞争、丢响应重试、delete 交错、无基准拒绝、显式确认保存、冲突后周统计与存行一致），与同步轮次独立复跑的脚本原生计数 179/179 完全一致——主条目「构建方 132/132（S6 18）与 179 为不同计数口径分账」作废：132/S6 为不完整预览的中间计数，唯一有效计数为 179/179。validate-time-review 65/65 不变。
 - (4) 旧客户端与回滚补正：未携带基准的旧客户端 update 一律按 stale_conflict 拒绝（无主条目所述「账本无已提交 update 键时放行」分支）；另新增局限——跨升级边界重放升级前已提交的 update 键会因指纹新增基准字段得到 conflict（客户端换新键重交、无数据丢失）；回滚还原三文件即可、无迁移回退，但回滚后以旧代码重放升级后已提交键同样会得到 conflict 需新键重交。其余结论（生产三表 0 行未动、冲突保稿＋当前存行并排展示、显式再保存才算新意图）不变。
+
+
+## 2026-10-22（07:13 轮次勘误二：READ 导入代际存储形态与出处换绑出口补正，依据构建方完整回传）
+
+- (1) `CMP-READ-IMPORT-001` 存储形态：主条目「迁移 0004 新增 book_imports 代际账本（request_id 主键、完整指纹、supersedes_gen、promoted_book_id、staging_file_key）」表述不准，更正为——迁移 0004 为纯加法：新增 import_staged_chapters 暂存表（含 (book_id, gen, idx) 唯一索引）＋books 两可空列 import_gen／import_blob_key；代际＝beginImport 的 requestId 存于 books.import_gen，暂存文件指针存 import_blob_key（epub-stage/<bookId>/<gen>），幂等仲裁走既有请求账本（resolveImportBinding 在任何删除/状态变更前仲裁、指纹口径不变）；finish 切换为受代际守卫（import_gen＋processing）的单 batch，守卫失配整批零行返回 conflict。机制结论（原键重放零破坏、旧代晚到全拒、失败保好副本）与验证计数 69/69 不变。
+- (2) `CMP-READ-001` 出处闭环换绑出口：续条目「用户显式选择『仍按原讨论保存』（同键＋forceQaBinding 重试）」表述不准，更正为——来源版本已更新时不能按旧快照直接落卡（卡出处只能来自存活片段行），显式出口是所有者点「改用当前片段出处保存」换绑当前版本后保存，旧引用快照仍固定在该轮 turn 与面板内可查；turns 只存本会话面板状态、未新增聊天持久化（续条目已注明）。其余结论与计数（reading-qa 107/107 等）不变。
