@@ -1176,15 +1176,48 @@ function SnippetCard({
         >
           {snippet.internalized ? "↩ 取消内化" : "✓ 标为已内化"}
         </button>
-        {book != null && book.chapterCount > 0 && snippet.chapterIdx != null && (
-          <button
-            type="button"
-            onClick={() => onOpenReader(book, snippet.chapterIdx ?? undefined, snippet.charOffset ?? undefined)}
-            className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
-          >
-            回原文
-          </button>
-        )}
+        {book != null && book.chapterCount > 0 && snippet.chapterIdx != null && (() => {
+          // Provenance honesty (CMP-READ-001): "回原文" may claim a
+          // located position ONLY when the snippet's recorded live
+          // version is provably the book's current live version.
+          // A moved version keeps the saved quote visible above,
+          // says so plainly, and offers the current version as a
+          // separate explicit action; an unrecorded version on
+          // either side is "无法确认", never guessed.
+          const versionState =
+            snippet.liveGen != null && book.liveGen != null
+              ? snippet.liveGen === book.liveGen
+                ? "same"
+                : "replaced"
+              : "unknown";
+          if (versionState === "same") {
+            return (
+              <button
+                type="button"
+                onClick={() => onOpenReader(book, snippet.chapterIdx ?? undefined, snippet.charOffset ?? undefined)}
+                className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+              >
+                回原文
+              </button>
+            );
+          }
+          return (
+            <span className="inline-flex flex-wrap items-center gap-2">
+              <span className="text-xs text-[var(--dim)]">
+                {versionState === "replaced"
+                  ? "原文版本已替换：上方是已保存的原句，旧位置无法在新版中确认。"
+                  : "无法确认这段原文与当前版本是否一致（版本记录缺失）。"}
+              </span>
+              <button
+                type="button"
+                onClick={() => onOpenReader(book)}
+                className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+              >
+                打开当前版本
+              </button>
+            </span>
+          );
+        })()}
         {confirmDelete ? (
           <button
             type="button"

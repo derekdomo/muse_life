@@ -101,6 +101,48 @@
 //      versionLabel in the same guarded batch as body and file, so
 //      snippets created from the still-live old body keep the old
 //      label as their provenance.
+//
+// P0 remainder, second round (CMP-READ-IMPORT-001, PM 2026-10-22
+// 12:54): the sequential fixes above still lost three COMBINATION
+// races, closed here.
+//  (e) Same-generation first-upload contention + pointer-failure
+//      recovery: the staged file's blob key is now CONTENT-
+//      ADDRESSED (stagedFileKey embeds the bytes' fingerprint).
+//      Two rival first uploads write DIFFERENT keys, so the loser
+//      can never overwrite the winner's bytes; the pointer commit
+//      alone decides which file is the generation's. And when the
+//      put landed but the pointer commit was lost (injected
+//      failure / lost response), a same-bytes retry names the same
+//      key — bytes already there are provably the same content —
+//      so the retry simply re-commits the pointer instead of being
+//      refused by an unverifiable orphan.
+//  (f) finishImport now FREEZES the generation before promoting:
+//      it stamps the validated staged set's fingerprint into
+//      books.import_frozen_manifest with a guarded update, then
+//      RE-READS the staged set, the file pointer and the book's
+//      deleted state and re-validates everything against the
+//      freeze. While a freeze is held, saveImportChapters and
+//      uploadImportFile refuse same-generation writes at their
+//      commit points, and the promotion batch is guarded on the
+//      freeze value + not-deleted and takes the file pointer and
+//      edition label from the book row's CURRENT columns inside
+//      the atomic batch (COALESCE over import_blob_key /
+//      import_version_label) — never from values captured before
+//      the freeze. A staged change, an upload, or a delete that
+//      lands in any finish window therefore yields either a typed
+//      conflict (live copy untouched) or one consistent complete
+//      version — never an unvalidated mixture.
+//  (g) Reader writes bind to the LIVE version they were read
+//      from. Promotion stamps books.live_gen (the only writer of
+//      that column); getChapter returns it as liveVersion;
+//      savePosition and createSnippet must carry it back and are
+//      refused with a typed conflict when it no longer matches —
+//      an old reader's scroll can no longer overwrite the new
+//      version's reset position, and its selections can no longer
+//      be stamped with the new edition's provenance. Snippets
+//      record the live_gen they were read from, so the UI can
+//      distinguish "same live version" from "原文版本已替换" and
+//      from "无法确认" (either side has no recorded token).
 
 import { defineAction, z, type ActionsModule, type Ctx, type SpaceDb } from "@hatch/space-sdk";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
@@ -185,6 +227,32 @@ function bytesHash(bytes: Buffer): string {
     h2 = Math.imul(h2 ^ b, 0x85ebca6b);
   }
   return `${bytes.length}:${(h1 >>> 0).toString(16).padStart(8, "0")}:${(h2 >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+// Content-addressed blob key for one generation's original file:
+// the fingerprint of the exact bytes is part of the key, so two
+// different files under the same generation NEVER share a key and
+// can never overwrite each other, and a retry of the same file
+// always names the same key — bytes already sitting there are by
+// construction the same content, which is what makes a lost
+// pointer commit recoverable by simply re-committing the pointer.
+function stagedFileKey(bookId: number, gen: string, hash: string): string {
+  return `epub-stage/${bookId}/${gen}/${hash.replaceAll(":", "-")}`;
+}
+
+// Fingerprint of a generation's complete staged chapter set
+// (positions, titles and bodies, in position order). finishImport
+// stamps this into books.import_frozen_manifest at its freeze
+// point; any staged change after that moment produces a different
+// fingerprint and the promotion is refused, never silently widened.
+function stagedManifest(
+  rows: Array<{ idx: number; title: string | null; html: string }>,
+): string {
+  const sorted = [...rows].sort((a, b) => a.idx - b.idx);
+  return payloadHash({
+    k: "staged-manifest",
+    chapters: sorted.map((r) => [r.idx, r.title, r.html]),
+  });
 }
 
 type Db = SpaceDb<typeof schema>;
@@ -568,6 +636,11 @@ const bookSchema = z.object({
   // separately from the live label while an import is in flight or
   // has failed, so the two versions are never conflated.
   pendingVersionLabel: z.string().nullable(),
+  // Live-version token (books.live_gen): the generation whose body
+  // is live NOW. Reader writes bind to it; a snippet's own liveGen
+  // is compared against it to tell "same version" from "原文版本
+  // 已替换" / "无法确认".
+  liveGen: z.string().nullable(),
   curChapter: z.number(),
   curOffset: z.number(),
   progressValue: z.number().nullable(),
@@ -598,6 +671,7 @@ const snippetSchema = z.object({
   bookId: z.number().nullable(),
   bookTitle: z.string(),
   versionLabel: z.string().nullable(),
+  liveGen: z.string().nullable(),
   chapterLabel: z.string().nullable(),
   chapterIdx: z.number().nullable(),
   charOffset: z.number().nullable(),
@@ -661,6 +735,7 @@ function toBook(row: BookRow, chapterCount: number): z.infer<typeof bookSchema> 
     importError: row.importError,
     versionLabel: row.versionLabel,
     pendingVersionLabel: row.importVersionLabel,
+    liveGen: row.liveGen,
     curChapter: row.curChapter,
     curOffset: row.curOffset,
     progressValue: row.progressValue,
@@ -681,6 +756,7 @@ function toSnippet(
     bookId: row.bookId,
     bookTitle: row.bookTitle,
     versionLabel: row.versionLabel,
+    liveGen: row.liveGen,
     chapterLabel: row.chapterLabel,
     chapterIdx: row.chapterIdx,
     charOffset: row.charOffset,
@@ -1403,6 +1479,7 @@ export const Actions = {
               importGen: args.requestId,
               importBlobKey: null,
               importFileHash: null,
+              importFrozenManifest: null,
               importVersionLabel: args.versionLabel || null,
               updatedAt: new Date(),
             })
@@ -1496,8 +1573,14 @@ export const Actions = {
         return { ok: true, forbidden: false, status: "saved" };
       }
       const gen = binding.gen;
-      const key = `epub-stage/${args.bookId}/${gen}`;
       const hash = bytesHash(bytes);
+      // CONTENT-ADDRESSED key (PM 2026-10-22 12:54 schedule 1):
+      // the key embeds THIS file's fingerprint, so a rival first
+      // upload under the same generation writes a DIFFERENT key —
+      // losing the pointer race can no longer overwrite the
+      // winner's bytes — and a same-bytes retry always names the
+      // same key, so bytes found there are provably this content.
+      const key = stagedFileKey(args.bookId, gen, hash);
       // The file this generation is recorded as owning: its staged
       // pointer while it is processing; once the generation has
       // been promoted, its staged key became the LIVE pointer.
@@ -1509,10 +1592,25 @@ export const Actions = {
         // generation closed, its staged key IS the live key, so
         // re-uploading different bytes under the closed key used to
         // silently rewrite the live file). A retry carrying the
-        // SAME bytes is idempotent — answer saved, write nothing.
-        // Different bytes are a typed conflict — zero blob writes,
-        // zero pointer writes, the recorded file stands.
-        if (book.importFileHash === hash && recordedKey === key) {
+        // SAME bytes is idempotent. Different bytes are a typed
+        // conflict — zero blob writes, zero pointer writes, the
+        // recorded file stands. (The recorded key may use the
+        // pre-content-addressing format for generations staged
+        // before this change; the fingerprint is the arbitration.)
+        if (book.importFileHash === hash && recordedKey != null) {
+          // Complete an interrupted put: the fingerprint/pointer
+          // committed but the bytes never landed (or were lost).
+          // Re-putting the SAME content under its own content-
+          // addressed key changes nothing that exists.
+          if (
+            recordedKey === key &&
+            (await ctx.blobs.head(recordedKey)) == null &&
+            book.importStatus === "processing"
+          ) {
+            await ctx.blobs.put(key, bytes, {
+              contentType: "application/epub+zip",
+            });
+          }
           return { ok: true, forbidden: false, status: "saved" };
         }
         return { ok: false, forbidden: false, status: "conflict" };
@@ -1522,21 +1620,27 @@ export const Actions = {
         // a late upload may attach to.
         return { ok: false, forbidden: false, status: "conflict" };
       }
-      // First file for this still-open generation. Never overwrite
-      // bytes already sitting at the generation's key (an orphan
-      // from a commit whose pointer update lost its race): without
-      // a recorded fingerprint their content cannot be verified as
-      // the same file, so the immutable answer is a conflict.
-      if ((await ctx.blobs.head(key)) != null) {
+      if (book.importFrozenManifest != null) {
+        // A finish is promoting this generation under a freeze:
+        // no file may join it now.
         return { ok: false, forbidden: false, status: "conflict" };
       }
-      await ctx.blobs.put(key, bytes, { contentType: "application/epub+zip" });
+      // First file for this still-open generation. Bytes already
+      // sitting at THIS key are by construction these same bytes
+      // (the key is their fingerprint — e.g. an earlier attempt
+      // whose pointer commit was lost), so they are adopted, never
+      // overwritten and never a conflict; bytes of any OTHER file
+      // live under other keys and are untouched either way.
+      if ((await ctx.blobs.head(key)) == null) {
+        await ctx.blobs.put(key, bytes, { contentType: "application/epub+zip" });
+      }
       // Commit point: the pointer + fingerprint commit in ONE
       // update guarded on this generation still owning the book in
-      // "processing" with no file recorded yet. If a newer begin
-      // (or a same-generation upload that committed first) won the
-      // race, this matches zero rows and nothing is pointed at the
-      // bytes just stored.
+      // "processing", unfrozen, with no file recorded yet. If a
+      // newer begin (or a same-generation upload that committed
+      // first) won the race, this matches zero rows and nothing is
+      // pointed at the bytes just stored — which sit under this
+      // content's own key and overwrite nothing.
       const updated = await db
         .update(schema.books)
         .set({ importBlobKey: key, importFileHash: hash, updatedAt: new Date() })
@@ -1546,6 +1650,7 @@ export const Actions = {
             eq(schema.books.importGen, gen),
             eq(schema.books.importStatus, "processing"),
             isNull(schema.books.importFileHash),
+            isNull(schema.books.importFrozenManifest),
             isNull(schema.books.deletedAt),
           ),
         )
@@ -1555,9 +1660,7 @@ export const Actions = {
         // winner's recorded state: if the generation now records
         // THIS file (a concurrent identical upload committed
         // first — the bytes just put are the same content), the
-        // retry is idempotent; anything else is a conflict. The
-        // bytes stored above sit under this generation's own key,
-        // pointed at by nothing the winner did not itself record.
+        // retry is idempotent; anything else is a conflict.
         const now = await db
           .select()
           .from(schema.books)
@@ -1570,7 +1673,7 @@ export const Actions = {
           cur != null &&
           cur.importGen === gen &&
           cur.importFileHash === hash &&
-          curKey === key
+          curKey != null
         ) {
           return { ok: true, forbidden: false, status: "saved" };
         }
@@ -1607,6 +1710,11 @@ export const Actions = {
       if (book.importStatus !== "processing") {
         return { ok: false, forbidden: false, status: "conflict" };
       }
+      if (book.importFrozenManifest != null) {
+        // A finish holds this generation frozen: no chapter may
+        // join or change the set it is promoting.
+        return { ok: false, forbidden: false, status: "conflict" };
+      }
       // Duplicate idx inside one payload is arbitrated explicitly:
       // the LAST occurrence wins, so a chunk never carries two rival
       // versions of the same chapter position.
@@ -1632,7 +1740,7 @@ export const Actions = {
         // imports always did. The guard pins the path's own
         // preconditions — still no generation, still processing,
         // still not deleted — inside the batch.
-        const legacyGuard = sql`(SELECT id FROM books WHERE id = ${args.bookId} AND import_gen IS NULL AND import_status = 'processing' AND deleted_at IS NULL)`;
+        const legacyGuard = sql`(SELECT id FROM books WHERE id = ${args.bookId} AND import_gen IS NULL AND import_status = 'processing' AND import_frozen_manifest IS NULL AND deleted_at IS NULL)`;
         const existing = await db
           .select({ id: schema.bookChapters.id, idx: schema.bookChapters.idx })
           .from(schema.bookChapters)
@@ -1664,7 +1772,7 @@ export const Actions = {
               db
                 .insert(schema.bookChapters)
                 .select(
-                  sql`SELECT NULL, ${args.bookId}, ${ch.idx}, ${ch.title}, ${ch.html}, ${ch.html.length} FROM books WHERE id = ${args.bookId} AND import_gen IS NULL AND import_status = 'processing' AND deleted_at IS NULL`,
+                  sql`SELECT NULL, ${args.bookId}, ${ch.idx}, ${ch.title}, ${ch.html}, ${ch.html.length} FROM books WHERE id = ${args.bookId} AND import_gen IS NULL AND import_status = 'processing' AND import_frozen_manifest IS NULL AND deleted_at IS NULL`,
                 ),
             );
           }
@@ -1692,7 +1800,7 @@ export const Actions = {
       // reader. A re-sent idx upserts the one staged row (the
       // unique (book, gen, idx) index backs this arbitration).
       const gen = binding.gen;
-      const ownsGen = sql`(SELECT id FROM books WHERE id = ${args.bookId} AND import_gen = ${gen} AND import_status = 'processing' AND deleted_at IS NULL)`;
+      const ownsGen = sql`(SELECT id FROM books WHERE id = ${args.bookId} AND import_gen = ${gen} AND import_status = 'processing' AND import_frozen_manifest IS NULL AND deleted_at IS NULL)`;
       const existing = await db
         .select({ id: schema.importStagedChapters.id, idx: schema.importStagedChapters.idx })
         .from(schema.importStagedChapters)
@@ -1730,7 +1838,7 @@ export const Actions = {
             db
               .insert(schema.importStagedChapters)
               .select(
-                sql`SELECT NULL, ${args.bookId}, ${gen}, ${ch.idx}, ${ch.title}, ${ch.html}, ${ch.html.length} FROM books WHERE id = ${args.bookId} AND import_gen = ${gen} AND import_status = 'processing' AND deleted_at IS NULL`,
+                sql`SELECT NULL, ${args.bookId}, ${gen}, ${ch.idx}, ${ch.title}, ${ch.html}, ${ch.html.length} FROM books WHERE id = ${args.bookId} AND import_gen = ${gen} AND import_status = 'processing' AND import_frozen_manifest IS NULL AND deleted_at IS NULL`,
               ),
           );
         }
@@ -1859,6 +1967,7 @@ export const Actions = {
               eq(schema.books.id, args.bookId),
               eq(schema.books.importGen, gen),
               eq(schema.books.importStatus, "processing"),
+              isNull(schema.books.deletedAt),
             ),
           );
         ctx.invalidateQueries();
@@ -1870,8 +1979,12 @@ export const Actions = {
       // (a lost chunk in the middle would promote a book with a
       // hole), and when the client reports how many chapters it
       // parsed, the staged count must equal that report exactly.
-      const staged = await db
-        .select({ idx: schema.importStagedChapters.idx })
+      const stagedRows = await db
+        .select({
+          idx: schema.importStagedChapters.idx,
+          title: schema.importStagedChapters.title,
+          html: schema.importStagedChapters.html,
+        })
         .from(schema.importStagedChapters)
         .where(
           and(
@@ -1880,6 +1993,7 @@ export const Actions = {
           ),
         )
         .orderBy(asc(schema.importStagedChapters.idx));
+      const staged = stagedRows;
       const idxs = new Set(staged.map((r) => r.idx));
       let complete = staged.length > 0;
       for (let i = 0; complete && i < staged.length; i += 1) {
@@ -1906,42 +2020,133 @@ export const Actions = {
               eq(schema.books.id, args.bookId),
               eq(schema.books.importGen, gen),
               eq(schema.books.importStatus, "processing"),
+              isNull(schema.books.deletedAt),
             ),
           );
         ctx.invalidateQueries();
         return { ok: false, forbidden: false, status: "conflict" };
       }
 
-      // Re-read the book at the commit point: the pointer and the
-      // pending label promoted below come from the row as it stands
-      // NOW (an upload may have committed after the binding check),
-      // and the batch guards re-verify ownership anyway.
+      // FREEZE (PM 2026-10-22 12:54 schedule 2): reading a correct
+      // staged set is not enough — the promotion must prove AT ITS
+      // COMMIT POINT that the set, the file and the book itself are
+      // still exactly what was validated. Stamp the validated set's
+      // fingerprint as this generation's freeze with a guarded
+      // update. From this moment saveImportChapters /
+      // uploadImportFile refuse same-generation writes at their
+      // commit points (their guards require no freeze), so nothing
+      // can join, leave or alter the frozen set.
+      const manifest = stagedManifest(staged);
+      const frozen = await db
+        .update(schema.books)
+        .set({ importFrozenManifest: manifest, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.books.id, args.bookId),
+            eq(schema.books.importGen, gen),
+            eq(schema.books.importStatus, "processing"),
+            isNull(schema.books.importFrozenManifest),
+            isNull(schema.books.deletedAt),
+          ),
+        )
+        .returning({ id: schema.books.id });
+      if (frozen.length === 0) {
+        // Either a rival finish holds a DIFFERENT freeze (a real
+        // conflict), or THIS finish's own earlier attempt stamped
+        // the identical freeze and then lost its response / failed
+        // before promoting: the freeze value is the fingerprint of
+        // exactly the set validated above, so an identical stamp
+        // can only be the same validated set's freeze — resume
+        // under it instead of deadlocking the generation.
+        const curRows = await db
+          .select()
+          .from(schema.books)
+          .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
+          .limit(1);
+        const cur = curRows[0];
+        if (
+          !cur ||
+          cur.importGen !== gen ||
+          cur.importStatus !== "processing" ||
+          cur.importFrozenManifest !== manifest
+        ) {
+          return { ok: false, forbidden: false, status: "conflict" };
+        }
+      }
+      const unfreeze = async () => {
+        await db
+          .update(schema.books)
+          .set({ importFrozenManifest: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.books.id, args.bookId),
+              eq(schema.books.importFrozenManifest, manifest),
+            ),
+          );
+      };
+      // Re-read EVERYTHING under the freeze: the staged set must
+      // hash to the same manifest (a chunk that landed between the
+      // first read and the freeze is caught here), the book must
+      // still be this generation, processing and NOT deleted (a
+      // delete that landed in the window must not be promoted
+      // over), and a recorded staged file pointer must name bytes
+      // that actually exist (an upload whose pointer moved without
+      // its file — or a pointer swapped in mid-finish — fails).
+      const stagedAfter = await db
+        .select({
+          idx: schema.importStagedChapters.idx,
+          title: schema.importStagedChapters.title,
+          html: schema.importStagedChapters.html,
+        })
+        .from(schema.importStagedChapters)
+        .where(
+          and(
+            eq(schema.importStagedChapters.bookId, args.bookId),
+            eq(schema.importStagedChapters.gen, gen),
+          ),
+        )
+        .orderBy(asc(schema.importStagedChapters.idx));
       const freshRows = await db
         .select()
         .from(schema.books)
         .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
         .limit(1);
       const fresh = freshRows[0];
-      if (!fresh || fresh.importGen !== gen || fresh.importStatus !== "processing") {
+      let commitOk =
+        fresh != null &&
+        fresh.importGen === gen &&
+        fresh.importStatus === "processing" &&
+        fresh.importFrozenManifest === manifest &&
+        stagedManifest(stagedAfter) === manifest &&
+        stagedAfter.length === staged.length;
+      if (commitOk && fresh?.importBlobKey != null) {
+        commitOk = (await ctx.blobs.head(fresh.importBlobKey)) != null;
+      }
+      if (!commitOk || !fresh) {
+        await unfreeze();
         return { ok: false, forbidden: false, status: "conflict" };
       }
 
-      // Atomic promotion, ONE batch, every statement guarded on this
-      // generation still owning the book in "processing": if a newer
-      // generation claimed the book after the binding check, every
-      // statement matches zero rows, nothing live changes, and the
-      // post-check below answers conflict. The reader therefore only
-      // ever sees the complete old version or the complete new one.
-      // Body, table of contents, file pointer AND the version label
-      // switch together in this batch: the pending label staged with
-      // this generation becomes the live label exactly when its
-      // body becomes the live body — never earlier (a snippet saved
-      // from the old body before this moment carries the old label),
-      // never separately.
-      const ownsBook = sql`(SELECT id FROM books WHERE id = ${args.bookId} AND import_gen = ${gen} AND import_status = 'processing')`;
+      // Atomic promotion, ONE batch, every statement guarded on
+      // this generation still owning the book in "processing",
+      // NOT deleted, and still holding THIS freeze: if anything
+      // superseded the generation or released the freeze after the
+      // re-read, every statement matches zero rows, nothing live
+      // changes, and the post-check below answers conflict. The
+      // reader therefore only ever sees the complete old version
+      // or the complete new one. Body, file pointer, version label
+      // AND the live-version token switch together in this batch:
+      // the file pointer and label are taken from the book row's
+      // CURRENT columns inside the batch (COALESCE over the staged
+      // slots) — never from values captured before the freeze — so
+      // an upload that committed just before the freeze is
+      // promoted as one consistent body+file+label set, and one
+      // that arrives after the freeze is refused outright.
+      const ownsBook = sql`(SELECT id FROM books WHERE id = ${args.bookId} AND import_gen = ${gen} AND import_status = 'processing' AND import_frozen_manifest = ${manifest} AND deleted_at IS NULL)`;
       const promotedBlobKey = fresh.importBlobKey ?? fresh.blobKey;
-      const promotedVersionLabel = fresh.importVersionLabel ?? fresh.versionLabel;
-      const results: unknown = await db.batch([
+      let results: unknown;
+      try {
+        results = await db.batch([
         db
           .delete(schema.bookChapters)
           .where(sql`${schema.bookChapters.bookId} IN ${ownsBook}`),
@@ -1960,6 +2165,7 @@ export const Actions = {
             and(
               eq(schema.importStagedChapters.bookId, args.bookId),
               eq(schema.importStagedChapters.gen, gen),
+              sql`${schema.importStagedChapters.bookId} IN ${ownsBook}`,
             ),
           ),
         db
@@ -1967,7 +2173,7 @@ export const Actions = {
           .set({
             importStatus: "ready",
             importError: null,
-            blobKey: promotedBlobKey,
+            blobKey: sql`COALESCE(${schema.books.importBlobKey}, ${schema.books.blobKey})`,
             importBlobKey: null,
             // The pending label becomes the live label in the same
             // atomic step as body + file; the staging slot clears.
@@ -1975,8 +2181,12 @@ export const Actions = {
             // describes the live file of this (closed) generation,
             // which is what makes the closed generation's file
             // immutable to late same-key uploads.
-            versionLabel: promotedVersionLabel,
+            versionLabel: sql`COALESCE(${schema.books.importVersionLabel}, ${schema.books.versionLabel})`,
             importVersionLabel: null,
+            // The live-version token moves ONLY here, with the
+            // body it names.
+            liveGen: gen,
+            importFrozenManifest: null,
             curChapter: 0,
             curOffset: 0,
             updatedAt: new Date(),
@@ -1986,10 +2196,19 @@ export const Actions = {
               eq(schema.books.id, args.bookId),
               eq(schema.books.importGen, gen),
               eq(schema.books.importStatus, "processing"),
+              eq(schema.books.importFrozenManifest, manifest),
+              isNull(schema.books.deletedAt),
             ),
           )
           .returning({ id: schema.books.id }),
-      ] as [BatchItem, ...BatchItem[]]);
+        ] as [BatchItem, ...BatchItem[]]);
+      } catch (err) {
+        // The promotion batch aborted as a whole (the live copy is
+        // untouched by construction): release THIS freeze so the
+        // same finish can be retried, then surface the failure.
+        await unfreeze();
+        throw err;
+      }
       const bookUpdate = (results as unknown[])[3] as Array<{ id: number }> | undefined;
       if ((bookUpdate?.length ?? 0) === 0) {
         // The generation was superseded mid-finish; the guarded
@@ -2026,16 +2245,36 @@ export const Actions = {
       title: z.string().nullable(),
       html: z.string(),
       toc: z.array(z.object({ idx: z.number(), title: z.string() })),
+      // The live version this body belongs to (books.live_gen +
+      // its edition label). The reader pins both and carries
+      // liveVersion back on every write; a mismatch at write time
+      // means the version moved under the open reader.
+      liveVersion: z.string().nullable(),
+      versionLabel: z.string().nullable(),
     }),
     async handler(ctx, args) {
-      if (!isOwner(ctx)) return { forbidden: true, found: false, title: null, html: "", toc: [] };
+      const empty = {
+        forbidden: false,
+        found: false,
+        title: null,
+        html: "",
+        toc: [],
+        liveVersion: null,
+        versionLabel: null,
+      };
+      if (!isOwner(ctx)) return { ...empty, forbidden: true };
       const db = ctx.db<typeof schema>();
-      const book = await db
-        .select({ id: schema.books.id })
+      const bookRows = await db
+        .select({
+          id: schema.books.id,
+          liveGen: schema.books.liveGen,
+          versionLabel: schema.books.versionLabel,
+        })
         .from(schema.books)
         .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
         .limit(1);
-      if (book.length === 0) return { forbidden: false, found: false, title: null, html: "", toc: [] };
+      const book = bookRows[0];
+      if (!book) return empty;
       const rows = await db
         .select()
         .from(schema.bookChapters)
@@ -2043,13 +2282,16 @@ export const Actions = {
         .orderBy(asc(schema.bookChapters.idx));
       const toc = rows.map((r) => ({ idx: r.idx, title: r.title ?? `第 ${r.idx + 1} 节` }));
       const chapter = rows.find((r) => r.idx === args.idx);
-      if (!chapter) return { forbidden: false, found: false, title: null, html: "", toc };
+      if (!chapter)
+        return { ...empty, toc, liveVersion: book.liveGen, versionLabel: book.versionLabel };
       return {
         forbidden: false,
         found: true,
         title: chapter.title,
         html: chapter.html,
         toc,
+        liveVersion: book.liveGen,
+        versionLabel: book.versionLabel,
       };
     },
   }),
@@ -2059,11 +2301,27 @@ export const Actions = {
       bookId: z.number().int().positive(),
       chapterIdx: z.number().int().min(0),
       charOffset: z.number().int().min(0),
+      // The live version the position was read in (from
+      // getChapter). Required whenever the book has a recorded
+      // live version: a position from a superseded version is a
+      // typed conflict and never overwrites the new version's
+      // position (PM 2026-10-22 12:54 schedule 3).
+      liveVersion: z.string().trim().min(1).max(120).nullable().optional(),
     }),
     response: okResult,
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
+      const bookRows = await db
+        .select({ liveGen: schema.books.liveGen })
+        .from(schema.books)
+        .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
+        .limit(1);
+      const book = bookRows[0];
+      if (!book) return { ok: false, forbidden: false, status: "notFound" };
+      if (book.liveGen != null && args.liveVersion !== book.liveGen) {
+        return { ok: false, forbidden: false, status: "conflict" };
+      }
       const updated = await db
         .update(schema.books)
         .set({
@@ -2071,9 +2329,31 @@ export const Actions = {
           curOffset: args.charOffset,
           updatedAt: new Date(),
         })
-        .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
+        .where(
+          book.liveGen != null
+            ? and(
+                eq(schema.books.id, args.bookId),
+                eq(schema.books.liveGen, book.liveGen),
+                isNull(schema.books.deletedAt),
+              )
+            : and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)),
+        )
         .returning({ id: schema.books.id });
-      if (updated.length === 0) return { ok: false, forbidden: false, status: "notFound" };
+      if (updated.length === 0) {
+        // Lost a race with a promotion (or a delete) between the
+        // check and the commit: the version moved, so this is a
+        // version conflict whenever the book still exists.
+        const still = await db
+          .select({ id: schema.books.id })
+          .from(schema.books)
+          .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
+          .limit(1);
+        return {
+          ok: false,
+          forbidden: false,
+          status: still.length > 0 ? "conflict" : "notFound",
+        };
+      }
       return { ok: true, forbidden: false, status: "saved" };
     },
   }),
@@ -2090,6 +2370,11 @@ export const Actions = {
       chapterIdx: z.number().int().min(0).nullable().optional(),
       chapterLabel: z.string().trim().max(300).nullable().optional(),
       charOffset: z.number().int().min(0).nullable().optional(),
+      // The live version this text was read in (from getChapter).
+      // Required whenever the book has a recorded live version: a
+      // selection from a superseded version must not be stamped
+      // with the new edition's provenance (PM 2026-10-22 12:54).
+      liveVersion: z.string().trim().min(1).max(120).nullable().optional(),
     }),
     response: createResult,
     async handler(ctx, args): Promise<z.infer<typeof createResult>> {
@@ -2106,6 +2391,7 @@ export const Actions = {
         chapterLabel: args.chapterLabel || null,
         chapterIdx: args.chapterIdx ?? null,
         charOffset: args.charOffset ?? null,
+        liveVersion: args.liveVersion ?? null,
       });
       const claim = await arbitrateCreate(db, args.requestId, "snippet", hash);
       const early = claimToResult(claim);
@@ -2117,6 +2403,17 @@ export const Actions = {
         .limit(1);
       const book = bookRows[0];
       if (!book) return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
+      // Live-version binding at the commit point: the text was read
+      // from ONE live version; if the book's live version has moved
+      // (or this write names none while the book has one), stamping
+      // it with the CURRENT versionLabel would falsify its
+      // provenance. Refuse with a typed conflict and write nothing
+      // — the caller's selection/draft is preserved client-side.
+      // (A replay of an already-committed save returned above, so
+      // a legitimate retry is never caught by this.)
+      if (book.liveGen != null && args.liveVersion !== book.liveGen) {
+        return { ok: false, forbidden: false, status: "conflict", id: null, resultId: null };
+      }
       const outcome = await commitCreate(db, args.requestId, "snippet", hash, [
         db
           .insert(schema.snippets)
@@ -2124,6 +2421,7 @@ export const Actions = {
             bookId: book.id,
             bookTitle: book.title,
             versionLabel: book.versionLabel,
+            liveGen: book.liveGen,
             chapterLabel: args.chapterLabel || null,
             chapterIdx: args.chapterIdx ?? null,
             charOffset: args.charOffset ?? null,

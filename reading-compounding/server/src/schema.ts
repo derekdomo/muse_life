@@ -96,6 +96,26 @@ export const books = sqliteTable("books", {
   // conflict with zero blob/pointer writes — even after the
   // generation has closed, when its staged key IS the live key.
   importFileHash: text("import_file_hash"),
+  // Finish freeze (migration 0007, CMP-READ-IMPORT-001 remainder):
+  // while finishImport promotes a generation it first stamps the
+  // validated staged manifest here; every same-generation write
+  // point (upload / staged chapters) refuses while a freeze is
+  // held, and the promotion batch itself is guarded on the freeze
+  // value, so the set that was validated is the set that can be
+  // promoted — nothing can join, leave or change in between.
+  // NULL whenever no finish is in flight; cleared by the promotion
+  // itself and by the next beginImport claim.
+  importFrozenManifest: text("import_frozen_manifest"),
+  // The generation whose body/file/label are LIVE right now
+  // (migration 0007). Set ONLY by a successful promotion — unlike
+  // importGen, which a new beginImport moves immediately while the
+  // old body is still live. This is the live-version token reader
+  // writes are bound to: getChapter returns it, savePosition /
+  // createSnippet must carry it back, and a token from a superseded
+  // live version is a typed conflict with zero writes. NULL for
+  // books whose live copy predates generations (version unknown,
+  // never guessed).
+  liveGen: text("live_gen"),
   // Stable reading position: chapter index + char offset inside it.
   curChapter: integer("cur_chapter").notNull().default(0),
   curOffset: integer("cur_offset").notNull().default(0),
@@ -173,6 +193,15 @@ export const snippets = sqliteTable("snippets", {
   // Provenance snapshots: kept even if the book row is later removed.
   bookTitle: text("book_title").notNull(),
   versionLabel: text("version_label"),
+  // The live-version token (books.live_gen) this snippet was read
+  // from (migration 0007). Together with versionLabel it pins the
+  // snippet's provenance to ONE live version: when the book's live
+  // version moves on, the UI can say honestly "原文版本已替换"
+  // instead of pretending the saved position still locates the
+  // quote. NULL for snippets saved before live versions existed or
+  // from books with no recorded live version — "无法确认", never
+  // backfilled by guessing.
+  liveGen: text("live_gen"),
   // NULL chapter label is displayed as 章节不详 — never invented.
   chapterLabel: text("chapter_label"),
   chapterIdx: integer("chapter_idx"),

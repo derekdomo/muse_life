@@ -106,12 +106,29 @@ function actionSlice(src, name) {
       !begin.includes("versionLabel: args.versionLabel || book.versionLabel"),
   );
   check(
-    "source: finishImport promotes the staged label from the fresh commit-point row (label switches with body/file)",
-    fin.includes("fresh.importVersionLabel ?? fresh.versionLabel") &&
-      fin.includes("versionLabel: promotedVersionLabel") &&
-      fin.includes("importVersionLabel: null"),
+    "source: finishImport promotes the staged label from the book row's CURRENT columns inside the batch (COALESCE, label switches with body/file)",
+    fin.includes("COALESCE") &&
+      fin.includes("importVersionLabel: null") &&
+      fin.includes("liveGen: gen"),
+  );
+  check(
+    "source: finishImport freezes the validated staged set and re-validates under the freeze (manifest + deleted + blob existence)",
+    fin.includes("stagedManifest(staged)") &&
+      fin.includes("importFrozenManifest: manifest") &&
+      fin.includes("stagedManifest(stagedAfter) === manifest") &&
+      fin.includes("ctx.blobs.head(fresh.importBlobKey)"),
   );
   const upload = actionSlice(serverSrc, "uploadImportFile");
+  check(
+    "source: the staged file key is content-addressed (rival first uploads can never share a key)",
+    serverSrc.includes("function stagedFileKey") &&
+      upload.includes("stagedFileKey(args.bookId, gen, hash)"),
+  );
+  check(
+    "source: reader writes bind to the live version (getChapter returns liveVersion; savePosition/createSnippet refuse a stale one)",
+    serverSrc.includes("liveVersion: book.liveGen") &&
+      serverSrc.includes("args.liveVersion !== book.liveGen"),
+  );
   check(
     "source: uploadImportFile arbitrates a generation's file on its recorded content fingerprint (bytesHash + importFileHash)",
     upload.includes("bytesHash(bytes)") &&
@@ -165,6 +182,10 @@ const db = drizzle(client, { schema });
 const blobStore = new Map();
 const blobCalls = { put: 0, delete: 0 };
 let failNextPut = false;
+// One-shot put gate for deterministic upload interleavings: when
+// armed with a predicate, the first matching put waits until the
+// test releases it.
+let putGate = null;
 
 function makeCtx(viewer) {
   const state = { dbCalls: 0 };
@@ -183,6 +204,11 @@ function makeCtx(viewer) {
         if (failNextPut) {
           failNextPut = false;
           throw new Error("injected blob put failure");
+        }
+        if (putGate && putGate.match(key)) {
+          const gate = putGate;
+          putGate = null;
+          await gate.promise;
         }
         blobStore.set(key, Buffer.from(data).toString("utf8"));
       },
@@ -227,6 +253,21 @@ async function attempt(name, ctx, args) {
 }
 
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
+// Content-addressed staged file key (mirrors stagedFileKey in
+// server/src/actions.ts): fingerprint = dual FNV-1a over the raw
+// bytes + length, formatted len:h1:h2 with ":" → "-".
+function skey(id, gen, bytesStr) {
+  const bytes = Buffer.from(bytesStr, "utf8");
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b1;
+  for (let i = 0; i < bytes.length; i += 1) {
+    const b = bytes.readUInt8(i);
+    h1 = Math.imul(h1 ^ b, 0x01000193);
+    h2 = Math.imul(h2 ^ b, 0x85ebca6b);
+  }
+  const hash = `${bytes.length}:${(h1 >>> 0).toString(16).padStart(8, "0")}:${(h2 >>> 0).toString(16).padStart(8, "0")}`;
+  return `epub-stage/${id}/${gen}/${hash.replaceAll(":", "-")}`;
+}
 
 async function bookRow(id) {
   const rows = await db.select().from(schema.books).where(eq(schema.books.id, id));
@@ -262,6 +303,13 @@ async function ledgerCount(requestId) {
     .from(schema.requestKeys)
     .where(eq(schema.requestKeys.requestId, requestId));
   return rows.length;
+}
+// The live-version token a reader would pin for this book right
+// now (reader writes must carry it — see the live-version binding
+// checks at the end of this script).
+async function liveVersionOf(id) {
+  const r = await call("getChapter", owner, { bookId: id, idx: 0 });
+  return r.liveVersion;
 }
 async function trigger(name, sqlText) {
   await client.execute(`CREATE TRIGGER ${name} ${sqlText}`);
@@ -326,9 +374,9 @@ const up1 = await call("uploadImportFile", owner, {
   check(
     "PM: upload stages the file under the generation key; the LIVE file pointer is untouched",
     up1.ok === true &&
-      row?.importBlobKey === `epub-stage/${bookId}/${K1}` &&
+      row?.importBlobKey === skey(bookId, K1, "EPUB-BYTES-V1") &&
       row?.blobKey === null &&
-      blobStore.get(`epub-stage/${bookId}/${K1}`) === "EPUB-BYTES-V1",
+      blobStore.get(skey(bookId, K1, "EPUB-BYTES-V1")) === "EPUB-BYTES-V1",
   );
 }
 
@@ -362,7 +410,7 @@ const fin1 = await call("finishImport", owner, {
       row?.importStatus === "ready" &&
       live.length === 1 &&
       live[0]?.html === "<p>第一版正文</p>" &&
-      row?.blobKey === `epub-stage/${bookId}/${K1}` &&
+      row?.blobKey === skey(bookId, K1, "EPUB-BYTES-V1") &&
       row?.importBlobKey === null &&
       (await stagedChapters(bookId)).length === 0,
   );
@@ -372,7 +420,7 @@ const fin1 = await call("finishImport", owner, {
   );
 }
 
-await call("savePosition", owner, { bookId, chapterIdx: 0, charOffset: 42 });
+await call("savePosition", owner, { bookId, chapterIdx: 0, charOffset: 42, liveVersion: await liveVersionOf(bookId) });
 const liveBeforeReplay = contentOf(await liveChapters(bookId));
 
 // THE PM REPRO: replay the original beginImport key + payload.
@@ -398,7 +446,7 @@ const replay = await call("beginImport", owner, {
       row?.importStatus === "ready" &&
       row?.curChapter === 0 &&
       row?.curOffset === 42 &&
-      row?.blobKey === `epub-stage/${bookId}/${K1}`,
+      row?.blobKey === skey(bookId, K1, "EPUB-BYTES-V1"),
   );
   check(
     "PM repro fixed: exactly one ledger row for the import key, consistent with the result",
@@ -524,7 +572,7 @@ const replay = await call("beginImport", owner, {
     "write-point begin: failure finish keeps the live v1 chapters + position (status only)",
     rowAfter?.importStatus === "failed" &&
       contentOf(await liveChapters(bookId)) === liveBeforeReplay &&
-      rowAfter?.curOffset === 42 && rowAfter?.blobKey === `epub-stage/${bookId}/${K1}`,
+      rowAfter?.curOffset === 42 && rowAfter?.blobKey === skey(bookId, K1, "EPUB-BYTES-V1"),
   );
 }
 {
@@ -547,7 +595,7 @@ const replay = await call("beginImport", owner, {
   check(
     "write-point upload: blob failure throws; no staged pointer, live pointer intact",
     failedUp.threw === true && rowMid?.importBlobKey === null &&
-      rowMid?.blobKey === `epub-stage/${bookId}/${K1}`,
+      rowMid?.blobKey === skey(bookId, K1, "EPUB-BYTES-V1"),
   );
   const retryUp = await call("uploadImportFile", owner, {
     bookId,
@@ -557,7 +605,7 @@ const replay = await call("beginImport", owner, {
   check(
     "write-point upload: same-key retry stages the file",
     retryUp.ok === true &&
-      (await bookRow(bookId))?.importBlobKey === `epub-stage/${bookId}/${G}`,
+      (await bookRow(bookId))?.importBlobKey === skey(bookId, G, "EPUB-BYTES-V3"),
   );
   // chunk: staged insert aborts → whole chunk rolls back; retry whole.
   await trigger(
@@ -621,12 +669,12 @@ const replay = await call("beginImport", owner, {
     "write-point finish: same-key retry promotes atomically (new content, pointer flipped, position reset by the NEW import)",
     retryFin.ok === true && rowNow?.importStatus === "ready" &&
       contentOf(liveNow) === "0:<p>三版一</p>|1:<p>三版二</p>" &&
-      rowNow?.blobKey === `epub-stage/${bookId}/${G}` &&
+      rowNow?.blobKey === skey(bookId, G, "EPUB-BYTES-V3") &&
       rowNow?.curChapter === 0 && rowNow?.curOffset === 0,
   );
   check(
     "write-point finish: the superseded generation's staged file blob is cleaned up after promotion",
-    !blobStore.has(`epub-stage/${bookId}/${K1}`) && blobStore.get(`epub-stage/${bookId}/${G}`) === "EPUB-BYTES-V3",
+    !blobStore.has(skey(bookId, K1, "EPUB-BYTES-V1")) && blobStore.get(skey(bookId, G, "EPUB-BYTES-V3")) === "EPUB-BYTES-V3",
   );
   // Lost response on finish: retrying the same finish replays.
   const finAgain = await call("finishImport", owner, {
@@ -694,7 +742,7 @@ const replay = await call("beginImport", owner, {
 /* ----- stale generation: late writes never touch the new generation ----- */
 {
   const v3 = contentOf(await liveChapters(bookId));
-  await call("savePosition", owner, { bookId, chapterIdx: 1, charOffset: 7 });
+  await call("savePosition", owner, { bookId, chapterIdx: 1, charOffset: 7, liveVersion: await liveVersionOf(bookId) });
   const OLD = "imp-stale-old";
   const NEW = "imp-stale-new";
   await call("beginImport", owner, {
@@ -775,7 +823,7 @@ const replay = await call("beginImport", owner, {
   check(
     "stale gen: after promotion reads serve the complete NEW version (content + file pointer)",
     finNew.ok === true && viewAfter.html === "<p>新代正文</p>" &&
-      (await bookRow(bookId))?.blobKey === `epub-stage/${bookId}/${NEW}`,
+      (await bookRow(bookId))?.blobKey === skey(bookId, NEW, "NEW-FILE"),
   );
   // And the old generation stays refused even after the new one closed.
   const lateAfter = await call("finishImport", owner, { bookId, importId: OLD, ok: true });
@@ -905,6 +953,7 @@ const replay = await call("beginImport", owner, {
     bookId,
     text: "重发覆盖",
     chapterLabel: "第 1 章",
+    liveVersion: await liveVersionOf(bookId),
   });
   check("provenance setup: snippet saved against the imported book", snip.ok === true);
   const FAILG = "imp-fail-keep";
@@ -976,7 +1025,7 @@ const replay = await call("beginImport", owner, {
     sameMid.ok === true && sameMid.status === "saved" &&
       diffMid.ok === false && diffMid.status === "conflict" &&
       blobCalls.put === putsAfterFirst &&
-      blobStore.get(`epub-stage/${b}/${G}`) === "ORIGINAL FILE",
+      blobStore.get(skey(b, G, "ORIGINAL FILE")) === "ORIGINAL FILE",
   );
   await call("saveImportChapters", owner, {
     bookId: b,
@@ -993,7 +1042,7 @@ const replay = await call("beginImport", owner, {
   check(
     "schedule 1 setup: generation completes — the live pointer IS the generation key, the label is promoted, the file fingerprint is recorded",
     finS1.ok === true && rowReady?.importStatus === "ready" &&
-      rowReady?.blobKey === `epub-stage/${b}/${G}` &&
+      rowReady?.blobKey === skey(b, G, "ORIGINAL FILE") &&
       rowReady?.versionLabel === "ORIGINAL.epub" &&
       rowReady?.importVersionLabel === null &&
       rowReady?.importFileHash != null,
@@ -1009,8 +1058,8 @@ const replay = await call("beginImport", owner, {
     "schedule 1: uploading a DIFFERENT file under the CLOSED generation's key is a typed conflict — live blob bytes, pointers, fingerprint and status all untouched, zero blob writes",
     diffClosed.ok === false && diffClosed.status === "conflict" &&
       blobCalls.put === putsClosed &&
-      blobStore.get(`epub-stage/${b}/${G}`) === "ORIGINAL FILE" &&
-      rowAfterDiff?.blobKey === `epub-stage/${b}/${G}` &&
+      blobStore.get(skey(b, G, "ORIGINAL FILE")) === "ORIGINAL FILE" &&
+      rowAfterDiff?.blobKey === skey(b, G, "ORIGINAL FILE") &&
       rowAfterDiff?.importBlobKey === null &&
       rowAfterDiff?.importStatus === "ready" &&
       rowAfterDiff?.importFileHash === rowReady?.importFileHash,
@@ -1024,7 +1073,7 @@ const replay = await call("beginImport", owner, {
     "schedule 1: re-uploading the SAME bytes under the closed generation's key is an idempotent no-op (saved, zero blob writes)",
     sameClosed.ok === true && sameClosed.status === "saved" &&
       blobCalls.put === putsClosed &&
-      blobStore.get(`epub-stage/${b}/${G}`) === "ORIGINAL FILE",
+      blobStore.get(skey(b, G, "ORIGINAL FILE")) === "ORIGINAL FILE",
   );
 }
 
@@ -1062,7 +1111,7 @@ const replay = await call("beginImport", owner, {
     ok: true,
     chapterCount: 1,
   });
-  await call("savePosition", owner, { bookId: b, chapterIdx: 0, charOffset: 11 });
+  await call("savePosition", owner, { bookId: b, chapterIdx: 0, charOffset: 11, liveVersion: await liveVersionOf(b) });
   const H = "s2-gen-h";
   await call("beginImport", owner, {
     requestId: H,
@@ -1117,8 +1166,8 @@ const replay = await call("beginImport", owner, {
   check(
     "schedule 2: the bound generation H still completes normally afterwards (content + file pointer switch together)",
     finH.ok === true && viewAfterS2.html === "<p>NEW</p>" &&
-      (await bookRow(b))?.blobKey === `epub-stage/${b}/${H}` &&
-      blobStore.get(`epub-stage/${b}/${H}`) === "NEW-FILE",
+      (await bookRow(b))?.blobKey === skey(b, H, "NEW-FILE") &&
+      blobStore.get(skey(b, H, "NEW-FILE")) === "NEW-FILE",
   );
 }
 
@@ -1294,12 +1343,13 @@ const replay = await call("beginImport", owner, {
     ok: true,
     chapterCount: 1,
   });
-  await call("savePosition", owner, { bookId: b, chapterIdx: 0, charOffset: 5 });
+  await call("savePosition", owner, { bookId: b, chapterIdx: 0, charOffset: 5, liveVersion: await liveVersionOf(b) });
   const snipOld = await call("createSnippet", owner, {
     requestId: "s4-snip-1",
     bookId: b,
     text: "旧版正文一句话",
     chapterLabel: "旧章",
+    liveVersion: await liveVersionOf(b),
   });
   const libAfterG1 = await call("getLibrary", owner, {});
   const snipOldRow = libAfterG1.snippets.find((s) => s.id === snipOld.id);
@@ -1320,7 +1370,7 @@ const replay = await call("beginImport", owner, {
     "schedule 6: beginImport stages NEW EDITION with the generation — the live label, body, file pointer and reading position are all untouched",
     rowMidS4?.versionLabel === "OLD EDITION" &&
       rowMidS4?.importVersionLabel === "NEW EDITION" &&
-      rowMidS4?.blobKey === `epub-stage/${b}/${G1}` &&
+      rowMidS4?.blobKey === skey(b, G1, "OLD-FILE") &&
       rowMidS4?.curOffset === 5 &&
       contentOf(await liveChapters(b)) === "0:<p>旧版正文一句话</p>",
   );
@@ -1337,6 +1387,7 @@ const replay = await call("beginImport", owner, {
     bookId: b,
     text: "旧版正文一句话",
     chapterLabel: "旧章",
+    liveVersion: await liveVersionOf(b),
   });
   const libMid2S4 = await call("getLibrary", owner, {});
   const snipMidRow = libMid2S4.snippets.find((s) => s.id === snipMid.id);
@@ -1401,8 +1452,8 @@ const replay = await call("beginImport", owner, {
     finG3.ok === true && rowPromoted?.importStatus === "ready" &&
       rowPromoted?.versionLabel === "NEW EDITION" &&
       rowPromoted?.importVersionLabel === null &&
-      rowPromoted?.blobKey === `epub-stage/${b}/${G3}` &&
-      blobStore.get(`epub-stage/${b}/${G3}`) === "NEW-FILE" &&
+      rowPromoted?.blobKey === skey(b, G3, "NEW-FILE") &&
+      blobStore.get(skey(b, G3, "NEW-FILE")) === "NEW-FILE" &&
       contentOf(await liveChapters(b)) === "0:<p>新版正文</p>" &&
       rowPromoted?.curChapter === 0 && rowPromoted?.curOffset === 0 &&
       snipOldAfter?.versionLabel === "OLD EDITION",
@@ -1659,6 +1710,420 @@ for (const [label, viewer] of [["non-owner", { id: "someone-else", isOwner: fals
   check(
     `${label}: staging untouched by the refused calls`,
     (await stagedChapters(bookId)).length === stagedBefore,
+  );
+}
+
+/* ----- second-round schedule 1: same-gen first-upload contention + pointer recovery ----- */
+{
+  const nb = await call("addBook", owner, {
+    requestId: "s5-add-1",
+    title: "争用之书",
+    source: "owner",
+    status: "reading",
+    importStatus: "pending",
+  });
+  const b = nb.id;
+  const G = "s5-gen-1";
+  await call("beginImport", owner, {
+    requestId: G,
+    title: "争用之书",
+    source: "owner",
+    versionLabel: "race.epub",
+    existingBookId: b,
+  });
+  // A passes its head check and pauses inside put; B (different
+  // bytes, same generation) runs to completion first.
+  let releaseA;
+  putGate = {
+    match: (key) => key === skey(b, G, "FILE-A"),
+    promise: new Promise((res) => {
+      releaseA = res;
+    }),
+  };
+  const pA = call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("FILE-A"),
+  });
+  const resB = await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G,
+    dataBase64: b64("FILE-B"),
+  });
+  releaseA();
+  const resA = await pA;
+  const rowRace = await bookRow(b);
+  check(
+    "schedule 1R: rival first uploads under one generation — the pointer winner's bytes stand, the loser conflicts and overwrites NOTHING",
+    resB.ok === true &&
+      resA.ok === false &&
+      resA.status === "conflict" &&
+      rowRace?.importBlobKey === skey(b, G, "FILE-B") &&
+      blobStore.get(skey(b, G, "FILE-B")) === "FILE-B" &&
+      blobStore.get(rowRace?.importBlobKey) === "FILE-B",
+  );
+  // Pointer-commit failure recovery: a trigger aborts the pointer
+  // update after the put landed; the same-bytes retry must adopt
+  // its own content-addressed orphan and commit the pointer.
+  const G2 = "s5-gen-2";
+  await call("beginImport", owner, {
+    requestId: G2,
+    title: "争用之书",
+    source: "owner",
+    versionLabel: "recover.epub",
+    existingBookId: b,
+  });
+  await trigger(
+    "fail_ptr_upd",
+    "BEFORE UPDATE OF import_blob_key ON books BEGIN SELECT RAISE(ABORT, 'injected pointer failure'); END",
+  );
+  const failedPtr = await attempt("uploadImportFile", owner, {
+    bookId: b,
+    importId: G2,
+    dataBase64: b64("RECOVER-FILE"),
+  });
+  await dropTrigger("fail_ptr_upd");
+  const rowOrphan = await bookRow(b);
+  check(
+    "schedule 1R: pointer commit failure leaves the put as an unpointed orphan (no pointer, no fingerprint)",
+    failedPtr.threw === true &&
+      rowOrphan?.importBlobKey === null &&
+      rowOrphan?.importFileHash === null &&
+      blobStore.get(skey(b, G2, "RECOVER-FILE")) === "RECOVER-FILE",
+  );
+  const retryPtr = await call("uploadImportFile", owner, {
+    bookId: b,
+    importId: G2,
+    dataBase64: b64("RECOVER-FILE"),
+  });
+  const rowRecovered = await bookRow(b);
+  check(
+    "schedule 1R: same-bytes retry after pointer failure ADOPTS the orphan and commits (no head-refusal deadlock)",
+    retryPtr.ok === true &&
+      rowRecovered?.importBlobKey === skey(b, G2, "RECOVER-FILE") &&
+      blobStore.get(rowRecovered?.importBlobKey) === "RECOVER-FILE",
+  );
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G2,
+    chapters: [{ idx: 0, title: null, html: "<p>恢复正文</p>" }],
+  });
+  const finRec = await call("finishImport", owner, {
+    bookId: b,
+    importId: G2,
+    ok: true,
+    chapterCount: 1,
+  });
+  check(
+    "schedule 1R: the recovered generation finishes with body+file consistent",
+    finRec.ok === true &&
+      (await bookRow(b))?.blobKey === skey(b, G2, "RECOVER-FILE") &&
+      contentOf(await liveChapters(b)) === "0:<p>恢复正文</p>",
+  );
+}
+
+/* ----- second-round schedule 2: finish freeze — staged change / delete / upload in the window ----- */
+{
+  const nb = await call("addBook", owner, {
+    requestId: "s6-add-1",
+    title: "冻结之书",
+    source: "owner",
+    status: "reading",
+    importStatus: "pending",
+  });
+  const b = nb.id;
+  const G1 = "s6-gen-1";
+  await call("beginImport", owner, {
+    requestId: G1,
+    title: "冻结之书",
+    source: "owner",
+    versionLabel: "old.epub",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G1,
+    chapters: [{ idx: 0, title: null, html: "<p>冻结旧正文</p>" }],
+  });
+  await call("finishImport", owner, { bookId: b, importId: G1, ok: true, chapterCount: 1 });
+  const liveV1 = contentOf(await liveChapters(b));
+
+  // (a) A staged chapter INSERT lands at the freeze moment (trigger
+  // on the freeze update): finish must refuse, live untouched,
+  // freeze released so the generation can be completed honestly.
+  const G2 = "s6-gen-2";
+  await call("beginImport", owner, {
+    requestId: G2,
+    title: "冻结之书",
+    source: "owner",
+    versionLabel: "new.epub",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G2,
+    chapters: [{ idx: 0, title: null, html: "<p>冻结新正文</p>" }],
+  });
+  await trigger(
+    "freeze_inject_ch",
+    `AFTER UPDATE OF import_frozen_manifest ON books WHEN NEW.import_frozen_manifest IS NOT NULL BEGIN INSERT INTO import_staged_chapters (book_id, gen, idx, title, html, char_count) VALUES (NEW.id, NEW.import_gen, 2, NULL, '<p>窗口注入</p>', 9); END`,
+  );
+  const finFrozen = await call("finishImport", owner, {
+    bookId: b,
+    importId: G2,
+    ok: true,
+    chapterCount: 1,
+  });
+  await dropTrigger("freeze_inject_ch");
+  const rowFrozen = await bookRow(b);
+  check(
+    "schedule 2R: a staged chapter landing AT the freeze point makes finish conflict — live copy untouched, freeze released, status still processing",
+    finFrozen.ok === false &&
+      finFrozen.status === "conflict" &&
+      contentOf(await liveChapters(b)) === liveV1 &&
+      rowFrozen?.importFrozenManifest === null &&
+      rowFrozen?.importStatus === "processing",
+  );
+  // The injected row is real staged data now: completing the set
+  // honestly (add idx 1, report 3) promotes one consistent whole.
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G2,
+    chapters: [{ idx: 1, title: null, html: "<p>补齐一</p>" }],
+  });
+  const finWhole = await call("finishImport", owner, {
+    bookId: b,
+    importId: G2,
+    ok: true,
+    chapterCount: 3,
+  });
+  check(
+    "schedule 2R: after the freeze conflict the completed set promotes as ONE consistent whole (no silent widening earlier)",
+    finWhole.ok === true &&
+      contentOf(await liveChapters(b)) ===
+        "0:<p>冻结新正文</p>|1:<p>补齐一</p>|2:<p>窗口注入</p>",
+  );
+
+  // (b) A delete lands at the freeze moment: finish must conflict
+  // and must NOT promote over (or resurrect) the deleted book.
+  const G3 = "s6-gen-3";
+  await call("beginImport", owner, {
+    requestId: G3,
+    title: "冻结之书",
+    source: "owner",
+    versionLabel: "third.epub",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G3,
+    chapters: [{ idx: 0, title: null, html: "<p>三版正文</p>" }],
+  });
+  const liveBeforeDelete = contentOf(await liveChapters(b));
+  await trigger(
+    "freeze_inject_del",
+    `AFTER UPDATE OF import_frozen_manifest ON books WHEN NEW.import_frozen_manifest IS NOT NULL BEGIN UPDATE books SET deleted_at = 1700000000000 WHERE id = NEW.id; END`,
+  );
+  const finDeleted = await call("finishImport", owner, {
+    bookId: b,
+    importId: G3,
+    ok: true,
+    chapterCount: 1,
+  });
+  await dropTrigger("freeze_inject_del");
+  const rawDeleted = await db
+    .select()
+    .from(schema.books)
+    .where(eq(schema.books.id, b));
+  check(
+    "schedule 2R: a delete landing AT the freeze point makes finish conflict — book stays deleted, live chapters NOT promoted over",
+    finDeleted.ok === false &&
+      finDeleted.status === "conflict" &&
+      rawDeleted[0]?.deletedAt != null &&
+      rawDeleted[0]?.importStatus === "processing" &&
+      contentOf(await liveChapters(b)) === liveBeforeDelete,
+  );
+  // Restore for later blocks: undelete directly in the fixture DB.
+  await client.execute({
+    sql: "UPDATE books SET deleted_at = NULL WHERE id = ?",
+    args: [b],
+  });
+
+  // (c) An upload pointer swap lands at the freeze moment naming
+  // bytes that do not exist: finish must conflict, live untouched.
+  const G4 = "s6-gen-4";
+  await call("beginImport", owner, {
+    requestId: G4,
+    title: "冻结之书",
+    source: "owner",
+    versionLabel: "fourth.epub",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G4,
+    chapters: [{ idx: 0, title: null, html: "<p>四版正文</p>" }],
+  });
+  const liveBeforeSwap = contentOf(await liveChapters(b));
+  await trigger(
+    "freeze_inject_ptr",
+    `AFTER UPDATE OF import_frozen_manifest ON books WHEN NEW.import_frozen_manifest IS NOT NULL BEGIN UPDATE books SET import_blob_key = 'epub-stage/ghost', import_file_hash = 'ghost' WHERE id = NEW.id; END`,
+  );
+  const finSwap = await call("finishImport", owner, {
+    bookId: b,
+    importId: G4,
+    ok: true,
+    chapterCount: 1,
+  });
+  await dropTrigger("freeze_inject_ptr");
+  check(
+    "schedule 2R: a file-pointer swap landing AT the freeze point (bytes missing) makes finish conflict — live copy untouched",
+    finSwap.ok === false &&
+      finSwap.status === "conflict" &&
+      contentOf(await liveChapters(b)) === liveBeforeSwap &&
+      (await bookRow(b))?.importStatus === "processing",
+  );
+  await call("finishImport", owner, { bookId: b, importId: G4, ok: false, error: "验证收尾" });
+}
+
+/* ----- second-round schedule 3: cross-version reader writes + snippet provenance tokens ----- */
+{
+  const nb = await call("addBook", owner, {
+    requestId: "s7-add-1",
+    title: "跨版之书",
+    source: "owner",
+    status: "reading",
+    importStatus: "pending",
+  });
+  const b = nb.id;
+  const G1 = "s7-gen-1";
+  await call("beginImport", owner, {
+    requestId: G1,
+    title: "跨版之书",
+    source: "owner",
+    versionLabel: "V1 EDITION",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G1,
+    chapters: [
+      { idx: 0, title: "旧章", html: "<p>跨版旧正文</p>" },
+      { idx: 1, title: "旧章二", html: "<p>跨版旧二</p>" },
+    ],
+  });
+  await call("finishImport", owner, { bookId: b, importId: G1, ok: true, chapterCount: 2 });
+  const viewV1 = await call("getChapter", owner, { bookId: b, idx: 0 });
+  check(
+    "schedule 3R: getChapter returns the live-version token + label of the body actually served",
+    viewV1.liveVersion === G1 && viewV1.versionLabel === "V1 EDITION",
+  );
+  const posV1 = await call("savePosition", owner, {
+    bookId: b,
+    chapterIdx: 1,
+    charOffset: 33,
+    liveVersion: viewV1.liveVersion,
+  });
+  const snipV1 = await call("createSnippet", owner, {
+    requestId: "s7-snip-1",
+    bookId: b,
+    text: "跨版旧正文",
+    chapterIdx: 0,
+    chapterLabel: "旧章",
+    liveVersion: viewV1.liveVersion,
+  });
+  const libV1 = await call("getLibrary", owner, {});
+  const snipV1Row = libV1.snippets.find((s) => s.id === snipV1.id);
+  const bookV1Row = libV1.books.find((x) => x.id === b);
+  check(
+    "schedule 3R: same-version reader writes save; the snippet records the live token it was read from",
+    posV1.ok === true &&
+      snipV1.ok === true &&
+      snipV1Row?.liveGen === G1 &&
+      snipV1Row?.versionLabel === "V1 EDITION" &&
+      bookV1Row?.liveGen === G1,
+  );
+  // Promote a new edition while the old reader is still open.
+  const G2 = "s7-gen-2";
+  await call("beginImport", owner, {
+    requestId: G2,
+    title: "跨版之书",
+    source: "owner",
+    versionLabel: "V2 EDITION",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: G2,
+    chapters: [{ idx: 0, title: "新章", html: "<p>跨版新正文</p>" }],
+  });
+  await call("finishImport", owner, { bookId: b, importId: G2, ok: true, chapterCount: 1 });
+  const rowV2 = await bookRow(b);
+  check(
+    "schedule 3R: promotion resets the position and moves the live token with the body",
+    rowV2?.liveGen === G2 && rowV2?.curChapter === 0 && rowV2?.curOffset === 0,
+  );
+  const staleSnip = await call("createSnippet", owner, {
+    requestId: "s7-snip-stale",
+    bookId: b,
+    text: "跨版旧正文",
+    chapterIdx: 0,
+    chapterLabel: "旧章",
+    liveVersion: G1,
+  });
+  const stalePos = await call("savePosition", owner, {
+    bookId: b,
+    chapterIdx: 5,
+    charOffset: 777,
+    liveVersion: G1,
+  });
+  const unboundSnip = await call("createSnippet", owner, {
+    requestId: "s7-snip-unbound",
+    bookId: b,
+    text: "跨版旧正文",
+    chapterIdx: 0,
+  });
+  const unboundPos = await call("savePosition", owner, {
+    bookId: b,
+    chapterIdx: 5,
+    charOffset: 777,
+  });
+  const rowAfterStale = await bookRow(b);
+  const libAfterStale = await call("getLibrary", owner, {});
+  check(
+    "schedule 3R: the OLD reader's snippet + position writes (stale token AND no token) are typed conflicts with ZERO writes — new version's reset position and provenance stand",
+    staleSnip.ok === false &&
+      staleSnip.status === "conflict" &&
+      stalePos.ok === false &&
+      stalePos.status === "conflict" &&
+      unboundSnip.ok === false &&
+      unboundSnip.status === "conflict" &&
+      unboundPos.ok === false &&
+      rowAfterStale?.curChapter === 0 &&
+      rowAfterStale?.curOffset === 0 &&
+      libAfterStale.snippets.filter((s) => s.bookId === b).length === 1,
+  );
+  const libFinal = await call("getLibrary", owner, {});
+  const oldRowFinal = libFinal.snippets.find((s) => s.id === snipV1.id);
+  const bookFinal = libFinal.books.find((x) => x.id === b);
+  check(
+    "schedule 3R: the previously saved snippet keeps its OLD token/label verbatim (provably 'replaced', never re-stamped)",
+    oldRowFinal?.liveGen === G1 &&
+      oldRowFinal?.versionLabel === "V1 EDITION" &&
+      bookFinal?.liveGen === G2 &&
+      bookFinal?.versionLabel === "V2 EDITION",
+  );
+  const snipV2 = await call("createSnippet", owner, {
+    requestId: "s7-snip-2",
+    bookId: b,
+    text: "跨版新正文",
+    chapterIdx: 0,
+    chapterLabel: "新章",
+    liveVersion: G2,
+  });
+  check(
+    "schedule 3R: a write carrying the CURRENT token saves under the new edition",
+    snipV2.ok === true,
   );
 }
 
