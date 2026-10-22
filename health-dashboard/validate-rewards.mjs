@@ -177,7 +177,7 @@ check('source: schema carries the completion proof and the receipt maps it to a 
   && serverSrc.includes('verification: row.completionProof !== null ? "verified" : "unverified"')
   && serverSrc.includes('status: "unverified"'));
 check('source: the atomic batch receipt insert records the completion proof (the watermark the batch itself produces)',
-  serverSrc.includes('${nowMs}, ${watermarkAfter}`'));
+  serverSrc.includes('${nowMs}, ${watermarkAfter}'));
 check('source: the read-only snapshot handler performs no settlement, no profile save, no batch, and no task spawn',
   (() => {
     const body = extractHandlerFunction(serverSrc, 'handleGetRewardsSnapshot');
@@ -408,9 +408,9 @@ if (H) {
       && redeemed.receipt.goldSpent === 500 && redeemed.receipt.balanceAfter === 500
       && redeemed.receipt.balanceVersion === V && redeemed.receipt.localDate === TODAY
       && redeemed.balance === 500);
-    const storedReceiptRow = (await db.select().from(H.schema.gameRewardRedemptions).where(eq(H.schema.gameRewardRedemptions.requestId, REQ1)))[0];
+    const storedProof = await client.execute({ sql: 'SELECT completion_proof FROM game_reward_redemptions WHERE request_id = ?', args: [REQ1] });
     check('proof: the batch recorded a per-request completion proof (the watermark it produced, -500) and the receipt reads verified',
-      storedReceiptRow?.completionProof === -500 && redeemed.receipt.verification === 'verified');
+      Number(storedProof.rows[0]?.completion_proof) === -500 && redeemed.receipt.verification === 'verified');
     const afterRedeem = await rawState(db);
     check('redeem: profile gold and watermark both drop by the price; one reward_redeem ledger flow of -500 (xp 0)',
       afterRedeem.gold === 500 && afterRedeem.goldLedgerSum === -500
@@ -424,6 +424,7 @@ if (H) {
     const afterReplay = await rawState(db);
     check('replay: same requestId + same content returns the original receipt (already_resolved), no second charge, zero writes',
       replay.status === 'already_resolved' && replay.receipt?.id === redeemed.receipt.id
+      && replay.receipt?.verification === 'verified'
       && JSON.stringify(beforeReplay) === JSON.stringify(afterReplay));
     const conflictPrice = await H.handleRedeemReward(owner, { requestId: REQ1, rewardId, rewardRevision: 3, price: 501, expectedBalanceVersion: V });
     const conflictVersion = await H.handleRedeemReward(owner, { requestId: REQ1, rewardId, rewardRevision: 3, price: 500, expectedBalanceVersion: V + 1 });
@@ -454,6 +455,8 @@ if (H) {
     check('list after redemptions: rewards and BOTH receipts remain readable with the settled balance (source still missing)',
       finalList.balance === 300 && finalList.receipts.length === 2 && finalList.rewards.length === 2
       && finalList.receipts[0]?.id === second.receipt.id && finalList.healthState === 'missing');
+    check('list: batch-issued receipts read verified per-request in the list as well',
+      finalList.receipts.every((receipt) => receipt.verification === 'verified'));
   });
 
   // ---------------------------------------------------------- source revision
@@ -679,26 +682,35 @@ if (H) {
       && state.redemptionCount === 1 && state.gold === 40 && state.redeemGoldSum === -60, `status=${res.status}`);
   });
 
-  await scenario('legacy half-completed state is preserved, never silently rewritten', async () => {
+  await scenario('legacy half-completed state is preserved and classified unverified, never certified', async () => {
     const { client, db } = await H.makeDb();
     const owner = ctxFor(db, OWNER);
     await seedFundedProfile(client, 100);
     const reward = await H.handleSaveReward(owner, { id: null, name: '旧回执', price: 60 });
     // A pre-fix half-completed state, seeded directly: a receipt
     // claiming 60 spent / 40 after, but no ledger flow and no
-    // deduction ever landed.
+    // deduction ever landed — and no completion proof exists.
     await client.execute({
       sql: 'INSERT INTO game_reward_redemptions (request_id, reward_id, reward_name, reward_price, reward_revision, balance_version, gold_spent, balance_after, local_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       args: ['req-legacy-half-1', reward.reward.id, '旧回执', 60, 1, 1, 60, 40, TODAY, Date.now()],
     });
     const list = await H.handleGetRewards(owner);
-    check('legacy: the stored receipt stays listed and the balance is NOT silently re-based to match it',
-      list.receipts.length === 1 && list.balance === 100);
+    check('legacy: the stored receipt stays listed as UNVERIFIED and the balance is NOT silently re-based to match it',
+      list.receipts.length === 1 && list.balance === 100 && list.receipts[0]?.verification === 'unverified');
+    const lookup = await H.handleGetRedemptionReceipt(owner, { requestId: 'req-legacy-half-1' });
+    check('legacy: lookup finds the receipt but marks it unverified — found is not proof of completion',
+      lookup.found === true && lookup.receipt?.verification === 'unverified' && lookup.receipt?.goldSpent === 60);
+    const beforeRetry = await rawState(db);
     const retry = await H.handleRedeemReward(owner, { requestId: 'req-legacy-half-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: 1 });
     const state = await rawState(db);
-    check('legacy: a same-key retry resolves to the stored receipt as-is (already_resolved) — no retroactive deduction, no deletion, no compensating flow',
-      retry.status === 'already_resolved' && retry.receipt?.goldSpent === 60
-      && state.gold === 100 && state.redemptionCount === 1 && state.redeemRowCount === 0, `status=${retry.status}`);
+    check('legacy: a same-key retry classifies it unverified (NOT already_resolved) — no retroactive deduction, no deletion, no compensating flow, zero writes',
+      retry.status === 'unverified' && retry.receipt?.verification === 'unverified' && retry.receipt?.goldSpent === 60
+      && state.gold === 100 && state.redemptionCount === 1 && state.redeemRowCount === 0
+      && JSON.stringify(beforeRetry) === JSON.stringify(state), `status=${retry.status}`);
+    const storedRow = await client.execute({ sql: 'SELECT completion_proof, balance_after, gold_spent FROM game_reward_redemptions WHERE request_id = ?', args: ['req-legacy-half-1'] });
+    check('legacy: the stored row itself is untouched (proof still NULL, snapshot amounts unchanged)',
+      storedRow.rows.length === 1 && storedRow.rows[0]?.completion_proof === null
+      && Number(storedRow.rows[0]?.balance_after) === 40 && Number(storedRow.rows[0]?.gold_spent) === 60);
   });
 
   // ---------------------------------------------------------- next-reward goal
@@ -737,6 +749,232 @@ if (H) {
       && list3.receipts[0]?.rewardName === '目标甲' && list3.receipts[0]?.price === 100);
     check('goal: the goal stays readable with the health source missing (list shows goal + rewards, healthState missing)',
       list3.healthState === 'missing' && list3.goalRewardId === b.reward.id && list3.rewards.length === 2);
+  });
+
+  // ------------------------------------------ pin scope (follow-up #2)
+  await scenario('pin scope: a balance change landing at the ledger SUM pause rejects the old confirmation', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '暂停点改余额', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    const V = list.balanceVersion;
+    check('pin race setup: preview pinned at the settled balance (100) and its version',
+      list.balance === 100, `V=${V}`);
+    let armed = true;
+    // The handler's pause point: its pre-commit ledger SUM read.
+    // When that read returns, a competing raw write lands
+    // (gold 100 -> 80, revision V -> V+1, watermark untouched) —
+    // exactly the follow-up counterexample — before the handler's
+    // first commit-loop iteration.
+    const pauseDb = wrapDb(db, {
+      select: (...a) => {
+        const fields = a[0];
+        if (armed && fields && typeof fields === 'object' && 'goldTotal' in fields && !('total' in fields) && !('xpTotal' in fields)) {
+          return {
+            from: () => ({
+              then: (resolve) => {
+                void (async () => {
+                  armed = false;
+                  await client.execute({ sql: 'UPDATE game_state SET gold = 80, revision = revision + 1 WHERE id = 1', args: [] });
+                  resolve([{ goldTotal: 0 }]);
+                })();
+              },
+            }),
+          };
+        }
+        return db.select(...a);
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(pauseDb, OWNER), { requestId: 'req-pin-race-001', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: V });
+    const state = await rawState(db);
+    check('pin race: the moved balance version/balance rejects the old confirmation as stale with ZERO redemption writes (the competing write itself is untouched)',
+      res.status === 'stale' && res.receipt === null
+      && state.gold === 80 && state.revision === V + 1 && state.goldLedgerSum === 0
+      && state.redemptionCount === 0 && state.redeemRowCount === 0, `status=${res.status}`);
+    const list2 = await H.handleGetRewards(owner);
+    const fresh = await H.handleRedeemReward(owner, { requestId: 'req-pin-race-002', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list2.balanceVersion });
+    const state2 = await rawState(db);
+    check('pin race: a fresh preview against the moved balance redeems exactly from it (80 - 60 = 20, verified proof)',
+      fresh.status === 'redeemed' && fresh.receipt?.balanceAfter === 20 && fresh.receipt?.verification === 'verified'
+      && state2.gold === 20 && state2.redeemGoldSum === -60);
+  });
+
+  await scenario('pin scope: own settlement advancing the revision does not stale the same intent', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    // Stranded gold: the ledger holds +50 the balance never received
+    // (watermark 0, balance 100). The preview (getRewards settles on
+    // read) shows the reconciled 150 at its version; the redeem then
+    // races a state where the watermark once again lags — simulated
+    // by re-stranding after the preview — and its OWN settlement
+    // inside the redeem advances the revision before the commit
+    // loop. The commit must still land on the first attempt.
+    await seedFundedProfile(client, 100);
+    await client.execute({
+      sql: 'INSERT INTO game_settlements (local_date, category, detail, xp, gold, rule_version, source_date, source_updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)',
+      args: [TODAY, 'steps', '', 50, 50, 2, TODAY, Date.now()],
+    });
+    const reward = await H.handleSaveReward(owner, { id: null, name: '自家结算', price: 60 });
+    const list = await H.handleGetRewards(owner);
+    check('own-settle setup: the settling preview shows the reconciled balance (100 + 50 = 150)',
+      list.balance === 150, `balance=${list.balance}`);
+    // Re-strand: a further +50 books to the ledger after the preview
+    // (a concurrent settlement's row whose profile save the preview
+    // did not include), so the redeem's own settle must run and will
+    // advance the revision past the pinned version before the loop.
+    await client.execute({
+      sql: 'UPDATE game_settlements SET gold = 100, xp = 100 WHERE local_date = ? AND category = ?',
+      args: [TODAY, 'steps'],
+    });
+    const res = await H.handleRedeemReward(owner, { requestId: 'req-own-settle-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: list.balanceVersion });
+    const state = await rawState(db);
+    check('own-settle: the redemption still commits (own settle is entitled to advance the base) — balance 200 - 60 = 140, watermark reconciled, verified receipt',
+      res.status === 'redeemed' && res.receipt?.balanceAfter === 140 && res.receipt?.verification === 'verified'
+      && state.gold === 140 && state.goldLedgerSum === 40 && state.redeemGoldSum === -60, `status=${res.status}`);
+  });
+
+  // --------------------------------- reconciliation gate (follow-up #3)
+  await scenario('reconciliation gate: a failed settlement means zero new spending', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    await seedFundedProfile(client, 100);
+    // The ledger already spent 60 (a reward_redeem flow) that the
+    // profile never absorbed: watermark 0, gold still shows 100 —
+    // the true available balance is 40.
+    const reward = await H.handleSaveReward(owner, { id: null, name: '对账门', price: 60 });
+    await client.execute({
+      sql: 'INSERT INTO game_settlements (local_date, category, detail, xp, gold, rule_version, source_date, source_updated_at, created_at) VALUES (?, ?, ?, 0, -60, 2, ?, NULL, ?)',
+      args: [TODAY, 'reward_redeem', String(reward.reward.id), TODAY, Date.now()],
+    });
+    const list = await H.handleGetRewards(owner);
+    // Disarm the settle inside getRewards above: it reconciled
+    // already, so re-strand the profile by hand to the counterexample
+    // state (gold 100 / watermark 0 against a -60 ledger).
+    await client.execute({ sql: 'UPDATE game_state SET gold = 100, gold_ledger_sum = 0 WHERE id = 1', args: [] });
+    const pinned = await client.execute({ sql: 'SELECT revision FROM game_state WHERE id = 1', args: [] });
+    const V = Number(pinned.rows[0]?.revision);
+    let armed = true;
+    // Inject the settlement profile-save failure: the game_state
+    // UPDATE matches nothing, so settlement can never persist.
+    const failSaveDb = wrapDb(db, {
+      update: (table) => {
+        if (armed && table === H.schema.gameState) {
+          return { set: () => ({ where: () => ({ returning: async () => [] }) }) };
+        }
+        return db.update(table);
+      },
+    });
+    const res = await H.handleRedeemReward(ctxFor(failSaveDb, OWNER), { requestId: 'req-recon-gate-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: V });
+    const state = await rawState(db);
+    check('recon gate: settle failure inside redeem returns busy with ZERO redemption writes (no second -60, gold/watermark untouched, no receipt)',
+      res.status === 'busy' && res.receipt === null
+      && state.gold === 100 && state.goldLedgerSum === 0 && state.revision === V
+      && state.redemptionCount === 0 && state.redeemGoldSum === -60, `status=${res.status}`);
+    const listFail = await H.handleGetRewards(ctxFor(failSaveDb, OWNER));
+    check('recon gate: getRewards under the same failure reports ok:false (unverifiable), never a spendable balance',
+      listFail.ok === false);
+    armed = false;
+    const listOk = await H.handleGetRewards(owner);
+    check('recon gate: once the save works again, settlement reconciles to the true balance (100 - 60 = 40)',
+      listOk.ok === true && listOk.balance === 40, `balance=${listOk.balance}`);
+    const retry = await H.handleRedeemReward(owner, { requestId: 'req-recon-gate-1', rewardId: reward.reward.id, rewardRevision: 1, price: 60, expectedBalanceVersion: listOk.balanceVersion });
+    const state2 = await rawState(db);
+    check('recon gate: the same requestId now meets the true balance and is refused as insufficient — never floored, never negative',
+      retry.status === 'insufficient_funds' && state2.gold === 40 && state2.redemptionCount === 0 && state2.redeemGoldSum === -60, `status=${retry.status}`);
+    void list;
+  });
+
+  // --------------------------------- read-only snapshot (follow-up #5)
+  await scenario('read-only snapshot: zero writes, goal and tri-state preserved', async () => {
+    const { client, db } = await H.makeDb();
+    const owner = ctxFor(db, OWNER);
+    const guest = ctxFor(db, GUEST);
+    await seedFundedProfile(client, 500);
+    const reward = await H.handleSaveReward(owner, { id: null, name: '只读目标', price: 200 });
+    await H.handleSetRewardGoal(owner, { rewardId: reward.reward.id });
+    let writes = 0;
+    const countingDb = wrapDb(db, {
+      batch: async (...a) => { writes++; return db.batch(...a); },
+      update: (...a) => { writes++; return db.update(...a); },
+      insert: (...a) => { writes++; return db.insert(...a); },
+      delete: (...a) => { writes++; return db.delete(...a); },
+    });
+    const countingOwner = ctxFor(countingDb, OWNER);
+    const before = await rawState(db);
+    const goalBefore = await db.select().from(H.schema.gameRewardGoal);
+    // The counting ctx carries NO agent at all: any spawn attempt
+    // would throw, so a clean return also proves no task is spawned.
+    const snap1 = await H.handleGetRewardsSnapshot(countingOwner);
+    const snap2 = await H.handleGetRewardsSnapshot(countingOwner);
+    const after = await rawState(db);
+    const goalAfter = await db.select().from(H.schema.gameRewardGoal);
+    check('snapshot: two read-only rechecks write NOTHING (profile/ledger/receipt/goal all identical, revision unmoved)',
+      writes === 0 && JSON.stringify(before) === JSON.stringify(after)
+      && JSON.stringify(goalBefore) === JSON.stringify(goalAfter));
+    check('snapshot: reconciled stored state reads ok:true with the stored balance, version, goal, list, and receipts',
+      snap1.readOnly === true && snap1.reconciled === true && snap1.ok === true
+      && snap1.balance === 500 && snap1.balanceVersion === before.revision
+      && snap1.goalRewardId === reward.reward.id && snap1.rewards.length === 1 && snap2.ok === true);
+    const snapGuest = await H.handleGetRewardsSnapshot(ctxFor(countingDb, GUEST));
+    check('snapshot: guest is forbidden with zero data (strict owner gate, no sync-channel exception)',
+      snapGuest.forbidden === true && snapGuest.rewards.length === 0 && snapGuest.goalRewardId === null && writes === 0);
+    await client.execute({ sql: 'UPDATE game_state SET gold_ledger_sum = -60 WHERE id = 1', args: [] });
+    const snapUnrec = await H.handleGetRewardsSnapshot(countingOwner);
+    check('snapshot: an unreconciled stored state reads ok:false (unknown) — yet the stored balance, goal, and list are NOT lost',
+      snapUnrec.ok === false && snapUnrec.reconciled === false && snapUnrec.balance === 500
+      && snapUnrec.goalRewardId === reward.reward.id && snapUnrec.rewards.length === 1 && writes === 0);
+    const { client: client2, db: db2 } = await H.makeDb();
+    await seedFundedProfile(client2, 0);
+    const snapZero = await H.handleGetRewardsSnapshot(ctxFor(db2, OWNER));
+    const { db: db3 } = await H.makeDb();
+    const snapUnknown = await H.handleGetRewardsSnapshot(ctxFor(db3, OWNER));
+    check('snapshot: tri-state is honest — a reconciled stored 0 is a true zero (ok:true), an uninitialized store is unknown (ok:false), never a fake zero',
+      snapZero.ok === true && snapZero.balance === 0 && snapUnknown.ok === false && snapUnknown.balance === 0);
+  });
+
+  // --------------------------------- journal rebuildability (follow-up #6)
+  await scenario('journal: from-scratch rebuild in journal order + legacy upgrade path', async () => {
+    const journal = JSON.parse(readFileSync(new URL('./drizzle/meta/_journal.json', import.meta.url), 'utf8'));
+    const entryTags = journal.entries.map((entry) => entry.tag);
+    const fileTags = H.migrationFiles.map((file) => file.replace(/\.sql$/, ''));
+    check('journal: every migration file is registered in the journal (0014 goal + 0015 proof included) and vice versa',
+      JSON.stringify([...entryTags].sort()) === JSON.stringify([...fileTags].sort())
+      && entryTags.includes('0014_add_game_reward_goal') && entryTags.includes('0015_add_redemption_completion_proof'),
+      `entries=${entryTags.length} files=${fileTags.length}`);
+    const orderedFiles = [...journal.entries].sort((a, b) => a.idx - b.idx).map((entry) => `${entry.tag}.sql`);
+    const { client, db } = await H.dbFromFiles(orderedFiles);
+    const owner = ctxFor(db, OWNER);
+    const tables = await client.execute({ sql: "SELECT name FROM sqlite_master WHERE type = 'table'", args: [] });
+    const tableNames = tables.rows.map((row) => row.name);
+    check('journal: a from-scratch build in journal order contains the full schema (goal table + proof column included)',
+      tableNames.includes('game_reward_goal') && tableNames.includes('game_reward_redemptions')
+      && Number((await client.execute({ sql: "SELECT COUNT(*) AS n FROM pragma_table_info('game_reward_redemptions') WHERE name = 'completion_proof'", args: [] })).rows[0]?.n) === 1);
+    const list = await H.handleGetRewards(owner);
+    const created = await H.handleSaveReward(owner, { id: null, name: '重建库奖励', price: 10 });
+    const set = await H.handleSetRewardGoal(owner, { rewardId: created.reward?.id ?? 0 });
+    const list2 = await H.handleGetRewards(owner);
+    check('journal: getRewards / setRewardGoal / getRewards(goal) all work on the journal-rebuilt store',
+      list.forbidden === false && set.ok === true && list2.goalRewardId === created.reward?.id);
+    // Upgrade path: a store built only through 0013 keeps its rows
+    // when 0014 + 0015 are applied on top.
+    const upTo = (n) => H.migrationFiles.filter((file) => Number.parseInt(file.slice(0, 4), 10) <= n);
+    const up = await H.dbFromFiles(upTo(13));
+    const upOwner = ctxFor(up.db, OWNER);
+    await seedFundedProfile(up.client, 100);
+    const upReward = await H.handleSaveReward(upOwner, { id: null, name: '升级前奖励', price: 60 });
+    await up.client.execute({
+      sql: 'INSERT INTO game_reward_redemptions (request_id, reward_id, reward_name, reward_price, reward_revision, balance_version, gold_spent, balance_after, local_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: ['req-pre-upgrade-1', upReward.reward.id, '升级前奖励', 60, 1, 1, 60, 40, TODAY, Date.now()],
+    });
+    for (const file of H.migrationFiles.filter((f) => Number.parseInt(f.slice(0, 4), 10) > 13)) {
+      await up.client.executeMultiple(readFileSync(new URL(`./drizzle/${file}`, import.meta.url), 'utf8'));
+    }
+    const upList = await H.handleGetRewards(upOwner);
+    const upState = await rawState(up.db);
+    check('upgrade: applying 0014+0015 over a 0013 store preserves every legacy row (receipt reads unverified, profile gold untouched)',
+      upList.receipts.length === 1 && upList.receipts[0]?.verification === 'unverified'
+      && upState.gold === 100 && upState.redemptionCount === 1 && upList.rewards.length === 1);
   });
 }
 
