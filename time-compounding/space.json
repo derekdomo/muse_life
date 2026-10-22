@@ -1,0 +1,8 @@
+{
+  "runtime": "typescript",
+  "platformVersion": 25,
+  "entry": "client/dist/index.html",
+  "name": "时间复利",
+  "slug": "space-14",
+  "managedCronJobs": []
+}

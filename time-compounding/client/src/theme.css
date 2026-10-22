@@ -1,0 +1,62 @@
+/* 时间复利 — editorial ledger theme.
+   Paper-warm neutrals tinted toward ink navy; category colors come from the
+   Okabe-Ito colorblind-safe palette and are always paired with text labels,
+   numbers and line styles — meaning never rides on color alone. */
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+  --text-4xl: 36px;
+  --text-4xl--line-height: 40px;
+  --text-5xl: 48px;
+  --text-5xl--line-height: 52px;
+
+  --font-ledger: "Songti SC", "Noto Serif SC", "STSong", Georgia, serif;
+}
+
+:root {
+  color-scheme: light dark;
+  --bg: #faf8f4;
+  --surface: #fffdf9;
+  --surface-alt: #f3efe6;
+  --text: #22303a;
+  --dim: #6f6a5e;
+  --border: #ddd5c6;
+  --accent: #1f3a4d;
+  --accent-soft: #33546c;
+  --danger: #b3261e;
+  --radius: 10px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-alt);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14181c;
+    --surface: #1d2329;
+    --surface-alt: #262e36;
+    --text: #ece7db;
+    --dim: #a39c8d;
+    --border: #3a434c;
+    --accent: #9db8cc;
+    --accent-soft: #7d99b1;
+    --danger: #f2b8b5;
+  }
+}

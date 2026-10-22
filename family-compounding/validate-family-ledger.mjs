@@ -1786,5 +1786,213 @@ for (const mode of ["single-gate", "both-gated"]) {
   );
 }
 
+/* ---- RECEIPT-001: the chat receipt quotes the STORED row ----
+   The success receipt of recordFamilyActivityFromChat must be built
+   from the record the shared adjudication read back — id, date,
+   typeName, minutes and source field-for-field equal to the stored
+   row — never from the request args plus the SOURCE_CHAT constant.
+   The regression this pins: a pre-source row (source NULL, legacy
+   4-field fingerprint) replayed through chat used to return
+   source '聊天记录' while the row stayed NULL and the dashboard
+   showed 旧来源未记录. The fix must NOT backfill the old row: the
+   receipt reports null, the stored row, its fingerprint and every
+   count stay exactly as they were. */
+{
+  const chat = actionSlice(serverSrc, "recordFamilyActivityFromChat");
+  check(
+    "source(receipt): the chat success receipt is assembled from the adjudicated stored row (stored.*), never from request args",
+    chat.includes("date: stored.date") && chat.includes("typeName: stored.typeName") &&
+      chat.includes("minutes: stored.minutes") && chat.includes("source: stored.source") &&
+      chat.includes("id: stored.id") && !chat.includes("date: args.date"),
+  );
+  check(
+    "source(receipt): adjudication reads the full stored row back and normalizes its source via knownSource",
+    serverSrc.includes("interface StoredActivity") &&
+      serverSrc.includes("source: knownSource(activity.source)"),
+  );
+}
+{
+  // Branch 1: pre-source database WITH a ledger row (legacy
+  // fingerprint) — a chat retry of the same content resolves to the
+  // old row; the receipt must report its true (null) source.
+  const { client, db } = await makePreSourceDb();
+  const nowTs = Date.now();
+  const payload = JSON.stringify({ date: TODAY, typeName: "陪玩", minutes: 45, note: "老记录" });
+  const ins = await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, '陪玩', 45, '老记录', 'receipt-pre-ledger', ?) RETURNING id",
+    args: [TODAY, nowTs],
+  });
+  const idA = Number(ins.rows[0].id);
+  await client.execute({
+    sql: "INSERT INTO family_request_keys (request_key, payload, activity_id, state, created_at, updated_at) VALUES ('receipt-pre-ledger', ?, ?, 'saved', ?, ?)",
+    args: [payload, idA, nowTs, nowTs],
+  });
+  await applyMigrations(client, ["0007"]);
+  const { ctx } = makeCtx(db, OWNER);
+  const rec = await call("recordFamilyActivityFromChat", ctx, {
+    date: TODAY, typeName: "陪玩", minutes: 45, note: "老记录", requestKey: "receipt-pre-ledger",
+  });
+  check(
+    "receipt: chat replay of a pre-source row (ledger present) succeeds as duplicate with the stored row's id",
+    rec.ok === true && rec.duplicate === true && rec.id === idA,
+  );
+  check(
+    "receipt: its source is null （旧来源未记录） — NOT upgraded to 聊天记录 by the retrying path",
+    rec.source === null,
+  );
+  check(
+    "receipt: date / typeName / minutes quote the stored row field-for-field",
+    rec.date === TODAY && rec.typeName === "陪玩" && rec.minutes === 45,
+  );
+  const rowAfter = await client.execute({
+    sql: "SELECT source FROM family_activities WHERE id = ?",
+    args: [idA],
+  });
+  const actsA = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  const ledAfter = await client.execute(
+    "SELECT payload, state FROM family_request_keys WHERE request_key = 'receipt-pre-ledger'",
+  );
+  check(
+    "receipt: nothing was backfilled to match the receipt — stored source still NULL, count still 1, old fingerprint and state unchanged",
+    rowAfter.rows[0].source === null && Number(actsA.rows[0].c) === 1 &&
+      ledAfter.rows[0].payload === payload && ledAfter.rows[0].state === "saved",
+  );
+  const dashA = await call("getDashboard", ctx, {});
+  check(
+    "receipt: receipt and dashboard agree — both read the row's source as null （旧来源未记录）",
+    dashA.recentActivities.find((r) => r.id === idA)?.source === null && rec.source === null,
+  );
+  // A different draft under the same pre-source key via chat:
+  // typed conflict, and the old row (NULL source included) is intact.
+  const diff = await call("recordFamilyActivityFromChat", ctx, {
+    date: TODAY, typeName: "陪玩", minutes: 46, note: "老记录", requestKey: "receipt-pre-ledger",
+  });
+  const rowFinal = await client.execute({
+    sql: "SELECT minutes, source FROM family_activities WHERE id = ?",
+    args: [idA],
+  });
+  check(
+    "receipt: a different draft under the pre-source key via chat is a typed conflict; the old row and its NULL source are unchanged",
+    diff.ok === false && diff.conflict === true && diff.id === null &&
+      Number(rowFinal.rows[0].minutes) === 45 && rowFinal.rows[0].source === null,
+  );
+}
+{
+  // Branch 2: pre-source database WITHOUT a ledger row — the chat
+  // retry takes the legacy backfill path; the receipt still quotes
+  // the stored row (source null), and the backfilled fingerprint
+  // stays the legacy 4-field shape (no source invented).
+  const { client, db } = await makePreSourceDb();
+  const nowTs = Date.now();
+  const pastDate = shiftDay(TODAY, -3);
+  const ins = await client.execute({
+    sql: "INSERT INTO family_activities (date, type_name, minutes, note, request_key, created_at) VALUES (?, '阅读', NULL, NULL, 'receipt-pre-nolgr', ?) RETURNING id",
+    args: [pastDate, nowTs],
+  });
+  const idB = Number(ins.rows[0].id);
+  await applyMigrations(client, ["0007"]);
+  const { ctx } = makeCtx(db, OWNER);
+  const rec = await call("recordFamilyActivityFromChat", ctx, {
+    date: pastDate, typeName: "阅读", minutes: null, note: null, requestKey: "receipt-pre-nolgr",
+  });
+  check(
+    "receipt: chat replay of a pre-source row (no ledger) backfills, replays as duplicate, and reports source null with the stored fields",
+    rec.ok === true && rec.duplicate === true && rec.id === idB && rec.source === null &&
+      rec.date === pastDate && rec.typeName === "阅读" && rec.minutes === null,
+  );
+  const led = await client.execute(
+    "SELECT payload FROM family_request_keys WHERE request_key = 'receipt-pre-nolgr'",
+  );
+  const parsedPayload = JSON.parse(String(led.rows[0].payload));
+  const rowAfter = await client.execute({
+    sql: "SELECT source FROM family_activities WHERE id = ?",
+    args: [idB],
+  });
+  const actsB = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  check(
+    "receipt: the backfilled fingerprint stays the legacy 4-field shape (no source key), the row keeps source NULL, count still 1",
+    !("source" in parsedPayload) && rowAfter.rows[0].source === null && Number(actsB.rows[0].c) === 1,
+  );
+  const man = await call("addActivity", ctx, {
+    date: pastDate, typeName: "阅读", minutes: null, note: null, requestKey: "receipt-pre-nolgr",
+  });
+  check(
+    "receipt: a manual replay of the same NULL-source row also returns the duplicate (content decides; unrecorded source cannot conflict)",
+    man.ok === true && man.duplicate === true && man.id === idB && man.conflict === false,
+  );
+}
+{
+  // Fresh saves on both paths + lost-response retry + cross-entry
+  // conflict + deleted cross-entry + null-identity zero-write.
+  const { db, client } = await makeDb();
+  const { ctx } = makeCtx(db, OWNER);
+  const args = { date: TODAY, typeName: "户外", minutes: 55, note: "公园", requestKey: "receipt-fresh-00001" };
+  const rec = await call("recordFamilyActivityFromChat", ctx, args);
+  const storedRows = await client.execute(
+    "SELECT id, date, type_name, minutes, source FROM family_activities WHERE request_key = 'receipt-fresh-00001'",
+  );
+  const s = storedRows.rows[0];
+  check(
+    "receipt: a fresh chat save's receipt matches the stored row field-for-field (id/date/type/minutes/source)",
+    rec.ok === true && rec.duplicate === false &&
+      rec.id === Number(s.id) && rec.date === s.date && rec.typeName === s.type_name &&
+      rec.minutes === Number(s.minutes) && rec.source === s.source && rec.source === "聊天记录",
+  );
+  const retry = await call("recordFamilyActivityFromChat", ctx, args);
+  const actsC = await client.execute("SELECT COUNT(*) AS c FROM family_activities");
+  check(
+    "receipt: lost-response retry replays the identical receipt (same id, source 聊天记录）, count still 1",
+    retry.ok === true && retry.duplicate === true && retry.id === rec.id &&
+      retry.source === "聊天记录" && retry.date === rec.date && retry.minutes === rec.minutes &&
+      Number(actsC.rows[0].c) === 1,
+  );
+  const manArgs = { date: TODAY, typeName: "运动", minutes: 25, note: null, requestKey: "receipt-fresh-00002" };
+  const man = await call("addActivity", ctx, manArgs);
+  const manStored = await client.execute({
+    sql: "SELECT source FROM family_activities WHERE id = ?",
+    args: [man.id],
+  });
+  const crossChat = await call("recordFamilyActivityFromChat", ctx, manArgs);
+  check(
+    "receipt: a manual save stamps 手动 in storage; a chat retry of that key conflicts (source differs) with a fully nulled receipt",
+    man.ok === true && manStored.rows[0].source === "手动" &&
+      crossChat.ok === false && crossChat.conflict === true &&
+      crossChat.id === null && crossChat.source === null && crossChat.date === null,
+  );
+  const manRetry = await call("addActivity", ctx, manArgs);
+  check(
+    "receipt: a manual retry of the manual key replays as duplicate (new-source rows keep arbitrating normally)",
+    manRetry.ok === true && manRetry.duplicate === true && manRetry.id === man.id,
+  );
+  // Cross-entry deleted: delete the chat record, then a MANUAL retry
+  // of its key is refused and a CHAT retry is typed deleted — the
+  // deleted row never comes back through either door.
+  const del = await call("deleteActivity", ctx, { id: rec.id });
+  const lateChat = await call("recordFamilyActivityFromChat", ctx, args);
+  const lateMan = await call("addActivity", ctx, args);
+  const actsAfterDel = await client.execute(
+    "SELECT COUNT(*) AS c FROM family_activities WHERE request_key = 'receipt-fresh-00001'",
+  );
+  check(
+    "receipt: deleted chat record — chat retry is typed deleted, manual retry is refused, zero rows return",
+    del.ok === true && lateChat.ok === false && lateChat.deleted === true && lateChat.source === null &&
+      lateMan.ok === false && lateMan.id === null && Number(actsAfterDel.rows[0].c) === 0,
+  );
+  // Null identity: forbidden before any db access, receipt nulled,
+  // and the database is byte-identical afterwards.
+  const nullGate = makeCtx(db, null);
+  const gated = await call("recordFamilyActivityFromChat", nullGate.ctx, {
+    date: TODAY, typeName: "陪玩", minutes: 10, note: null, requestKey: "receipt-gate-00001",
+  });
+  const keysAfter = await client.execute(
+    "SELECT COUNT(*) AS c FROM family_request_keys WHERE request_key = 'receipt-gate-00001'",
+  );
+  check(
+    "receipt: a null viewer is forbidden before any db access, with a fully nulled receipt and zero writes",
+    gated.ok === false && gated.forbidden === true && gated.id === null && gated.source === null &&
+      gated.date === null && nullGate.state.dbCalls === 0 && Number(keysAfter.rows[0].c) === 0,
+  );
+}
+
 console.log(`\n${passed} passed, ${failures} failed`);
 if (failures > 0) process.exit(1);

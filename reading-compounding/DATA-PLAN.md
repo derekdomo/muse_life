@@ -1,0 +1,52 @@
+# Data Plan
+
+## Context provenance
+- `核心理念：复利指标是知识卡的复用而非阅读页数——片段→知识卡→实际复用才是利息；不打分、不 KPI 化、不惩罚断签` (verbatim build request; shapes the whole dashboard: reuse ledger is the core mechanism, no scores/streak-punishment UI)
+- `预置第一本：《纳瓦尔宝典》（The Almanack of Naval Ravikant），来源=所有者自选，状态=想读，并注明「官方免费 EPUB 已暂存于所有者本地，待导入」——不得声称已导入全文` (verbatim build request; the ONE user-supplied seed row, seeded once via ensureSeeded on first owner read, exactly like space-10's preset skills — import_status stays 待导入， no full text claimed)
+- `与学习复利分工：学习复利记广义输入→产出转化，读书复利记书籍来源的知识资产与其复用，两者不重复记账` (verbatim build request; no learning-input duplication in this app)
+- `app 内对 snippet 直接提问（内置 agent 通道）是紧随其后的下一片（目标 10-24），本首片不做、不伪造答复` (verbatim build request; explicitly out of scope — no fake Q&A surface)
+- Sibling artifact space-10 （学习复利） patterns reused: strict `ctx.viewer?.isOwner === true` gate before any DB touch with typed forbidden + zero-content responses, America/Los_Angeles day keys and streak helpers, and the immutable request-receipt ledger with payload hash + tombstones (CMP-LEARN-SAVE-001) as the model for this app's requestId ledger.
+- User is color-weak (standing memory): status never rides on color alone — text labels, symbols (✓/●/▲/○), numbers and line styles carry meaning; Okabe-Ito palette.
+
+## Tested sources
+### ctx.inference (tag suggestions + think prompts)
+**Used by**: suggestSnippetMeta action (suggested tags + one think prompt per snippet; suggestions are labeled 建议 and owner-editable, never auto-applied to the original text)
+**Test command**: `bun /opt/muse/assets/spaces/ts-runtime/dist/probe-ctx.js < /tmp/probe-inference.ts` (snippet body: ctx.inference.complete with zod schema {tags: string[1..3], thinkPrompt: string})
+**Sample output**: `{"tags":["自我成长","独立生活","摆脱期望"],"thinkPrompt":"你现在的生活选择，有多少是出于自己的意愿，又有多少是在迎合别人的期望？"}`
+**Processing**: called only on explicit owner tap; result stored as suggestion fields on the snippet, visually separated from 原文 and owner 批注； failure → honest error, snippet still saves without suggestions.
+
+### ctx.inference (per-snippet Q&A — CMP-READ-001 second slice, 2026-10-22)
+**Used by**: askSnippetQuestion action — owner asks about ONE saved snippet; the server loads the stored snippet row and returns its 原文 + provenance （书名/版本/章节， chapter NULL → 章节不详） as a fixed snapshot alongside the answer, so the panel's pinned 「原文」 block is always the real stored text and never editable or merged with model output. The prompt forbids fabricating book content beyond the passage.
+**Processing**: the exchange is ephemeral — turns live only in the panel's client state (history re-sent per ask, bounded to 6 turns), nothing is written on ask success OR failure (failure keeps the client-side question draft + retry entry; no half exchange, no half card). Only the owner's explicit tap on 「一键存为知识卡」 persists anything, through the existing createCard action and its request-key ledger (suggested core prefilled, labeled 建议， owner-editable; annotation is the owner's own words). Draft/deleted/missing snippets are typed notFound and never reach inference; non-owner/anonymous get typed forbidden with zero content, zero db access, zero inference calls. Validated by validate-reading-qa.mjs (57 checks, real handlers against an in-memory DB with a stubbed inference).
+
+### Client-side EPUB parsing (no external host)
+**Used by**: EPUB import flow + reader
+**Test command**: inspected scaffold node_modules and SDK dist — no zip library is bundled (checked package.json deps and node_modules listing); SDK client exports `fileToBase64`/`bytesToBase64` helpers for moving file bytes through action args.
+**Sample output**: SDK `client/file-encoding.d.ts` confirms `fileToBase64(file) → { dataBase64, mimeType }`.
+**Processing**: import is fully client-side: a hand-written minimal ZIP reader (EOCD/central directory, store + deflate via the browser's native `DecompressionStream('deflate-raw')`) unpacks the EPUB in the browser; container.xml → OPF manifest/spine → per-chapter XHTML sanitized with DOMParser (scripts, event handlers, remote images/links stripped; remote resources never fetched). Sanitized chapter HTML + TOC are stored in this app's private DB (book_chapters.text) via chunked save actions; the original EPUB bytes are also uploaded (base64, chunked) and kept with ctx.blobs under `epub/<bookId>` so a failed import keeps the original file and can be retried against the same book row (no duplicate book). Nothing is uploaded to any external service; no book full text is fetched from any website — commercial books enter only as owner-supplied files. If DecompressionStream is unavailable, import fails honestly with status 失败 and the original file/blob + reading position preserved.
+
+### 微信读书片段 (paste / screenshot OCR)
+**Used by**: snippet draft intake
+**Processing**: paste path is plain text entry into a pending draft. Screenshot path: owner picks an image in the app; the image goes through ctx.inference with an images input (SDK InferenceImageInput, probed schema path above) to extract candidate text into the SAME pending-draft state — never directly into snippets. Owner must confirm/edit text + book + chapter before it becomes a snippet, stamped source=粘贴 or OCR. No WeRead cookie, no unofficial scraping (explicitly excluded by the brief).
+
+## Web-search sources
+None. No web content is fetched; book text comes only from owner-supplied files.
+
+## Agent-task sources
+None. recordKnowledgeCardFromChat / recordCardReuse are plain owner-gated actions the main agent invokes when delivering chat work; they need no spawnTask.
+
+## Long-term data behavior
+- **Refresh policy**: none — no cron, no external feeds. All data is owner-entered or derived from the owner's own rows at read time.
+- **Growth**: books, reading sessions, snippets, knowledge cards, reuse entries, tags — all append-oriented; deletes are soft (deleted_at) so tombstones and the request ledger keep working and deleted snippets never resurface in 片刻回味.
+- **Ordering**: dashboard aggregates server-side; cumulative knowledge-card curve buckets cards by the LA calendar day of their real created_at (first save), never backfilled; reuse counts are separate columns (cards total / distinct cards reused ≥1 / total reuse events) per the brief's example (2 cards, 3 uses → 2 / 2 / 3).
+- **Time semantics**: reading streak counts only explicit reading-session rows' LA local days; imports, savor views, and internalized marks never create reading days or minutes. Unknown totals stay unknown: progress keeps the owner's original unit （页/章）, no percentage is fabricated when total pages are unknown; unknown duration is NULL, distinct from 0.
+- **Save safety (A-class)**: every mutating save carries a client-generated requestId recorded in an immutable request_keys ledger (request_id PK, payload fingerprint hash, result row id, tombstone deleted flag — never deleted, never rewritten except stamping deletion). Same key + same payload → original row returned; same key + different payload → typed conflict, draft preserved client-side; retry after delete → typed deleted, never resurrects. Edits use optimistic version checks: stale-version saves return conflict and keep the newer row.
+- **ACL**: every action checks `ctx.viewer?.isOwner === true` before any DB read/write or seed; non-owner/anonymous get typed forbidden responses with zero content and zero writes. No L0.1 exception in this app.
+
+## Rejected approaches
+- **Tried**: server-side EPUB parsing or fetching book text
+  **Why rejected**: brief mandates browser-side parsing, private runtime storage only, and forbids downloading commercial full text from any site.
+- **Tried**: adding a zip dependency (jszip/fflate)
+  **Why rejected**: not in the scaffold's pinned dependency set and no install step is guaranteed; the native DecompressionStream ZIP reader covers store+deflate EPUBs with an honest failure state otherwise.
+- **Tried**: WeRead API/cookie integration for shelf + highlights
+  **Why rejected**: explicitly forbidden by the brief; shelf enters by screenshot/口述 as booklist-only rows, highlights via paste/OCR drafts pending owner confirmation.

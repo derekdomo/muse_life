@@ -2048,6 +2048,19 @@ const GAME_SLOT_META: { slot: "weapon" | "armor" | "accessory"; label: string; s
 // stay available throughout; only a new redemption waits until the
 // pending intent reaches a terminal classification.
 //
+// Cross-tab hardening (P0-2): a localStorage read is not a lock, so
+// the redeem mutationFn RE-CHECKS the slot at send time — a
+// different pending requestId already stored (another tab submitted
+// after this tab's preview opened) means the request is never sent;
+// the mutation fails locally and routes into the STORED intent's
+// unconfirmed flow. And clearing is compare-by-requestId: a
+// callback empties the slot only when the stored identity is the
+// intent that callback resolves, so a late callback or another
+// tab's callback can never wipe the current key. On the server
+// side, every terminal rejection is durable-arbitrated against the
+// receipt table, so a typed rejection reaching this client is a
+// true terminal state for its requestId.
+//
 // Receipt verification is a text label, never color alone: a receipt
 // carrying its per-request completion proof reads ✓ 已完成; a
 // historical receipt without one reads ▲ 未核实 on the list, on the
@@ -2083,6 +2096,13 @@ function newRewardRequestId(): string {
 // reads it back as a recovery entry and never generates a new key
 // for the same intent.
 const PENDING_REDEMPTION_KEY = "space4.pending-redemption.v1";
+
+// Cross-component signal inside this page: the character screen's
+// pending strip asks the rewards panel to open the stored pending
+// intent's unconfirmed flow (same requestId — the panel re-reads the
+// slot itself; the event carries no draft, so no new key can ever
+// be minted by this path).
+const OPEN_PENDING_REDEMPTION_EVENT = "space4:open-pending-redemption";
 
 function loadPendingRedemption(): RedeemDraft | null {
   try {
@@ -2147,12 +2167,45 @@ async function recheckStoredRewards(queryClient: ReturnType<typeof useQueryClien
 // 可兑换 / 余额暂不可核实. Today's unsettled XP preview never counts
 // toward the balance shown here. With no preference saved, the strip
 // invites a choice instead of inventing a default reward.
+//
+// Pending intent first (S3 恢复首屏): while a redemption is still
+// unconfirmed, an independent strip ABOVE the goal names that
+// intent — the ORIGINALLY submitted name and fixed price from the
+// persisted draft, never the reward's current (possibly renamed or
+// repriced) row — and its 继续确认 CTA scrolls to the rewards panel
+// and asks it to open the SAME requestId's unconfirmed flow. No new
+// preview is generated here and no new intent is minted; the goal
+// below stays fully readable and changeable, and a fresh intent can
+// only be started explicitly after the pending one reaches an
+// authoritative terminal classification. With no pending intent,
+// the goal renders the stored-balance three-state as before.
 function NextRewardGoal() {
   const queryClient = useQueryClient();
   const rewards = useQuery({ queryKey: ["rewards"], queryFn: () => api.getRewards({}) });
   const data = rewards.data;
   const goalReward = data && data.goalRewardId !== null ? data.rewards.find((reward) => reward.id === data.goalRewardId) ?? null : null;
+  const [pendingIntent, setPendingIntent] = useState<RedeemDraft | null>(null);
+  useEffect(() => {
+    const sync = () => setPendingIntent(loadPendingRedemption());
+    sync();
+    // Cross-tab: another tab storing or clearing the slot repaints
+    // this strip (the storage event fires in every OTHER tab).
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+  const continuePending = () => {
+    scrollToRewardsPanel();
+    window.dispatchEvent(new Event(OPEN_PENDING_REDEMPTION_EVENT));
+  };
   return (
+    <>
+      {pendingIntent ? (
+        <div className="game-goal-pending" role="alert">
+          <strong><span aria-hidden="true">▲</span> 先确认这笔兑换</strong>
+          <p className="game-note">{pendingIntent.name} · {numberLabel(pendingIntent.price)} 金币 · ▲ 结果未确认：它可能已经入账，也可能没有。确认出权威结果之前，不要发起新的兑换。</p>
+          <button type="button" className="game-btn" aria-label="继续确认未确认的兑换" onClick={continuePending}>继续确认</button>
+        </div>
+      ) : null}
     <div className="game-goal" role="group" aria-label="下一奖励目标">
       <div className="section-line">
         <strong><span aria-hidden="true">◎</span> 下一奖励</strong>
@@ -2177,7 +2230,22 @@ function NextRewardGoal() {
         <p className="game-note">选一项你想先实现的奖励：在下方奖励清单里点「设为下一奖励」。</p>
       )}
     </div>
+    </>
   );
+}
+
+// Thrown by the redeem mutationFn when the send-time identity
+// re-check finds a DIFFERENT pending intent already occupying the
+// recovery slot (typically submitted from another tab after this
+// tab's preview was opened): the new request must NOT be sent at
+// all — the other intent keeps its identity and this tab routes
+// into ITS unconfirmed flow instead.
+class PendingBlockedError extends Error {
+  existing: RedeemDraft;
+  constructor(existing: RedeemDraft) {
+    super("pending-blocked");
+    this.existing = existing;
+  }
 }
 
 function RewardsPanel() {
@@ -2198,9 +2266,31 @@ function RewardsPanel() {
   const [pendingRecovery, setPendingRecovery] = useState<RedeemDraft | null>(null);
   useEffect(() => { setPendingRecovery(loadPendingRedemption()); }, []);
 
-  const clearPending = () => {
-    storePendingRedemption(null);
-    setPendingRecovery(null);
+  // The character screen's pending strip asks this panel to open
+  // the stored intent's unconfirmed flow: re-read the slot at that
+  // moment and route into ITS draft — the original requestId, the
+  // original fixed content — never a fresh preview or a new key.
+  useEffect(() => {
+    const openPending = () => {
+      const pending = loadPendingRedemption();
+      if (!pending) return;
+      setPendingRecovery(pending);
+      setStage({ kind: "unconfirmed", draft: pending, lookupNote: null });
+    };
+    window.addEventListener(OPEN_PENDING_REDEMPTION_EVENT, openPending);
+    return () => window.removeEventListener(OPEN_PENDING_REDEMPTION_EVENT, openPending);
+  }, []);
+
+  // Compare-by-requestId clearing (P0-2): the slot is emptied ONLY
+  // when the stored identity is the very intent this callback is
+  // resolving. A late callback, or another tab's callback resolving
+  // a different intent, must never wipe the current key — the
+  // stored pending belongs to whichever intent submitted it until
+  // THAT intent reaches a terminal classification.
+  const clearPending = (requestId: string) => {
+    const existing = loadPendingRedemption();
+    if (existing && existing.requestId === requestId) storePendingRedemption(null);
+    setPendingRecovery((prev) => (prev && prev.requestId === requestId ? null : prev));
   };
 
   const invalidateRewards = () => {
@@ -2238,7 +2328,21 @@ function RewardsPanel() {
   });
 
   const redeem = useMutation({
-    mutationFn: (draft: RedeemDraft) => api.redeemReward({ requestId: draft.requestId, rewardId: draft.rewardId, rewardRevision: draft.rewardRevision, price: draft.price, expectedBalanceVersion: draft.expectedBalanceVersion }),
+    mutationFn: async (draft: RedeemDraft) => {
+      // Send-time identity re-check (P0-2): a single localStorage
+      // read at preview time is NOT a cross-tab lock — another tab
+      // may have submitted and stored its own intent after this
+      // tab's preview opened. Re-read the slot NOW, immediately
+      // before sending: a DIFFERENT pending requestId means this
+      // request must not be sent at all (the stored intent keeps
+      // the slot and the recovery identity); the mutation fails
+      // locally with PendingBlockedError and onError routes into
+      // the stored intent's unconfirmed flow. The same requestId
+      // (a retry of the stored intent itself) always passes.
+      const existing = loadPendingRedemption();
+      if (existing && existing.requestId !== draft.requestId) throw new PendingBlockedError(existing);
+      return api.redeemReward({ requestId: draft.requestId, rewardId: draft.rewardId, rewardRevision: draft.rewardRevision, price: draft.price, expectedBalanceVersion: draft.expectedBalanceVersion });
+    },
     onMutate: (draft) => {
       // The recovery slot holds ONE identity: never overwrite a
       // different pending intent with a new draft — the pending one
@@ -2248,7 +2352,7 @@ function RewardsPanel() {
     },
     onSuccess: (result, draft) => {
       if ((result.status === "redeemed" || result.status === "already_resolved") && result.receipt) {
-        clearPending();
+        clearPending(draft.requestId);
         setLastReceipt(result.receipt);
         setReceiptNote(result.status === "already_resolved" ? "这笔兑换此前已经入账，下面是原回执，未重复扣账。" : null);
         setNote(null);
@@ -2263,7 +2367,7 @@ function RewardsPanel() {
         // classified (the server charged nothing and changed
         // nothing), so the pending identity clears and the receipt
         // is displayed with its 未核实 label.
-        clearPending();
+        clearPending(draft.requestId);
         setLastReceipt(result.receipt);
         setReceiptNote("这张历史回执未核实：没有逐笔完成证明，不能确认这笔兑换已经扣账。本次没有重复扣账，也没有改动原回执。");
         setNote(null);
@@ -2282,19 +2386,39 @@ function RewardsPanel() {
         return;
       }
       // Typed rejection (stale / insufficient / conflict / not
-      // found): the intent is terminally classified — clear the
-      // pending identity, return to the list with the reason; the
-      // list and the form drafts are untouched and the balance
-      // refreshes for a fresh preview.
-      clearPending();
+      // found): the server arbitrated this rejection against the
+      // durable receipt table as its last step, so the intent is
+      // terminally classified — clear the pending identity (only
+      // if the slot still holds THIS intent), return to the list
+      // with the reason; the list and the form drafts are untouched
+      // and the balance refreshes for a fresh preview.
+      clearPending(draft.requestId);
       setNote(result.message);
       setStage({ kind: "list" });
       invalidateRewards();
     },
-    onError: (_error, draft) => {
+    onError: (error, draft) => {
+      if (error instanceof PendingBlockedError) {
+        // Nothing was sent: another intent (another tab, or an
+        // earlier flow) owns the recovery slot. Route into THAT
+        // intent's unconfirmed flow on its original requestId —
+        // this tab's unsent draft is simply dropped, and the slot
+        // is left exactly as the other intent stored it.
+        setPendingRecovery(error.existing);
+        setStage({ kind: "unconfirmed", draft: error.existing, lookupNote: `另一笔兑换（${error.existing.name} · ${numberLabel(error.existing.price)} 金币）还没有确认，本次没有发出新的兑换请求。先确认它，再发起新的兑换。` });
+        return;
+      }
       // The response was lost — the redemption may or may not have
       // landed. Keep the exact same requestId (already persisted by
-      // onMutate) and resolve from it.
+      // onMutate) and resolve from it — unless the slot meanwhile
+      // came to hold a different intent, which then owns the
+      // recovery flow.
+      const existing = loadPendingRedemption();
+      if (existing && existing.requestId !== draft.requestId) {
+        setPendingRecovery(existing);
+        setStage({ kind: "unconfirmed", draft: existing, lookupNote: null });
+        return;
+      }
       setPendingRecovery(draft);
       setStage({ kind: "unconfirmed", draft, lookupNote: null });
     },
@@ -2302,9 +2426,9 @@ function RewardsPanel() {
 
   const lookup = useMutation({
     mutationFn: (requestId: string) => api.getRedemptionReceipt({ requestId }),
-    onSuccess: (result) => {
+    onSuccess: (result, requestId) => {
       if (result.receipt) {
-        clearPending();
+        clearPending(requestId);
         setLastReceipt(result.receipt);
         setReceiptNote(result.receipt.verification === "verified"
           ? "已确认：这笔兑换已经入账，下面是原回执，未重复扣账。"
@@ -2385,6 +2509,24 @@ function RewardsPanel() {
     });
   };
 
+  // Receipt-card 选择下一项 (S3): close the receipt card AND move
+  // to the reward list's goal selection — scroll the list into
+  // view and focus the first available 「设为下一奖励」 control (the
+  // list itself when no other reward can be picked). The saved goal
+  // is NOT touched here: it stays the current target until another
+  // setGoal actually succeeds.
+  const chooseNextGoal = () => {
+    setLastReceipt(null);
+    setReceiptNote(null);
+    requestAnimationFrame(() => {
+      const list = document.getElementById("game-rewards-list");
+      list?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const pick = document.querySelector<HTMLButtonElement>("#game-rewards-panel button[data-goal-pick='true']:not([disabled])");
+      if (pick) pick.focus({ preventScroll: true });
+      else list?.focus({ preventScroll: true });
+    });
+  };
+
   const submitNew = () => {
     const price = Number(newPrice);
     if (!newName.trim()) { setNote("先给奖励起个名字。"); return; }
@@ -2440,7 +2582,7 @@ function RewardsPanel() {
               {data.goalRewardId === lastReceipt.rewardId ? (
                 <div className="reward-actions">
                   <button type="button" className="game-btn" aria-label="保留这条奖励为下一目标" onClick={() => { setLastReceipt(null); setReceiptNote(null); }}>保留该目标</button>
-                  <button type="button" className="game-btn game-btn-ghost" aria-label="去选择下一项奖励作为目标" onClick={() => { setLastReceipt(null); setReceiptNote(null); }}>选择下一项</button>
+                  <button type="button" className="game-btn game-btn-ghost" aria-label="去选择下一项奖励作为目标" onClick={chooseNextGoal}>选择下一项</button>
                 </div>
               ) : null}
             </div>
@@ -2484,7 +2626,7 @@ function RewardsPanel() {
                   </div>
                 </div>
               ) : null}
-              <div className="game-shop">
+              <div className="game-shop" id="game-rewards-list" tabIndex={-1}>
                 {data.rewards.length ? data.rewards.map((reward) => {
                   const shortfall = reward.price - balance;
                   const affordable = shortfall <= 0;
@@ -2515,7 +2657,7 @@ function RewardsPanel() {
                               <span className="game-item-locked">还差 {numberLabel(shortfall)} 金币</span>
                             ) : null}
                             {reward.id !== data.goalRewardId ? (
-                              <button type="button" className="game-btn game-btn-ghost" aria-label={`把 ${reward.name} 设为下一奖励`} disabled={setGoal.isPending} onClick={() => setGoal.mutate(reward.id)}>设为下一奖励</button>
+                              <button type="button" className="game-btn game-btn-ghost" data-goal-pick="true" aria-label={`把 ${reward.name} 设为下一奖励`} disabled={setGoal.isPending} onClick={() => setGoal.mutate(reward.id)}>设为下一奖励</button>
                             ) : null}
                             <button type="button" className="game-btn game-btn-ghost" aria-label={`编辑奖励 ${reward.name}`} onClick={() => { setEditingId(reward.id); setEditName(reward.name); setEditPrice(String(reward.price)); }}>编辑</button>
                           </div>
