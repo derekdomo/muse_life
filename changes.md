@@ -1109,3 +1109,11 @@
 - `CMP-TIME-SAVE-001`（space-14 先改 artifact）：改了什么——addEntry/update 改为账本先行仲裁＋单原子 batch：主体行与 request_ledger 行同批落盘，任一写点失败整批回滚零半包；同键并发由账本主键唯一约束仲裁、只产一行；账本存规范化指纹，同键异稿 conflict 保稿；旧重试与较新编辑交错时指纹比对拦截、不回滚新稿；delete 写墓碑行，晚重试返回 deleted 不复活；统计公式未动。涉及文件（time-compounding/）：server/src/actions.ts、新增 validate-time-atomicity.mjs；构建方称新增迁移 0002（request_id 唯一索引），仓库镜像中 request_ledger.request_id 在 schema 为主键、未见独立新迁移文件落盘，此差异列 EVID 残项下轮核对，不冒称已回灌。验证证据：构建方在已发布源码树实跑 validate-time-atomicity＋首片存储层合计 **143/143**（PM 两复现均转绿：账本写点失败零半包、同键并发一行；含每写点失败/丢响应/墓碑/DST 167·169h/manual-only/guest 零读写/迁移保行）；构建审计 pass；生产三表仍 0 行未动。同步轮次独立复跑：仓库副本 validate-time-review **65/65** 通过（呈现层无回归）；validate-time-atomicity 仓库副本因缺 @libsql/client 无法直跑，143 计数以构建方已发布环境实跑为准、如实分账。源码 actions 已回灌本仓。回滚：revert 本条构建。
 - `F0.7`（P0，只读续查，遵丙(ii)）：05:13 PDT 经 space-3 getRefreshObservations——access=owner、currentAttempt=1、status=running、diagnosis=awaiting_callback，观测行仍仅 refresh_started(claimed)＋spawn_attached（2026-10-20T18:27:22Z），state.updatedAt 冻结于启动时刻，距启动约 41¾ 小时无本代回调/终态行、新快照未核实，断点未变（平台任务执行/回调段）。未触发 run、未清冻/重置。
 - 仍（需用户确认）：`CWEB-LEVEL-001` 四参数/路径；`W6.2-PM-IMG` 整批过目未收，不接入；`H4.6` 恢复参考 T 未定。本轮用户可见增量：3 组（三项 P0 修复，其中健康含 P2 同页通知）。未提交 app.db/.env/任何真实数据。此登记仅表示实现方已交付，PM 结论以其评审记录为准。
+
+
+## 2026-10-22（05:13 轮次勘误：READ/TIME 证据口径补正，依据构建方完整回传延迟送达）
+
+- 本日 05:13 主条目中两处证据表述以构建方完整完成回传（space-15 于 12:32Z、space-14 于 12:22Z 送达，晚于主条目登记时所据的不完整预览）为准补正：
+- (1) `CMP-READ-SAVE-001`：validate-save-atomicity 实为在**真实 drizzle/libsql 上实跑 113/113**——构建方先以探针脚本实证 db.batch 四项语义（账本插入触发器 abort 时整批回滚、.returning()+SQL 子查询回填 resultId、同键并发恰一提交、删除批原子回滚），再逐项覆盖 PM 四复现、七入口 fresh/replay/conflict、每个写点触发器注入失败与恢复、legacy 兼容、guest/anon 零 db 访问；server/client 均过 tsc strict。主条目「25/25 源码/结构层、运行时注入驱动在本平台结构性不可行、运行时终证待 PM 复验」作废，改为：实现方已具真实 handler/内存库层证据 113/113，PM 独立复验仍以其评审记录为准。validate-reading-qa 57/57 不变。
+- (2) `CMP-TIME-SAVE-001`：validate-time-atomicity 独立计数为 **114/114**（真实 handler＋实际迁移内存库，含 PM 原 repro、查询屏障并发、update 两写点失败回滚、旧重试不回滚新稿、墓碑三键、guest 零读写、DST 167/169 三值一致、旧记录保行）；且**无 schema 变更、无新迁移**——同键仲裁靠 request_ledger 主键与同批写入。主条目「构建方称新增迁移 0002、镜像未见落盘列 EVID 残项」作废：不存在该迁移，无此残项；「143/143 合计」口径以本勘误的 114/114 独立计数为准（不与首片计数相加）。
+- (3) 新增未关闭项（同轮内容评审 P1，随本勘误入队）：`CMP-READ-001` 问答面板异载荷冲突回执靠猜——冲突分支忽略服务端结果 ID、refetch 后取同片段最后一张卡冒充权威结果，同片段多卡时定位错卡。已派 space-15 修复（服务端冲突响应返回原键账本 resultId、客户端按 cardId 精确定位、拿不到明说无法定位不猜），交付后另行登记。其余结论不变。
