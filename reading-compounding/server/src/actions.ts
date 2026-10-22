@@ -18,15 +18,27 @@
 //
 // Save safety (CMP-READ-SAVE-001): every create carries a requestId
 // recorded in the immutable request_keys ledger with a payload
-// fingerprint, in the same batch as the row it creates.
+// fingerprint covering ALL saved content and provenance fields. The
+// created row(s), their tag rows and the ledger row commit as ONE
+// db.batch — a single atomic unit — so a failure at any write point
+// (or a lost response, or a same-key race lost to the ledger's
+// primary key) never leaves a body row without its ledger entry or
+// vice versa: the outcome is the full commit, or the untouched
+// pre-save state, and the same key can simply be retried.
 //   same key + same payload  → the original row is returned (replay)
 //   same key + other payload → typed "conflict", nothing written
 //   key whose row was deleted → typed "deleted", never resurrected
+// Replay/deleted arbitration reads the persisted ledger AND the
+// created row's own visibility (its deleted_at), never a cached
+// claim — so even a row deleted before deletes became atomic is
+// answered "deleted" truthfully. Deletes are atomic too: the
+// soft-delete and the ledger tombstone stamp commit in one batch.
 // Edits carry an optimistic `version`: a stale save conflicts and the
 // newer row is never overwritten.
 
 import { defineAction, z, type ActionsModule, type Ctx, type SpaceDb } from "@hatch/space-sdk";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import type { BatchItem as DrizzleBatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 
 function isOwner(ctx: Ctx): boolean {
@@ -93,15 +105,137 @@ function payloadHash(payload: unknown): string {
 
 type Db = SpaceDb<typeof schema>;
 
+// One statement of an atomic db.batch write set (sqlite dialect).
+type BatchItem = DrizzleBatchItem<"sqlite">;
+
 type Claim =
   | { state: "fresh" }
   | { state: "replay"; resultId: number | null }
   | { state: "conflict" }
   | { state: "deleted" };
 
-// Look up a requestId in the ledger. Fresh keys return "fresh" and the
-// caller inserts the ledger row in the same batch as the created row.
-async function claimRequest(
+// Tables a ledger row can point at (the ledger's result_table values).
+const RESULT_TABLE_SQL = {
+  books: "books",
+  reading_sessions: "reading_sessions",
+  snippets: "snippets",
+  knowledge_cards: "knowledge_cards",
+  card_reuses: "card_reuses",
+} as const;
+
+type ResultTableName = keyof typeof RESULT_TABLE_SQL;
+
+// SQL fragment resolving, inside the same batch, the id of the row a
+// create just inserted — every created row carries its requestId, so
+// the ledger backfill and dependent rows (tags, a chat card's
+// snippet) reference the ACTUAL stored row, never a guessed id.
+function idByRequestId(resultTable: ResultTableName, requestId: string) {
+  return sql`(SELECT id FROM ${sql.raw(RESULT_TABLE_SQL[resultTable])} WHERE request_id = ${requestId})`;
+}
+
+function ledgerInsertStmt(
+  db: Db,
+  requestId: string,
+  kind: string,
+  hash: string,
+  resultTable: ResultTableName,
+): BatchItem {
+  return db.insert(schema.requestKeys).values({
+    requestId,
+    kind,
+    payloadHash: hash,
+    resultTable,
+    resultId: null,
+  });
+}
+
+function ledgerResultStmt(
+  db: Db,
+  requestId: string,
+  resultTable: ResultTableName,
+): BatchItem {
+  return db
+    .update(schema.requestKeys)
+    .set({ resultId: idByRequestId(resultTable, requestId) })
+    .where(eq(schema.requestKeys.requestId, requestId));
+}
+
+// Is the row a ledger entry points at still there and not deleted?
+// The ledger records what was committed; the row itself is the
+// authority on whether it is still alive. card_reuses has no
+// tombstone column of its own — a reuse dies with its card, exactly
+// as the read paths already filter it.
+async function entityAlive(
+  db: Db,
+  resultTable: string | null,
+  resultId: number | null,
+): Promise<boolean> {
+  if (resultTable == null || resultId == null) return false;
+  switch (resultTable) {
+    case "books": {
+      const rows = await db
+        .select({ deletedAt: schema.books.deletedAt })
+        .from(schema.books)
+        .where(eq(schema.books.id, resultId))
+        .limit(1);
+      const r = rows[0];
+      return r != null && r.deletedAt == null;
+    }
+    case "reading_sessions": {
+      const rows = await db
+        .select({ deletedAt: schema.readingSessions.deletedAt })
+        .from(schema.readingSessions)
+        .where(eq(schema.readingSessions.id, resultId))
+        .limit(1);
+      const r = rows[0];
+      return r != null && r.deletedAt == null;
+    }
+    case "snippets": {
+      const rows = await db
+        .select({ deletedAt: schema.snippets.deletedAt })
+        .from(schema.snippets)
+        .where(eq(schema.snippets.id, resultId))
+        .limit(1);
+      const r = rows[0];
+      return r != null && r.deletedAt == null;
+    }
+    case "knowledge_cards": {
+      const rows = await db
+        .select({ deletedAt: schema.knowledgeCards.deletedAt })
+        .from(schema.knowledgeCards)
+        .where(eq(schema.knowledgeCards.id, resultId))
+        .limit(1);
+      const r = rows[0];
+      return r != null && r.deletedAt == null;
+    }
+    case "card_reuses": {
+      const rows = await db
+        .select({ cardId: schema.cardReuses.cardId })
+        .from(schema.cardReuses)
+        .where(eq(schema.cardReuses.id, resultId))
+        .limit(1);
+      const reuse = rows[0];
+      if (!reuse) return false;
+      const cards = await db
+        .select({ deletedAt: schema.knowledgeCards.deletedAt })
+        .from(schema.knowledgeCards)
+        .where(eq(schema.knowledgeCards.id, reuse.cardId))
+        .limit(1);
+      const card = cards[0];
+      return card != null && card.deletedAt == null;
+    }
+    default:
+      return false;
+  }
+}
+
+// Authoritative arbitration for one create key, from persisted state
+// only: the ledger row plus the created row's own visibility. A
+// committed row that has since been deleted is answered "deleted"
+// even if its tombstone stamp is missing (rows deleted before
+// deletes became atomic) — a replay never reports a false success
+// and never resurrects anything.
+async function arbitrateCreate(
   db: Db,
   requestId: string,
   kind: string,
@@ -116,31 +250,95 @@ async function claimRequest(
   if (!row) return { state: "fresh" };
   if (row.kind !== kind || row.payloadHash !== hash) return { state: "conflict" };
   if (row.deleted === 1) return { state: "deleted" };
+  if (!(await entityAlive(db, row.resultTable, row.resultId))) {
+    return { state: "deleted" };
+  }
   return { state: "replay", resultId: row.resultId };
 }
 
-// Stamp the ledger row(s) for a deleted entity so late retries with the
-// original creation key are answered "deleted" forever.
-async function tombstoneByResult(
+function claimToResult(claim: Claim): z.infer<typeof createResult> | null {
+  switch (claim.state) {
+    case "conflict":
+      return { ok: false, forbidden: false, status: "conflict", id: null };
+    case "deleted":
+      return { ok: false, forbidden: false, status: "deleted", id: null };
+    case "replay":
+      return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
+    default:
+      return null;
+  }
+}
+
+// Commit one create's ENTIRE write set — created row(s), dependent
+// rows (tags, a chat card's source snippet) and the ledger row — as
+// one db.batch. The runtime executes a batch as a single atomic
+// unit, so any failure (a rejected ledger insert, a rejected tag
+// insert, a crash before the response) commits nothing at all: the
+// pre-save state stands and the same key retries cleanly. When the
+// batch fails because a concurrent save with the same key committed
+// first (the ledger primary key rejects ours, body included), the
+// persisted ledger arbitrates the real outcome instead of surfacing
+// a spurious error.
+async function commitCreate(
   db: Db,
-  resultTable: string,
+  requestId: string,
+  kind: string,
+  hash: string,
+  items: BatchItem[],
+): Promise<{ committed: true; results: unknown } | { committed: false; claim: Claim }> {
+  try {
+    const results: unknown = await db.batch(items as [BatchItem, ...BatchItem[]]);
+    return { committed: true, results };
+  } catch (err) {
+    const claim = await arbitrateCreate(db, requestId, kind, hash);
+    if (claim.state === "fresh") throw err;
+    return { committed: false, claim };
+  }
+}
+
+// The new row's id from a committed batch: `index` is the position of
+// the body's `.returning({ id })` insert within the batch items.
+function batchInsertId(results: unknown, index: number): number {
+  const per = (results as unknown[])[index] as Array<{ id: number }> | undefined;
+  const row = per?.[0];
+  if (!row) throw new Error("atomic save: batch body insert returned no row");
+  return row.id;
+}
+
+// The tombstone half of a delete, batched WITH the delete itself:
+// stamp every ledger row that created this entity, in one UPDATE.
+// Delete + tombstone commit together or not at all, so a failed
+// tombstone can no longer leave a deleted row answering "replayed".
+function tombstoneStmt(
+  db: Db,
+  resultTable: ResultTableName,
   resultId: number,
-): Promise<void> {
-  const rows = await db
-    .select({ requestId: schema.requestKeys.requestId })
-    .from(schema.requestKeys)
+): BatchItem {
+  return db
+    .update(schema.requestKeys)
+    .set({ deleted: 1 })
     .where(
       and(
         eq(schema.requestKeys.resultTable, resultTable),
         eq(schema.requestKeys.resultId, resultId),
       ),
     );
-  for (const r of rows) {
-    await db
-      .update(schema.requestKeys)
-      .set({ deleted: 1 })
-      .where(eq(schema.requestKeys.requestId, r.requestId));
-  }
+}
+
+// Run a soft-delete update and its ledger tombstone as one atomic
+// batch. Returns true when the row was actually deleted by this call.
+async function commitDelete(
+  db: Db,
+  deleteStmt: BatchItem,
+  resultTable: ResultTableName,
+  resultId: number,
+): Promise<boolean> {
+  const results: unknown = await db.batch([
+    deleteStmt,
+    tombstoneStmt(db, resultTable, resultId),
+  ] as [BatchItem, ...BatchItem[]]);
+  const rows = (results as unknown[])[0] as Array<{ id: number }> | undefined;
+  return (rows?.length ?? 0) > 0;
 }
 
 // The one user-supplied seed row (verbatim build request): the owner's
@@ -668,39 +866,39 @@ export const Actions = {
       const hash = payloadHash({
         k: "book",
         title: args.title,
-        author: args.author ?? null,
+        author: args.author || null,
         source: args.source,
         status: args.status,
-        note: args.note ?? null,
+        note: args.note || null,
         importStatus: args.importStatus,
       });
-      const claim = await claimRequest(db, args.requestId, "book", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
-      const inserted = await db
-        .insert(schema.books)
-        .values({
-          title: args.title,
-          author: args.author || null,
-          source: args.source,
-          status: args.status,
-          note: args.note || null,
-          importStatus: args.importStatus,
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.books.id });
-      const row = inserted[0];
-      if (!row) throw new Error("addBook: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "book",
-        payloadHash: hash,
-        resultTable: "books",
-        resultId: row.id,
-      });
+      const claim = await arbitrateCreate(db, args.requestId, "book", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
+      const outcome = await commitCreate(db, args.requestId, "book", hash, [
+        db
+          .insert(schema.books)
+          .values({
+            title: args.title,
+            author: args.author || null,
+            source: args.source,
+            status: args.status,
+            note: args.note || null,
+            importStatus: args.importStatus,
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.books.id }),
+        ledgerInsertStmt(db, args.requestId, "book", hash, "books"),
+        ledgerResultStmt(db, args.requestId, "books"),
+      ]);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("addBook: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 
@@ -763,13 +961,17 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
-      const updated = await db
-        .update(schema.books)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(schema.books.id, args.id), isNull(schema.books.deletedAt)))
-        .returning({ id: schema.books.id });
-      if (updated.length === 0) return { ok: false, forbidden: false, status: "notFound" };
-      await tombstoneByResult(db, "books", args.id);
+      const deleted = await commitDelete(
+        db,
+        db
+          .update(schema.books)
+          .set({ deletedAt: new Date(), updatedAt: new Date() })
+          .where(and(eq(schema.books.id, args.id), isNull(schema.books.deletedAt)))
+          .returning({ id: schema.books.id }),
+        "books",
+        args.id,
+      );
+      if (!deleted) return { ok: false, forbidden: false, status: "notFound" };
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, status: "saved" };
     },
@@ -802,12 +1004,11 @@ export const Actions = {
         minutes: args.minutes ?? null,
         progressValue: args.progressValue ?? null,
         progressUnit: args.progressUnit ?? null,
-        note: args.note ?? null,
+        note: args.note || null,
       });
-      const claim = await claimRequest(db, args.requestId, "reading", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
+      const claim = await arbitrateCreate(db, args.requestId, "reading", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
       let bookId = args.bookId ?? null;
       if (bookId != null) {
         const found = await db
@@ -817,41 +1018,48 @@ export const Actions = {
           .limit(1);
         if (found.length === 0) bookId = null;
       }
-      const inserted = await db
-        .insert(schema.readingSessions)
-        .values({
-          bookId,
-          date,
-          minutes: args.minutes ?? null,
-          progressValue: args.progressValue ?? null,
-          progressUnit: args.progressUnit ?? null,
-          note: args.note || null,
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.readingSessions.id });
-      const row = inserted[0];
-      if (!row) throw new Error("logReading: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "reading",
-        payloadHash: hash,
-        resultTable: "reading_sessions",
-        resultId: row.id,
-      });
+      // The session row, its ledger entry and the book's progress
+      // marker commit as one batch — a failure anywhere leaves none
+      // of them behind.
+      const items: BatchItem[] = [
+        db
+          .insert(schema.readingSessions)
+          .values({
+            bookId,
+            date,
+            minutes: args.minutes ?? null,
+            progressValue: args.progressValue ?? null,
+            progressUnit: args.progressUnit ?? null,
+            note: args.note || null,
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.readingSessions.id }),
+        ledgerInsertStmt(db, args.requestId, "reading", hash, "reading_sessions"),
+        ledgerResultStmt(db, args.requestId, "reading_sessions"),
+      ];
       // A progress report on the session also moves the book's own
       // progress marker (same unit, owner's number verbatim).
       if (bookId != null && args.progressValue != null) {
-        await db
-          .update(schema.books)
-          .set({
-            progressValue: args.progressValue,
-            progressUnit: args.progressUnit ?? null,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.books.id, bookId));
+        items.push(
+          db
+            .update(schema.books)
+            .set({
+              progressValue: args.progressValue,
+              progressUnit: args.progressUnit ?? null,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.books.id, bookId)),
+        );
       }
+      const outcome = await commitCreate(db, args.requestId, "reading", hash, items);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("logReading: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 
@@ -861,18 +1069,22 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
-      const updated = await db
-        .update(schema.readingSessions)
-        .set({ deletedAt: new Date() })
-        .where(
-          and(
-            eq(schema.readingSessions.id, args.id),
-            isNull(schema.readingSessions.deletedAt),
-          ),
-        )
-        .returning({ id: schema.readingSessions.id });
-      if (updated.length === 0) return { ok: false, forbidden: false, status: "notFound" };
-      await tombstoneByResult(db, "reading_sessions", args.id);
+      const deleted = await commitDelete(
+        db,
+        db
+          .update(schema.readingSessions)
+          .set({ deletedAt: new Date() })
+          .where(
+            and(
+              eq(schema.readingSessions.id, args.id),
+              isNull(schema.readingSessions.deletedAt),
+            ),
+          )
+          .returning({ id: schema.readingSessions.id }),
+        "reading_sessions",
+        args.id,
+      );
+      if (!deleted) return { ok: false, forbidden: false, status: "notFound" };
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, status: "saved" };
     },
@@ -910,53 +1122,57 @@ export const Actions = {
           .limit(1);
         const book = found[0];
         if (!book) return { ok: false, forbidden: false, status: "notFound", id: null };
-        await db.delete(schema.bookChapters).where(eq(schema.bookChapters.bookId, book.id));
-        await db
-          .update(schema.books)
-          .set({
-            importStatus: "processing",
-            importError: null,
-            versionLabel: args.versionLabel || book.versionLabel,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.books.id, book.id));
+        // Chapter wipe + status flip commit together: a failure can
+        // never leave a "processing" book whose chapters are gone.
+        await db.batch([
+          db.delete(schema.bookChapters).where(eq(schema.bookChapters.bookId, book.id)),
+          db
+            .update(schema.books)
+            .set({
+              importStatus: "processing",
+              importError: null,
+              versionLabel: args.versionLabel || book.versionLabel,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.books.id, book.id)),
+        ] as [BatchItem, ...BatchItem[]]);
         ctx.invalidateQueries();
         return { ok: true, forbidden: false, status: "saved", id: book.id };
       }
       const hash = payloadHash({
         k: "import-book",
         title: args.title,
-        author: args.author ?? null,
+        author: args.author || null,
         source: args.source,
-        versionLabel: args.versionLabel ?? null,
+        versionLabel: args.versionLabel || null,
       });
-      const claim = await claimRequest(db, args.requestId, "import-book", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
-      const inserted = await db
-        .insert(schema.books)
-        .values({
-          title: args.title,
-          author: args.author || null,
-          source: args.source,
-          status: "want",
-          importStatus: "processing",
-          versionLabel: args.versionLabel || null,
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.books.id });
-      const row = inserted[0];
-      if (!row) throw new Error("beginImport: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "import-book",
-        payloadHash: hash,
-        resultTable: "books",
-        resultId: row.id,
-      });
+      const claim = await arbitrateCreate(db, args.requestId, "import-book", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
+      const outcome = await commitCreate(db, args.requestId, "import-book", hash, [
+        db
+          .insert(schema.books)
+          .values({
+            title: args.title,
+            author: args.author || null,
+            source: args.source,
+            status: "want",
+            importStatus: "processing",
+            versionLabel: args.versionLabel || null,
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.books.id }),
+        ledgerInsertStmt(db, args.requestId, "import-book", hash, "books"),
+        ledgerResultStmt(db, args.requestId, "books"),
+      ]);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("beginImport: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 
@@ -1014,17 +1230,15 @@ export const Actions = {
       if (book.importStatus !== "processing") {
         return { ok: false, forbidden: false, status: "conflict" };
       }
+      const existing = await db
+        .select({ id: schema.bookChapters.id, idx: schema.bookChapters.idx })
+        .from(schema.bookChapters)
+        .where(eq(schema.bookChapters.bookId, args.bookId));
+      const existingByIdx = new Map(existing.map((r) => [r.idx, r.id]));
+      // The whole chunk commits as one batch: a failure mid-chunk
+      // stores none of it, so a retry re-sends the same chunk whole.
+      const items: BatchItem[] = [];
       for (const ch of args.chapters) {
-        const existing = await db
-          .select({ id: schema.bookChapters.id })
-          .from(schema.bookChapters)
-          .where(
-            and(
-              eq(schema.bookChapters.bookId, args.bookId),
-              eq(schema.bookChapters.idx, ch.idx),
-            ),
-          )
-          .limit(1);
         const values = {
           bookId: args.bookId,
           idx: ch.idx,
@@ -1032,14 +1246,17 @@ export const Actions = {
           html: ch.html,
           charCount: ch.html.length,
         };
-        if (existing.length > 0) {
-          await db
-            .update(schema.bookChapters)
-            .set(values)
-            .where(eq(schema.bookChapters.id, existing[0]?.id ?? -1));
+        const existingId = existingByIdx.get(ch.idx);
+        if (existingId != null) {
+          items.push(
+            db.update(schema.bookChapters).set(values).where(eq(schema.bookChapters.id, existingId)),
+          );
         } else {
-          await db.insert(schema.bookChapters).values(values);
+          items.push(db.insert(schema.bookChapters).values(values));
         }
+      }
+      if (items.length > 0) {
+        await db.batch(items as [BatchItem, ...BatchItem[]]);
       }
       return { ok: true, forbidden: false, status: "saved" };
     },
@@ -1192,17 +1409,21 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof createResult>> {
       if (!isOwner(ctx)) return refusedCreate();
       const db = ctx.db<typeof schema>();
+      // The fingerprint covers EVERY stored field, provenance
+      // included: chapterLabel is part of the saved source, so the
+      // same key re-sent with a different chapter is a conflict, not
+      // a silent replay (CMP-READ-SAVE-001 repro ④).
       const hash = payloadHash({
         k: "snippet",
         bookId: args.bookId,
         text: args.text,
+        chapterLabel: args.chapterLabel || null,
         chapterIdx: args.chapterIdx ?? null,
         charOffset: args.charOffset ?? null,
       });
-      const claim = await claimRequest(db, args.requestId, "snippet", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
+      const claim = await arbitrateCreate(db, args.requestId, "snippet", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
       const bookRows = await db
         .select()
         .from(schema.books)
@@ -1210,32 +1431,33 @@ export const Actions = {
         .limit(1);
       const book = bookRows[0];
       if (!book) return { ok: false, forbidden: false, status: "notFound", id: null };
-      const inserted = await db
-        .insert(schema.snippets)
-        .values({
-          bookId: book.id,
-          bookTitle: book.title,
-          versionLabel: book.versionLabel,
-          chapterLabel: args.chapterLabel || null,
-          chapterIdx: args.chapterIdx ?? null,
-          charOffset: args.charOffset ?? null,
-          text: args.text,
-          source: "reader",
-          status: "saved",
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.snippets.id });
-      const row = inserted[0];
-      if (!row) throw new Error("createSnippet: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "snippet",
-        payloadHash: hash,
-        resultTable: "snippets",
-        resultId: row.id,
-      });
+      const outcome = await commitCreate(db, args.requestId, "snippet", hash, [
+        db
+          .insert(schema.snippets)
+          .values({
+            bookId: book.id,
+            bookTitle: book.title,
+            versionLabel: book.versionLabel,
+            chapterLabel: args.chapterLabel || null,
+            chapterIdx: args.chapterIdx ?? null,
+            charOffset: args.charOffset ?? null,
+            text: args.text,
+            source: "reader",
+            status: "saved",
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.snippets.id }),
+        ledgerInsertStmt(db, args.requestId, "snippet", hash, "snippets"),
+        ledgerResultStmt(db, args.requestId, "snippets"),
+      ]);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("createSnippet: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 
@@ -1259,36 +1481,36 @@ export const Actions = {
         k: "snippet-draft",
         source: args.source,
         text: args.text,
-        bookTitle: args.bookTitle ?? null,
-        chapterLabel: args.chapterLabel ?? null,
+        bookTitle: args.bookTitle || null,
+        chapterLabel: args.chapterLabel || null,
       });
-      const claim = await claimRequest(db, args.requestId, "snippet-draft", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
-      const inserted = await db
-        .insert(schema.snippets)
-        .values({
-          bookId: null,
-          bookTitle: args.bookTitle || "出处待确认",
-          chapterLabel: args.chapterLabel || null,
-          text: args.text,
-          source: args.source,
-          status: "draft",
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.snippets.id });
-      const row = inserted[0];
-      if (!row) throw new Error("createSnippetDraft: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "snippet-draft",
-        payloadHash: hash,
-        resultTable: "snippets",
-        resultId: row.id,
-      });
+      const claim = await arbitrateCreate(db, args.requestId, "snippet-draft", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
+      const outcome = await commitCreate(db, args.requestId, "snippet-draft", hash, [
+        db
+          .insert(schema.snippets)
+          .values({
+            bookId: null,
+            bookTitle: args.bookTitle || "出处待确认",
+            chapterLabel: args.chapterLabel || null,
+            text: args.text,
+            source: args.source,
+            status: "draft",
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.snippets.id }),
+        ledgerInsertStmt(db, args.requestId, "snippet-draft", hash, "snippets"),
+        ledgerResultStmt(db, args.requestId, "snippets"),
+      ]);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("createSnippetDraft: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 
@@ -1416,15 +1638,20 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
-      const updated = await db
-        .update(schema.snippets)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(schema.snippets.id, args.id), isNull(schema.snippets.deletedAt)))
-        .returning({ id: schema.snippets.id });
-      if (updated.length === 0) return { ok: false, forbidden: false, status: "notFound" };
       // Soft-deleted rows are filtered from every read, so a removed
-      // snippet can never resurface in 片刻回味.
-      await tombstoneByResult(db, "snippets", args.id);
+      // snippet can never resurface in 片刻回味. Delete + tombstone
+      // commit atomically (commitDelete).
+      const deleted = await commitDelete(
+        db,
+        db
+          .update(schema.snippets)
+          .set({ deletedAt: new Date(), updatedAt: new Date() })
+          .where(and(eq(schema.snippets.id, args.id), isNull(schema.snippets.deletedAt)))
+          .returning({ id: schema.snippets.id }),
+        "snippets",
+        args.id,
+      );
+      if (!deleted) return { ok: false, forbidden: false, status: "notFound" };
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, status: "saved" };
     },
@@ -1450,34 +1677,41 @@ export const Actions = {
         .from(schema.snippetTags)
         .where(eq(schema.snippetTags.snippetId, args.id));
       const suggested = existing.filter((t) => t.origin === "suggested");
-      await db
-        .delete(schema.snippetTags)
-        .where(
-          and(
-            eq(schema.snippetTags.snippetId, args.id),
-            eq(schema.snippetTags.origin, "owner"),
-          ),
-        );
       const wanted = [...new Set(args.tags.map((t) => t.trim()).filter(Boolean))];
+      // The whole tag rewrite commits as one batch: no half-applied
+      // tag set is ever visible.
+      const items: BatchItem[] = [
+        db
+          .delete(schema.snippetTags)
+          .where(
+            and(
+              eq(schema.snippetTags.snippetId, args.id),
+              eq(schema.snippetTags.origin, "owner"),
+            ),
+          ),
+      ];
       // Applying a suggested tag adopts it as an owner tag.
       for (const t of suggested) {
         if (wanted.includes(t.tag)) {
-          await db
-            .delete(schema.snippetTags)
-            .where(
-              and(
-                eq(schema.snippetTags.snippetId, args.id),
-                eq(schema.snippetTags.tag, t.tag),
-                eq(schema.snippetTags.origin, "suggested"),
+          items.push(
+            db
+              .delete(schema.snippetTags)
+              .where(
+                and(
+                  eq(schema.snippetTags.snippetId, args.id),
+                  eq(schema.snippetTags.tag, t.tag),
+                  eq(schema.snippetTags.origin, "suggested"),
+                ),
               ),
-            );
+          );
         }
       }
       for (const tag of wanted) {
-        await db
-          .insert(schema.snippetTags)
-          .values({ snippetId: args.id, tag, origin: "owner" });
+        items.push(
+          db.insert(schema.snippetTags).values({ snippetId: args.id, tag, origin: "owner" }),
+        );
       }
+      await db.batch(items as [BatchItem, ...BatchItem[]]);
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, status: "saved" };
     },
@@ -1514,18 +1748,6 @@ export const Actions = {
         },
       );
       const tags = out.tags.map((t) => t.trim()).filter(Boolean).slice(0, 3);
-      await db
-        .update(schema.snippets)
-        .set({ thinkPrompt: out.thinkPrompt, updatedAt: new Date() })
-        .where(eq(schema.snippets.id, args.id));
-      await db
-        .delete(schema.snippetTags)
-        .where(
-          and(
-            eq(schema.snippetTags.snippetId, args.id),
-            eq(schema.snippetTags.origin, "suggested"),
-          ),
-        );
       const ownerTags = await db
         .select()
         .from(schema.snippetTags)
@@ -1536,13 +1758,32 @@ export const Actions = {
           ),
         );
       const ownerSet = new Set(ownerTags.map((t) => t.tag));
+      // Think prompt + suggested-tag rewrite commit as one batch;
+      // the 原文 itself is never part of the write set.
+      const items: BatchItem[] = [
+        db
+          .update(schema.snippets)
+          .set({ thinkPrompt: out.thinkPrompt, updatedAt: new Date() })
+          .where(eq(schema.snippets.id, args.id)),
+        db
+          .delete(schema.snippetTags)
+          .where(
+            and(
+              eq(schema.snippetTags.snippetId, args.id),
+              eq(schema.snippetTags.origin, "suggested"),
+            ),
+          ),
+      ];
       for (const tag of tags) {
         if (!ownerSet.has(tag)) {
-          await db
-            .insert(schema.snippetTags)
-            .values({ snippetId: args.id, tag, origin: "suggested" });
+          items.push(
+            db
+              .insert(schema.snippetTags)
+              .values({ snippetId: args.id, tag, origin: "suggested" }),
+          );
         }
       }
+      await db.batch(items as [BatchItem, ...BatchItem[]]);
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, thinkPrompt: out.thinkPrompt, tags };
     },
@@ -1562,6 +1803,17 @@ export const Actions = {
     request: z.object({
       snippetId: z.number().int().positive(),
       question: z.string().trim().min(1).max(1000),
+      // The panel's per-question request id: one id per question the
+      // owner actually asked (retries of the same question — e.g.
+      // after a lost response — reuse it), so an answer can always be
+      // traced to exactly one ask. Asks persist nothing server-side;
+      // the id is the binding, not a storage key.
+      questionRequestId: z.string().trim().min(1).max(120).optional(),
+      // The version of the snippet row the panel pinned as 原文. When
+      // given, the stored row must still BE that version: answering
+      // against a silently newer 原文 than the pinned one would mix
+      // two different source texts into one discussion.
+      snippetVersion: z.number().int().positive().optional(),
       // Prior turns of THIS panel session, newest last, so follow-ups
       // stay a discussion. Bounded; never stored server-side.
       history: z
@@ -1616,8 +1868,22 @@ export const Actions = {
         .limit(1);
       const snip = rows[0];
       // Only confirmed （已保存） snippets can be discussed; drafts are
-      // unconfirmed text and tombstoned rows never resurface.
+      // unconfirmed text and tombstoned rows never resurface. A stale
+      // version reference is refused the same way: the pinned 原文
+      // the owner is looking at is no longer the stored one, and no
+      // inference runs against the wrong text.
       if (!snip || snip.status !== "saved") {
+        return {
+          ok: false,
+          forbidden: false,
+          status: "notFound",
+          answer: "",
+          suggestedCore: null,
+          sourceText: "",
+          sourceLabel: "",
+        };
+      }
+      if (args.snippetVersion != null && args.snippetVersion !== snip.version) {
         return {
           ok: false,
           forbidden: false,
@@ -1722,13 +1988,12 @@ export const Actions = {
         k: "card",
         core: args.core,
         snippetId: args.snippetId ?? null,
-        annotation: args.annotation ?? null,
-        tags: args.tags ?? [],
+        annotation: args.annotation || null,
+        tags: [...new Set((args.tags ?? []).map((t) => t.trim()).filter(Boolean))],
       });
-      const claim = await claimRequest(db, args.requestId, "card", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
+      const claim = await arbitrateCreate(db, args.requestId, "card", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
       let sourceLabel: string | null = null;
       let snippetId: number | null = null;
       if (args.snippetId != null) {
@@ -1740,38 +2005,54 @@ export const Actions = {
           )
           .limit(1);
         const snip = rows[0];
-        if (snip) {
-          snippetId = snip.id;
-          sourceLabel = snip.chapterLabel
-            ? `${snip.bookTitle} · ${snip.chapterLabel}`
-            : snip.bookTitle;
+        // A card may claim a source only from a confirmed （已保存）
+        // snippet that is still there. A missing, draft or deleted
+        // snippet never lends its provenance to a card — the save is
+        // refused as notFound and nothing is written under this key.
+        if (!snip || snip.status !== "saved") {
+          return { ok: false, forbidden: false, status: "notFound", id: null };
         }
+        snippetId = snip.id;
+        sourceLabel = snip.chapterLabel
+          ? `${snip.bookTitle} · ${snip.chapterLabel}`
+          : snip.bookTitle;
       }
-      const inserted = await db
-        .insert(schema.knowledgeCards)
-        .values({
-          core: args.core,
-          snippetId,
-          sourceLabel,
-          annotation: args.annotation || null,
-          origin: "ui",
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.knowledgeCards.id });
-      const row = inserted[0];
-      if (!row) throw new Error("createCard: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "card",
-        payloadHash: hash,
-        resultTable: "knowledge_cards",
-        resultId: row.id,
-      });
-      for (const tag of [...new Set((args.tags ?? []).map((t) => t.trim()).filter(Boolean))]) {
-        await db.insert(schema.cardTags).values({ cardId: row.id, tag, origin: "owner" });
+      // Card row + tag rows + ledger entry commit as ONE batch: any
+      // failure leaves no card, no tags and no ledger row behind.
+      const tagValues = [...new Set((args.tags ?? []).map((t) => t.trim()).filter(Boolean))];
+      const items: BatchItem[] = [
+        db
+          .insert(schema.knowledgeCards)
+          .values({
+            core: args.core,
+            snippetId,
+            sourceLabel,
+            annotation: args.annotation || null,
+            origin: "ui",
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.knowledgeCards.id }),
+        ledgerInsertStmt(db, args.requestId, "card", hash, "knowledge_cards"),
+        ledgerResultStmt(db, args.requestId, "knowledge_cards"),
+      ];
+      for (const tag of tagValues) {
+        items.push(
+          db.insert(schema.cardTags).values({
+            cardId: idByRequestId("knowledge_cards", args.requestId),
+            tag,
+            origin: "owner",
+          }),
+        );
       }
+      const outcome = await commitCreate(db, args.requestId, "card", hash, items);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("createCard: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 
@@ -1799,28 +2080,14 @@ export const Actions = {
         snippetText: args.snippetText ?? null,
         bookTitle: args.bookTitle ?? null,
         chapterLabel: args.chapterLabel ?? null,
-        annotation: args.annotation ?? null,
-        tags: args.tags ?? [],
+        annotation: args.annotation || null,
+        tags: [...new Set((args.tags ?? []).map((t) => t.trim()).filter(Boolean))],
       });
-      const claim = await claimRequest(db, args.requestId, "card-chat", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
-      let snippetId: number | null = null;
+      const claim = await arbitrateCreate(db, args.requestId, "card-chat", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
       let sourceLabel: string | null = null;
       if (args.snippetText) {
-        const snipInserted = await db
-          .insert(schema.snippets)
-          .values({
-            bookId: null,
-            bookTitle: args.bookTitle || "出处待确认",
-            chapterLabel: args.chapterLabel || null,
-            text: args.snippetText,
-            source: "chat",
-            status: "saved",
-          })
-          .returning({ id: schema.snippets.id });
-        snippetId = snipInserted[0]?.id ?? null;
         sourceLabel = args.chapterLabel
           ? `${args.bookTitle ?? "出处待确认"} · ${args.chapterLabel}`
           : (args.bookTitle ?? null);
@@ -1829,31 +2096,61 @@ export const Actions = {
           ? `${args.bookTitle} · ${args.chapterLabel}`
           : args.bookTitle;
       }
-      const inserted = await db
-        .insert(schema.knowledgeCards)
-        .values({
-          core: args.core,
-          snippetId,
-          sourceLabel,
-          annotation: args.annotation || null,
-          origin: "chat",
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.knowledgeCards.id });
-      const row = inserted[0];
-      if (!row) throw new Error("recordKnowledgeCardFromChat: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "card-chat",
-        payloadHash: hash,
-        resultTable: "knowledge_cards",
-        resultId: row.id,
-      });
-      for (const tag of [...new Set((args.tags ?? []).map((t) => t.trim()).filter(Boolean))]) {
-        await db.insert(schema.cardTags).values({ cardId: row.id, tag, origin: "owner" });
+      // Source snippet + card + tags + ledger commit as ONE batch:
+      // a failure can never strand a source snippet without its card
+      // (or a card without its ledger entry). The snippet row carries
+      // this requestId so the card's snippetId resolves to the actual
+      // stored row inside the same batch.
+      const items: BatchItem[] = [];
+      if (args.snippetText) {
+        items.push(
+          db.insert(schema.snippets).values({
+            bookId: null,
+            bookTitle: args.bookTitle || "出处待确认",
+            chapterLabel: args.chapterLabel || null,
+            text: args.snippetText,
+            source: "chat",
+            status: "saved",
+            requestId: args.requestId,
+          }),
+        );
       }
+      const cardIndex = items.length;
+      items.push(
+        db
+          .insert(schema.knowledgeCards)
+          .values({
+            core: args.core,
+            snippetId: args.snippetText
+              ? idByRequestId("snippets", args.requestId)
+              : null,
+            sourceLabel,
+            annotation: args.annotation || null,
+            origin: "chat",
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.knowledgeCards.id }),
+      );
+      items.push(ledgerInsertStmt(db, args.requestId, "card-chat", hash, "knowledge_cards"));
+      items.push(ledgerResultStmt(db, args.requestId, "knowledge_cards"));
+      for (const tag of [...new Set((args.tags ?? []).map((t) => t.trim()).filter(Boolean))]) {
+        items.push(
+          db.insert(schema.cardTags).values({
+            cardId: idByRequestId("knowledge_cards", args.requestId),
+            tag,
+            origin: "owner",
+          }),
+        );
+      }
+      const outcome = await commitCreate(db, args.requestId, "card-chat", hash, items);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("recordKnowledgeCardFromChat: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, cardIndex);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 
@@ -1910,15 +2207,22 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResult>> {
       if (!isOwner(ctx)) return refusedOk();
       const db = ctx.db<typeof schema>();
-      const updated = await db
-        .update(schema.knowledgeCards)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(
-          and(eq(schema.knowledgeCards.id, args.id), isNull(schema.knowledgeCards.deletedAt)),
-        )
-        .returning({ id: schema.knowledgeCards.id });
-      if (updated.length === 0) return { ok: false, forbidden: false, status: "notFound" };
-      await tombstoneByResult(db, "knowledge_cards", args.id);
+      const deleted = await commitDelete(
+        db,
+        db
+          .update(schema.knowledgeCards)
+          .set({ deletedAt: new Date(), updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.knowledgeCards.id, args.id),
+              isNull(schema.knowledgeCards.deletedAt),
+            ),
+          )
+          .returning({ id: schema.knowledgeCards.id }),
+        "knowledge_cards",
+        args.id,
+      );
+      if (!deleted) return { ok: false, forbidden: false, status: "notFound" };
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, status: "saved" };
     },
@@ -1941,10 +2245,17 @@ export const Actions = {
         )
         .limit(1);
       if (found.length === 0) return { ok: false, forbidden: false, status: "notFound" };
-      await db.delete(schema.cardTags).where(eq(schema.cardTags.cardId, args.id));
+      // Delete + re-insert commits as one batch: the card never
+      // shows a half-rewritten tag set.
+      const items: BatchItem[] = [
+        db.delete(schema.cardTags).where(eq(schema.cardTags.cardId, args.id)),
+      ];
       for (const tag of [...new Set(args.tags.map((t) => t.trim()).filter(Boolean))]) {
-        await db.insert(schema.cardTags).values({ cardId: args.id, tag, origin: "owner" });
+        items.push(
+          db.insert(schema.cardTags).values({ cardId: args.id, tag, origin: "owner" }),
+        );
       }
+      await db.batch(items as [BatchItem, ...BatchItem[]]);
       ctx.invalidateQueries();
       return { ok: true, forbidden: false, status: "saved" };
     },
@@ -1975,10 +2286,9 @@ export const Actions = {
         scene: args.scene,
         outcome: args.outcome,
       });
-      const claim = await claimRequest(db, args.requestId, "reuse", hash);
-      if (claim.state === "conflict") return { ok: false, forbidden: false, status: "conflict", id: null };
-      if (claim.state === "deleted") return { ok: false, forbidden: false, status: "deleted", id: null };
-      if (claim.state === "replay") return { ok: true, forbidden: false, status: "replayed", id: claim.resultId };
+      const claim = await arbitrateCreate(db, args.requestId, "reuse", hash);
+      const early = claimToResult(claim);
+      if (early) return early;
       const cardRows = await db
         .select({ id: schema.knowledgeCards.id })
         .from(schema.knowledgeCards)
@@ -1990,27 +2300,28 @@ export const Actions = {
         )
         .limit(1);
       if (cardRows.length === 0) return { ok: false, forbidden: false, status: "notFound", id: null };
-      const inserted = await db
-        .insert(schema.cardReuses)
-        .values({
-          cardId: args.cardId,
-          date,
-          scene: args.scene,
-          outcome: args.outcome,
-          requestId: args.requestId,
-        })
-        .returning({ id: schema.cardReuses.id });
-      const row = inserted[0];
-      if (!row) throw new Error("recordCardReuse: insert returned no rows");
-      await db.insert(schema.requestKeys).values({
-        requestId: args.requestId,
-        kind: "reuse",
-        payloadHash: hash,
-        resultTable: "card_reuses",
-        resultId: row.id,
-      });
+      const outcome = await commitCreate(db, args.requestId, "reuse", hash, [
+        db
+          .insert(schema.cardReuses)
+          .values({
+            cardId: args.cardId,
+            date,
+            scene: args.scene,
+            outcome: args.outcome,
+            requestId: args.requestId,
+          })
+          .returning({ id: schema.cardReuses.id }),
+        ledgerInsertStmt(db, args.requestId, "reuse", hash, "card_reuses"),
+        ledgerResultStmt(db, args.requestId, "card_reuses"),
+      ]);
+      if (!outcome.committed) {
+        const mapped = claimToResult(outcome.claim);
+        if (mapped) return mapped;
+        throw new Error("recordCardReuse: arbitration returned fresh after a failed commit");
+      }
+      const id = batchInsertId(outcome.results, 0);
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id: row.id };
+      return { ok: true, forbidden: false, status: "saved", id };
     },
   }),
 } satisfies ActionsModule;

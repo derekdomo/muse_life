@@ -1719,6 +1719,39 @@ function evaluateDailyTasks(health: Snapshot | null, strength: StrengthTraining 
   });
 }
 
+// Redeem-bound settlement (CWEB-REDEEM-SAFE-001, pre-settlement
+// baseline remainder): settleGame's CAS retry above is the right
+// behaviour for a plain read — a concurrent purchase is absorbed
+// and gold is still credited exactly once — but a redemption must
+// never let ITS OWN settlement endorse an external balance/version
+// advancement that landed after the owner's confirmation. A
+// guarded settle therefore carries the confirmed pin as the head
+// of a provable advancement chain: the first read of every attempt
+// must equal the chain head exactly (revision + balance +
+// watermark), and the chain advances ONLY through this settle's
+// own successful CAS save (to exactly the state that save
+// committed). A CAS miss whose retry re-read shows any other state
+// — an external purchase, allocation, equip, or settlement that
+// landed before the first read, after the read but before the CAS,
+// or in the CAS-failure re-read — aborts the settle with this
+// typed error instead of retrying on top of the winner; the
+// redemption handler arbitrates the abort against the durable
+// receipt table and answers stale (or the winner's receipt), with
+// zero redemption writes. Unguarded callers (getGameState,
+// getRewards) pass no pin and keep the absorbing retry unchanged —
+// the global settle is NOT turned into a gate.
+const SETTLE_PIN_MOVED_MESSAGE = "settlement aborted: the profile moved off the pinned confirmation state";
+
+function settlementPinMovedError(): Error {
+  const error = new Error(SETTLE_PIN_MOVED_MESSAGE);
+  error.name = "SettlementPinMovedError";
+  return error;
+}
+
+function isSettlementPinMovedError(error: unknown): boolean {
+  return error instanceof Error && error.name === "SettlementPinMovedError";
+}
+
 // Settle every candidate and today's daily tasks, then persist the
 // profile. The ledger table is the source of truth for total XP
 // (summed, never incremented by hand); game_state carries the gold
@@ -1745,10 +1778,18 @@ function evaluateDailyTasks(health: Snapshot | null, strength: StrengthTraining 
 // their gold then. The same reconciliation is the failure boundary for
 // a save that throws mid-pass: rows booked, watermark not advanced →
 // the next open pays the stranded delta, never twice.
-async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthTraining | null, todayLA: string): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[]; dailyTasks: z.infer<typeof gameDailyTaskSchema>[]; profile: GameProfile; committedRevision: number; committedGold: number; committedGoldLedgerSum: number | null; committedLedgerGoldSum: number }> {
+async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthTraining | null, todayLA: string, pinGuard?: { revision: number; gold: number; goldLedgerSum: number | null }): Promise<{ totalXp: number; settledThroughDate: string | null; ledger: z.infer<typeof gameSettlementEntrySchema>[]; dailyTasks: z.infer<typeof gameDailyTaskSchema>[]; profile: GameProfile; committedRevision: number; committedGold: number; committedGoldLedgerSum: number | null; committedLedgerGoldSum: number }> {
   const db = ctx.db<typeof schema>();
+  // Guarded mode (redeem only): the provable advancement chain —
+  // starts at the confirmed pin and advances only through THIS
+  // settle's own committed save. Verified on the first read and on
+  // every CAS retry's re-read; any other state aborts the settle.
+  let chainHead: { revision: number; gold: number; goldLedgerSum: number | null } | null = pinGuard ?? null;
   for (let attempt = 0; attempt < PROFILE_CAS_ATTEMPTS; attempt++) {
     const row = await loadGameStateRow(ctx);
+    if (chainHead !== null && (row.revision !== chainHead.revision || row.profile.gold !== chainHead.gold || row.profile.goldLedgerSum !== chainHead.goldLedgerSum)) {
+      throw settlementPinMovedError();
+    }
     const profile = row.profile;
     // Gold baseline for this attempt: the ledger gold SUM the balance
     // being carried already accounts for.
@@ -1847,6 +1888,11 @@ async function settleGame(ctx: Ctx, health: Snapshot | null, strength: StrengthT
     if (earned > profile.attrPointsEarned) profile.attrPointsEarned = earned;
     const saved = await saveGameProfile(ctx, profile, totalXp, settledThroughDate, row.exists ? row.revision : null);
     if (!saved) continue;
+    // This settle's own CAS save landed: in guarded mode it is the
+    // one advancement entitled to extend the chain — to exactly
+    // the state this save committed (read revision + 1, the draft's
+    // reconciled balance and watermark), never to a later re-read.
+    if (chainHead !== null) chainHead = { revision: row.revision + 1, gold: profile.gold, goldLedgerSum: profile.goldLedgerSum };
     // Read back today's claim state from the ledger (post-save, so the
     // response reflects what actually persisted).
     const claimedRows = await db.select({ detail: schema.gameSettlements.detail }).from(schema.gameSettlements)
@@ -2292,6 +2338,22 @@ function buildUnifiedTimeline(healthSnapshot: Snapshot | null, strengthData: Str
 // rejects the confirmation as stale with zero redemption writes;
 // the post-settle re-read survives only as the reconciliation gate
 // (a watermark/SUM mismatch is a busy, never a base).
+//
+// Pre-settlement baseline (final remainder of the same follow-up):
+// the pin binding above covered the handler's own reads, but the
+// settlement it then ran could still absorb an external advancement
+// that landed BEFORE the settle — most sharply a purchase landing
+// in front of the settle's first CAS save: the save missed, the
+// settle's retry re-read the winner's profile, reconciled on top
+// of it, and the old confirmation charged against a balance
+// version the owner never confirmed. The redeem-path settle is
+// therefore pin-bound end to end (see settleGame's pinGuard): the
+// first read and every CAS retry verify the provable chain that
+// starts at the confirmed pin and advances only through this
+// settle's own committed save; any external advancement aborts
+// the settle, and the handler answers stale (after the durable
+// receipt arbitration) with zero redemption writes. Unguarded
+// settlements on plain reads keep their absorbing retry.
 //
 // Rejection/success arbitration (P0-2, same follow-up): a terminal
 // rejection of a request is durable-arbitrated against that
@@ -2746,8 +2808,27 @@ async function handleRedeemReward(ctx: Ctx, args: RedeemRewardArgs): Promise<z.i
       const strength = effectiveStrength(healthLoad, strengthLoad);
       let settled: Awaited<ReturnType<typeof settleGame>>;
       try {
-        settled = await settleGame(ctx, health, strength, todayLA);
-      } catch {
+        // Redeem-bound settle: the confirmed pin heads the settle's
+        // provable advancement chain, so an external balance/version
+        // advancement landing anywhere before or during this settle
+        // (before its first read, after the read but before its CAS,
+        // or in a CAS-failure re-read) aborts the settle instead of
+        // being absorbed by its CAS retry and endorsed as if the
+        // owner had confirmed it.
+        settled = await settleGame(ctx, health, strength, todayLA, pin);
+      } catch (error) {
+        if (isSettlementPinMovedError(error)) {
+          // The confirmation was overtaken by an external write the
+          // settle refused to endorse. The mover may still be this
+          // very intent's own concurrent commit (P0-2): arbitrate
+          // against the durable receipt first; only a key with no
+          // receipt anywhere is rejected as stale. Zero redemption
+          // writes on this path either way.
+          const resolved = await resolveCommittedReceipt(ctx, args);
+          if (resolved) return resolved;
+          const current = await loadGameStateRow(ctx);
+          return { forbidden: false, status: "stale", message: "金币余额已经变化，未扣账；请重新预览确认", receipt: null, balance: current.profile.gold, balanceVersion: current.revision };
+        }
         // Reconciliation gate: a failed settlement means the stored
         // balance cannot be certified against the ledger. The
         // redemption must NOT proceed on the pre-settle numbers (it

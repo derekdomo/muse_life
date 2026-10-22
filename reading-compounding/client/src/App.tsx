@@ -30,6 +30,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [reader, setReader] = useState<ReaderState | null>(null);
   const [focusSnippetId, setFocusSnippetId] = useState<number | null>(null);
+  const [focusCardId, setFocusCardId] = useState<number | null>(null);
 
   const dashboard = useQuery({
     queryKey: ["dashboard"],
@@ -49,6 +50,13 @@ export function App() {
   const goSnippet = (id: number) => {
     setFocusSnippetId(id);
     setTab("snippets");
+  };
+
+  // Jump to one specific knowledge card by id (CMP-READ-001 receipt):
+  // the cards tab scrolls to and highlights exactly that card.
+  const goCard = (id: number) => {
+    setFocusCardId(id);
+    setTab("cards");
   };
 
   return (
@@ -99,9 +107,10 @@ export function App() {
                 library={library.data}
                 focusId={focusSnippetId}
                 onOpenReader={openReader}
+                onViewCard={goCard}
               />
             )}
-            {tab === "cards" && <Cards library={library.data} />}
+            {tab === "cards" && <Cards library={library.data} focusId={focusCardId} />}
             {tab === "tags" && (
               <Tags
                 library={library.data}

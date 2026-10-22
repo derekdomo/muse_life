@@ -15,11 +15,18 @@
 //   deletion: same key + same payload replays the original result, same key +
 //   different payload is a typed conflict, and any key whose entry was deleted
 //   returns typed "deleted" forever (no resurrection).
+// - Every mutation applies its body change AND its ledger row in ONE atomic
+//   db.batch: if any write point fails (or a concurrent same-key write wins
+//   the ledger primary key) the whole batch rolls back, so a failed or lost
+//   write never leaves a body row without its ledger key — a retry with the
+//   original key can therefore never duplicate a time fact. A batch failure
+//   is re-resolved against the committed ledger (replay / conflict / deleted)
+//   before surfacing, and only a failure that left no ledger trace rethrows.
 // - Every read and write requires the owner (ctx.viewer?.isOwner === true).
 //   Guests / anonymous / missing viewer get a typed forbidden with zero data.
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 // ---------------------------------------------------------------- categories
@@ -250,6 +257,61 @@ const mutationResponse = z.object({
   entry: entryDto.nullable(),
 });
 
+// ------------------------------------------------------- ledger resolution
+
+function getDb(ctx: Ctx) {
+  return ctx.db<typeof schema>();
+}
+type Db = ReturnType<typeof getDb>;
+
+// How a requestId resolves against the COMMITTED ledger. Used both as the
+// pre-write fast path and to re-resolve after an atomic batch failure (a
+// concurrent same-key write may have committed while this one rolled back).
+type KeyResolution =
+  | { kind: "replay"; entry: EntryDto }
+  | { kind: "conflict" }
+  | { kind: "deleted" }
+  | { kind: "absent" };
+
+async function resolveCommittedKey(
+  db: Db,
+  requestId: string,
+  fp: string,
+): Promise<KeyResolution> {
+  const existing = await db
+    .select()
+    .from(schema.requestLedger)
+    .where(eq(schema.requestLedger.requestId, requestId))
+    .limit(1);
+  const key = existing[0];
+  if (!key) return { kind: "absent" };
+  if (key.fingerprint !== fp) return { kind: "conflict" };
+  if (key.deleted === 1 || key.entryId == null) return { kind: "deleted" };
+  const rows = await db
+    .select()
+    .from(schema.timeEntries)
+    .where(eq(schema.timeEntries.id, key.entryId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return { kind: "deleted" };
+  return { kind: "replay", entry: toDto(row) };
+}
+
+function resolutionToResponse(
+  res: KeyResolution,
+): { ok: boolean; error: string | null; entry: EntryDto | null } | null {
+  switch (res.kind) {
+    case "replay":
+      return { ok: true, error: null, entry: res.entry };
+    case "conflict":
+      return { ok: false, error: "conflict", entry: null };
+    case "deleted":
+      return { ok: false, error: "deleted", entry: null };
+    case "absent":
+      return null;
+  }
+}
+
 // ------------------------------------------------------------- week summary
 
 const categoryMinutes = z.object({
@@ -479,49 +541,52 @@ export const Actions = {
         endMs: args.endMs,
         note: args.note,
       });
-      const db = ctx.db<typeof schema>();
-      const existing = await db
-        .select()
-        .from(schema.requestLedger)
-        .where(eq(schema.requestLedger.requestId, args.requestId))
-        .limit(1);
-      const key = existing[0];
-      if (key) {
-        if (key.fingerprint !== fp) {
-          return { ok: false, error: "conflict", entry: null };
-        }
-        if (key.deleted === 1 || key.entryId == null) {
-          return { ok: false, error: "deleted", entry: null };
-        }
-        const rows = await db
-          .select()
-          .from(schema.timeEntries)
-          .where(eq(schema.timeEntries.id, key.entryId))
-          .limit(1);
-        const row = rows[0];
-        if (!row) return { ok: false, error: "deleted", entry: null };
-        return { ok: true, error: null, entry: toDto(row) }; // idempotent replay
-      }
+      const db = getDb(ctx);
+      const prior = resolutionToResponse(
+        await resolveCommittedKey(db, args.requestId, fp),
+      );
+      if (prior) return prior; // replay / conflict / deleted — no write
 
-      const inserted = await db
-        .insert(schema.timeEntries)
-        .values({
-          category: args.category,
-          startMs: args.startMs,
-          endMs: args.endMs,
-          note: args.note,
-        })
-        .returning();
-      const row = inserted[0];
-      if (!row) throw new Error("addEntry: insert returned no rows");
-      await db.insert(schema.requestLedger).values({
-        requestId: args.requestId,
-        fingerprint: fp,
-        entryId: row.id,
-        deleted: 0,
-      });
+      // Body row + ledger key in ONE atomic batch. The ledger's entry_id is
+      // last_insert_rowid() of the entry insert in the same batch, so the
+      // two rows commit together or not at all: a failure at either write
+      // point leaves zero rows, and a concurrent same-key batch that loses
+      // the ledger primary-key race rolls its entry insert back with it.
+      try {
+        await db.batch([
+          db.insert(schema.timeEntries).values({
+            category: args.category,
+            startMs: args.startMs,
+            endMs: args.endMs,
+            note: args.note,
+          }),
+          db.insert(schema.requestLedger).values({
+            requestId: args.requestId,
+            fingerprint: fp,
+            entryId: sql`last_insert_rowid()`,
+            deleted: 0,
+          }),
+        ]);
+      } catch (err) {
+        // Rolled back. If a concurrent same-key write committed first, this
+        // call resolves against that committed key instead of erroring.
+        const after = resolutionToResponse(
+          await resolveCommittedKey(db, args.requestId, fp),
+        );
+        if (after) {
+          if (after.ok) ctx.invalidateQueries();
+          return after;
+        }
+        throw err; // genuine failure, zero partial state (batch rolled back)
+      }
+      const committed = resolutionToResponse(
+        await resolveCommittedKey(db, args.requestId, fp),
+      );
+      if (!committed || !committed.ok || !committed.entry) {
+        throw new Error("addEntry: batch committed but ledger row missing");
+      }
       ctx.invalidateQueries();
-      return { ok: true, error: null, entry: toDto(row) };
+      return committed;
     },
   }),
 
@@ -548,31 +613,14 @@ export const Actions = {
         endMs: args.endMs,
         note: args.note,
       });
-      const db = ctx.db<typeof schema>();
-      const existing = await db
-        .select()
-        .from(schema.requestLedger)
-        .where(eq(schema.requestLedger.requestId, args.requestId))
-        .limit(1);
-      const key = existing[0];
-      if (key) {
-        if (key.fingerprint !== fp) {
-          return { ok: false, error: "conflict", entry: null };
-        }
-        if (key.deleted === 1) {
-          return { ok: false, error: "deleted", entry: null };
-        }
-        // Replay of an already-applied update: report the entry as it now
-        // stands without writing again.
-        const rows = await db
-          .select()
-          .from(schema.timeEntries)
-          .where(eq(schema.timeEntries.id, args.entryId))
-          .limit(1);
-        const row = rows[0];
-        if (!row) return { ok: false, error: "deleted", entry: null };
-        return { ok: true, error: null, entry: toDto(row) };
-      }
+      const db = getDb(ctx);
+      // Replay of an already-applied update reports the entry as it NOW
+      // stands (a newer edit may have superseded this payload) and never
+      // writes again — a stale retry cannot roll a newer edit back.
+      const prior = resolutionToResponse(
+        await resolveCommittedKey(db, args.requestId, fp),
+      );
+      if (prior) return prior;
 
       const rows = await db
         .select()
@@ -594,29 +642,48 @@ export const Actions = {
         };
       }
 
-      await db
-        .update(schema.timeEntries)
-        .set({
-          category: args.category,
-          startMs: args.startMs,
-          endMs: args.endMs,
-          note: args.note,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.timeEntries.id, args.entryId));
-      await db.insert(schema.requestLedger).values({
-        requestId: args.requestId,
-        fingerprint: fp,
-        entryId: args.entryId,
-        deleted: 0,
-      });
+      // Body update + ledger key in ONE atomic batch: a failure at either
+      // write point leaves the entry untouched and the key unrecorded, so
+      // the same key can be retried cleanly and can never half-apply.
+      try {
+        await db.batch([
+          db
+            .update(schema.timeEntries)
+            .set({
+              category: args.category,
+              startMs: args.startMs,
+              endMs: args.endMs,
+              note: args.note,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.timeEntries.id, args.entryId)),
+          db.insert(schema.requestLedger).values({
+            requestId: args.requestId,
+            fingerprint: fp,
+            entryId: args.entryId,
+            deleted: 0,
+          }),
+        ]);
+      } catch (err) {
+        const after = resolutionToResponse(
+          await resolveCommittedKey(db, args.requestId, fp),
+        );
+        if (after) {
+          if (after.ok) ctx.invalidateQueries();
+          return after;
+        }
+        throw err; // genuine failure, zero partial state (batch rolled back)
+      }
       const after = await db
         .select()
         .from(schema.timeEntries)
         .where(eq(schema.timeEntries.id, args.entryId))
         .limit(1);
+      // A delete may have landed between the existence check and the batch;
+      // the update then touched no row and the entry stays deleted.
+      if (!after[0]) return { ok: false, error: "deleted", entry: null };
       ctx.invalidateQueries();
-      return { ok: true, error: null, entry: after[0] ? toDto(after[0]) : null };
+      return { ok: true, error: null, entry: toDto(after[0]) };
     },
   }),
 
@@ -661,24 +728,46 @@ export const Actions = {
         };
       }
 
-      await db.batch([
-        db
-          .delete(schema.timeEntries)
-          .where(eq(schema.timeEntries.id, args.entryId)),
-        // Flag every key that ever touched this entry: a late retry of the
-        // original create (or of an update) must resolve to "deleted",
-        // never resurrect the row.
-        db
-          .update(schema.requestLedger)
-          .set({ deleted: 1 })
-          .where(eq(schema.requestLedger.entryId, args.entryId)),
-        db.insert(schema.requestLedger).values({
-          requestId: args.requestId,
-          fingerprint: fp,
-          entryId: args.entryId,
-          deleted: 1,
-        }),
-      ]);
+      // Delete + tombstone flags + this key's ledger row in ONE atomic
+      // batch: a failure at any write point leaves the entry and every
+      // ledger flag untouched, so no half-deleted state can exist.
+      try {
+        await db.batch([
+          db
+            .delete(schema.timeEntries)
+            .where(eq(schema.timeEntries.id, args.entryId)),
+          // Flag every key that ever touched this entry: a late retry of the
+          // original create (or of an update) must resolve to "deleted",
+          // never resurrect the row.
+          db
+            .update(schema.requestLedger)
+            .set({ deleted: 1 })
+            .where(eq(schema.requestLedger.entryId, args.entryId)),
+          db.insert(schema.requestLedger).values({
+            requestId: args.requestId,
+            fingerprint: fp,
+            entryId: args.entryId,
+            deleted: 1,
+          }),
+        ]);
+      } catch (err) {
+        // Rolled back. A concurrent same-key delete may have committed:
+        // resolve against the committed ledger before surfacing.
+        const existing = await db
+          .select()
+          .from(schema.requestLedger)
+          .where(eq(schema.requestLedger.requestId, args.requestId))
+          .limit(1);
+        const key = existing[0];
+        if (key) {
+          if (key.fingerprint !== fp) {
+            return { ok: false, error: "conflict", entry: null };
+          }
+          ctx.invalidateQueries();
+          return { ok: true, error: null, entry: null };
+        }
+        throw err; // genuine failure, zero partial state (batch rolled back)
+      }
       ctx.invalidateQueries();
       return { ok: true, error: null, entry: null };
     },
