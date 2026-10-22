@@ -1090,3 +1090,12 @@
 ## 2026-10-22（01:13 轮次勘误：CMP-TIME-001 证据口径补正）
 
 - 本日 01:13 轮次主条目中 `CMP-TIME-001` 一段的两处表述以构建方最终完成回传（2026-10-22T08:21:30Z，构建 08:20:40 成功、晚于全部源码编辑）为准补正：(1) validate-time-review 实跑计数为 **65/65**（覆盖零/部分/完整/重叠/跨周裁剪/167h·169h DST 周/未来周 null 口径＋呈现文案断言），主条目「175/175（原 117＋58 新）」作废；首片 117 项为更早构建的口径，不与本增量脚本计数相加。(2) 实现层为**纯客户端呈现层**：三态由客户端既有 weekStats 派生（coverageStateOf），未新增服务端 deriveWeeklyReview 纯函数、未改服务端动作/公式/schema——主条目「新增可审计组合层复盘投影 deriveWeeklyReview（server actions 与 validate 脚本共用）」作废。仓库回灌副本与最终已发布源码一致（客户端 coverageStateOf 与三态文案已在 `time-compounding/client/src/App.tsx` 核对在位）。其余结论不变：审计 verdict=pass、生产三表 0 行未动、所有者视角以本人打开为准。`CMP-READ-001` 57/57 与 EVID 独立复跑计数不受影响。
+
+
+## 2026-10-22（muse-life-plans-sync 03:13 轮次：EVID-LIFE-001 READ 镜像补齐与两脚本独立复跑、F0.7 只读续查）
+
+- 队列来源：git pull 已最新（HEAD bd3feb6＝上轮基线），无新提交、无新编号条目、无新 PM bug 单。本轮按队列规则推进 EVID 尾巴：上轮明示顺延的「TIME/READ 两新脚本独立复跑」与 READ 镜像完整性核对。
+- `EVID-LIFE-001` READ 镜像补齐（证据尾巴，非新功能）：逐文件 diff 已发布源码树（ts-spaces/space-15）与仓库 `reading-compounding/`——共有文件全部逐字一致，但客户端缺 8 个已发布源文件（client/src/Books.tsx、Cards.tsx、Home.tsx、Reader.tsx、Snippets.tsx、Tags.tsx、epub.ts、lib.ts），仓库 App.tsx 仅为脚手架短文件、问答 UI 实际在 Snippets.tsx，上轮「全量回灌」表述就此补正。本轮已将 8 文件按已发布源码原样回灌（未改一字），回灌后两树 diff 为零（排除构建产物/app.db）。`time-compounding/` 与已发布树 diff 为零、镜像完整。
+- 独立复跑（同步轮次本机，非构建方申报）：(1) `validate-time-review.mjs` 在仓库副本以 node 实跑 **65/65 全过**，与 01:13 勘误后计数一致（纯客户端呈现层口径不变）。(2) `validate-reading-qa.mjs` 补齐镜像前在仓库副本因缺 Snippets.tsx 直接 ENOENT 失败；补齐后客户端层断言全过、行为层在仓库目录受既有 @hatch/space-sdk dist 不完整限制无法加载（与陪伴仓既有限制同类）；改在已发布源码树（与回灌后仓库逐字一致）以 bun 实跑 **57/57 全过**，与构建方申报一致。READ 首片其余 validate 套件（reading/knowledge/reader/reviews，构建方首片申报 160/65/87/89）经实查在已发布源码树与仓库均不存在脚本文件——构建方从未落盘，仍无脚本可复跑，继续如实保留为 EVID 残项，不冒称已验证。
+- `F0.7`（P0，只读续查，遵丙(ii)）：03:13 PDT 经 space-3 `getrefreshobservations`——access=owner、currentAttempt=1、status=running、diagnosis=awaiting_callback，观测行仍仅 refresh_started(claimed)＋spawn_attached（2026-10-20T18:27:22Z），state.updatedAt 冻结于启动时刻；`getdashboard` 只读核对 asOf/sourceMonth 仍为 2026-09-20、refresh 呈 stale error 可重试，距启动约 39¾ 小时无本代回调/终态行、新快照未核实，断点未变（平台任务执行/回调段）。未触发 run、未清冻/重置，未记录任何金额。
+- 仍（需用户确认）：`CWEB-LEVEL-001` 四参数/路径；`W6.2-PM-IMG` 整批过目未收，不接入；`H4.6` 恢复参考 T 未定。本轮用户可见增量：0 组（纯证据/镜像尾巴）。未提交 app.db/.env/任何真实数据。此登记仅表示实现方证据补齐，PM 结论以其评审记录为准。
