@@ -468,6 +468,40 @@ function workoutsInRange(workouts: Workout[], start: Date, end: Date) {
   });
 }
 
+// W2.3: the in-progress week — Monday (local calendar) through today.
+// `today` is the local start-of-day for the current date and `end` is
+// tomorrow's start-of-day (exclusive), so a record belongs to this
+// window by the same completion-time rule workoutsInRange applies to
+// the review week: a late-saved record lands in the week of its
+// completed_at, never its started_at. Pure calendar arithmetic via
+// setDate, so a week containing a DST transition still spans exactly
+// Monday..today local calendar days.
+export function currentWeekRange(now = new Date()) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const weekday = today.getDay();
+  const start = new Date(today);
+  start.setDate(start.getDate() - (weekday === 0 ? 6 : weekday - 1));
+  const end = new Date(today);
+  end.setDate(end.getDate() + 1);
+  return { start, today, end };
+}
+
+// W2.3: the in-progress week's saved-completed summary. Only workouts
+// with a completed_at inside the window count — an in-progress
+// (active) workout has completed_at null and is therefore never
+// counted here; the UI lists it on its own line instead. Set totals
+// count completed sets only.
+export function currentWeekSummary(workouts: Workout[], now = new Date()) {
+  const range = currentWeekRange(now);
+  const sessions = workoutsInRange(workouts, range.start, range.end);
+  return {
+    start: range.start,
+    today: range.today,
+    sessions,
+    completedSets: sessions.reduce((sum, workout) => sum + completedCount(workout), 0),
+  };
+}
+
 function targetRange(target: string) {
   const values = target.match(/\d+/g)?.map(Number).filter(Number.isFinite) ?? [];
   const first = values[0] ?? 0;
@@ -678,11 +712,23 @@ function recommendationFromCandidate(
   return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
 }
 
+// W2.3: the basis line under each W1 suggestion — the date and unit
+// of the record the suggestion actually derives from (the comparable
+// source workout), with the existing 已换算 marker when that source's
+// unit differs from the review unit and its weights were converted.
+function recommendationBasis(sourceCompletedAt: string | null, sourceUnit: Unit, reviewUnit: Unit) {
+  const parts: string[] = [];
+  if (sourceCompletedAt) parts.push(formatDate(sourceCompletedAt));
+  parts.push(`${sourceUnit} 记录`);
+  if (sourceUnit !== reviewUnit) parts.push("已换算");
+  return `依据：${parts.join(" · ")}`;
+}
+
 function reviewRecommendation(
   review: ExerciseReview,
   workouts: Workout[],
   comparableHistory?: ComparableHistoryEntry[],
-) {
+): { text: string; basis: string | null } {
   // W1: the "next time" suggestion is decided by this exercise's most
   // recent comparable workout, fed through the same progressionDecision
   // the server prefill uses. The week-over-week evidence above stays
@@ -698,11 +744,17 @@ function reviewRecommendation(
   // below run, unchanged.
   const historyEntry = comparableHistory?.find((entry) => entry.exercise_key === review.key);
   if (historyEntry) {
-    return recommendationFromCandidate(review, {
-      target: historyEntry.target,
-      unit: historyEntry.unit,
-      sets: historyEntry.sets,
-    });
+    return {
+      text: recommendationFromCandidate(review, {
+        target: historyEntry.target,
+        unit: historyEntry.unit,
+        sets: historyEntry.sets,
+      }),
+      // W2.3: the date comes from the source workout's own completion
+      // time (server-passed source_completed_at), never from the
+      // review week or from "today".
+      basis: recommendationBasis(historyEntry.source_completed_at, historyEntry.unit, review.unit),
+    };
   }
   let comparable: { workout: Workout; exercise: ReturnType<typeof groupSets>[number] } | null = null;
   for (const workout of workouts) {
@@ -712,12 +764,15 @@ function reviewRecommendation(
       break;
     }
   }
-  if (!comparable) return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
-  return recommendationFromCandidate(review, {
-    target: comparable.exercise.target,
-    unit: comparable.workout.unit,
-    sets: comparable.exercise.sets,
-  });
+  if (!comparable) return { text: `${review.name}：上次没有可比重量记录，暂不做重量建议`, basis: null };
+  return {
+    text: recommendationFromCandidate(review, {
+      target: comparable.exercise.target,
+      unit: comparable.workout.unit,
+      sets: comparable.exercise.sets,
+    }),
+    basis: recommendationBasis(comparable.workout.completed_at, comparable.workout.unit, review.unit),
+  };
 }
 
 // --- W4.3-D1: completion receipt derivation (pure) ---
@@ -893,6 +948,66 @@ export function muscleReceiptFacts(workout: Workout): MuscleReceiptFacts {
   return { primary, secondary, unmapped };
 }
 
+// W2.3: the in-progress week layer, shown above the previous
+// complete week's review. It reports ONLY what is already saved:
+// each saved-completed session of this week (Monday through today)
+// with its completed/total set counts, plus a totals line. A workout
+// still being recorded is named on its own line and never folded
+// into the completed counts. With zero saved sessions it says
+// exactly that — no inference about whether the user trained, and
+// no suggestion. On the start page each session row is a button
+// opening that record in History (the same focus mechanism the
+// receipt uses); the compact variant on the active-workout page
+// renders the same facts without the navigation.
+function CurrentWeekProgress({ workouts, activeWorkout, onOpenWorkout, compact }: {
+  workouts: Workout[];
+  activeWorkout?: Workout | null;
+  onOpenWorkout?: (workoutId: number) => void;
+  compact?: boolean;
+}) {
+  const summary = currentWeekSummary(workouts);
+  const title = `本周进行中 · ${compactDate(summary.start)}–${compactDate(summary.today)}`;
+  return (
+    <section className={`current-week${compact ? " current-week-compact" : ""}`} aria-label={title}>
+      <div className="current-week-head">
+        <h2>{title}</h2>
+        {summary.sessions.length > 0 ? (
+          <span>已保存完成 {summary.sessions.length} 次 · 共 {summary.completedSets} 组</span>
+        ) : null}
+      </div>
+      {summary.sessions.length === 0 ? (
+        <p className="current-week-empty">本周暂无已保存完成记录</p>
+      ) : (
+        <ul className="current-week-list">
+          {summary.sessions.map((workout) => {
+            const label = `${formatDate(workout.completed_at ?? workout.started_at)} · ${ROUTINE_META[workout.routine].title} · 已完成 ${completedCount(workout)}/${workout.sets.length} 组`;
+            return (
+              <li key={workout.id}>
+                {onOpenWorkout ? (
+                  <button
+                    type="button"
+                    className="current-week-row"
+                    aria-label={`查看记录：${label}`}
+                    onClick={() => onOpenWorkout(workout.id)}
+                  >
+                    <span>{label}</span>
+                    <span aria-hidden="true">›</span>
+                  </button>
+                ) : (
+                  <span className="current-week-row">{label}</span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {activeWorkout ? (
+        <p className="current-week-active">正在记录：{ROUTINE_META[activeWorkout.routine].title}（未计入完成数）</p>
+      ) : null}
+    </section>
+  );
+}
+
 function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
   const { start, end } = previousCompleteWeek();
   const priorStart = new Date(start);
@@ -937,7 +1052,7 @@ function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; co
               <p key={`${review.key}-${review.unit}`}>
                 <strong>{review.name}</strong>
                 <span>
-                  本周 {review.completed}/{review.planned} 组 · {review.atTop} 组到上限
+                  该复盘周 {review.completed}/{review.planned} 组 · {review.atTop} 组到上限
                   {review.prior ? `；前周 ${review.prior.atTop}/${review.prior.completed} 组到上限` : "；前周无记录"}
                 </span>
                 <small>{weightTrend(review)}</small>
@@ -948,7 +1063,7 @@ function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; co
       ) : null}
 
       <div className="review-change">
-        <span>下周调整</span>
+        <span>下次训练参考</span>
         {week.length === 0 ? (
           <>
             <strong>暂不新增动作</strong>
@@ -957,7 +1072,14 @@ function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; co
         ) : (
           <>
             <strong>动作结构不变，按最近一次可比训练调负荷</strong>
-            <ul>{recommendations.map((recommendation) => <li key={recommendation}>{recommendation}</li>)}</ul>
+            <ul>
+              {recommendations.map((recommendation) => (
+                <li key={recommendation.text}>
+                  {recommendation.text}
+                  {recommendation.basis ? <span className="review-basis">{recommendation.basis}</span> : null}
+                </li>
+              ))}
+            </ul>
             <p>
               {completeRound
                 ? "增重幅度与训练预填一致：lb +5、kg +2.5。只有连续几周仍出现明确短板，才考虑替换或新增动作。"
@@ -2619,6 +2741,8 @@ function ActiveWorkout({ workout, recent, onCompleted }: {
         </div>
       </header>
 
+      <CurrentWeekProgress workouts={recent} activeWorkout={workout} compact />
+
       <div className="progress-track" aria-label={`已完成 ${doneCount} 组，共 ${total} 组`}>
         <span style={{ width: `${total ? (doneCount / total) * 100 : 0}%` }} />
       </div>
@@ -3257,6 +3381,11 @@ function StartScreen({ recent, comparableHistory, receiptId, onCloseReceipt }: {
           <button type="button" aria-pressed={unit === "kg"} onClick={() => setUnit("kg")}>kg</button>
         </div>
       </section>
+
+      <CurrentWeekProgress
+        workouts={recent}
+        onOpenWorkout={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}
+      />
 
       <WeeklyReview workouts={recent} comparableHistory={comparableHistory} />
 

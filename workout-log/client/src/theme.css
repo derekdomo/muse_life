@@ -92,6 +92,18 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .error-banner { padding: 12px; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); font-weight: 700; font-size: 13px; }
 .plan-read-retry { margin-left: 10px; padding: 4px 12px; border: 1px solid currentColor; border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 
+.current-week { margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.current-week-compact { margin: 14px 0 0; padding: 10px 12px; }
+.current-week-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.current-week-head h2 { margin: 0; font-size: 14px; font-weight: 800; }
+.current-week-head > span { color: var(--dim); font-size: 11px; font-weight: 700; }
+.current-week-empty { margin: 8px 0 0; color: var(--dim); font-size: 12px; }
+.current-week-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.current-week-list li + li { border-top: 1px solid var(--border); }
+.current-week-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 8px 0; background: none; border: 0; color: var(--text); font-size: 12px; text-align: left; }
+button.current-week-row { cursor: pointer; font: inherit; font-size: 12px; }
+.current-week-active { margin: 8px 0 0; padding-top: 8px; border-top: 1px dashed var(--border); color: var(--dim); font-size: 12px; font-weight: 700; }
+
 .weekly-review { margin: 18px 0 8px; padding: 18px; background: var(--text); color: var(--bg); border-radius: var(--radius); }
 .review-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .review-header p { margin: 0 0 5px; color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .08em; }
@@ -115,6 +127,7 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .review-change strong { display: block; font-size: 14px; }
 .review-change ul { margin: 9px 0 0; padding-left: 18px; color: color-mix(in srgb, var(--bg) 78%, transparent); font-size: 11px; line-height: 1.55; }
 .review-change li + li { margin-top: 5px; }
+.review-basis { display: block; margin-top: 2px; color: color-mix(in srgb, var(--bg) 55%, transparent); font-size: 10px; }
 .review-change p { margin: 6px 0 0; color: color-mix(in srgb, var(--bg) 72%, transparent); font-size: 11px; line-height: 1.55; }
 
 .receipt-card { margin: 18px 0 4px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }

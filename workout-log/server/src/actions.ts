@@ -160,11 +160,17 @@ const comparableHistorySetResponse = z.object({
 // the startWorkout prefill uses (see selectComparableHistory). Sets
 // are in the source workout's own unit/values — unconverted. Existing
 // consumers （健康看板 sync channel) ignore the field.
+// W2.3 (additive): source_completed_at is the source workout's own
+// completion time (ISO string, nullable), passed through untouched
+// from that workout's completedAt so the weekly review can cite the
+// exact record each suggestion derives from. Older consumers ignore
+// it; the selection itself is unchanged.
 const comparableHistoryEntryResponse = z.object({
   routine: routineSchema,
   exercise_key: z.string(),
   unit: unitSchema,
   target: z.string(),
+  source_completed_at: z.string().nullable(),
   sets: z.array(comparableHistorySetResponse),
 });
 
@@ -967,11 +973,15 @@ export type ComparableHistoryRaw = {
   exerciseKey: string;
   unit: "lb" | "kg";
   target: string;
+  // W2.3 (additive): the contributing workout's completion time as an
+  // ISO string, or null when the caller did not supply one. Pure
+  // pass-through — it never influences which workout is selected.
+  sourceCompletedAt: string | null;
   sets: { setNumber: number; weight: number | null; reps: number | null; completed: boolean }[];
 };
 
 export function selectComparableHistory(
-  recentCompleted: { unit: "lb" | "kg"; sets: ComparableSetLike[] }[],
+  recentCompleted: { unit: "lb" | "kg"; completedAt?: string | null; sets: ComparableSetLike[] }[],
   exerciseKeys: string[],
 ): ComparableHistoryRaw[] {
   const windowed = recentCompleted.slice(0, 20);
@@ -986,6 +996,7 @@ export function selectComparableHistory(
         exerciseKey: key,
         unit: workout.unit,
         target: first.targetReps,
+        sourceCompletedAt: workout.completedAt ?? null,
         sets: sets.map((set) => ({
           setNumber: set.setNumber,
           weight: set.weight,
@@ -1038,10 +1049,10 @@ type PreviousComparable = {
 async function loadRoutineRecentCompleted(
   ctx: Ctx,
   routine: z.infer<typeof routineSchema>,
-): Promise<{ unit: "lb" | "kg"; sets: ComparableSetLike[] }[]> {
+): Promise<{ unit: "lb" | "kg"; completedAt: string | null; sets: ComparableSetLike[] }[]> {
   const db = ctx.db<typeof schema>();
   const rows = await db
-    .select({ id: schema.workouts.id, unit: schema.workouts.unit })
+    .select({ id: schema.workouts.id, unit: schema.workouts.unit, completedAt: schema.workouts.completedAt })
     .from(schema.workouts)
     .where(and(eq(schema.workouts.routine, routine), isNotNull(schema.workouts.completedAt)))
     .orderBy(desc(schema.workouts.completedAt))
@@ -1067,6 +1078,9 @@ async function loadRoutineRecentCompleted(
   }
   return rows.map((row) => ({
     unit: row.unit,
+    // W2.3: the source workout's completion time, passed through so
+    // selectComparableHistory can stamp it onto the dashboard entry.
+    completedAt: row.completedAt ? row.completedAt.toISOString() : null,
     sets: setsByWorkout.get(row.id) ?? [],
   }));
 }
@@ -1102,6 +1116,7 @@ async function loadComparableHistory(
         exercise_key: raw.exerciseKey,
         unit: raw.unit,
         target: raw.target,
+        source_completed_at: raw.sourceCompletedAt,
         sets: raw.sets.map((set) => ({
           set_number: set.setNumber,
           weight: set.weight,
