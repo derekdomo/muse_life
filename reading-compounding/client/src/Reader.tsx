@@ -112,6 +112,13 @@ export interface ReaderVersionState {
   pinned: string | null | undefined;
   awaitingNewVersion: boolean;
   switchFromVersion: string | null | undefined;
+  // The chapter idx the in-flight switch targets (chapter 0 —
+  // a switch always restarts from the beginning). While
+  // awaiting, ONLY a response for this idx may complete the
+  // switch; a response for any other chapter (e.g. one a stray
+  // navigation requested) is ignored for switch purposes, so
+  // ordinary navigation can never preempt "从头阅读".
+  switchTargetIdx?: number;
 }
 
 export type ChapterAdmission =
@@ -142,6 +149,15 @@ export function admitChapterResponse(
 ): ChapterAdmission {
   if (!data || data.forbidden) return { kind: "skip" };
   if (state.awaitingNewVersion) {
+    // Target check first: the switch completes ONLY on a
+    // response for the switch's own target chapter (chapter 0).
+    // Any other chapter's response — whatever version it
+    // carries — must not clear the awaiting state or re-pin:
+    // the owner chose "从头阅读", and a chapter-1 response
+    // landing early would silently skip that choice.
+    if (requestedIdx !== (state.switchTargetIdx ?? 0)) {
+      return { kind: "ignore" };
+    }
     // The switch completes only on the first response whose
     // version DIFFERS from the pre-switch pin. An old-version
     // response here is a cache echo of the version being left:
@@ -266,6 +282,77 @@ export function readerWritesBlocked(state: {
   return state.pinned === undefined || state.awaitingNewVersion;
 }
 
+// The switch state machine (CMP-READ-001 P1 failure recovery).
+// The switch's loading / error / retry state is accounted
+// SEPARATELY from the display snapshot: a failed target request
+// never touches what is on screen, it only moves the phase.
+//   idle          — no switch has run in this reader session.
+//   switching     — a switch attempt is unresolved and its
+//                   chapter-0 target request has not failed.
+//   switch-failed — the target request failed (query error, or
+//                   a forbidden/skip response): the display and
+//                   any selection draft stay exactly as they
+//                   were, writes stay blocked, and the ONLY way
+//                   forward offered is retrying the SAME switch
+//                   (same switchFromVersion, same generation,
+//                   same chapter-0 target — just a refetch).
+//   switch-done   — a switch completed: the displayed snapshot
+//                   belongs to a post-switch generation under a
+//                   settled pin; normal navigation resumes.
+export type SwitchPhase = "idle" | "switching" | "switch-failed" | "switch-done";
+
+export function resolveSwitchPhase(state: {
+  awaitingNewVersion: boolean;
+  targetFailed: boolean;
+  switchCompleted: boolean;
+}): SwitchPhase {
+  if (state.awaitingNewVersion) {
+    return state.targetFailed ? "switch-failed" : "switching";
+  }
+  return state.switchCompleted ? "switch-done" : "idle";
+}
+
+// The version-check verdict (CMP-READ-001 P1): what "检查新版本"
+// may honestly say. "已是最新版本" is allowed ONLY under a
+// settled pin whose version equals the live version. While a
+// switch is unresolved the check must say the switch is not
+// complete — never "current" — and with the pin unset outside a
+// switch the version is simply not yet determined.
+export type VersionCheckOutcome =
+  | { kind: "current"; message: string }
+  | { kind: "switch-pending"; message: string }
+  | { kind: "unsettled"; message: string }
+  | { kind: "unknown"; message: string }
+  | { kind: "stale" };
+
+export function resolveVersionCheck(args: {
+  forbidden: boolean;
+  found: boolean;
+  pinned: string | null | undefined;
+  awaitingNewVersion: boolean;
+  liveVersion: string | null;
+}): VersionCheckOutcome {
+  if (args.forbidden || !args.found) {
+    return { kind: "unknown", message: "暂时无法确认版本，请稍后再试。" };
+  }
+  if (args.awaitingNewVersion) {
+    return {
+      kind: "switch-pending",
+      message: "新版本尚未切换完成，切换完成前显示的仍是切换前的内容。",
+    };
+  }
+  if (args.pinned === undefined) {
+    return {
+      kind: "unsettled",
+      message: "当前版本尚未确定，暂时无法确认是否已是最新版本。",
+    };
+  }
+  if (args.liveVersion === (args.pinned ?? null)) {
+    return { kind: "current", message: "已是最新版本。" };
+  }
+  return { kind: "stale" };
+}
+
 export function Reader({
   book,
   startChapter,
@@ -310,7 +397,17 @@ export function Reader({
   const awaitingRef = useRef(false);
   const generationRef = useRef(0);
   const snapshotRef = useRef<DisplaySnapshot | null>(null);
+  // The chapter idx the in-flight switch targets (always 0:
+  // a switch restarts from the beginning). Admission completes
+  // the switch only on a response for this idx.
+  const switchTargetRef = useRef(0);
+  // `switching` stays true for the WHOLE unresolved attempt —
+  // including the failed phase awaiting a retry — so navigation
+  // and writes stay fenced until the new version actually lands.
+  // `switchFailed` is the separate failure ledger: the target
+  // chapter-0 request errored or came back forbidden.
   const [switching, setSwitching] = useState(false);
+  const [switchFailed, setSwitchFailed] = useState(false);
 
   const chapter = useQuery({
     queryKey: ["chapter", book.id, chapterIdx],
@@ -332,6 +429,7 @@ export function Reader({
         pinned: pinnedVersionRef.current,
         awaitingNewVersion: awaitingRef.current,
         switchFromVersion: switchFromRef.current,
+        switchTargetIdx: switchTargetRef.current,
       },
       chapterIdx,
       generationRef.current,
@@ -343,6 +441,7 @@ export function Reader({
       if (awaitingRef.current) {
         awaitingRef.current = false;
         setSwitching(false);
+        setSwitchFailed(false);
       }
       setSnapshot(res.snapshot);
     } else if (res.kind === "stale") {
@@ -351,6 +450,43 @@ export function Reader({
     // "ignore" / "skip": display, pin and selection stay untouched.
   }, [chapter.data, chapterIdx]);
 
+  // Switch-failure ledger: while a switch is unresolved, a
+  // SETTLED failure of the target chapter-0 request — a query
+  // error, or a response that came back forbidden — moves the
+  // attempt into the failed phase. The display snapshot, the
+  // pin and any selection draft are NOT touched; only the
+  // phase changes, so the UI can say the switch failed and
+  // offer a same-target retry. A fetch still in flight is not
+  // a failure (the refetch after 切换/重试 passes through here).
+  useEffect(() => {
+    if (!awaitingRef.current || chapter.isFetching) return;
+    if (chapter.isError || chapter.data?.forbidden === true) {
+      setSwitchFailed(true);
+    }
+  }, [chapter.isError, chapter.isFetching, chapter.data]);
+
+  // The switch phase, decided by the exported pure function:
+  // loading / failed / done are separate from the display
+  // snapshot, which the failure path never modifies.
+  const switchPhase = resolveSwitchPhase({
+    awaitingNewVersion: switching,
+    targetFailed: switchFailed,
+    switchCompleted: (snapshot?.generation ?? 0) > 0,
+  });
+
+  // Retry the SAME switch after a target-request failure: same
+  // switchFromVersion, same generation (NOT advanced again),
+  // same chapter-0 target — only that chapter-0 query is
+  // invalidated, which re-issues its request. The pin is never
+  // restored to the old version: writes stay blocked until the
+  // new version's chapter 0 is admitted.
+  const retrySwitch = () => {
+    setSwitchFailed(false);
+    void queryClient.invalidateQueries({
+      queryKey: ["chapter", book.id, switchTargetRef.current],
+    });
+  };
+
   // "检查新版本" checks VERSION METADATA ONLY (getBookLiveVersion
   // reads one books row) — it never refetches body text. A version
   // different from the pin raises the switch banner; the same
@@ -358,18 +494,22 @@ export function Reader({
   const checkVersion = useMutation({
     mutationFn: () => api.getBookLiveVersion({ bookId: book.id }),
     onSuccess: (res) => {
-      if (res.forbidden || !res.found) {
-        setCheckMsg("暂时无法确认版本，请稍后再试。");
-        return;
-      }
-      if (
-        pinnedVersionRef.current === undefined ||
-        res.liveVersion === pinnedVersionRef.current
-      ) {
-        setCheckMsg("已是最新版本。");
-      } else {
+      // The verdict is decided by resolveVersionCheck: an
+      // unsettled pin (e.g. mid-switch, where the body on
+      // screen is still the OLD version) must never be
+      // reported as "已是最新版本".
+      const outcome = resolveVersionCheck({
+        forbidden: res.forbidden,
+        found: res.found,
+        pinned: pinnedVersionRef.current,
+        awaitingNewVersion: awaitingRef.current,
+        liveVersion: res.liveVersion,
+      });
+      if (outcome.kind === "stale") {
         setCheckMsg(null);
         setVersionStale(true);
+      } else {
+        setCheckMsg(outcome.message);
       }
     },
     onError: () => setCheckMsg("暂时无法确认版本，请稍后再试。"),
@@ -601,12 +741,17 @@ export function Reader({
                 <li key={t.idx}>
                   <button
                     type="button"
-                    disabled={versionStale}
+                    disabled={versionStale || switching}
                     onClick={() => {
                       // While stale, chapter jumps are refused
                       // outright: a new-version chapter must never
                       // be spliced onto the pinned old token.
-                      if (versionStale) return;
+                      // While a switch attempt is unresolved
+                      // (loading or failed-awaiting-retry),
+                      // navigation is fenced too: it must not
+                      // move the request off the switch's
+                      // chapter-0 target.
+                      if (versionStale || switching) return;
                       setChapterIdx(t.idx);
                       restoredFor.current = "";
                       setShowToc(false);
@@ -653,10 +798,16 @@ export function Reader({
                 switchFromRef.current = pinnedVersionRef.current;
                 awaitingRef.current = true;
                 setSwitching(true);
+                setSwitchFailed(false);
+                switchTargetRef.current = 0;
                 pinnedVersionRef.current = undefined;
                 generationRef.current += 1;
                 setVersionStale(false);
-                setSelection(null);
+                // A held selection draft is KEPT across the
+                // switch attempt: it stays bound to the version
+                // it was captured in, writes stay blocked until
+                // the switch completes, and a failed switch must
+                // not silently throw the owner's draft away.
                 setChapterIdx(0);
                 restoredFor.current = "";
                 void queryClient.invalidateQueries({ queryKey: ["chapter", book.id] });
@@ -673,10 +824,26 @@ export function Reader({
           {snapshot?.versionLabel ? ` · ${snapshot.versionLabel}` : ""}
         </p>
         <h2 className="font-serif-book mt-1 text-xl font-semibold">{chapterTitle}</h2>
-        {switching && (
+        {switchPhase === "switching" && (
           <p role="status" className="mt-3 text-sm text-[var(--dim)]">
             正在加载新版本…上方仍是切换前显示的内容，加载完成前不会保存阅读位置或片段。
           </p>
+        )}
+        {switchPhase === "switch-failed" && (
+          <div role="alert" className="mt-3 rounded-xl border border-[var(--accent2)] px-4 py-3">
+            <p className="text-sm font-medium">新版本切换失败</p>
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              新版本第 1 章没有加载成功，上方仍是切换前显示的内容；已有的选文草稿会保留在这里，
+              切换完成前仍不会保存阅读位置或片段。可以重试切换——仍从第 1 章开始，不会改动当前内容。
+            </p>
+            <button
+              type="button"
+              onClick={retrySwitch}
+              className="mt-2 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white"
+            >
+              重试切换
+            </button>
+          </div>
         )}
         {!switching && chapter.isError && snapshot && (
           <p role="status" className="mt-3 text-sm text-[var(--dim)]">
@@ -704,9 +871,9 @@ export function Reader({
         <div className="mt-10 flex items-center justify-between">
           <button
             type="button"
-            disabled={versionStale || chapterIdx <= 0}
+            disabled={versionStale || switching || chapterIdx <= 0}
             onClick={() => {
-              if (versionStale) return;
+              if (versionStale || switching) return;
               setChapterIdx(chapterIdx - 1);
               restoredFor.current = "";
             }}
@@ -719,9 +886,9 @@ export function Reader({
           </span>
           <button
             type="button"
-            disabled={versionStale || toc.length === 0 || chapterIdx >= toc.length - 1}
+            disabled={versionStale || switching || toc.length === 0 || chapterIdx >= toc.length - 1}
             onClick={() => {
-              if (versionStale) return;
+              if (versionStale || switching) return;
               setChapterIdx(chapterIdx + 1);
               restoredFor.current = "";
             }}
@@ -745,7 +912,9 @@ export function Reader({
             </p>
             {switching && (
               <p role="status" className="mt-1 text-xs text-[var(--dim)]">
-                正在切换新版本，切换完成前不能保存；选文会保留在这里。
+                {switchPhase === "switch-failed"
+                  ? "新版本切换失败、尚未完成，切换完成前不能保存；选文会保留在这里。"
+                  : "正在切换新版本，切换完成前不能保存；选文会保留在这里。"}
               </p>
             )}
             <div className="mt-2 flex gap-2">

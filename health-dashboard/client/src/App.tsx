@@ -2478,6 +2478,207 @@ export function previousFocusWindows(windowStart: string, windowEnd: string): {
   };
 }
 
+// H3.5 重点依据上下文往返 (P1, B layout + A window/source binding): the
+// context a focus card hands to the training range page. It carries
+// the source (本次 current card / 上次 previous look-back), the focus
+// identity (focusKey), the focus wording and the save-time basis
+// exactly as they stood when the owner tapped 查看这段训练记录， plus
+// the feedback presentation at that moment — a confirmed (saved)
+// value and/or an unsaved draft selection. The range page renders
+// this card verbatim; it never recomputes the basis from current
+// data and never backfills an old record.
+export interface FocusRangeContext {
+  source: "current" | "previous";
+  focusKey: string;
+  windowStart: string;
+  windowEnd: string;
+  focusText: string;
+  basisText: string | null;
+  savedFeedback: FocusFeedbackChoice | null;
+  draftFeedback: FocusFeedbackChoice | null;
+}
+
+// The current card's context, derived from the live feedback state:
+// the confirmed value is what the server has saved; a selection that
+// is still in flight, failed, refused by arbitration, or simply
+// different from the confirmed value rides along as the unsaved
+// draft so the range page can name it 『X』尚未保存 instead of
+// pretending it landed.
+export function buildCurrentFocusContext(
+  state: FocusFeedbackState,
+  focusKey: string,
+  windowStart: string,
+  windowEnd: string,
+  focusText: string,
+  basisText: string,
+): FocusRangeContext {
+  const unsaved = state.selection !== null
+    && (state.status === "saving" || state.status === "error" || state.status === "conflict"
+      || state.selection !== state.confirmed);
+  return {
+    source: "current",
+    focusKey,
+    windowStart,
+    windowEnd,
+    focusText,
+    basisText,
+    savedFeedback: state.confirmed,
+    draftFeedback: unsaved ? state.selection : null,
+  };
+}
+
+// The previous look-back's context, derived from the stored row
+// alone: its own window, its own focus wording and basis, and its
+// saved feedback (a stored row exists only because feedback was
+// saved, so there is never a draft on this source).
+export function buildPreviousFocusContext(row: {
+  focusKey: string;
+  windowStart: string;
+  windowEnd: string;
+  focusText: string;
+  basisText: string;
+  feedback: FocusFeedbackChoice;
+}): FocusRangeContext {
+  return {
+    source: "previous",
+    focusKey: row.focusKey,
+    windowStart: row.windowStart,
+    windowEnd: row.windowEnd,
+    focusText: row.focusText,
+    basisText: row.basisText,
+    savedFeedback: row.feedback,
+    draftFeedback: null,
+  };
+}
+
+// The basis card's fixed lines, adjudicated in one place: line 1 is
+// the source + window heading, line 2 the focus wording verbatim,
+// then the feedback line (an unsaved draft outranks the saved value
+// in presentation because it is the owner's pending intent; with
+// neither, the card says 尚未反馈）, and the save-time basis display
+// (an empty stored basis reads 旧记录未保存该项 — never backfilled).
+export function focusBasisLines(context: FocusRangeContext): {
+  heading: string;
+  feedbackLine: string;
+  basisDisplay: string;
+} {
+  const heading = `${context.source === "current" ? "本次重点依据" : "上次已反馈重点依据"} · ${fullDateLabel(context.windowStart)}–${fullDateLabel(context.windowEnd)}`;
+  const feedbackLine = context.draftFeedback
+    ? `对这条重点的反馈：『${context.draftFeedback}』尚未保存`
+    : context.savedFeedback
+      ? `对这条重点的反馈：已保存『${context.savedFeedback}』`
+      : "对这条重点的反馈：尚未反馈";
+  const basisDisplay = context.basisText ? context.basisText : "旧记录未保存该项";
+  return { heading, feedbackLine, basisDisplay };
+}
+
+// While the owner sits on the range page the underlying focus can
+// move (a new snapshot or window lands): the notice shows only when
+// a current key is known AND differs from the key the basis card was
+// opened with. The owner switches via 查看当前重点； nothing
+// auto-navigates.
+export function focusContextUpdateNotice(contextKey: string, currentKey: string | null): boolean {
+  return currentKey !== null && currentKey !== contextKey;
+}
+
+// Honest degradation for a source whose stored detail sample has
+// rolled forward past the selected range: when the WHOLE range ends
+// before the earliest date still present in that source's stored
+// sample, and the visit carries a focus context, an empty in-range
+// list means "the detail from back then is no longer retained" —
+// never "there was no training". Each source is judged against its
+// own sample. A range that reaches into the sample's coverage (or a
+// sample with no rows at all to judge from) keeps the plain empty
+// wording.
+export function focusSampleEmptyKind(
+  range: { start: string; end: string },
+  earliestSampleDate: string | null,
+  hasFocusContext: boolean,
+): "rolled-out" | "plain-empty" {
+  if (hasFocusContext && earliestSampleDate !== null && range.end < earliestSampleDate) return "rolled-out";
+  return "plain-empty";
+}
+
+// Session-level draft store for the focus feedback state, keyed by
+// focusKey (H3.5 round-trip): navigating to the range page unmounts
+// the today view, so the panel's unsaved selection, save status and
+// pending arbitration identity survive ONLY here. One key's draft
+// is never read under another key — a different focus starts from
+// the server row for its own key, and an old opinion is never
+// migrated or auto-submitted.
+export interface FocusDraftStore {
+  byKey: Record<string, FocusFeedbackState>;
+}
+
+export function createFocusDraftStore(): FocusDraftStore {
+  return { byKey: {} };
+}
+
+export function saveFocusDraft(store: FocusDraftStore, focusKey: string, state: FocusFeedbackState): FocusDraftStore {
+  store.byKey[focusKey] = state;
+  return store;
+}
+
+export function loadFocusDraft(store: FocusDraftStore, focusKey: string): FocusFeedbackState | null {
+  return store.byKey[focusKey] ?? null;
+}
+
+// A save outcome that lands while the panel is unmounted (the owner
+// is on the range page) is written into the draft store by the
+// mutation callback itself, applying the SAME pure transitions the
+// panel applies to its live state — so on return the restored draft
+// shows the save's actual result (saved + revision, conflict with
+// the server's value, or failure with the pending identity kept for
+// the retry), never a stale "saving" or a lost failure. When no
+// draft exists yet for the key the outcome applies to a fresh state
+// bound to that key, and the transitions' own key guards decide.
+export function recordFocusSaveOutcome(
+  store: FocusDraftStore,
+  boundKey: string,
+  outcome:
+    | { kind: "success"; choice: FocusFeedbackChoice; revision?: number }
+    | { kind: "conflict"; feedback: FocusFeedbackChoice | null; revision: number | null }
+    | { kind: "failure" },
+): FocusDraftStore {
+  const draft = loadFocusDraft(store, boundKey) ?? { ...createFocusFeedbackState(), boundKey };
+  const next = outcome.kind === "success"
+    ? completeFocusFeedbackSave(draft, boundKey, outcome.choice, outcome.revision)
+    : outcome.kind === "conflict"
+      ? conflictFocusFeedbackSave(draft, boundKey, outcome.feedback, outcome.revision)
+      : failFocusFeedbackSave(draft, boundKey);
+  return saveFocusDraft(store, boundKey, next);
+}
+
+// The one-slot hand-off for the range context: the panel saves the
+// context it built, then calls the existing range navigation; the
+// dashboard takes the pending context as it switches tabs. Taking
+// clears the slot, so a later plain history visit never inherits a
+// stale card.
+export interface FocusRangeContextStore {
+  pending: FocusRangeContext | null;
+}
+
+export function createFocusRangeContextStore(): FocusRangeContextStore {
+  return { pending: null };
+}
+
+export function saveFocusRangeContext(store: FocusRangeContextStore, context: FocusRangeContext): FocusRangeContextStore {
+  store.pending = context;
+  return store;
+}
+
+export function takeFocusRangeContext(store: FocusRangeContextStore): FocusRangeContext | null {
+  const context = store.pending;
+  store.pending = null;
+  return context;
+}
+
+// The session singletons the components actually share. They live
+// at module level precisely because the today view unmounts during
+// the round-trip; nothing here is persisted beyond the session.
+const focusDraftStore = createFocusDraftStore();
+const focusRangeContextStore = createFocusRangeContextStore();
+
 // H3.1/H3.2/H3.3: the weekly review panel on the 今日 page, rendered
 // inside the hero after the load verdict block and the seven-day facts
 // strip. Every number comes from the weekReview derivation above;
@@ -2508,10 +2709,23 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
     focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.feedback : null;
   const serverRevision: number | null =
     focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.revision : null;
-  const [feedbackState, setFeedbackState] = useState<FocusFeedbackState>(() => createFocusFeedbackState());
+  // Round-trip restore (H3.5): the panel unmounts while the owner is
+  // on the training range page, so the feedback state is seeded from
+  // the session draft store for THIS card key and re-saved there on
+  // every change (under the state's own boundKey — a rebind to a new
+  // key never writes the old state under the new key). The sync
+  // effect below then merges the latest server read on top with its
+  // usual guards, so a restored unsaved draft survives the merge and
+  // a stale draft can never rewind a confirmed value.
+  const [feedbackState, setFeedbackState] = useState<FocusFeedbackState>(
+    () => loadFocusDraft(focusDraftStore, cardKey) ?? createFocusFeedbackState(),
+  );
   useEffect(() => {
     setFeedbackState((prev) => syncFocusFeedbackState(prev, cardKey, serverConfirmed, focusReadFailed, serverRevision));
   }, [cardKey, serverConfirmed, focusReadFailed, serverRevision]);
+  useEffect(() => {
+    if (feedbackState.boundKey) saveFocusDraft(focusDraftStore, feedbackState.boundKey, feedbackState);
+  }, [feedbackState]);
   // The previous look-back survives a failed local read: the last
   // successfully read row is kept in state and the failed read never
   // replaces it with null (which would masquerade as "no history").
@@ -2540,19 +2754,30 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
       operationId: vars.operationId,
     }),
     onSuccess: (result, vars) => {
+      // Every outcome is ALSO recorded into the session draft store:
+      // if the owner is on the range page when this lands, the panel
+      // is unmounted and setFeedbackState is a no-op — the store is
+      // what the restored panel reads on return, so the return shows
+      // this save's actual result for its key.
       if (result.ok) {
+        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "success", choice: vars.choice, revision: result.revision ?? undefined });
         setFeedbackState((prev) => completeFocusFeedbackSave(prev, vars.key, vars.choice, result.revision ?? undefined));
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       } else if (result.conflict) {
         // Arbitration refused the write: the server's saved value
         // stands. Adopt it as confirmed and keep the attempted choice
         // as the selection — the owner decides whether to insist.
+        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "conflict", feedback: result.feedback, revision: result.revision });
         setFeedbackState((prev) => conflictFocusFeedbackSave(prev, vars.key, result.feedback, result.revision));
       } else {
+        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure" });
         setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key));
       }
     },
-    onError: (_error, vars) => setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key)),
+    onError: (_error, vars) => {
+      recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure" });
+      setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key));
+    },
   });
   // A fresh user intent: mint a new operationId, gated on the
   // currently confirmed revision (after a conflict that is the
@@ -2707,7 +2932,10 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
                 type="button"
                 className="week-review-training-btn"
                 aria-label="查看这段训练记录"
-                onClick={() => onViewTraining({ start: review.reviewWindow.start, end: review.reviewWindow.end })}
+                onClick={() => {
+                  saveFocusRangeContext(focusRangeContextStore, buildCurrentFocusContext(feedbackState, cardKey, review.reviewWindow.start, review.reviewWindow.end, review.focus, basisText));
+                  onViewTraining({ start: review.reviewWindow.start, end: review.reviewWindow.end });
+                }}
               >
                 查看这段训练记录
               </button>
@@ -2734,6 +2962,19 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
                 );
               })()}
               <p className="week-review-note">上次的意见只记录当时这条重点是否适用，不代表已完成或有效改善。</p>
+              {onViewTraining ? (
+                <button
+                  type="button"
+                  className="week-review-training-btn"
+                  aria-label="查看上次重点这段训练记录"
+                  onClick={() => {
+                    saveFocusRangeContext(focusRangeContextStore, buildPreviousFocusContext(shownPrevious));
+                    onViewTraining({ start: shownPrevious.windowStart, end: shownPrevious.windowEnd });
+                  }}
+                >
+                  查看这段训练记录
+                </button>
+              ) : null}
             </details>
           ) : null}
         </>
@@ -3041,10 +3282,12 @@ function allWorkoutsList(historyWorkouts: HistoryWorkout[]): HistoryWorkout[] {
   });
 }
 
-function HistoryView({ snapshot, unifiedTimeline, focusRange, onReturnToFocus, onClearFocusRange }: {
+function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, currentFocusKey, onReturnToFocus, onClearFocusRange }: {
   snapshot: Snapshot;
   unifiedTimeline?: UnifiedDay[];
   focusRange?: { start: string; end: string } | null;
+  focusContext?: FocusRangeContext | null;
+  currentFocusKey?: string | null;
   onReturnToFocus?: () => void;
   onClearFocusRange?: () => void;
 }) {
@@ -3092,17 +3335,50 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, onReturnToFocus, o
           return { week, weekEnd, sampleCompleted };
         })
     : [];
+  // Rolled-out adjudication (H3.5 round-trip): each source's stored
+  // sample is judged against its OWN earliest retained date. When
+  // the whole selected range predates that sample and the visit
+  // carries a focus context, an empty in-range list reads as
+  // 当时明细未保留 — the detail rolled out of the retained sample —
+  // never as "there was no training back then".
+  const earliestSampleDate = (dates: string[]): string | null =>
+    dates.length ? dates.reduce((min, date) => (date < min ? date : min), dates[0] ?? "") : null;
+  const strengthEmptyKind = focusRange
+    ? focusSampleEmptyKind(focusRange, earliestSampleDate(strengths.map((workout) => workout.date)), !!focusContext)
+    : "plain-empty";
+  const hkEmptyKind = focusRange
+    ? focusSampleEmptyKind(focusRange, earliestSampleDate(allWorkouts.map((workout) => workout.date)), !!focusContext)
+    : "plain-empty";
+  const basisLines = focusContext ? focusBasisLines(focusContext) : null;
+  const focusKeyChanged = focusContext ? focusContextUpdateNotice(focusContext.focusKey, currentFocusKey ?? null) : false;
+  const returnFocusLabel = focusContext?.source === "previous" ? "返回上次重点" : "返回本次重点";
   return (
     <div className="history-view">
       {focusRange ? (
         <section className="history-section history-focus-range" aria-labelledby="history-focus-range-title">
           <div className="section-heading"><div><p className="section-kicker">周复盘窗口</p><h2 id="history-focus-range-title">{fullDateLabel(focusRange.start)} – {fullDateLabel(focusRange.end)} 的已存训练记录</h2></div></div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "10px" }} role="group" aria-label="范围视图控制">
-            <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label="返回本次重点" onClick={onReturnToFocus}>返回本次重点</button>
+            <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label={returnFocusLabel} onClick={onReturnToFocus}>{returnFocusLabel}</button>
             <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label={showAllHistory ? "只看这段记录" : "查看全部历史"} aria-pressed={showAllHistory} onClick={() => setShowAllHistory((value) => !value)}>{showAllHistory ? "只看这段记录" : "查看全部历史"}</button>
             <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label="清除范围" onClick={onClearFocusRange}>清除范围</button>
           </div>
+          {focusContext && basisLines ? (
+            <div className="history-focus-basis">
+              <p className="history-focus-basis-heading">{basisLines.heading}</p>
+              <p className="history-focus-basis-focus">{focusContext.focusText}</p>
+              <p className="history-focus-basis-feedback">{basisLines.feedbackLine}</p>
+              {focusKeyChanged ? (
+                <div className="history-focus-basis-update">
+                  <p>已有更新依据：打开这张卡之后，当前重点已经更新（新快照或新窗口）。这张卡仍按打开时的重点呈现，不自动切换。</p>
+                  <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label="查看当前重点" onClick={onReturnToFocus}>查看当前重点</button>
+                </div>
+              ) : null}
+              <h3 className="history-focus-subtitle">当时记录的依据</h3>
+              <p className="history-focus-basis-text">{basisLines.basisDisplay}</p>
+            </div>
+          ) : null}
           <p className="unified-note">以下只呈现快照内已存的明细，两来源分列，不合并为一个总数。{showAllHistory ? "下方已展开全部历史。" : "全量历史各区已收起，点「查看全部历史」才展开。"}</p>
+          {focusContext ? <h3 className="history-focus-subtitle">当前可核对的记录</h3> : null}
           <h3 className="history-focus-subtitle">力量训练（来源：训练记录）· 已存明细样本 {focusStrengths.length} 次（已完成 {focusCompletedCount} 次{focusActiveCount ? ` · 进行中 ${focusActiveCount} 次，进行中不计入完成` : ""}）</h3>
           {focusStrengths.length ? (
             <div className="strength-history-list">{focusStrengths.map((workout) => (
@@ -3118,13 +3394,17 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, onReturnToFocus, o
                 </div>
               </details>
             ))}</div>
-          ) : <p className="empty-inline">这段时间没有已存的力量训练明细。</p>}
+          ) : <p className="empty-inline">{strengthEmptyKind === "rolled-out" ? "当时明细未保留（已存样本只覆盖最近一段，这段时间的明细已滚出）。" : "这段时间没有已存的力量训练明细。"}</p>}
           <p className="unified-note">力量明细是快照内已存明细样本（仅最近若干次），可能少于完整周汇总；完整周次数以复盘卡的周汇总为准，两者缺口分开呈现，不用样本冒充全量。</p>
-          {focusWeeks.length ? focusWeeks.map(({ week, weekEnd, sampleCompleted }) => (
-            <p className="unified-note" key={week.weekStart}>全量周汇总（自然周 {fullDateLabel(week.weekStart)}–{fullDateLabel(weekEnd)}）：{week.sessions} 次 · 容量 {volumeLabel(week.volume)} {snapshot.strengthTraining.displayUnit}。与范围内已存明细样本相差 {week.sessions - sampleCompleted} 次（全量周汇总 {week.sessions} 次 − 样本已完成 {sampleCompleted} 次）；自然周与上面的滚动复盘窗不是同一窗口，数字分开呈现。</p>
-          )) : (
-            <p className="unified-note">本页未取得全量周汇总：与这段时间重叠的自然周没有已确认整周覆盖的周汇总；下面仍可查看已存明细样本，不新造数字。</p>
-          )}
+          <div className="history-focus-weeks">
+            <h3 className="history-focus-subtitle">相关自然周汇总 · 周一–周日</h3>
+            <p className="unified-note">自然周按周一到周日计，可能跨出所选范围；与这段时间重叠的多个自然周各自是整周口径，不相加成七天总数。</p>
+            {focusWeeks.length ? focusWeeks.map(({ week, weekEnd, sampleCompleted }) => (
+              <p className="unified-note" key={week.weekStart}>全量周汇总（自然周 {fullDateLabel(week.weekStart)}–{fullDateLabel(weekEnd)}）：{week.sessions} 次 · 容量 {volumeLabel(week.volume)} {snapshot.strengthTraining.displayUnit}。与范围内已存明细样本相差 {week.sessions - sampleCompleted} 次（全量周汇总 {week.sessions} 次 − 样本已完成 {sampleCompleted} 次）；自然周与上面的滚动复盘窗不是同一窗口，数字分开呈现。</p>
+            )) : (
+              <p className="unified-note">本页未取得全量周汇总：与这段时间重叠的自然周没有已确认整周覆盖的周汇总；下面仍可查看已存明细样本，不新造数字。</p>
+            )}
+          </div>
           <h3 className="history-focus-subtitle">运动记录（HealthKit 来源）{focusWorkouts.length} 次</h3>
           {focusWorkouts.length ? (
             <div className="record-list">{focusWorkouts.map((workout) => (
@@ -3133,7 +3413,7 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, onReturnToFocus, o
                 <dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl>
               </article>
             ))}</div>
-          ) : <p className="empty-inline">这段时间没有已存的 HealthKit 运动记录。</p>}
+          ) : <p className="empty-inline">{hkEmptyKind === "rolled-out" ? "当时明细未保留（已存样本只覆盖最近一段，这段时间的明细已滚出）。" : "这段时间没有已存的 HealthKit 运动记录。"}</p>}
         </section>
       ) : null}
       {fullHistoryVisible ? (<>
@@ -4185,7 +4465,13 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
   // 记录 (which also switches to the history tab); the history view
   // presents the stored sessions inside exactly this range.
   const [historyFocusRange, setHistoryFocusRange] = useState<{ start: string; end: string } | null>(null);
+  // H3.5 round-trip: the basis context the focus card handed over
+  // for this range visit (source, focusKey, wording, save-time
+  // basis, feedback state), taken from the session hand-off slot the
+  // panel filled immediately before navigating.
+  const [historyFocusContext, setHistoryFocusContext] = useState<FocusRangeContext | null>(null);
   const viewTrainingRange = (range: { start: string; end: string }) => {
+    setHistoryFocusContext(takeFocusRangeContext(focusRangeContextStore));
     setHistoryFocusRange(range);
     setTab("history");
   };
@@ -4194,7 +4480,22 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
   // from the same dashboard data) or clear the range and return to
   // the ordinary history page.
   const backToFocus = () => setTab("today");
-  const clearHistoryFocusRange = () => setHistoryFocusRange(null);
+  const clearHistoryFocusRange = () => {
+    setHistoryFocusRange(null);
+    setHistoryFocusContext(null);
+  };
+  // The focus key the today card would bind RIGHT NOW (same
+  // derivation the panel uses): the range page compares it against
+  // the key its basis card was opened with, so a snapshot/window
+  // change during the visit surfaces as 已有更新依据 instead of
+  // silently retconning the presented basis.
+  const currentFocusKey = useMemo(() => {
+    const review = weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
+      coverageIncomplete: snapshot.coverageIncomplete,
+      strengthDates: snapshot.strengthTraining.workouts.map((workout) => workout.date),
+    });
+    return focusFeedbackKey(review.reviewWindow.start, review.reviewWindow.end, snapshot.updatedAt);
+  }, [snapshot]);
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const polling = useTaskPolling();
@@ -4234,7 +4535,7 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
