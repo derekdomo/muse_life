@@ -314,6 +314,68 @@ function applySave(store, req) {
     decideFocusSaveOutcome(legacy.row, { feedback: '不适用', expectedRevision: 1, operationId: 'new-2' }) === 'saved' && legacy.row.revision === 2);
 }
 
+// --------------------------------------- (16) stale-read monotonicity
+// (PM 2026-10-23 07:05, H3.5 P1): within one boundKey the confirmed
+// revision only moves forward. The PM counterexample: confirm 有帮助
+// rev1, save 不适用 to rev2, then a late-arriving successful read of
+// rev1 must not regress the card.
+{
+  let t = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  t = beginFocusFeedbackSave(t, '不适用', 'op-201');
+  t = completeFocusFeedbackSave(t, KEY_A, '不适用', 2);
+  const before = t;
+  t = syncFocusFeedbackState(t, KEY_A, '有帮助', false, 1);
+  check('stale-read: PM counterexample — rev2 confirmed survives a late rev1 read (value, revision, selection, status unchanged)',
+    t.confirmed === '不适用' && t.confirmedRevision === 2 && t.selection === '不适用' && t.status === 'saved'
+    && t.readFailed === false && before.confirmedRevision === 2);
+  // Reverse arrival order: the rev2 read binds first, rev1 after.
+  let u = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '不适用', false, 2);
+  u = syncFocusFeedbackState(u, KEY_A, '有帮助', false, 1);
+  check('stale-read: reverse order — a rev1 read after a rev2 bind is likewise refused',
+    u.confirmed === '不适用' && u.confirmedRevision === 2 && u.status === 'saved');
+  // A read reporting NO row for a key already confirmed at rev > 0 is
+  // stale too — the row cannot have vanished.
+  u = syncFocusFeedbackState(u, KEY_A, null, false, null);
+  check('stale-read: a null-row read cannot erase a confirmed rev2 opinion',
+    u.confirmed === '不适用' && u.confirmedRevision === 2 && u.status === 'saved');
+  // Old read during an in-flight save: nothing about the save moves.
+  let v = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 2);
+  v = beginFocusFeedbackSave(v, '不适用', 'op-202');
+  v = syncFocusFeedbackState(v, KEY_A, '有帮助', false, 1);
+  check('stale-read: an old read during saving leaves the in-flight save untouched',
+    v.status === 'saving' && v.selection === '不适用' && v.confirmed === '有帮助' && v.confirmedRevision === 2);
+  // Old read after a conflict: the conflict state stands.
+  let w = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  w = beginFocusFeedbackSave(w, '不适用', 'op-203');
+  w = conflictFocusFeedbackSave(w, KEY_A, '有帮助', 2);
+  w = syncFocusFeedbackState(w, KEY_A, '有帮助', false, 1);
+  check('stale-read: an old read after a conflict keeps the conflict value and revision',
+    w.status === 'conflict' && w.confirmedRevision === 2 && w.conflictRevision === 2);
+  // A stale completion callback (rev1) landing after rev2 is dropped.
+  let x = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '不适用', false, 2);
+  x = completeFocusFeedbackSave(x, KEY_A, '有帮助', 1);
+  check('stale-read: a late completion callback at rev1 cannot overwrite the rev2 confirmation',
+    x.confirmed === '不适用' && x.confirmedRevision === 2 && x.selection === '不适用');
+  // New keys are unaffected: a fresh key still binds at rev1.
+  const y = syncFocusFeedbackState(x, KEY_B, '有帮助', false, 1);
+  check('stale-read: a different key still binds fresh at rev1 (guard is per-key, not global)',
+    y.boundKey === KEY_B && y.confirmed === '有帮助' && y.confirmedRevision === 1 && y.status === 'saved');
+}
+
+// --------------------------------------- (17) scope landing source checks
+// (H3.5 product advance, PM 2026-10-23 07:05): the range landing in
+// the history view — return-to-focus / show-all / clear controls,
+// per-ID expandable strength detail, and the natural-week totals
+// helper separated from the rolling window.
+check('scope: history range landing exposes 返回本次重点 / 查看全部历史 / 清除范围 controls',
+  clientSrc.includes('返回本次重点') && clientSrc.includes('查看全部历史') && clientSrc.includes('清除范围'));
+check('scope: full history is gated behind the show-all toggle while a range is active',
+  clientSrc.includes('const fullHistoryVisible = !focusRange || showAllHistory;'));
+check('scope: strength rows in the range expand per workout id with exercise detail, missing detail stated honestly',
+  clientSrc.includes('key={`focus-${workout.id}`}') && clientSrc.includes('该条未收录动作明细。'));
+check('scope: natural-week totals come only from coverage-complete weeklyTrend buckets, absence stated plainly',
+  clientSrc.includes('focusWeeks') && clientSrc.includes('本页未取得全量周汇总'));
+
 // ------------------------------------------------------------ source checks
 check('client: panel renders the two feedback buttons only when canJudge',
   clientSrc.includes('review.canJudge ? (') && clientSrc.includes('week-review-feedback-btn'));
