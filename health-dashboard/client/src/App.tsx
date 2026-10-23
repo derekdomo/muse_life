@@ -1386,6 +1386,34 @@ function sevenDayFacts(
 // Self-contained (own date math, own formatting) so repo-side
 // validate-week-review.mjs can extract it by name and run the real
 // production function over synthetic fixtures.
+//
+// H3.3 multi-day support rule (fixed, explainable): the two gates above
+// are NOT sufficient. A trend insight for a given comparison (versus
+// the comparison window OR versus the baseline window — the same rule
+// applies to both paths) additionally requires at least 3 days inside
+// the review window that EACH deviate from the other window's mean by
+// at least the metric's practical threshold in the SAME direction as
+// the mean difference (percentage thresholds are converted against the
+// other window's mean). One isolated spike day — however large — can
+// lift the 7-day mean past the threshold but can never supply 3
+// supporting days, so it produces no trend insight and no action. The
+// spike itself is NOT removed: window means are still computed over
+// every stored value exactly as recorded.
+//
+// H3.1 source / coverage honesty: callers may pass the snapshot's
+// global coverageIncomplete flag plus the strength-training dates (a
+// separate source from HealthKit, never merged into the HealthKit
+// session count). Only an explicit coverageIncomplete === false may be
+// described as 覆盖完整 or earn 置信度较高. true (source coverage
+// incomplete, with no per-metric completeness proof) suppresses every
+// trend insight and every definite training adjustment — stored facts
+// (means, valid-day counts) are still presented, and the focus degrades
+// to cannot-judge / keep observing. undefined (legacy payload,
+// completeness unknown) likewise never claims completeness, caps
+// insight confidence at 中等, and marks the completeness as unconfirmed.
+// A HealthKit session count of 0 is a provable true zero ONLY when
+// coverageIncomplete === false; under true/undefined it is reported as
+// unknown (null) with the note 快照内 0 次，完整性未确认.
 
 export interface WeekReviewWindowInfo {
   start: string;
@@ -1401,6 +1429,9 @@ export interface WeekReviewMetricRow {
   kind: "mean" | "count";
   // Window means for kind "mean", session counts for kind "count".
   // A null mean means the window held no usable value — never a 0.
+  // For kind "count" a null value means UNKNOWN, not zero: the
+  // HealthKit list held no session in that window but source coverage
+  // was not confirmed complete (H3.1), so a true 0 cannot be proven.
   reviewValue: number | null;
   reviewN: number;
   comparisonValue: number | null;
@@ -1443,6 +1474,17 @@ export interface WeekReviewResult {
   insights: WeekReviewInsight[];
   canJudge: boolean;
   focus: string;
+  // H3.1: the source/coverage state the caller supplied, echoed back
+  // for presentation. null = completeness unknown (legacy payload or
+  // no source info passed); only an explicit false means the source
+  // coverage was confirmed complete.
+  coverageIncomplete: boolean | null;
+  coverageStatusNote: string;
+  // H3.1: strength-training sessions (source: 训练记录) counted per
+  // window from the dates the caller passed, kept strictly separate
+  // from the HealthKit session count — never merged into one total.
+  // null when the caller passed no strength dates at all.
+  strengthCounts: { review: number; comparison: number; baseline: number } | null;
 }
 
 interface WeekReviewMetricDef {
@@ -1460,9 +1502,24 @@ export function weekReview(
   historySleeps: Array<Pick<Snapshot["historySleeps"][number], "date" | "totalHours">>,
   historyWorkouts: Array<Pick<Snapshot["historyWorkouts"][number], "date">>,
   dataDate: string,
+  // H3.1: optional source info. Existing four-argument calls keep
+  // working; an absent coverageIncomplete means completeness UNKNOWN
+  // (legacy payload), which is never treated as complete.
+  options?: { coverageIncomplete?: boolean; strengthDates?: string[] },
 ): WeekReviewResult {
   const MIN_DAYS = 5;
+  // H3.3: minimum number of review-window days that must EACH reach
+  // the practical threshold in the trend's direction (see the header
+  // comment) before a trend insight may be generated at all.
+  const MIN_SUPPORT_DAYS = 3;
   const fallbackFocus = "保持现有节奏，继续积累完整数据。";
+  const coverageIncomplete: boolean | null = options?.coverageIncomplete ?? null;
+  const coverageComplete = coverageIncomplete === false;
+  const coverageStatusNote = coverageIncomplete === true
+    ? "来源覆盖不完整：以下为已存事实，完整性未确认"
+    : coverageIncomplete === null
+      ? "来源完整性未确认：以下为已存事实，完整性未经确认"
+      : "来源覆盖完整（已确认）";
   const shift = (date: string, days: number): string => {
     const shifted = new Date(`${date}T12:00:00Z`);
     shifted.setUTCDate(shifted.getUTCDate() + days);
@@ -1489,6 +1546,9 @@ export function weekReview(
       insights: [],
       canJudge: false,
       focus: fallbackFocus,
+      coverageIncomplete,
+      coverageStatusNote,
+      strengthCounts: null,
     };
   }
   const datesBack = (count: number, endOffset: number): string[] =>
@@ -1540,6 +1600,17 @@ export function weekReview(
     }
     return values;
   };
+  // Same gathering as collect but keeps each value's date, so the
+  // H3.3 multi-day support rule can count individual review-window
+  // days instead of only looking at the window mean.
+  const collectDated = (dates: string[], pick: (date: string) => number | null): Array<{ date: string; value: number }> => {
+    const entries: Array<{ date: string; value: number }> = [];
+    for (const date of dates) {
+      const value = pick(date);
+      if (value !== null) entries.push({ date, value });
+    }
+    return entries;
+  };
   const meanOf = (values: number[]): number | null =>
     values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 
@@ -1585,20 +1656,31 @@ export function weekReview(
   };
 
   const metrics: WeekReviewMetricRow[] = [];
-  const stats = new Map<string, { reviewMean: number; reviewN: number; comparisonMean: number | null; comparisonN: number; baselineMean: number | null; baselineN: number }>();
+  const stats = new Map<string, { reviewMean: number; reviewN: number; reviewDated: Array<{ date: string; value: number }>; comparisonMean: number | null; comparisonN: number; baselineMean: number | null; baselineN: number }>();
   for (const def of defs) {
     const reviewValues = collect(reviewDates, def.pick);
+    const reviewDated = collectDated(reviewDates, def.pick);
     const comparisonValues = collect(comparisonDates, def.pick);
     const baselineValues = collect(baselineDates, def.pick);
     const reviewMean = meanOf(reviewValues);
     const comparisonMean = meanOf(comparisonValues);
     const baselineSufficient = baselineValues.length >= MIN_DAYS;
     const baselineMean = baselineSufficient ? meanOf(baselineValues) : null;
+    // H3.1: a full set of stored rows is NOT proof of complete source
+    // coverage. Only an explicit coverageIncomplete === false may be
+    // called 覆盖完整; true always reads 来源覆盖不完整 (even with all
+    // 7 rows present) and unknown completeness is named as such.
     const coverageNote = reviewValues.length === 0
       ? "无记录"
-      : reviewValues.length === reviewDates.length
-        ? "覆盖完整"
-        : `缺 ${reviewDates.length - reviewValues.length} 天记录`;
+      : coverageIncomplete === true
+        ? "来源覆盖不完整"
+        : coverageIncomplete === null
+          ? reviewValues.length === reviewDates.length
+            ? "完整性未确认"
+            : `缺 ${reviewDates.length - reviewValues.length} 天记录 · 完整性未确认`
+          : reviewValues.length === reviewDates.length
+            ? "覆盖完整"
+            : `缺 ${reviewDates.length - reviewValues.length} 天记录`;
     const baselineNote = !baselineSufficient
       ? "基线数据不足"
       : def.key === "sleep" && baselineValues.length < baselineDates.length
@@ -1615,15 +1697,18 @@ export function weekReview(
     });
     if (reviewMean !== null) {
       stats.set(def.key, {
-        reviewMean, reviewN: reviewValues.length,
+        reviewMean, reviewN: reviewValues.length, reviewDated,
         comparisonMean, comparisonN: comparisonValues.length,
         baselineMean, baselineN: baselineValues.length,
       });
     }
   }
 
-  // Training sessions are counted per window from historyWorkouts —
-  // a count, not a mean, so it never feeds an insight.
+  // Training sessions are counted per window from historyWorkouts
+  // (HealthKit) — a count, not a mean, so it never feeds an insight.
+  // H3.1: this count is labelled with its source and never stands for
+  // ALL training — strength training lives in a separate source (see
+  // strengthCounts below) and the two are never merged into one total.
   const countSessions = (dates: string[]): { sessions: number; days: number } => {
     const inWindow = new Set(dates);
     let sessions = 0;
@@ -1638,22 +1723,55 @@ export function weekReview(
   const reviewWorkouts = countSessions(reviewDates);
   const comparisonWorkouts = countSessions(comparisonDates);
   const baselineWorkouts = countSessions(baselineDates);
-  const workoutDiff = diffOf(reviewWorkouts.sessions, comparisonWorkouts.sessions, 0, "次");
+  // H3.1 count trust rule: an empty HealthKit list is a provable true
+  // 0 ONLY when coverageIncomplete is explicitly false. When coverage
+  // is incomplete (true) or unknown (undefined), a stored 0 is
+  // reported as unknown (null) — never as a definite 0 — and the
+  // baseline is not marked sufficient on the strength of it.
+  const trustedCount = (sessions: number): number | null =>
+    sessions === 0 && !coverageComplete ? null : sessions;
+  const reviewWorkoutValue = trustedCount(reviewWorkouts.sessions);
+  const comparisonWorkoutValue = trustedCount(comparisonWorkouts.sessions);
+  const baselineWorkoutValue = trustedCount(baselineWorkouts.sessions);
+  const workoutDiff = diffOf(reviewWorkoutValue, comparisonWorkoutValue, 0, "次");
   metrics.push({
-    key: "workouts", label: "训练次数", unit: "次", digits: 0, kind: "count",
-    reviewValue: reviewWorkouts.sessions, reviewN: reviewWorkouts.days,
-    comparisonValue: comparisonWorkouts.sessions, comparisonN: comparisonWorkouts.days,
-    baselineValue: baselineWorkouts.sessions, baselineN: baselineWorkouts.days,
-    baselineSufficient: true,
-    baselineNote: `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
-    coverageNote: `复盘窗 ${reviewWorkouts.days}/7 天有训练记录`,
+    key: "workouts", label: "运动次数（HealthKit 来源）", unit: "次", digits: 0, kind: "count",
+    reviewValue: reviewWorkoutValue, reviewN: reviewWorkouts.days,
+    comparisonValue: comparisonWorkoutValue, comparisonN: comparisonWorkouts.days,
+    baselineValue: baselineWorkoutValue, baselineN: baselineWorkouts.days,
+    baselineSufficient: baselineWorkoutValue !== null,
+    baselineNote: baselineWorkoutValue === null
+      ? "快照内 0 次，完整性未确认"
+      : `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
+    coverageNote: reviewWorkoutValue === null
+      ? "快照内 0 次，完整性未确认"
+      : `复盘窗 ${reviewWorkouts.days}/7 天有训练记录（HealthKit）`,
     diff: workoutDiff.diff, diffSymbol: workoutDiff.diffSymbol, diffText: workoutDiff.diffText,
   });
+
+  // H3.1: strength-training sessions per window, counted from the
+  // caller-supplied dates (snapshot.strengthTraining.workouts). Each
+  // supplied date is one stored session. Presented separately from
+  // the HealthKit count above; the two sources are never summed and
+  // no combined total is inferred.
+  const strengthDates = options?.strengthDates;
+  const strengthCounts: WeekReviewResult["strengthCounts"] = strengthDates === undefined
+    ? null
+    : {
+        review: strengthDates.filter((date) => reviewDates.includes(date)).length,
+        comparison: strengthDates.filter((date) => comparisonDates.includes(date)).length,
+        baseline: strengthDates.filter((date) => baselineDates.includes(date)).length,
+      };
 
   const candidates: WeekReviewInsight[] = [];
   const reviewStart = reviewDates[0] ?? dataDate;
   const reviewEnd = reviewDates[reviewDates.length - 1] ?? dataDate;
-  for (const def of defs) {
+  // H3.1: with source coverage incomplete (coverageIncomplete ===
+  // true) and no per-metric completeness proof, NO definite training
+  // adjustment may be derived — the candidate loop is skipped whole,
+  // the stored per-metric facts above are still presented, and the
+  // focus below degrades to cannot-judge / keep observing.
+  for (const def of coverageIncomplete === true ? [] : defs) {
     const stat = stats.get(def.key);
     if (stat === undefined) continue;
     const reviewMean = stat.reviewMean;
@@ -1670,11 +1788,29 @@ export function weekReview(
       const thresholdAbs = def.thresholdKind === "abs" ? def.threshold : def.threshold * otherMean;
       if (thresholdAbs <= 0) continue;
       if (Math.abs(diff) < thresholdAbs) continue;
+      // H3.3 multi-day support: at least MIN_SUPPORT_DAYS (3) days in
+      // the review window must EACH deviate from this window's mean by
+      // >= the practical threshold in the same direction as the mean
+      // difference. An isolated 1-day spike (either direction) that
+      // drags the mean past the threshold fails here and yields no
+      // trend insight and no action; 3+ same-direction days, or a
+      // whole week shifted, still pass. Applies identically to the
+      // comparison-window and baseline-window paths.
+      const directionSign = diff > 0 ? 1 : -1;
+      const supportDays = stat.reviewDated.filter((entry) => {
+        const deviation = entry.value - otherMean;
+        return deviation * directionSign > 0 && Math.abs(deviation) >= thresholdAbs;
+      }).length;
+      if (supportDays < MIN_SUPPORT_DAYS) continue;
       const magnitude = Math.abs(diff) / thresholdAbs;
       const direction: "up" | "down" = diff > 0 ? "up" : "down";
       const pctText = otherMean > 0 ? `（约 ${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff / otherMean) * 100, 0)}%）` : "";
       const observation = `${def.label}：复盘窗（${md(reviewStart)}–${md(reviewEnd)}）均值 ${fmt(reviewMean, def.digits)} ${def.unit}，${other.label}（${md(other.start)}–${md(other.end)}）均值 ${fmt(otherMean, def.digits)} ${def.unit}，${direction === "up" ? "增加" : "减少"} ${fmt(Math.abs(diff), def.digits)} ${def.unit}${pctText}。`;
-      const confidence: "较高" | "中等" = stat.reviewN === reviewDates.length && other.n === other.days ? "较高" : "中等";
+      // H3.1: 置信度较高 requires BOTH windows fully covered AND an
+      // explicitly confirmed-complete source (coverageIncomplete ===
+      // false). Unknown completeness caps confidence at 中等 and the
+      // note says the completeness is unconfirmed.
+      const confidence: "较高" | "中等" = coverageComplete && stat.reviewN === reviewDates.length && other.n === other.days ? "较高" : "中等";
       const insight: WeekReviewInsight = {
         metricKey: def.key,
         label: def.label,
@@ -1683,7 +1819,7 @@ export function weekReview(
         explanation: `${copyFor(explanations, def.key, direction, "可能与近期生活与训练安排的变化有关")}；这只是可能性，不是因果结论，也不是医疗判断。`,
         action: copyFor(actions, def.key, direction, "保持现有节奏，下周继续观察。"),
         confidence,
-        confidenceNote: `复盘窗有效 ${stat.reviewN}/${reviewDates.length} 天 · 对照窗有效 ${other.n}/${other.days} 天`,
+        confidenceNote: `复盘窗有效 ${stat.reviewN}/${reviewDates.length} 天 · 对照窗有效 ${other.n}/${other.days} 天 · 复盘窗 ${supportDays} 天单独达到同向实用差异（趋势洞察要求至少 ${MIN_SUPPORT_DAYS} 天，单日异常不触发）${coverageComplete ? "" : " · 完整性未确认"}`,
         magnitude,
       };
       if (best === null || insight.magnitude > best.magnitude) best = insight;
@@ -1702,7 +1838,15 @@ export function weekReview(
     metrics,
     insights,
     canJudge: insights.length > 0,
-    focus: insights[0]?.action ?? fallbackFocus,
+    // H3.1: under incomplete source coverage the focus must not land
+    // on a definite training action — it degrades to cannot-judge /
+    // keep observing while the stored facts above remain visible.
+    focus: coverageIncomplete === true
+      ? "来源覆盖不完整，无法据此判断下周训练安排：先保持现有节奏，继续观察，等数据补全后再判断。"
+      : insights[0]?.action ?? fallbackFocus,
+    coverageIncomplete,
+    coverageStatusNote,
+    strengthCounts,
   };
 }
 
@@ -1963,17 +2107,26 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
 // wording, never by color alone.
 function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
   const review = useMemo(
-    () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate),
+    () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
+      coverageIncomplete: snapshot.coverageIncomplete,
+      strengthDates: snapshot.strengthTraining.workouts.map((workout) => workout.date),
+    }),
     [snapshot],
   );
   const valueText = (metric: WeekReviewMetricRow, value: number | null): string => {
-    if (value === null) return "—／无记录";
+    if (value === null) return metric.kind === "count" ? "未知" : "—／无记录";
     return metric.kind === "count" ? `${value} 次` : `${numberLabel(value, metric.digits)} ${metric.unit}`;
   };
   return (
     <section className="week-review" aria-labelledby="week-review-title">
       <h2 id="week-review-title" className="week-review-title">上周复盘 · 滚动 7 天</h2>
       {!review.valid ? <p className="week-review-warn">{review.note}</p> : null}
+      {review.valid && review.coverageIncomplete === true ? (
+        <p className="week-review-warn">来源覆盖不完整：以下为已存事实，完整性未确认。</p>
+      ) : null}
+      {review.valid && review.coverageIncomplete === null ? (
+        <p className="week-review-note">来源完整性未确认：以下为已存事实，完整性未经确认。</p>
+      ) : null}
       {review.valid ? (
         <>
           <ul className="week-review-windows">
@@ -1982,6 +2135,7 @@ function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
             <li><span>基线窗</span>{fullDateLabel(review.baselineWindow.start)} – {fullDateLabel(review.baselineWindow.end)}（28 天）</li>
           </ul>
           <p className="week-review-note">健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。</p>
+          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作。原始单日值照常计入均值，不删除、不改动。</p>
           <div className="week-review-rows">
             {review.metrics.map((metric) => (
               <div className="week-review-row" key={metric.key}>
@@ -1991,18 +2145,23 @@ function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
                 </div>
                 <div className="week-review-cells">
                   <div><span>{metric.kind === "count" ? "对比窗次数" : "对比窗均值"}</span><strong>{valueText(metric, metric.comparisonValue)}</strong></div>
-                  <div><span>{metric.kind === "count" ? "基线窗次数（28 天）" : "基线均值（28 天）"}</span><strong>{metric.baselineSufficient ? valueText(metric, metric.baselineValue) : "基线数据不足"}</strong></div>
+                  <div><span>{metric.kind === "count" ? "基线窗次数（28 天）" : "基线均值（28 天）"}</span><strong>{metric.baselineValue !== null ? valueText(metric, metric.baselineValue) : metric.baselineNote ?? "基线数据不足"}</strong></div>
                   <div><span>差值（较对比窗）</span><strong><span aria-hidden="true">{metric.diffSymbol}</span> {metric.diffText}</strong></div>
                 </div>
                 <p className="week-review-coverage">
                   {metric.kind === "count"
                     ? metric.coverageNote
-                    : <>复盘窗有效 {metric.reviewN}/7 天 · {metric.coverageNote}</>}
+                    : <>复盘窗有效 {metric.reviewN}/7 天 · 对比窗有效 {metric.comparisonN}/7 天 · 基线窗有效 {metric.baselineN}/28 天 · {metric.coverageNote}</>}
                   {metric.baselineNote ? <> · {metric.baselineNote}</> : null}
                 </p>
               </div>
             ))}
           </div>
+          {review.strengthCounts ? (
+            <p className="week-review-note">
+              力量训练（来源：训练记录）：复盘窗 {review.strengthCounts.review} 次 · 对比窗 {review.strengthCounts.comparison} 次 · 基线窗（28 天）{review.strengthCounts.baseline} 次。以上为快照内已存记录，与上面的运动次数（HealthKit 来源）分列呈现，不合并为一个总数，也不据此推算全部训练量。
+            </p>
+          ) : null}
           {review.insights.length ? (
             <div className="week-review-insights">
               <h3>复盘洞察</h3>
