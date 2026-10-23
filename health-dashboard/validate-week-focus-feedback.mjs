@@ -25,6 +25,18 @@
 //     the attempted choice stays as the selection, and the
 //     「改用我的选择」 retry is a NEW intent gated on the server's
 //     revision,
+// (11b) stale conflict (H3.5 P1): a conflict callback whose server
+//     revision is BELOW the confirmedRevision already merged into
+//     the card (a newer successful read landed during the save) is
+//     refused whole — confirmed + confirmedRevision keep their
+//     paired values, no conflict fields are adopted, the selection
+//     stays, and the status becomes "error" so the existing retry
+//     path re-offers the intent; reverse order (conflict first,
+//     newer read after) still advances confirmed paired; a conflict
+//     at/above confirmedRevision and the legacy null-revision
+//     conflict adopt exactly as before; a mutation copy with the
+//     stale guard removed MUST flip the stale fixture back to the
+//     mismatched adoption,
 // (12) previous look-back preservation: a failed local read keeps the
 //     last successfully read row; a successful read replaces it
 //     (including a genuine null),
@@ -189,6 +201,90 @@ check('「改用我的选择」 is a new intent: new operationId gated on the se
   s.status === 'saving' && s.pendingOperationId === 'op-107' && s.pendingExpectedRevision === 1 && s.conflictFeedback === null);
 s = completeFocusFeedbackSave(s, KEY_A, '有帮助', 2);
 check('insist-retry success confirms the choice at the advanced revision', s.status === 'saved' && s.confirmed === '有帮助' && s.confirmedRevision === 2);
+
+// (11b) stale conflict adjudication (H3.5 P1). Fixture A is the
+// reported reproduction, walked through a helper so the mutation
+// copy below runs the identical steps: confirmed 有帮助 rev1 ->
+// begin 不适用 (saving) -> a newer successful read 有帮助 rev3 merges
+// during the save -> the OLD save's conflict callback finally lands
+// carrying 不适用 rev2.
+function staleConflictWalk(m) {
+  let st = m.syncFocusFeedbackState(m.createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  st = m.beginFocusFeedbackSave(st, '不适用', 'op-300');
+  st = m.syncFocusFeedbackState(st, KEY_A, '有帮助', false, 3);
+  st = m.conflictFocusFeedbackSave(st, KEY_A, '不适用', 2);
+  return st;
+}
+{
+  // Setup sanity: before the late conflict lands, the saving-state
+  // sync has already paired confirmed 有帮助 with revision 3.
+  let a = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  a = beginFocusFeedbackSave(a, '不适用', 'op-300');
+  a = syncFocusFeedbackState(a, KEY_A, '有帮助', false, 3);
+  check('stale-conflict setup: the newer read merges during saving (confirmed 有帮助 rev3, still saving, selection kept)',
+    a.status === 'saving' && a.confirmed === '有帮助' && a.confirmedRevision === 3 && a.selection === '不适用');
+  const fixed = staleConflictWalk(machine);
+  check('fixture A: stale conflict (rev2 < confirmed rev3) is refused whole — confirmed stays 有帮助 paired with rev3',
+    fixed.confirmed === '有帮助' && fixed.confirmedRevision === 3);
+  check('fixture A: the refused save reads as an unsaved error, selection + pending identity kept, no conflict fields adopted',
+    fixed.status === 'error' && fixed.selection === '不适用'
+    && fixed.conflictFeedback === null && fixed.conflictRevision === null
+    && fixed.pendingOperationId === 'op-300' && fixed.pendingExpectedRevision === 1);
+}
+{
+  // Fixture B (reverse order): the rev2 conflict lands FIRST, while
+  // confirmed is still rev1, so it adopts normally; the newer rev3
+  // read arriving afterwards still advances confirmed — paired.
+  let b = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  b = beginFocusFeedbackSave(b, '不适用', 'op-301');
+  b = conflictFocusFeedbackSave(b, KEY_A, '不适用', 2);
+  check('fixture B: conflict rev2 over confirmed rev1 adopts normally (conflict state, confirmed 不适用 rev2)',
+    b.status === 'conflict' && b.confirmed === '不适用' && b.confirmedRevision === 2
+    && b.conflictFeedback === '不适用' && b.conflictRevision === 2);
+  b = syncFocusFeedbackState(b, KEY_A, '有帮助', false, 3);
+  check('fixture B: the later rev3 read advances confirmed to 有帮助 rev3 (content + revision paired)',
+    b.confirmed === '有帮助' && b.confirmedRevision === 3);
+}
+{
+  // Fixture C: a conflict strictly above the confirmed revision is
+  // a genuine newer arbitration — adopted exactly as before.
+  let c = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  c = beginFocusFeedbackSave(c, '不适用', 'op-302');
+  c = conflictFocusFeedbackSave(c, KEY_A, '不适用', 3);
+  check('fixture C: conflict rev3 over confirmed rev1 adopts paired (status conflict, confirmed + conflict fields both rev3)',
+    c.status === 'conflict' && c.confirmed === '不适用' && c.confirmedRevision === 3
+    && c.conflictFeedback === '不适用' && c.conflictRevision === 3 && c.selection === '不适用');
+}
+{
+  // Legacy path: a conflict reporting NO revision (serverRevision
+  // null) keeps the pre-guard adoption behaviour verbatim.
+  let d = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  d = beginFocusFeedbackSave(d, '不适用', 'op-303');
+  d = conflictFocusFeedbackSave(d, KEY_A, '不适用', null);
+  check('legacy conflict (null revision) still adopts the content and keeps the confirmed revision',
+    d.status === 'conflict' && d.confirmed === '不适用' && d.confirmedRevision === 1
+    && d.conflictFeedback === '不适用' && d.conflictRevision === null);
+}
+{
+  // Mutation sensitivity: rebuild the machine with the stale guard
+  // surgically removed from conflictFocusFeedbackSave (the pre-fix
+  // unconditional adoption + Math.max revision). Fixture A MUST
+  // flip to the mismatched state — stale content adopted, revision
+  // held at the newer 3, conflict copy citing the old rev2.
+  const conflictSrc = extractFunction(clientSrc, 'conflictFocusFeedbackSave').replace(/^export /, '');
+  const guardRe = /if \(serverRevision !== null && serverRevision < state\.confirmedRevision\) \{\s*return \{ \.\.\.state, status: "error" \};\s*\}/;
+  const mutatedConflictSrc = conflictSrc.replace(guardRe, '');
+  check('mutation setup: the stale-conflict guard exists in the production source and the mutation removes it',
+    mutatedConflictSrc !== conflictSrc && !mutatedConflictSrc.includes('status: "error"'));
+  const mutatedCode = NAMES.map((name) => stripTypeScriptTypes(
+    name === 'conflictFocusFeedbackSave' ? mutatedConflictSrc : extractFunction(clientSrc, name).replace(/^export /, ''),
+  )).join('\n');
+  const mutatedMachine = new Function(`${mutatedCode}\nreturn { ${NAMES.join(', ')} };`)();
+  const mutated = staleConflictWalk(mutatedMachine);
+  check('mutation: without the guard, fixture A flips to the buggy adoption (stale 不适用 content paired with rev3, conflict citing rev2) — fixture A would fail',
+    mutated.status === 'conflict' && mutated.confirmed === '不适用' && mutated.confirmedRevision === 3
+    && mutated.conflictFeedback === '不适用' && mutated.conflictRevision === 2);
+}
 
 // (12) previous look-back preservation across local read failures
 const PREV = { focusKey: 'k-old', windowStart: '2026-10-10', windowEnd: '2026-10-16', focusText: '旧重点', basisText: '旧依据', ruleVersion: 1, feedback: '有帮助', revision: 1, updatedAt: '2026-10-17T00:00:00.000Z' };

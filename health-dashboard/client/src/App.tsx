@@ -2394,6 +2394,25 @@ export function failFocusFeedbackSave(state: FocusFeedbackState, boundKey: strin
 // the selection so the owner can still insist with 「改用我的选择」 —
 // that retry is a new intent gated on conflictRevision, which is why
 // confirmedRevision advances to it here.
+//
+// Stale conflict (H3.5 P1): a conflict callback can also arrive LATE
+// — after a newer successful read has already merged a HIGHER
+// confirmed revision into this card (syncFocusFeedbackState merges
+// during "saving"). When serverRevision is strictly below the
+// confirmedRevision already held, the report describes an older
+// server state than the one this card has confirmed: adopting its
+// content would pair the stale value with the newer revision (the
+// adoption below keeps confirmedRevision at the max), a
+// content/version mismatch. The report is therefore refused whole —
+// confirmed and confirmedRevision keep their paired values, no
+// conflict fields are adopted, and the attempted choice stays as the
+// selection — but the save itself did not land, so the status
+// becomes "error": the existing error retry path re-offers it (same
+// operationId, same gate). If that retry is arbitrated against
+// again, the new conflict's revision is >= confirmedRevision and is
+// adopted normally. serverRevision === null keeps the legacy
+// adoption behaviour; a different boundKey is dropped whole, as
+// before.
 export function conflictFocusFeedbackSave(
   state: FocusFeedbackState,
   boundKey: string,
@@ -2401,6 +2420,9 @@ export function conflictFocusFeedbackSave(
   serverRevision: number | null,
 ): FocusFeedbackState {
   if (state.boundKey !== boundKey) return state;
+  if (serverRevision !== null && serverRevision < state.confirmedRevision) {
+    return { ...state, status: "error" };
+  }
   return {
     ...state,
     status: "conflict",
