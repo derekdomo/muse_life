@@ -1414,6 +1414,26 @@ function sevenDayFacts(
 // A HealthKit session count of 0 is a provable true zero ONLY when
 // coverageIncomplete === false; under true/undefined it is reported as
 // unknown (null) with the note 快照内 0 次，完整性未确认.
+//
+// H3.1 baseline-count completeness (PM re-review 2026-10-23 00:57):
+// coverageIncomplete === false only proves the QUERIED range was
+// complete — the refresh contract queries workouts over the latest
+// 30 completed days while the baseline window reaches back 35, so a
+// complete 30-day query still cannot prove a 28-day baseline total.
+// The count logic therefore also checks the stored range: if the
+// earliest stored daily/workout date is later than a window's start,
+// that window was not fully covered by the source query and its
+// count is presented as 已存 (stored) with 完整性未确认 — never as a
+// total, never as a provable zero, and never baseline-sufficient.
+// The stored list hitting the 100-entry schema cap is likewise
+// treated as possibly truncated: totals are unprovable then too.
+// H3.3 (same re-review): the multi-day support rule guards the
+// REVIEW side; the comparison/baseline side gets a leave-one-out
+// single-day influence check — if removing the single most
+// deviating day from EITHER side drops the difference below the
+// practical threshold, one isolated abnormal day is driving the
+// apparent trend and no insight is generated. Sustained multi-day
+// or whole-window differences survive the check on both sides.
 
 export interface WeekReviewWindowInfo {
   start: string;
@@ -1656,12 +1676,14 @@ export function weekReview(
   };
 
   const metrics: WeekReviewMetricRow[] = [];
-  const stats = new Map<string, { reviewMean: number; reviewN: number; reviewDated: Array<{ date: string; value: number }>; comparisonMean: number | null; comparisonN: number; baselineMean: number | null; baselineN: number }>();
+  const stats = new Map<string, { reviewMean: number; reviewN: number; reviewDated: Array<{ date: string; value: number }>; comparisonMean: number | null; comparisonN: number; comparisonDated: Array<{ date: string; value: number }>; baselineMean: number | null; baselineN: number; baselineDated: Array<{ date: string; value: number }> }>();
   for (const def of defs) {
     const reviewValues = collect(reviewDates, def.pick);
     const reviewDated = collectDated(reviewDates, def.pick);
     const comparisonValues = collect(comparisonDates, def.pick);
+    const comparisonDated = collectDated(comparisonDates, def.pick);
     const baselineValues = collect(baselineDates, def.pick);
+    const baselineDated = collectDated(baselineDates, def.pick);
     const reviewMean = meanOf(reviewValues);
     const comparisonMean = meanOf(comparisonValues);
     const baselineSufficient = baselineValues.length >= MIN_DAYS;
@@ -1698,8 +1720,8 @@ export function weekReview(
     if (reviewMean !== null) {
       stats.set(def.key, {
         reviewMean, reviewN: reviewValues.length, reviewDated,
-        comparisonMean, comparisonN: comparisonValues.length,
-        baselineMean, baselineN: baselineValues.length,
+        comparisonMean, comparisonN: comparisonValues.length, comparisonDated,
+        baselineMean, baselineN: baselineValues.length, baselineDated,
       });
     }
   }
@@ -1728,21 +1750,45 @@ export function weekReview(
   // is incomplete (true) or unknown (undefined), a stored 0 is
   // reported as unknown (null) — never as a definite 0 — and the
   // baseline is not marked sufficient on the strength of it.
-  const trustedCount = (sessions: number): number | null =>
-    sessions === 0 && !coverageComplete ? null : sessions;
-  const reviewWorkoutValue = trustedCount(reviewWorkouts.sessions);
-  const comparisonWorkoutValue = trustedCount(comparisonWorkouts.sessions);
-  const baselineWorkoutValue = trustedCount(baselineWorkouts.sessions);
+  // H3.1 (PM 2026-10-23): completeness of the QUERIED range is not
+  // completeness of the WINDOW. The source query span is evidenced by
+  // the stored data itself: the earliest stored daily/workout date.
+  // A window whose start predates that earliest date was only partly
+  // queried, so its count is a stored count （已存）, not a total —
+  // a stored 0 there is unknown, a stored N is labelled 已存 with
+  // 完整性未确认， and the baseline is not sufficient. A list at the
+  // 100-entry schema cap may be truncated and proves no total either.
+  // With no stored rows at all there is no range evidence either way
+  // and the coverageComplete rule above decides alone.
+  const storedRangeStart = (() => {
+    let earliest: string | null = null;
+    for (const row of historyDaily) if (earliest === null || row.date < earliest) earliest = row.date;
+    for (const workout of historyWorkouts) if (earliest === null || workout.date < earliest) earliest = workout.date;
+    return earliest;
+  })();
+  const listAtCap = historyWorkouts.length >= 100;
+  const windowRangeCovered = (dates: string[]): boolean =>
+    !listAtCap && (storedRangeStart === null || (dates.length > 0 && storedRangeStart <= dates[0]));
+  const reviewRangeCovered = windowRangeCovered(reviewDates);
+  const comparisonRangeCovered = windowRangeCovered(comparisonDates);
+  const baselineRangeCovered = windowRangeCovered(baselineDates);
+  const trustedCount = (sessions: number, rangeCovered: boolean): number | null =>
+    sessions === 0 && !(coverageComplete && rangeCovered) ? null : sessions;
+  const reviewWorkoutValue = trustedCount(reviewWorkouts.sessions, reviewRangeCovered);
+  const comparisonWorkoutValue = trustedCount(comparisonWorkouts.sessions, comparisonRangeCovered);
+  const baselineWorkoutValue = trustedCount(baselineWorkouts.sessions, baselineRangeCovered);
   const workoutDiff = diffOf(reviewWorkoutValue, comparisonWorkoutValue, 0, "次");
   metrics.push({
     key: "workouts", label: "运动次数（HealthKit 来源）", unit: "次", digits: 0, kind: "count",
     reviewValue: reviewWorkoutValue, reviewN: reviewWorkouts.days,
     comparisonValue: comparisonWorkoutValue, comparisonN: comparisonWorkouts.days,
     baselineValue: baselineWorkoutValue, baselineN: baselineWorkouts.days,
-    baselineSufficient: baselineWorkoutValue !== null,
-    baselineNote: baselineWorkoutValue === null
-      ? "快照内 0 次，完整性未确认"
-      : `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
+    baselineSufficient: baselineWorkoutValue !== null && baselineRangeCovered,
+    baselineNote: !baselineRangeCovered
+      ? `基线窗内已存 ${baselineWorkouts.sessions} 次，完整性未确认（来源查询范围未覆盖基线窗全程${listAtCap ? "，且列表已达 100 条上限" : ""}）`
+      : baselineWorkoutValue === null
+        ? "快照内 0 次，完整性未确认"
+        : `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
     coverageNote: reviewWorkoutValue === null
       ? "快照内 0 次，完整性未确认"
       : `复盘窗 ${reviewWorkouts.days}/7 天有训练记录（HealthKit）`,
@@ -1776,9 +1822,25 @@ export function weekReview(
     if (stat === undefined) continue;
     const reviewMean = stat.reviewMean;
     const versusWindows = [
-      { versus: "comparison" as const, label: "前 7 天", mean: stat.comparisonMean, n: stat.comparisonN, days: comparisonDates.length, start: comparisonDates[0] ?? dataDate, end: comparisonDates[comparisonDates.length - 1] ?? dataDate },
-      { versus: "baseline" as const, label: "28 天基线", mean: stat.baselineMean, n: stat.baselineN, days: baselineDates.length, start: baselineDates[0] ?? dataDate, end: baselineDates[baselineDates.length - 1] ?? dataDate },
+      { versus: "comparison" as const, label: "前 7 天", mean: stat.comparisonMean, n: stat.comparisonN, days: comparisonDates.length, start: comparisonDates[0] ?? dataDate, end: comparisonDates[comparisonDates.length - 1] ?? dataDate, dated: stat.comparisonDated },
+      { versus: "baseline" as const, label: "28 天基线", mean: stat.baselineMean, n: stat.baselineN, days: baselineDates.length, start: baselineDates[0] ?? dataDate, end: baselineDates[baselineDates.length - 1] ?? dataDate, dated: stat.baselineDated },
     ];
+    // H3.3 leave-one-out single-day influence: the mean of a dated
+    // window with its single most-deviating day removed. If the
+    // apparent difference collapses below the practical threshold
+    // after removing ONE day from either side, that day alone is
+    // driving the "trend" and no insight may be generated from it.
+    const looMean = (dated: Array<{ date: string; value: number }>, mean: number): number | null => {
+      if (dated.length < 2) return null;
+      let worstIndex = 0;
+      let worstDeviation = -1;
+      dated.forEach((entry, index) => {
+        const deviation = Math.abs(entry.value - mean);
+        if (deviation > worstDeviation) { worstDeviation = deviation; worstIndex = index; }
+      });
+      const rest = dated.filter((_, index) => index !== worstIndex).map((entry) => entry.value);
+      return meanOf(rest);
+    };
     let best: WeekReviewInsight | null = null;
     for (const other of versusWindows) {
       const otherMean = other.mean;
@@ -1802,6 +1864,28 @@ export function weekReview(
         return deviation * directionSign > 0 && Math.abs(deviation) >= thresholdAbs;
       }).length;
       if (supportDays < MIN_SUPPORT_DAYS) continue;
+      // H3.3 (PM 2026-10-23): the support rule above counts review
+      // days against the OTHER window's mean — but one isolated
+      // abnormal day INSIDE the other window drags that mean until
+      // every normal review day looks like support. Leave-one-out on
+      // both sides: with the single most-deviating day removed from
+      // the other window, and separately from the review window, the
+      // difference must still reach the practical threshold (the
+      // threshold itself is recomputed against the reduced mean for
+      // percentage metrics). Otherwise a single原始日期 is the whole
+      // "trend" and this candidate is skipped; the day's value stays
+      // in every reported mean and count exactly as recorded.
+      const otherLooMean = looMean(other.dated, otherMean);
+      if (otherLooMean !== null) {
+        const looDiff = reviewMean - otherLooMean;
+        const looThreshold = def.thresholdKind === "abs" ? def.threshold : def.threshold * otherLooMean;
+        if (looThreshold <= 0 || Math.abs(looDiff) < looThreshold || Math.sign(looDiff) !== directionSign) continue;
+      }
+      const reviewLooMean = looMean(stat.reviewDated, reviewMean);
+      if (reviewLooMean !== null) {
+        const looDiff = reviewLooMean - otherMean;
+        if (Math.abs(looDiff) < thresholdAbs || Math.sign(looDiff) !== directionSign) continue;
+      }
       const magnitude = Math.abs(diff) / thresholdAbs;
       const direction: "up" | "down" = diff > 0 ? "up" : "down";
       const pctText = otherMean > 0 ? `（约 ${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff / otherMean) * 100, 0)}%）` : "";
@@ -1819,7 +1903,7 @@ export function weekReview(
         explanation: `${copyFor(explanations, def.key, direction, "可能与近期生活与训练安排的变化有关")}；这只是可能性，不是因果结论，也不是医疗判断。`,
         action: copyFor(actions, def.key, direction, "保持现有节奏，下周继续观察。"),
         confidence,
-        confidenceNote: `复盘窗有效 ${stat.reviewN}/${reviewDates.length} 天 · 对照窗有效 ${other.n}/${other.days} 天 · 复盘窗 ${supportDays} 天单独达到同向实用差异（趋势洞察要求至少 ${MIN_SUPPORT_DAYS} 天，单日异常不触发）${coverageComplete ? "" : " · 完整性未确认"}`,
+        confidenceNote: `复盘窗有效 ${stat.reviewN}/${reviewDates.length} 天 · 对照窗有效 ${other.n}/${other.days} 天 · 复盘窗 ${supportDays} 天单独达到同向实用差异（趋势洞察要求至少 ${MIN_SUPPORT_DAYS} 天，单日异常不触发）· 已做两侧留一单日影响检查（任一侧去掉影响最大的一天后差异仍达到阈值）${coverageComplete ? "" : " · 完整性未确认"}`,
         magnitude,
       };
       if (best === null || insight.magnitude > best.magnitude) best = insight;
@@ -2135,7 +2219,7 @@ function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
             <li><span>基线窗</span>{fullDateLabel(review.baselineWindow.start)} – {fullDateLabel(review.baselineWindow.end)}（28 天）</li>
           </ul>
           <p className="week-review-note">健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。</p>
-          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作。原始单日值照常计入均值，不删除、不改动。</p>
+          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作——对照窗或基线窗里的单个异常日同样不行：任一侧去掉影响最大的一天后差异若跌破阈值，就不生成洞察。原始单日值照常计入均值，不删除、不改动。运动次数按来源查询范围呈现：查询未覆盖基线窗全程时只标已存次数、完整性未确认，不称 28 天总数。</p>
           <div className="week-review-rows">
             {review.metrics.map((metric) => (
               <div className="week-review-row" key={metric.key}>

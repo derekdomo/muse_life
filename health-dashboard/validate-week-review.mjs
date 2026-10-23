@@ -459,6 +459,69 @@ check('source: panel labels the HealthKit count with its source and the strength
     Math.abs(metric(rs, 'sleep').reviewValue - (7.5 * 6 + 3.0) / 7) < 1e-9 && rs.insights.length === 0);
 }
 
+// ----------------- (13) PM 2026-10-23 00:57: baseline range + other-side spikes
+{
+  // H3.1 repro: the source query spans only the latest 30 completed
+  // days (daily rows 2026-09-23..10-22), coverageIncomplete === false
+  // for that queried range, one stored session inside the baseline
+  // window (10-12). A second real session on 09-20 sits OUTSIDE the
+  // queried range and is therefore absent from the list. The 30-day
+  // completeness must not be read as a 28-day baseline total.
+  const daily30 = dailyRows().filter((row) => row.date >= '2026-09-23'); // exactly the 30 queried days
+  const r = weekReview(daily30, sleepRows(flatSleeps(LAST14, 7.5)), [{ date: '2026-10-12' }], DATA_DATE, { coverageIncomplete: false });
+  const w = metric(r, 'workouts');
+  check('range: 30-day query keeps the stored baseline count as a fact (1) but not as a total',
+    w.baselineValue === 1 && w.baselineSufficient === false
+    && w.baselineNote !== null && w.baselineNote.includes('已存 1 次') && w.baselineNote.includes('完整性未确认')
+    && !w.baselineNote.includes('共 1 次'));
+  check('range: windows inside the queried range keep provable counts (review 0 is a true 0, comparison 1)',
+    w.reviewValue === 0 && w.comparisonValue === 1);
+  // Empty list under the same 30-day query: baseline 0 is NOT provable.
+  const r0 = weekReview(daily30, sleepRows(flatSleeps(LAST14, 7.5)), [], DATA_DATE, { coverageIncomplete: false });
+  const w0 = metric(r0, 'workouts');
+  check('range: empty list under a 30-day query -> baseline count unknown, not a claimed 共0次',
+    w0.baselineValue === null && w0.baselineSufficient === false
+    && w0.baselineNote !== null && w0.baselineNote.includes('已存 0 次'));
+  // 35-day complete control: the same two sessions ARE the total.
+  const r35 = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)),
+    [{ date: '2026-10-12' }, { date: '2026-09-20' }], DATA_DATE, { coverageIncomplete: false });
+  const w35 = metric(r35, 'workouts');
+  check('range: 35-day complete input -> baseline total 2 stands with the 共 wording',
+    w35.baselineValue === 2 && w35.baselineSufficient === true
+    && w35.baselineNote === '基线窗 28 天共 2 次');
+  // 100-entry cap: a list at the schema cap may be truncated.
+  const capped = Array.from({ length: 100 }, () => ({ date: '2026-10-20' }));
+  const rc = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)), capped, DATA_DATE, { coverageIncomplete: false });
+  const wc = metric(rc, 'workouts');
+  check('range: a list at the 100-entry cap proves no baseline total (stored 0 -> unknown)',
+    wc.baselineValue === null && wc.baselineSufficient === false
+    && wc.baselineNote !== null && wc.baselineNote.includes('100 条上限'));
+}
+{
+  // H3.3 repro: an isolated abnormal day on the COMPARISON or
+  // BASELINE side drags that window's mean until every normal review
+  // day counts as support. Leave-one-out must block all of these.
+  const flat = sleepRows(flatSleeps(LAST14, 7.5));
+  const cmp88 = weekReview(dailyRows({ '2026-10-14': { restingHr: 88 } }), flat, [], DATA_DATE, { coverageIncomplete: false });
+  check('other-side spike: comparison-day RHR 88 (mean 64 vs 60) generates no resting-HR insight',
+    Math.abs(metric(cmp88, 'restingHr').comparisonValue - 64) < 1e-9
+    && !cmp88.insights.some((i) => i.metricKey === 'restingHr'));
+  const cmp32 = weekReview(dailyRows({ '2026-10-14': { restingHr: 32 } }), flat, [], DATA_DATE, { coverageIncomplete: false });
+  check('other-side spike: comparison-day RHR 32 generates no resting-HR insight and no 不加量 action',
+    !cmp32.insights.some((i) => i.metricKey === 'restingHr') && !cmp32.focus.includes('先不加量'));
+  const base172 = weekReview(dailyRows({ '2026-10-02': { restingHr: 172 } }), flat, [], DATA_DATE, { coverageIncomplete: false });
+  check('other-side spike: baseline-day RHR 172 generates no resting-HR insight',
+    !base172.insights.some((i) => i.metricKey === 'restingHr'));
+  const cmpSleep = weekReview(dailyRows(),
+    sleepRows({ ...flatSleeps(LAST14, 7.5), '2026-10-14': 3.5 }), [], DATA_DATE, { coverageIncomplete: false });
+  check('other-side spike: one short comparison night (3.5h) generates no sleep insight',
+    !cmpSleep.insights.some((i) => i.metricKey === 'sleep'));
+  // Sustained differences survive leave-one-out on both sides.
+  const sustained = weekReview(dailyRows(perDates(REVIEW, { restingHr: 65 })), flat, [], DATA_DATE, { coverageIncomplete: false });
+  check('other-side spike: a whole shifted review week still trends after the LOO check',
+    sustained.insights.some((i) => i.metricKey === 'restingHr'));
+}
+
 // ------------------------------------------------------- mutation sensitivity
 {
   const noGateSrc = clientSrc.replace('const MIN_DAYS = 5;', 'const MIN_DAYS = 0;');
