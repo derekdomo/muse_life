@@ -45,6 +45,22 @@ export const SNIPPET_SOURCE_LABEL: Record<Snippet["source"], string> = {
   chat: "聊天沉淀",
 };
 
+// Snippet ↔ book live-version tri-state (CMP-READ-001), shared by
+// the snippets list and Home's 片刻回味 so both surfaces judge the
+// SAME snippet identically: the two versions are comparable ONLY
+// when both sides recorded a live-version token — equal is "same",
+// different is "replaced", and a missing token on either side is
+// "unknown" (never guessed, never backfilled).
+export function snippetVersionState(
+  snippet: { liveGen: string | null },
+  book: { liveGen: string | null },
+): "same" | "replaced" | "unknown" {
+  if (snippet.liveGen != null && book.liveGen != null) {
+    return snippet.liveGen === book.liveGen ? "same" : "replaced";
+  }
+  return "unknown";
+}
+
 export function sourceLabelOf(s: Snippet): string {
   const parts = [`《${s.bookTitle}》`];
   if (s.versionLabel) parts.push(s.versionLabel);

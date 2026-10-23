@@ -143,6 +143,36 @@
 //      record the live_gen they were read from, so the UI can
 //      distinguish "same live version" from "原文版本已替换" and
 //      from "无法确认" (either side has no recorded token).
+//
+// P0 remainder, third round (CMP-READ-IMPORT-001, PM 2026-10-22
+// 15:52): the version binding still had read/commit gaps, closed
+// here.
+//  (h) getChapter is a CONSISTENT SNAPSHOT: body, TOC, liveVersion
+//      and versionLabel come from ONE join statement (chapter rows
+//      + the book's live_gen / version_label + the not-deleted
+//      condition together), so a promotion landing mid-read can
+//      never pair a new body with an old token/label. Only a book
+//      with NO chapter rows at all falls back to a book-row read
+//      (there is no body to mislabel); a deleted book returns
+//      nothing.
+//  (i) createSnippet's version verdict moved INTO the atomic
+//      batch: the snippet insert and the ledger insert are both
+//      insert-selects guarded on the book row (id, not deleted,
+//      live_gen STRICTLY equal to the read baseline — NULL equals
+//      NULL). A promotion landing after any pre-check makes both
+//      statements write zero rows: typed conflict, no snippet, no
+//      ledger row. The snippet's provenance is selected from the
+//      book row inside the batch, which the guard proves equal to
+//      the baseline. Committed-key replays still arbitrate FIRST
+//      and are never caught by the guard.
+//  (j) savePosition's NULL-baseline branch now matches
+//      live_gen IS NULL in its UPDATE WHERE (the non-NULL branch
+//      keeps exact equality): a position read from a legacy
+//      (live_gen NULL) book can no longer overwrite the reset
+//      position of a version promoted before the update lands.
+//  (k) getBookLiveVersion is a metadata-only read (one books row:
+//      live_gen + version_label) so the reader's "检查新版本"
+//      check never refetches body text to learn the version.
 
 import { defineAction, z, type ActionsModule, type Ctx, type SpaceDb } from "@hatch/space-sdk";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
@@ -2264,32 +2294,97 @@ export const Actions = {
       };
       if (!isOwner(ctx)) return { ...empty, forbidden: true };
       const db = ctx.db<typeof schema>();
-      const bookRows = await db
+      // Consistent snapshot (CMP-READ-IMPORT-001, PM 2026-10-22
+      // 15:52): body, TOC, liveVersion and versionLabel come from
+      // ONE join statement — the chapter rows together with the
+      // book's live_gen / version_label and the not-deleted
+      // condition — so a promotion committing mid-read can never
+      // pair a NEW body with an OLD token/label, and a deleted
+      // book yields no rows at all.
+      const rows = await db
         .select({
-          id: schema.books.id,
+          idx: schema.bookChapters.idx,
+          title: schema.bookChapters.title,
+          html: schema.bookChapters.html,
           liveGen: schema.books.liveGen,
           versionLabel: schema.books.versionLabel,
         })
-        .from(schema.books)
-        .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
-        .limit(1);
-      const book = bookRows[0];
-      if (!book) return empty;
-      const rows = await db
-        .select()
         .from(schema.bookChapters)
-        .where(eq(schema.bookChapters.bookId, args.bookId))
+        .innerJoin(schema.books, eq(schema.bookChapters.bookId, schema.books.id))
+        .where(
+          and(eq(schema.bookChapters.bookId, args.bookId), isNull(schema.books.deletedAt)),
+        )
         .orderBy(asc(schema.bookChapters.idx));
+      if (rows.length === 0) {
+        // The book has NO chapter rows: there is no body that
+        // could be mislabeled, so a fallback read of the books row
+        // alone may answer with an empty TOC (and distinguish a
+        // deleted/missing book, which returns nothing).
+        const bookRows = await db
+          .select({
+            liveGen: schema.books.liveGen,
+            versionLabel: schema.books.versionLabel,
+          })
+          .from(schema.books)
+          .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
+          .limit(1);
+        const book = bookRows[0];
+        if (!book) return empty;
+        return { ...empty, liveVersion: book.liveGen, versionLabel: book.versionLabel };
+      }
+      const head = rows[0];
       const toc = rows.map((r) => ({ idx: r.idx, title: r.title ?? `第 ${r.idx + 1} 节` }));
       const chapter = rows.find((r) => r.idx === args.idx);
-      if (!chapter)
-        return { ...empty, toc, liveVersion: book.liveGen, versionLabel: book.versionLabel };
+      if (!chapter || !head)
+        return {
+          ...empty,
+          toc,
+          liveVersion: head?.liveGen ?? null,
+          versionLabel: head?.versionLabel ?? null,
+        };
       return {
         forbidden: false,
         found: true,
         title: chapter.title,
         html: chapter.html,
         toc,
+        liveVersion: head.liveGen,
+        versionLabel: head.versionLabel,
+      };
+    },
+  }),
+
+  // Version metadata ONLY (CMP-READ-001): the reader's "检查新版本"
+  // check reads ONE books row — live_gen + version_label — and
+  // never refetches body text. Owner-gated; a deleted or missing
+  // book is found:false with no content.
+  getBookLiveVersion: defineAction({
+    request: z.object({
+      bookId: z.number().int().positive(),
+    }),
+    response: z.object({
+      forbidden: z.boolean(),
+      found: z.boolean(),
+      liveVersion: z.string().nullable(),
+      versionLabel: z.string().nullable(),
+    }),
+    async handler(ctx, args) {
+      const none = { found: false, liveVersion: null, versionLabel: null };
+      if (!isOwner(ctx)) return { ...none, forbidden: true };
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select({
+          liveGen: schema.books.liveGen,
+          versionLabel: schema.books.versionLabel,
+        })
+        .from(schema.books)
+        .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
+        .limit(1);
+      const book = rows[0];
+      if (!book) return { ...none, forbidden: false };
+      return {
+        forbidden: false,
+        found: true,
         liveVersion: book.liveGen,
         versionLabel: book.versionLabel,
       };
@@ -2336,7 +2431,18 @@ export const Actions = {
                 eq(schema.books.liveGen, book.liveGen),
                 isNull(schema.books.deletedAt),
               )
-            : and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)),
+            : and(
+                eq(schema.books.id, args.bookId),
+                // NULL-baseline CAS (PM 2026-10-22 15:52): the
+                // legacy branch must ALSO pin the version it read
+                // — live_gen IS NULL — so a promotion landing
+                // between the check above and this UPDATE makes
+                // the update match zero rows (typed conflict
+                // below) instead of overwriting the new version's
+                // reset position with a legacy-baseline one.
+                isNull(schema.books.liveGen),
+                isNull(schema.books.deletedAt),
+              ),
         )
         .returning({ id: schema.books.id });
       if (updated.length === 0) {
@@ -2396,42 +2502,54 @@ export const Actions = {
       const claim = await arbitrateCreate(db, args.requestId, "snippet", hash);
       const early = claimToResult(claim);
       if (early) return early;
+      // Existence pre-read ONLY (answers notFound). The version
+      // verdict is NOT taken here: a pre-check cannot see a
+      // promotion that lands between it and the commit, so the
+      // binding is decided inside the atomic batch below.
       const bookRows = await db
-        .select()
+        .select({ id: schema.books.id })
         .from(schema.books)
         .where(and(eq(schema.books.id, args.bookId), isNull(schema.books.deletedAt)))
         .limit(1);
-      const book = bookRows[0];
-      if (!book) return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
-      // Live-version binding at the commit point: the text was read
-      // from ONE live version; if the book's live version has moved
-      // (or this write names none while the book has one), stamping
-      // it with the CURRENT versionLabel would falsify its
-      // provenance. Refuse with a typed conflict and write nothing
-      // — the caller's selection/draft is preserved client-side.
-      // (A replay of an already-committed save returned above, so
-      // a legitimate retry is never caught by this.)
-      if (book.liveGen != null && args.liveVersion !== book.liveGen) {
-        return { ok: false, forbidden: false, status: "conflict", id: null, resultId: null };
+      if (bookRows.length === 0) {
+        return { ok: false, forbidden: false, status: "notFound", id: null, resultId: null };
       }
+      // Live-version binding AT THE COMMIT POINT (PM 2026-10-22
+      // 15:52): the text was read from ONE live version (the
+      // baseline args.liveVersion). Both writes of the atomic
+      // batch — the snippet row and its request_keys ledger row —
+      // are insert-selects GUARDED on the books row inside the
+      // same statement: id matches, deleted_at IS NULL, and
+      // books.live_gen is STRICTLY equal to the baseline (NULL
+      // equals NULL). A promotion landing after any pre-check
+      // makes both statements select zero rows: nothing is
+      // written, the handler answers a typed conflict, and the
+      // caller's selection stays intact client-side. The snippet's
+      // provenance (bookTitle / versionLabel / liveGen) is selected
+      // from the books row INSIDE the batch, which the guard
+      // proves equal to the read baseline. (A replay of an
+      // already-committed save returned above via arbitrateCreate,
+      // so a legitimate retry is never caught by this guard.)
+      const baseline = args.liveVersion ?? null;
+      const versionGuard = sql`id = ${args.bookId} AND deleted_at IS NULL AND ((live_gen IS NULL AND ${baseline} IS NULL) OR live_gen = ${baseline})`;
+      const nowMs = Date.now();
       const outcome = await commitCreate(db, args.requestId, "snippet", hash, [
+        // Raw-SQL insert-select (values in the schema's declared
+        // column order for snippets): NULL id lets the table
+        // assign the row id.
         db
           .insert(schema.snippets)
-          .values({
-            bookId: book.id,
-            bookTitle: book.title,
-            versionLabel: book.versionLabel,
-            liveGen: book.liveGen,
-            chapterLabel: args.chapterLabel || null,
-            chapterIdx: args.chapterIdx ?? null,
-            charOffset: args.charOffset ?? null,
-            text: args.text,
-            source: "reader",
-            status: "saved",
-            requestId: args.requestId,
-          })
+          .select(
+            sql`SELECT NULL, id, title, version_label, live_gen, ${args.chapterLabel || null}, ${args.chapterIdx ?? null}, ${args.charOffset ?? null}, ${args.text}, 'reader', 'saved', NULL, NULL, NULL, ${args.requestId}, 1, NULL, ${nowMs}, ${nowMs} FROM books WHERE ${versionGuard}`,
+          )
           .returning({ id: schema.snippets.id }),
-        ledgerInsertStmt(db, args.requestId, "snippet", hash, "snippets"),
+        // The ledger row is guarded by the SAME condition, so a
+        // refused save leaves zero successful ledger rows behind.
+        db
+          .insert(schema.requestKeys)
+          .select(
+            sql`SELECT ${args.requestId}, 'snippet', ${hash}, 'snippets', NULL, 0, ${nowMs} FROM books WHERE ${versionGuard}`,
+          ),
         ledgerResultStmt(db, args.requestId, "snippets"),
       ]);
       if (!outcome.committed) {
@@ -2439,9 +2557,19 @@ export const Actions = {
         if (mapped) return mapped;
         throw new Error("createSnippet: arbitration returned fresh after a failed commit");
       }
-      const id = batchInsertId(outcome.results, 0);
+      const inserted = (outcome.results as unknown[])[0] as
+        | Array<{ id: number }>
+        | undefined;
+      const newRow = inserted?.[0];
+      if (!newRow) {
+        // The batch committed but the guard selected zero rows:
+        // the live version moved (or the book was deleted) between
+        // the read and the commit point. Snippet AND ledger both
+        // wrote nothing — a typed conflict, never a stale save.
+        return { ok: false, forbidden: false, status: "conflict", id: null, resultId: null };
+      }
       ctx.invalidateQueries();
-      return { ok: true, forbidden: false, status: "saved", id, resultId: id };
+      return { ok: true, forbidden: false, status: "saved", id: newRow.id, resultId: newRow.id };
     },
   }),
 

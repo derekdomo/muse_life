@@ -5,6 +5,7 @@ import { api } from "./api";
 import {
 SNIPPET_SOURCE_LABEL,
 newRequestId,
+snippetVersionState,
 sourceLabelOf,
 statusMessage,
 type Book,
@@ -1183,13 +1184,10 @@ function SnippetCard({
           // A moved version keeps the saved quote visible above,
           // says so plainly, and offers the current version as a
           // separate explicit action; an unrecorded version on
-          // either side is "无法确认", never guessed.
-          const versionState =
-            snippet.liveGen != null && book.liveGen != null
-              ? snippet.liveGen === book.liveGen
-                ? "same"
-                : "replaced"
-              : "unknown";
+          // either side is "无法确认", never guessed. The tri-state
+          // itself is the shared helper in lib.ts, so Home's
+          // 片刻回味 judges the same snippet identically.
+          const versionState = snippetVersionState(snippet, book);
           if (versionState === "same") {
             return (
               <button

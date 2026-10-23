@@ -12,6 +12,7 @@ YAxis,
 import { api } from "./api";
 import {
 fmtMinutes,
+snippetVersionState,
 sourceLabelOf,
 statusMessage,
 type Book,
@@ -173,21 +174,46 @@ export function Home({
               >
                 {savor.internalized ? "↩ 取消内化" : "✓ 标为已内化"}
               </button>
-              {savorBook != null && savorBook.chapterCount > 0 && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    onOpenReader(
-                      savorBook,
-                      savor.chapterIdx ?? undefined,
-                      savor.charOffset ?? undefined,
-                    )
-                  }
-                  className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm"
-                >
-                  回到原文
-                </button>
-              )}
+              {savorBook != null && savorBook.chapterCount > 0 && (() => {
+                // Same shared tri-state as the snippets list
+                // (lib.ts snippetVersionState): a located return is
+                // offered ONLY when the snippet provably belongs to
+                // the book's current live version.
+                const versionState = snippetVersionState(savor, savorBook);
+                if (versionState === "same") {
+                  return (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenReader(
+                          savorBook,
+                          savor.chapterIdx ?? undefined,
+                          savor.charOffset ?? undefined,
+                        )
+                      }
+                      className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm"
+                    >
+                      回到原文
+                    </button>
+                  );
+                }
+                return (
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-[var(--dim)]">
+                      {versionState === "replaced"
+                        ? "原文版本已替换：已保存的原句如上，旧位置无法在新版中确认。"
+                        : "无法确认这段原文与当前版本是否一致（版本记录缺失）。"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onOpenReader(savorBook)}
+                      className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm"
+                    >
+                      打开当前版本
+                    </button>
+                  </span>
+                );
+              })()}
               <button
                 type="button"
                 onClick={onGoSnippets}
