@@ -160,6 +160,83 @@ function actionSlice(src, name) {
   );
 }
 
+/* ----- third-round source checks (PM 2026-10-22 15:52) ----- */
+
+const readerSrc = readFileSync(new URL("./client/src/Reader.tsx", import.meta.url), "utf8");
+const homeSrc = readFileSync(new URL("./client/src/Home.tsx", import.meta.url), "utf8");
+const snippetsSrc = readFileSync(new URL("./client/src/Snippets.tsx", import.meta.url), "utf8");
+const libSrc = readFileSync(new URL("./client/src/lib.ts", import.meta.url), "utf8");
+
+{
+  const gc = actionSlice(serverSrc, "getChapter");
+  check(
+    "source (3R): getChapter takes body + TOC + liveVersion + versionLabel from ONE join query (chapters ⋈ books, not-deleted in the same statement)",
+    gc.includes(".innerJoin(schema.books") &&
+      gc.includes("eq(schema.bookChapters.bookId, schema.books.id)") &&
+      gc.includes("isNull(schema.books.deletedAt)"),
+  );
+  check(
+    "source (3R): getChapter's books-row fallback is gated on ZERO chapter rows (no body to mislabel)",
+    gc.includes("if (rows.length === 0)"),
+  );
+  const cs = actionSlice(serverSrc, "createSnippet");
+  check(
+    "source (3R): createSnippet's snippet AND ledger inserts are both guarded insert-selects over the books row in the same batch",
+    (cs.match(/FROM books WHERE \$\{versionGuard\}/g) ?? []).length === 2 &&
+      cs.includes(".insert(schema.snippets)") &&
+      cs.includes(".insert(schema.requestKeys)"),
+  );
+  check(
+    "source (3R): the createSnippet guard is strict live_gen equality with NULL === NULL, plus id + not-deleted",
+    serverSrc.includes(
+      "(live_gen IS NULL AND ${baseline} IS NULL) OR live_gen = ${baseline}",
+    ) &&
+      serverSrc.includes("deleted_at IS NULL"),
+  );
+  check(
+    "source (3R): createSnippet still arbitrates committed keys FIRST (replay never reaches the guard)",
+    cs.indexOf("arbitrateCreate(db, args.requestId, \"snippet\", hash)") >= 0 &&
+      cs.indexOf("arbitrateCreate(db, args.requestId, \"snippet\", hash)") <
+        cs.indexOf("versionGuard"),
+  );
+  const sp = actionSlice(serverSrc, "savePosition");
+  check(
+    "source (3R): savePosition's NULL-baseline UPDATE branch pins live_gen IS NULL in its WHERE (CAS)",
+    sp.includes("isNull(schema.books.liveGen)"),
+  );
+  check(
+    "source (3R): getBookLiveVersion exists as a metadata-only action (books row: liveGen + versionLabel)",
+    serverSrc.includes("getBookLiveVersion: defineAction({") &&
+      actionSlice(serverSrc, "getBookLiveVersion").includes("liveGen: schema.books.liveGen"),
+  );
+  check(
+    "source (3R): Reader keeps a display snapshot and the in-page version label comes from it, not the book prop",
+    readerSrc.includes("DisplaySnapshot") &&
+      readerSrc.includes("snapshot?.versionLabel") &&
+      !readerSrc.includes("book.versionLabel"),
+  );
+  check(
+    "source (3R): the 检查新版本 button calls getBookLiveVersion only (never refetches chapter body)",
+    readerSrc.includes("api.getBookLiveVersion") && !readerSrc.includes("chapter.refetch()"),
+  );
+  check(
+    "source (3R): stale banner states old-version later chapters are unavailable; same-version check gives the up-to-date note",
+    readerSrc.includes("旧版后续章节已不可用") && readerSrc.includes("已是最新版本"),
+  );
+  check(
+    "source (3R): snippet version tri-state is ONE shared helper in lib.ts, used by both Snippets and Home",
+    libSrc.includes("export function snippetVersionState") &&
+      snippetsSrc.includes("snippetVersionState(snippet, book)") &&
+      homeSrc.includes("snippetVersionState(savor, savorBook)"),
+  );
+  check(
+    "source (3R): Home's replaced/unknown states explain and open the current version without the old position",
+    homeSrc.includes("原文版本已替换：已保存的原句如上，旧位置无法在新版中确认") &&
+      homeSrc.includes("无法确认这段原文与当前版本是否一致（版本记录缺失）") &&
+      homeSrc.includes("onOpenReader(savorBook)"),
+  );
+}
+
 /* ---------------- behavior: real handlers, in-memory db ---------------- */
 
 const { Actions } = await import("./server/src/actions.ts");
@@ -2124,6 +2201,260 @@ for (const [label, viewer] of [["non-owner", { id: "someone-else", isOwner: fals
   check(
     "schedule 3R: a write carrying the CURRENT token saves under the new edition",
     snipV2.ok === true,
+  );
+}
+
+/* ----- third-round schedule (a): NULL-baseline CAS in savePosition ----- */
+{
+  // A legacy book: live copy exists, live_gen was never recorded.
+  const ins = await db
+    .insert(schema.books)
+    .values({
+      title: "旧档之书",
+      source: "owner",
+      status: "reading",
+      importStatus: "ready",
+      requestId: null,
+    })
+    .returning({ id: schema.books.id });
+  const b = ins[0]?.id ?? -1;
+  await db.insert(schema.bookChapters).values({
+    bookId: b,
+    idx: 0,
+    title: null,
+    html: "<p>旧档正文</p>",
+    charCount: 9,
+  });
+  const viewLegacy = await call("getChapter", owner, { bookId: b, idx: 0 });
+  const okSave = await call("savePosition", owner, {
+    bookId: b,
+    chapterIdx: 0,
+    charOffset: 21,
+  });
+  check(
+    "3R (a): a legacy (live_gen NULL) book's position saves with a null baseline against the same version",
+    viewLegacy.liveVersion === null &&
+      okSave.ok === true &&
+      (await bookRow(b))?.curOffset === 21,
+  );
+  // The promotion lands BETWEEN savePosition's pre-read and its
+  // UPDATE (the update call itself dispatches the promotion first):
+  // the NULL-branch WHERE (live_gen IS NULL) must match zero rows.
+  const { ctx: raceBase } = makeCtx(OWNER);
+  let fired = false;
+  const proxied = new Proxy(db, {
+    get(target, prop) {
+      if (prop === "update") {
+        return (...a) => {
+          if (!fired) {
+            fired = true;
+            void client.execute({
+              sql: "UPDATE books SET live_gen = 'promoted-gen-x', cur_chapter = 0, cur_offset = 0 WHERE id = ?",
+              args: [b],
+            });
+          }
+          return target.update(...a);
+        };
+      }
+      const v = Reflect.get(target, prop);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  const raceCtxPos = { ...raceBase, db: () => proxied };
+  const racedSave = await call("savePosition", raceCtxPos, {
+    bookId: b,
+    chapterIdx: 3,
+    charOffset: 99,
+  });
+  const rowRaced = await bookRow(b);
+  check(
+    "3R (a): a promotion landing before the UPDATE makes the null-baseline save a typed conflict — the new version's reset position is NOT overwritten",
+    racedSave.ok === false &&
+      racedSave.status === "conflict" &&
+      rowRaced?.liveGen === "promoted-gen-x" &&
+      rowRaced?.curChapter === 0 &&
+      rowRaced?.curOffset === 0,
+  );
+  // Same fact from the plain path: liveGen already promoted, a
+  // null-baseline save conflicts and changes nothing.
+  const plainStale = await call("savePosition", owner, {
+    bookId: b,
+    chapterIdx: 3,
+    charOffset: 99,
+  });
+  check(
+    "3R (a): after promotion, a null-baseline savePosition is a typed conflict with zero writes",
+    plainStale.ok === false &&
+      plainStale.status === "conflict" &&
+      (await bookRow(b))?.curOffset === 0,
+  );
+}
+
+/* ----- third-round schedule (b)+(c): createSnippet provenance + getChapter consistency + getBookLiveVersion ----- */
+{
+  const nb = await call("addBook", owner, {
+    requestId: "s8-add-1",
+    title: "一致之书",
+    source: "owner",
+    status: "reading",
+    importStatus: "pending",
+  });
+  const b = nb.id;
+  const A = "s8-gen-a";
+  await call("beginImport", owner, {
+    requestId: A,
+    title: "一致之书",
+    source: "owner",
+    versionLabel: "C-V1",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: A,
+    chapters: [{ idx: 0, title: "甲章", html: "<p>一致一版正文</p>" }],
+  });
+  await call("finishImport", owner, { bookId: b, importId: A, ok: true, chapterCount: 1 });
+
+  const viewA = await call("getChapter", owner, { bookId: b, idx: 0 });
+  check(
+    "3R (c): getChapter before promotion returns body + token + label of the SAME version (V1)",
+    viewA.found === true &&
+      viewA.html === "<p>一致一版正文</p>" &&
+      viewA.liveVersion === A &&
+      viewA.versionLabel === "C-V1",
+  );
+  const metaA = await call("getBookLiveVersion", owner, { bookId: b });
+  check(
+    "3R: getBookLiveVersion (owner) reports the live version metadata",
+    metaA.forbidden === false &&
+      metaA.found === true &&
+      metaA.liveVersion === A &&
+      metaA.versionLabel === "C-V1",
+  );
+  const snipA = await call("createSnippet", owner, {
+    requestId: "s8-snip-a",
+    bookId: b,
+    text: "一致一版正文",
+    chapterIdx: 0,
+    chapterLabel: "甲章",
+    liveVersion: A,
+  });
+  const libA = await call("getLibrary", owner, {});
+  const snipARow = libA.snippets.find((s) => s.id === snipA.id);
+  check(
+    "3R (b): a same-version createSnippet saves, and its provenance is the book row's CURRENT title/label/token",
+    snipA.ok === true &&
+      snipARow?.bookTitle === "一致之书" &&
+      snipARow?.versionLabel === "C-V1" &&
+      snipARow?.liveGen === A,
+  );
+
+  const B = "s8-gen-b";
+  await call("beginImport", owner, {
+    requestId: B,
+    title: "一致之书",
+    source: "owner",
+    versionLabel: "C-V2",
+    existingBookId: b,
+  });
+  await call("saveImportChapters", owner, {
+    bookId: b,
+    importId: B,
+    chapters: [{ idx: 0, title: "乙章", html: "<p>一致二版正文</p>" }],
+  });
+  await call("finishImport", owner, { bookId: b, importId: B, ok: true, chapterCount: 1 });
+
+  const viewB = await call("getChapter", owner, { bookId: b, idx: 0 });
+  const viewMissing = await call("getChapter", owner, { bookId: b, idx: 7 });
+  check(
+    "3R (c): getChapter after promotion returns body + token + label of the SAME version (V2); a missing chapter still reports V2's TOC/token/label as one snapshot",
+    viewB.found === true &&
+      viewB.html === "<p>一致二版正文</p>" &&
+      viewB.liveVersion === B &&
+      viewB.versionLabel === "C-V2" &&
+      viewMissing.found === false &&
+      viewMissing.toc.length === 1 &&
+      viewMissing.liveVersion === B &&
+      viewMissing.versionLabel === "C-V2",
+  );
+  const metaB = await call("getBookLiveVersion", owner, { bookId: b });
+  check(
+    "3R: getBookLiveVersion tracks the promotion (owner)",
+    metaB.found === true && metaB.liveVersion === B && metaB.versionLabel === "C-V2",
+  );
+
+  // (b) stale token AFTER the promotion completed: typed conflict,
+  // zero new snippets, zero ledger rows for the refused key.
+  // (This restates the 3R-schedule coverage of §3R above at the
+  // commit-point guard: the refusal now comes from the batch's
+  // own insert-select guard, not a pre-check.)
+  const staleSnip = await call("createSnippet", owner, {
+    requestId: "s8-snip-stale",
+    bookId: b,
+    text: "一致一版正文",
+    chapterIdx: 0,
+    chapterLabel: "甲章",
+    liveVersion: A,
+  });
+  const libAfterStale = await call("getLibrary", owner, {});
+  check(
+    "3R (b): createSnippet with the OLD token after promotion is a typed conflict — zero new snippets, zero ledger rows for the refused key",
+    staleSnip.ok === false &&
+      staleSnip.status === "conflict" &&
+      libAfterStale.snippets.filter((s) => s.bookId === b).length === 1 &&
+      (await ledgerRow("s8-snip-stale")) === null,
+  );
+  // The already-committed key replays through arbitration FIRST —
+  // the new batch guard must not misjudge it even though its
+  // token is now stale.
+  const replaySnip = await call("createSnippet", owner, {
+    requestId: "s8-snip-a",
+    bookId: b,
+    text: "一致一版正文",
+    chapterIdx: 0,
+    chapterLabel: "甲章",
+    liveVersion: A,
+  });
+  const libAfterReplay = await call("getLibrary", owner, {});
+  check(
+    "3R (b): replaying the committed snippet key after promotion still returns the original row (arbitration precedes the guard), zero new rows",
+    replaySnip.ok === true &&
+      replaySnip.status === "replayed" &&
+      replaySnip.id === snipA.id &&
+      libAfterReplay.snippets.filter((s) => s.bookId === b).length === 1 &&
+      (await ledgerCount("s8-snip-a")) === 1,
+  );
+
+  // getBookLiveVersion gate: guest + anonymous are forbidden and
+  // receive zero content.
+  for (const [label, viewer] of [
+    ["guest", { id: "guest-1", isOwner: false }],
+    ["anon", undefined],
+  ]) {
+    const { ctx } = makeCtx(viewer);
+    const res = await call("getBookLiveVersion", ctx, { bookId: b });
+    check(
+      `3R: getBookLiveVersion is forbidden for ${label} with zero content`,
+      res.forbidden === true &&
+        res.found === false &&
+        res.liveVersion === null &&
+        res.versionLabel === null,
+    );
+  }
+
+  // (c) after deletion: no content from either read.
+  await call("deleteBook", owner, { id: b });
+  const viewDel = await call("getChapter", owner, { bookId: b, idx: 0 });
+  const metaDel = await call("getBookLiveVersion", owner, { bookId: b });
+  check(
+    "3R (c): a deleted book returns found=false and NO content from getChapter and getBookLiveVersion",
+    viewDel.found === false &&
+      viewDel.html === "" &&
+      viewDel.toc.length === 0 &&
+      viewDel.liveVersion === null &&
+      viewDel.versionLabel === null &&
+      metaDel.found === false &&
+      metaDel.liveVersion === null,
   );
 }
 

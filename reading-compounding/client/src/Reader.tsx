@@ -61,6 +61,23 @@ interface SelectionInfo {
   charOffset: number;
 }
 
+// The DISPLAY SNAPSHOT (CMP-READ-001): the one version of the book
+// this reader is actually showing — chapter body, title, TOC and
+// the live-version token + edition label it belongs to, as one
+// unit. Only data whose liveVersion matches the pinned version (or
+// the first load that SETS the pin) may enter it; a late response
+// from a different version never overwrites the displayed body,
+// TOC, label or selection — it only raises the stale banner.
+interface DisplaySnapshot {
+  idx: number;
+  found: boolean;
+  title: string | null;
+  html: string;
+  toc: Array<{ idx: number; title: string }>;
+  liveVersion: string | null;
+  versionLabel: string | null;
+}
+
 export function Reader({
   book,
   startChapter,
@@ -79,6 +96,8 @@ export function Reader({
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
   const [snippetMsg, setSnippetMsg] = useState<string | null>(null);
   const [versionStale, setVersionStale] = useState(false);
+  const [snapshot, setSnapshot] = useState<DisplaySnapshot | null>(null);
+  const [checkMsg, setCheckMsg] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const snippetKeyRef = useRef<string>(newRequestId());
   const restoredFor = useRef<number>(-1);
@@ -94,23 +113,70 @@ export function Reader({
     queryFn: () => api.getChapter({ bookId: book.id, idx: chapterIdx }),
   });
 
-  // Pin the version on first load; if a later fetch shows a
-  // different live version, surface the switch banner (the text on
-  // screen is still the pinned version's — react-query keeps the
-  // per-chapter cache separate — so nothing is silently relabeled).
+  // Display-snapshot admission: the first load pins the version
+  // and enters the snapshot; afterwards ONLY a response carrying
+  // the pinned liveVersion may replace what's on screen. A late
+  // different-version response just raises the stale banner — the
+  // displayed body/TOC/label (and any selection made on them) stay
+  // exactly as they were, never silently relabeled or mixed.
   useEffect(() => {
-    const lv = chapter.data?.liveVersion;
-    if (lv === undefined) return;
+    const data = chapter.data;
+    if (!data || data.forbidden) return;
     if (pinnedVersionRef.current === undefined) {
-      pinnedVersionRef.current = lv;
-    } else if (lv !== pinnedVersionRef.current) {
+      pinnedVersionRef.current = data.liveVersion;
+      setSnapshot({
+        idx: chapterIdx,
+        found: data.found,
+        title: data.title,
+        html: data.html,
+        toc: data.toc,
+        liveVersion: data.liveVersion,
+        versionLabel: data.versionLabel,
+      });
+      return;
+    }
+    if (data.liveVersion === pinnedVersionRef.current) {
+      setSnapshot({
+        idx: chapterIdx,
+        found: data.found,
+        title: data.title,
+        html: data.html,
+        toc: data.toc,
+        liveVersion: data.liveVersion,
+        versionLabel: data.versionLabel,
+      });
+    } else {
       setVersionStale(true);
     }
-  }, [chapter.data?.liveVersion]);
+  }, [chapter.data, chapterIdx]);
+
+  // "检查新版本" checks VERSION METADATA ONLY (getBookLiveVersion
+  // reads one books row) — it never refetches body text. A version
+  // different from the pin raises the switch banner; the same
+  // version just confirms we're current.
+  const checkVersion = useMutation({
+    mutationFn: () => api.getBookLiveVersion({ bookId: book.id }),
+    onSuccess: (res) => {
+      if (res.forbidden || !res.found) {
+        setCheckMsg("暂时无法确认版本，请稍后再试。");
+        return;
+      }
+      if (
+        pinnedVersionRef.current === undefined ||
+        res.liveVersion === pinnedVersionRef.current
+      ) {
+        setCheckMsg("已是最新版本。");
+      } else {
+        setCheckMsg(null);
+        setVersionStale(true);
+      }
+    },
+    onError: () => setCheckMsg("暂时无法确认版本，请稍后再试。"),
+  });
 
   const safeHtml = useMemo(
-    () => (chapter.data?.found ? sanitizeChapterHtml(chapter.data.html) : ""),
-    [chapter.data],
+    () => (snapshot?.found ? sanitizeChapterHtml(snapshot.html) : ""),
+    [snapshot],
   );
 
   const savePosition = useMutation({
@@ -125,17 +191,18 @@ export function Reader({
     },
   });
 
-  // Restore the saved position once per chapter load.
+  // Restore the saved position once per displayed chapter (the
+  // snapshot is the authority on what's on screen).
   useEffect(() => {
-    if (!chapter.data?.found || !safeHtml) return;
-    if (restoredFor.current === chapterIdx) return;
-    restoredFor.current = chapterIdx;
+    if (!snapshot?.found || !safeHtml) return;
+    if (restoredFor.current === snapshot.idx) return;
+    restoredFor.current = snapshot.idx;
     const root = contentRef.current;
     if (!root) return;
     const target =
-      startChapter === chapterIdx && startOffset != null
+      startChapter === snapshot.idx && startOffset != null
         ? startOffset
-        : chapterIdx === book.curChapter
+        : snapshot.idx === book.curChapter
           ? book.curOffset
           : 0;
     if (target > 0) {
@@ -145,7 +212,7 @@ export function Reader({
     window.scrollTo({ top: 0 });
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chapter.data, safeHtml, chapterIdx]);
+  }, [snapshot, safeHtml]);
 
   // Persist position as the owner scrolls (debounced).
   useEffect(() => {
@@ -155,6 +222,10 @@ export function Reader({
       timer = window.setTimeout(() => {
         const root = contentRef.current;
         if (!root) return;
+        // No pin, no write: during the explicit version switch
+        // the pin is unset until the new version's first chapter
+        // lands — writes are allowed only under a settled pin.
+        if (pinnedVersionRef.current === undefined) return;
         savePosition.mutate({
           chapterIdx,
           charOffset: currentTopOffset(root),
@@ -200,7 +271,7 @@ export function Reader({
         bookId: book.id,
         text: sel.text,
         chapterIdx,
-        chapterLabel: chapter.data?.title ?? null,
+        chapterLabel: snapshot?.title ?? null,
         charOffset: sel.charOffset,
         liveVersion: pinnedVersionRef.current ?? null,
       }),
@@ -226,9 +297,9 @@ export function Reader({
     onError: () => setSnippetMsg("保存失败，请重试（输入还在）。"),
   });
 
-  const toc = chapter.data?.toc ?? [];
+  const toc = snapshot?.toc ?? [];
   const chapterTitle =
-    chapter.data?.title ?? toc.find((t) => t.idx === chapterIdx)?.title ?? "";
+    snapshot?.title ?? toc.find((t) => t.idx === chapterIdx)?.title ?? "";
 
   return (
     <div className="fixed inset-0 z-40 overflow-y-auto bg-[var(--bg)]">
@@ -253,9 +324,13 @@ export function Reader({
           </button>
           <button
             type="button"
-            onClick={() => void chapter.refetch()}
+            disabled={checkVersion.isPending}
+            onClick={() => {
+              setCheckMsg(null);
+              checkVersion.mutate();
+            }}
             aria-label="检查新版本"
-            className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+            className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm disabled:opacity-40"
           >
             检查新版本
           </button>
@@ -278,6 +353,14 @@ export function Reader({
             </button>
           </div>
         </div>
+        {checkMsg && (
+          <p
+            role="status"
+            className="mx-auto max-w-2xl border-t border-[var(--border)] px-4 py-1.5 text-xs text-[var(--dim)]"
+          >
+            {checkMsg}
+          </p>
+        )}
         {showToc && (
           <nav aria-label="章节目录" className="max-h-64 overflow-y-auto border-t border-[var(--border)]">
             <ul className="mx-auto max-w-2xl px-4 py-2">
@@ -285,13 +368,18 @@ export function Reader({
                 <li key={t.idx}>
                   <button
                     type="button"
+                    disabled={versionStale}
                     onClick={() => {
+                      // While stale, chapter jumps are refused
+                      // outright: a new-version chapter must never
+                      // be spliced onto the pinned old token.
+                      if (versionStale) return;
                       setChapterIdx(t.idx);
                       restoredFor.current = -1;
                       setShowToc(false);
                     }}
                     aria-current={t.idx === chapterIdx ? "true" : undefined}
-                    className={`block w-full truncate py-2 text-left text-sm ${
+                    className={`block w-full truncate py-2 text-left text-sm disabled:opacity-40 ${
                       t.idx === chapterIdx
                         ? "font-semibold text-[var(--accent)]"
                         : "text-[var(--text)]"
@@ -313,11 +401,19 @@ export function Reader({
             <p className="text-sm font-medium">书籍已有新版本</p>
             <p className="mt-1 text-sm text-[var(--dim)]">
               你正在读的是旧版本正文；已经保存的片段和批注仍按旧版本出处保留，不会被改成新版本。
-              旧版本的选文和阅读位置不会写入新版本。
+              旧版本的选文和阅读位置不会写入新版本。旧版后续章节已不可用，可保留当前选文后切换新版。
             </p>
             <button
               type="button"
               onClick={() => {
+                // The explicit switch: ONE wholesale move — pin
+                // unset (the first new-version response re-pins),
+                // snapshot target reset to chapter 0 / offset 0
+                // (no old chapter, old start offset or old
+                // navigation position is carried over), selection
+                // cleared, and the new version's chapter 0 fetched
+                // fresh. Writes stay blocked until the new pin
+                // settles.
                 pinnedVersionRef.current = undefined;
                 setVersionStale(false);
                 setSelection(null);
@@ -334,14 +430,16 @@ export function Reader({
         )}
         <p className="text-xs text-[var(--dim)]">
           《{book.title}》
-          {book.versionLabel ? ` · ${book.versionLabel}` : ""}
+          {snapshot?.versionLabel ? ` · ${snapshot.versionLabel}` : ""}
         </p>
         <h2 className="font-serif-book mt-1 text-xl font-semibold">{chapterTitle}</h2>
-        {chapter.isPending && <p className="mt-6 text-sm text-[var(--dim)]">加载章节中…</p>}
-        {chapter.data && !chapter.data.found && (
+        {chapter.isPending && !snapshot && (
+          <p className="mt-6 text-sm text-[var(--dim)]">加载章节中…</p>
+        )}
+        {snapshot && !snapshot.found && (
           <p className="mt-6 text-sm text-[var(--dim)]">这一章没有存入正文。</p>
         )}
-        {chapter.data?.found && (
+        {snapshot?.found && (
           <div
             ref={contentRef}
             role="document"
@@ -356,8 +454,9 @@ export function Reader({
         <div className="mt-10 flex items-center justify-between">
           <button
             type="button"
-            disabled={chapterIdx <= 0}
+            disabled={versionStale || chapterIdx <= 0}
             onClick={() => {
+              if (versionStale) return;
               setChapterIdx(chapterIdx - 1);
               restoredFor.current = -1;
             }}
@@ -370,8 +469,9 @@ export function Reader({
           </span>
           <button
             type="button"
-            disabled={toc.length === 0 || chapterIdx >= toc.length - 1}
+            disabled={versionStale || toc.length === 0 || chapterIdx >= toc.length - 1}
             onClick={() => {
+              if (versionStale) return;
               setChapterIdx(chapterIdx + 1);
               restoredFor.current = -1;
             }}
