@@ -25,6 +25,17 @@
 //  - copy: the review calls its week 该复盘周 (never 本周）, the
 //    adjustments block is titled 下次训练参考， and every suggestion
 //    carries a 依据 line built from the comparable source.
+//  - W2.3 P1 fix (PM re-check 2026-10-22): the in-progress totals no
+//    longer come from the capped recent_workouts sample. The client
+//    pure function currentWeekSummaryWithTotals takes the server's
+//    full week_summaries (summarizeWeekSummaries, extracted and run
+//    for real below) and reports the matching Monday bucket's
+//    sessions and measured+unmeasured completed sets as the week
+//    totals, the sample as detail, and the gap as
+//    missingDetailCount. 21 synthetic sessions this week, each with
+//    1 completed unmeasured set, must read 21/21 in the totals while
+//    the 20-row sample detail stays 20; without a matching bucket
+//    hasFullTotals is false and the UI copy is sample-worded.
 process.env.TZ = 'America/Los_Angeles';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
@@ -62,12 +73,13 @@ function extractFunction(source, name) {
   const bodyEnd = matchDelim(source, bodyStart, '{', '}');
   return source.slice(idx, bodyEnd + 1);
 }
-const CLIENT_FN = ['completedCount', 'previousCompleteWeek', 'workoutsInRange', 'currentWeekRange', 'currentWeekSummary'];
+const CLIENT_FN = ['completedCount', 'previousCompleteWeek', 'workoutsInRange', 'currentWeekRange', 'currentWeekSummary', 'currentWeekSummaryWithTotals'];
 const C = new Function(
   `${stripTypeScriptTypes(CLIENT_FN.map((n) => extractFunction(clientSrc, n)).join('\n'))}\nreturn { ${CLIENT_FN.join(', ')} };`,
 )();
+const SERVER_FN = ['selectComparableHistory', 'summarizeWeekSummaries'];
 const S = new Function(
-  `${stripTypeScriptTypes(extractFunction(serverSrc, 'selectComparableHistory'))}\nreturn { selectComparableHistory };`,
+  `${stripTypeScriptTypes(SERVER_FN.map((n) => extractFunction(serverSrc, n)).join('\n'))}\nreturn { ${SERVER_FN.join(', ')} };`,
 )();
 
 // --- helpers ---
@@ -247,8 +259,194 @@ function mkWorkout(id, routine, startedIso, completedIso, totalSets, completedSe
     clientSrc.includes('onOpenWorkout={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}'));
   check('title: the layer is titled 本周进行中 with the Monday..today range',
     clientSrc.includes('`本周进行中 · ${compactDate(summary.start)}–${compactDate(summary.today)}`'));
-  check('totals: the summary line counts saved sessions and completed sets in words and numbers',
-    clientSrc.includes('已保存完成 {summary.sessions.length} 次 · 共 {summary.completedSets} 组'));
+  // Totals assertion updated for the W2.3 P1 fix: the header line now
+  // binds the full-week fields (totalSessions / totalCompletedSets
+  // from the week_summaries bucket) instead of the sample's own
+  // sessions.length / completedSets — that sample binding WAS the bug
+  // (a 20-row sample reported as the week's total). The sample counts
+  // survive as detailCount / detailCompletedSets and are asserted in
+  // the sample-wording checks in section 10.
+  check('totals: the summary line counts the FULL-WEEK saved sessions and completed sets in words and numbers',
+    clientSrc.includes('已保存完成 {summary.totalSessions} 次 · 共 {summary.totalCompletedSets} 组'));
+}
+
+// --- 10: W2.3 P1 fix — full-week totals from week_summaries ---
+// Server inputs mirror the getDashboard handler's shapes:
+// workouts { id, completed_at, unit }, sets { workout_id, weight,
+// reps, completed }. An unmeasured set has weight and/or reps null.
+function srvWorkout(id, completedIso, unit = 'lb') {
+  return { id, completed_at: completedIso, unit };
+}
+function srvSets(workoutId, list) {
+  return list.map((s) => ({ workout_id: workoutId, weight: s.weight, reps: s.reps, completed: s.completed }));
+}
+function unmeasuredClientWorkout(id, startedIso, completedIso) {
+  setId += 1;
+  return {
+    id, routine: 'push', unit: 'lb', started_at: startedIso, completed_at: completedIso,
+    sets: [{ id: setId, workout_id: id, exercise_key: 'ex', exercise_name: '动作', set_number: 1, target_reps: '8', weight: null, reps: 10, completed: true }],
+  };
+}
+// N completed sessions inside the in-progress week of Thu 2026-10-22
+// (Mon 10-19 .. Thu 10-22), each with exactly 1 completed unmeasured
+// set, as paired server + client inputs.
+function weekOfSessions(n) {
+  const serverWorkouts = [];
+  const serverSets = [];
+  const clientWorkouts = [];
+  for (let i = 0; i < n; i++) {
+    const day = 19 + (i % 4); // Mon..Thu of the in-progress week
+    const hour = 6 + Math.floor(i / 4);
+    const doneIso = iso(2026, 10, day, hour, 30);
+    const startIso = iso(2026, 10, day, hour, 0);
+    serverWorkouts.push(srvWorkout(1000 + i, doneIso));
+    serverSets.push(...srvSets(1000 + i, [{ weight: null, reps: 10, completed: true }]));
+    clientWorkouts.push(unmeasuredClientWorkout(1000 + i, startIso, doneIso));
+  }
+  return { serverWorkouts, serverSets, clientWorkouts };
+}
+const NOW22 = local(2026, 10, 22, 15);
+
+{
+  // 0 sessions: the server still returns both buckets, all zero.
+  const summaries = S.summarizeWeekSummaries([], [], NOW22);
+  check('P1 totals: server returns the current-week bucket even when empty',
+    summaries.length === 2 && summaries[1]?.week_start === '2026-10-19' && summaries[1]?.sessions === 0,
+    `buckets=${summaries.map((b) => `${b.week_start}:${b.sessions}`).join(',')}`);
+  const t = C.currentWeekSummaryWithTotals([], summaries, NOW22);
+  check('P1 totals: 0 sessions -> full totals confirmed at 0/0, no missing detail',
+    t.hasFullTotals === true && t.totalSessions === 0 && t.totalCompletedSets === 0
+    && t.detailCount === 0 && t.missingDetailCount === 0);
+}
+{
+  // 1 session with measured + unmeasured completed sets: the
+  // unmeasured completion must count toward the week total.
+  const serverWorkouts = [srvWorkout(2001, iso(2026, 10, 20, 8))];
+  const serverSets = srvSets(2001, [
+    { weight: 100, reps: 8, completed: true },
+    { weight: null, reps: 12, completed: true },
+    { weight: 100, reps: 8, completed: false },
+  ]);
+  const summaries = S.summarizeWeekSummaries(serverWorkouts, serverSets, NOW22);
+  const bucket = summaries.find((b) => b.week_start === '2026-10-19');
+  check('P1 totals: server bucket splits measured 1 / unmeasured 1, ignores the incomplete set',
+    bucket?.sessions === 1 && bucket?.measured_completed_sets === 1 && bucket?.unmeasured_completed_sets === 1,
+    `measured=${bucket?.measured_completed_sets} unmeasured=${bucket?.unmeasured_completed_sets}`);
+  const client = [mkWorkout(2001, 'push', iso(2026, 10, 20, 7), iso(2026, 10, 20, 8), 3, 2)];
+  const t = C.currentWeekSummaryWithTotals(client, summaries, NOW22);
+  check('P1 totals: 1 session -> totals 1 session / 2 completed sets (unmeasured included), detail matches',
+    t.hasFullTotals === true && t.totalSessions === 1 && t.totalCompletedSets === 2
+    && t.detailCount === 1 && t.detailCompletedSets === 2 && t.missingDetailCount === 0);
+}
+{
+  // 20 sessions: exactly at the sample cap — detail covers the week.
+  const { serverWorkouts, serverSets, clientWorkouts } = weekOfSessions(20);
+  const summaries = S.summarizeWeekSummaries(serverWorkouts, serverSets, NOW22);
+  const t = C.currentWeekSummaryWithTotals(clientWorkouts, summaries, NOW22);
+  check('P1 totals: 20 sessions -> totals 20/20, detail 20/20, nothing missing',
+    t.hasFullTotals === true && t.totalSessions === 20 && t.totalCompletedSets === 20
+    && t.detailCount === 20 && t.detailCompletedSets === 20 && t.missingDetailCount === 0,
+    `totals=${t.totalSessions}/${t.totalCompletedSets} detail=${t.detailCount}/${t.detailCompletedSets}`);
+}
+{
+  // THE P1 repro: 21 completed sessions this week, 1 unmeasured
+  // completed set each. recent_workouts would carry only the newest
+  // 20; the old client reported 20/20 as the week. Now the totals
+  // must be the server's full 21/21 while the detail stays 20.
+  const { serverWorkouts, serverSets, clientWorkouts } = weekOfSessions(21);
+  const summaries = S.summarizeWeekSummaries(serverWorkouts, serverSets, NOW22);
+  const bucket = summaries.find((b) => b.week_start === '2026-10-19');
+  check('P1 repro: server full count is 21 sessions / 21 unmeasured completed sets',
+    bucket?.sessions === 21 && bucket?.measured_completed_sets === 0 && bucket?.unmeasured_completed_sets === 21,
+    `sessions=${bucket?.sessions} unmeasured=${bucket?.unmeasured_completed_sets}`);
+  const sample20 = clientWorkouts.slice(0, 20); // the capped recent sample
+  const oldWay = C.currentWeekSummary(sample20, NOW22);
+  check('P1 repro: the capped sample alone still yields only 20/20 (the old, wrong-as-total reading)',
+    oldWay.sessions.length === 20 && oldWay.completedSets === 20);
+  const t = C.currentWeekSummaryWithTotals(sample20, summaries, NOW22);
+  check('P1 repro: totals read 21/21 while the detail stays 20 sessions / 20 sets, 1 not expanded',
+    t.hasFullTotals === true && t.totalSessions === 21 && t.totalCompletedSets === 21
+    && t.detailCount === 20 && t.detailCompletedSets === 20 && t.missingDetailCount === 1
+    && t.sessions.length === 20,
+    `totals=${t.totalSessions}/${t.totalCompletedSets} detail=${t.detailCount}/${t.detailCompletedSets} missing=${t.missingDetailCount}`);
+}
+{
+  // 21+: 25 sessions, sample of 20 -> 5 not expanded.
+  const { serverWorkouts, serverSets, clientWorkouts } = weekOfSessions(25);
+  const summaries = S.summarizeWeekSummaries(serverWorkouts, serverSets, NOW22);
+  const t = C.currentWeekSummaryWithTotals(clientWorkouts.slice(0, 20), summaries, NOW22);
+  check('P1 totals: 25 sessions with a 20-row sample -> totals 25/25, missing 5',
+    t.totalSessions === 25 && t.totalCompletedSets === 25 && t.detailCount === 20 && t.missingDetailCount === 5,
+    `missing=${t.missingDetailCount}`);
+}
+{
+  // In-progress exclusion + completed_at week attribution + cross-week.
+  const { serverWorkouts, serverSets, clientWorkouts } = weekOfSessions(2);
+  const active = mkWorkout(3001, 'legs', iso(2026, 10, 22, 9), null, 6, 2);
+  const lateSaved = unmeasuredClientWorkout(3002, iso(2026, 10, 17, 18), iso(2026, 10, 19, 9));
+  const lastSunday = unmeasuredClientWorkout(3003, iso(2026, 10, 18, 7), iso(2026, 10, 18, 8));
+  const allServerWorkouts = [...serverWorkouts, srvWorkout(3002, iso(2026, 10, 19, 9)), srvWorkout(3003, iso(2026, 10, 18, 8))];
+  const allServerSets = [...serverSets, ...srvSets(3002, [{ weight: null, reps: 10, completed: true }]), ...srvSets(3003, [{ weight: null, reps: 10, completed: true }])];
+  const summaries = S.summarizeWeekSummaries(allServerWorkouts, allServerSets, NOW22);
+  const t = C.currentWeekSummaryWithTotals([...clientWorkouts, active, lateSaved, lastSunday], summaries, NOW22);
+  check('P1 totals: active workout excluded from detail and totals (3 saved sessions this week)',
+    t.detailCount === 3 && t.totalSessions === 3 && t.missingDetailCount === 0,
+    `detail=${t.detailCount} totals=${t.totalSessions}`);
+  check('P1 totals: late-saved record counts in the week of its completed_at (Monday), in detail and bucket alike',
+    t.sessions.some((w) => w.id === 3002)
+    && summaries.find((b) => b.week_start === '2026-10-19')?.sessions === 3);
+  check('P1 totals: last Sunday belongs to the previous bucket only, never this week',
+    !t.sessions.some((w) => w.id === 3003)
+    && summaries.find((b) => b.week_start === '2026-10-12')?.sessions === 1);
+}
+{
+  // LA DST-end week: fallback on Sun 2026-11-01. Sessions on Mon
+  // 10-26 and on the fallback Sunday itself share bucket 2026-10-26,
+  // and the client's local-Monday key must match it.
+  const nowSun = local(2026, 11, 1, 12);
+  const serverWorkouts = [srvWorkout(4001, iso(2026, 10, 26, 8)), srvWorkout(4002, iso(2026, 11, 1, 10))];
+  const serverSets = [...srvSets(4001, [{ weight: null, reps: 10, completed: true }]), ...srvSets(4002, [{ weight: null, reps: 10, completed: true }])];
+  const summaries = S.summarizeWeekSummaries(serverWorkouts, serverSets, nowSun);
+  const client = [unmeasuredClientWorkout(4001, iso(2026, 10, 26, 7), iso(2026, 10, 26, 8)), unmeasuredClientWorkout(4002, iso(2026, 11, 1, 9), iso(2026, 11, 1, 10))];
+  const t = C.currentWeekSummaryWithTotals(client, summaries, nowSun);
+  check('P1 totals: DST-end week (fallback Sun 2026-11-01) bucket 2026-10-26 matches the client Monday key',
+    summaries.some((b) => b.week_start === '2026-10-26' && b.sessions === 2)
+    && t.hasFullTotals === true && t.totalSessions === 2 && t.totalCompletedSets === 2 && t.detailCount === 2,
+    `hasFullTotals=${t.hasFullTotals} totals=${t.totalSessions}`);
+}
+{
+  // Older response shapes: no week_summaries at all, an empty list,
+  // or buckets with no current-week match -> sample wording only.
+  const { clientWorkouts } = weekOfSessions(3);
+  const noField = C.currentWeekSummaryWithTotals(clientWorkouts, undefined, NOW22);
+  const empty = C.currentWeekSummaryWithTotals(clientWorkouts, [], NOW22);
+  const stale = C.currentWeekSummaryWithTotals(clientWorkouts, [
+    { week_start: '2026-09-28', sessions: 9, measured_completed_sets: 9, unmeasured_completed_sets: 0, volume_lb: 0, volume_kg: 0 },
+  ], NOW22);
+  check('P1 totals: missing/empty/unmatched week_summaries -> hasFullTotals=false, totals fall back to the sample',
+    noField.hasFullTotals === false && empty.hasFullTotals === false && stale.hasFullTotals === false
+    && noField.totalSessions === 3 && noField.totalCompletedSets === 3 && noField.missingDetailCount === 0);
+  const zeroSample = C.currentWeekSummaryWithTotals([], undefined, NOW22);
+  check('P1 totals: no full totals and an empty sample -> zero sample counts, still not a full-week claim',
+    zeroSample.hasFullTotals === false && zeroSample.detailCount === 0 && zeroSample.totalSessions === 0);
+}
+{
+  // UI copy + wiring for the two CurrentWeekProgress call sites.
+  check('P1 copy: without full totals the header is sample-worded with the unconfirmed marker',
+    clientSrc.includes('最近样本内已保存完成 {summary.detailCount} 次 · 共 {summary.detailCompletedSets} 组（全周总数未确认）'));
+  check('P1 copy: without full totals an empty sample never claims the week is empty',
+    clientSrc.includes('最近样本内暂无已保存完成记录（全周未确认）'));
+  check('P1 copy: unexpanded detail sessions are stated in words and numbers',
+    clientSrc.includes('明细展示最近 {summary.detailCount} 条，其余 {summary.missingDetailCount} 条未在明细中展开'));
+  check('P1 copy: the component reads totals through currentWeekSummaryWithTotals',
+    clientSrc.includes('const summary = currentWeekSummaryWithTotals(workouts, weekSummaries);'));
+  check('P1 wiring: App passes the dashboard week_summaries to BOTH pages',
+    (clientSrc.match(/weekSummaries=\{dashboard\.data\.week_summaries\}/g) ?? []).length === 2);
+  check('P1 wiring: the compact (active workout) variant receives weekSummaries',
+    clientSrc.includes('weekSummaries={weekSummaries} activeWorkout={workout} compact'));
+  const startScreenSlice = clientSrc.slice(clientSrc.indexOf('function StartScreen'), clientSrc.indexOf('export function App'));
+  check('P1 wiring: the start page passes weekSummaries into CurrentWeekProgress',
+    startScreenSlice.includes('weekSummaries={weekSummaries}'));
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

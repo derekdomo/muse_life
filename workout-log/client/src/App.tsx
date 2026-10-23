@@ -10,6 +10,7 @@ type Workout = NonNullable<Dashboard["active_workout"]>;
 type WorkoutSet = Workout["sets"][number];
 type Routine = Workout["routine"];
 type Unit = Workout["unit"];
+type WeekSummary = Dashboard["week_summaries"][number];
 
 const ROUTINE_META: Record<Routine, { label: string; title: string; day: string; count: string; warmup: string }> = {
   push: {
@@ -502,6 +503,62 @@ export function currentWeekSummary(workouts: Workout[], now = new Date()) {
   };
 }
 
+// W2.3 (P1 fix): full-week totals for the in-progress week. The detail
+// sessions above come from getDashboard's recent_workouts, which is a
+// capped sample (recent_limit) — with more saved sessions this week
+// than the cap, the sample silently undercounts the week and must
+// never be reported as the week's total. The dashboard's
+// week_summaries are computed server-side from ALL completed workouts
+// of the last 21 days with no limit, so the bucket whose week_start
+// matches this week's Monday (local date, YYYY-MM-DD) is the
+// full-week truth: its sessions is the week's total session count,
+// and measured + unmeasured completed sets is the week's total
+// completed-set count (completed sets without a measured load count
+// too). When week_summaries is missing, empty, or has no matching
+// bucket (e.g. an older response), hasFullTotals is false and the
+// totals fall back to the detail sample's own counts — callers must
+// then label them as sample counts, never as the full week. Pure: no
+// IO, and the two-argument currentWeekSummary above keeps its exact
+// semantics for the detail list.
+export function currentWeekSummaryWithTotals(
+  workouts: Workout[],
+  weekSummaries: readonly WeekSummary[] | null | undefined,
+  now = new Date(),
+) {
+  const detail = currentWeekSummary(workouts, now);
+  const detailCount = detail.sessions.length;
+  const detailCompletedSets = detail.completedSets;
+  const monday = detail.start;
+  const mondayKey = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`;
+  const bucket = weekSummaries?.find((entry) => entry.week_start === mondayKey) ?? null;
+  if (!bucket) {
+    return {
+      start: detail.start,
+      today: detail.today,
+      sessions: detail.sessions,
+      totalSessions: detailCount,
+      totalCompletedSets: detailCompletedSets,
+      detailCount,
+      detailCompletedSets,
+      hasFullTotals: false,
+      missingDetailCount: 0,
+    };
+  }
+  const totalSessions = bucket.sessions;
+  const totalCompletedSets = bucket.measured_completed_sets + bucket.unmeasured_completed_sets;
+  return {
+    start: detail.start,
+    today: detail.today,
+    sessions: detail.sessions,
+    totalSessions,
+    totalCompletedSets,
+    detailCount,
+    detailCompletedSets,
+    hasFullTotals: true,
+    missingDetailCount: Math.max(0, totalSessions - detailCount),
+  };
+}
+
 function targetRange(target: string) {
   const values = target.match(/\d+/g)?.map(Number).filter(Number.isFinite) ?? [];
   const first = values[0] ?? 0;
@@ -951,32 +1008,47 @@ export function muscleReceiptFacts(workout: Workout): MuscleReceiptFacts {
 // W2.3: the in-progress week layer, shown above the previous
 // complete week's review. It reports ONLY what is already saved:
 // each saved-completed session of this week (Monday through today)
-// with its completed/total set counts, plus a totals line. A workout
-// still being recorded is named on its own line and never folded
-// into the completed counts. With zero saved sessions it says
-// exactly that — no inference about whether the user trained, and
-// no suggestion. On the start page each session row is a button
-// opening that record in History (the same focus mechanism the
-// receipt uses); the compact variant on the active-workout page
-// renders the same facts without the navigation.
-function CurrentWeekProgress({ workouts, activeWorkout, onOpenWorkout, compact }: {
+// with its completed/total set counts, plus a totals line. The
+// totals come from the server's full-week week_summaries bucket
+// (currentWeekSummaryWithTotals): the detail list below is only the
+// recent_workouts sample, so when the sample cannot show every
+// session of the week a line says how many are not expanded, and
+// when no full-week bucket is available the totals are labelled as
+// sample counts instead of week totals. A workout still being
+// recorded is named on its own line and never folded into the
+// completed counts. With zero saved sessions it says exactly that —
+// no inference about whether the user trained, and no suggestion. On
+// the start page each session row is a button opening that record in
+// History (the same focus mechanism the receipt uses); the compact
+// variant on the active-workout page renders the same facts without
+// the navigation.
+function CurrentWeekProgress({ workouts, weekSummaries, activeWorkout, onOpenWorkout, compact }: {
   workouts: Workout[];
+  weekSummaries?: readonly WeekSummary[] | null;
   activeWorkout?: Workout | null;
   onOpenWorkout?: (workoutId: number) => void;
   compact?: boolean;
 }) {
-  const summary = currentWeekSummary(workouts);
+  const summary = currentWeekSummaryWithTotals(workouts, weekSummaries);
   const title = `本周进行中 · ${compactDate(summary.start)}–${compactDate(summary.today)}`;
   return (
     <section className={`current-week${compact ? " current-week-compact" : ""}`} aria-label={title}>
       <div className="current-week-head">
         <h2>{title}</h2>
-        {summary.sessions.length > 0 ? (
-          <span>已保存完成 {summary.sessions.length} 次 · 共 {summary.completedSets} 组</span>
+        {summary.hasFullTotals ? (
+          summary.totalSessions > 0 ? (
+            <span>已保存完成 {summary.totalSessions} 次 · 共 {summary.totalCompletedSets} 组</span>
+          ) : null
+        ) : summary.detailCount > 0 ? (
+          <span>最近样本内已保存完成 {summary.detailCount} 次 · 共 {summary.detailCompletedSets} 组（全周总数未确认）</span>
         ) : null}
       </div>
       {summary.sessions.length === 0 ? (
-        <p className="current-week-empty">本周暂无已保存完成记录</p>
+        summary.hasFullTotals && summary.totalSessions > 0 ? null : (
+          <p className="current-week-empty">
+            {summary.hasFullTotals ? "本周暂无已保存完成记录" : "最近样本内暂无已保存完成记录（全周未确认）"}
+          </p>
+        )
       ) : (
         <ul className="current-week-list">
           {summary.sessions.map((workout) => {
@@ -1001,6 +1073,9 @@ function CurrentWeekProgress({ workouts, activeWorkout, onOpenWorkout, compact }
           })}
         </ul>
       )}
+      {summary.hasFullTotals && summary.missingDetailCount > 0 ? (
+        <p className="current-week-note">明细展示最近 {summary.detailCount} 条，其余 {summary.missingDetailCount} 条未在明细中展开</p>
+      ) : null}
       {activeWorkout ? (
         <p className="current-week-active">正在记录：{ROUTINE_META[activeWorkout.routine].title}（未计入完成数）</p>
       ) : null}
@@ -2295,9 +2370,10 @@ function RestAutoToggle({ timer, onChange }: {
   );
 }
 
-function ActiveWorkout({ workout, recent, onCompleted }: {
+function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
   workout: Workout;
   recent: Workout[];
+  weekSummaries?: readonly WeekSummary[] | null;
   // W4.3-D1: fired once with this workout's id when completeWorkout
   // has genuinely succeeded, so App can show the completion receipt
   // for exactly this record on the start page.
@@ -2741,7 +2817,7 @@ function ActiveWorkout({ workout, recent, onCompleted }: {
         </div>
       </header>
 
-      <CurrentWeekProgress workouts={recent} activeWorkout={workout} compact />
+      <CurrentWeekProgress workouts={recent} weekSummaries={weekSummaries} activeWorkout={workout} compact />
 
       <div className="progress-track" aria-label={`已完成 ${doneCount} 组，共 ${total} 组`}>
         <span style={{ width: `${total ? (doneCount / total) * 100 : 0}%` }} />
@@ -3330,8 +3406,9 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, comparableHistory, receiptId, onCloseReceipt }: {
+function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCloseReceipt }: {
   recent: Workout[];
+  weekSummaries?: readonly WeekSummary[] | null;
   comparableHistory?: ComparableHistoryEntry[];
   // W4.3-D1: the workoutId this session just finished, or null. The
   // receipt renders non-blockingly at the top of the start page.
@@ -3384,6 +3461,7 @@ function StartScreen({ recent, comparableHistory, receiptId, onCloseReceipt }: {
 
       <CurrentWeekProgress
         workouts={recent}
+        weekSummaries={weekSummaries}
         onOpenWorkout={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}
       />
 
@@ -3481,11 +3559,13 @@ export function App() {
         <ActiveWorkout
           workout={dashboard.data.active_workout}
           recent={dashboard.data.recent_workouts}
+          weekSummaries={dashboard.data.week_summaries}
           onCompleted={(workoutId) => setReceiptId(workoutId)}
         />
       ) : (
         <StartScreen
           recent={dashboard.data.recent_workouts}
+          weekSummaries={dashboard.data.week_summaries}
           comparableHistory={dashboard.data.comparable_history}
           receiptId={receiptId}
           onCloseReceipt={() => setReceiptId(null)}
