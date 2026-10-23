@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
@@ -840,10 +840,71 @@ const readinessHistoryPointSchema = z.object({
   score: z.number().min(0).max(10).nullable(),
 });
 
+// H3.5 周复盘「下周重点」反馈 (migration 0016): one stored feedback row
+// as returned to the client — focus identity, window, the save-time
+// focus/basis wording snapshots, the rule version, the owner's
+// feedback, its revision, and when it was last saved. No health values
+// are ever part of this shape.
+const weekFocusFeedbackRowSchema = z.object({
+  focusKey: z.string(),
+  windowStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  windowEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  focusText: z.string(),
+  basisText: z.string(),
+  ruleVersion: z.number().int(),
+  feedback: z.enum(["有帮助", "不适用"]),
+  revision: z.number().int(),
+  updatedAt: z.string(),
+});
+
+// The fixed rule version stamped on every week-focus feedback row.
+const WEEK_FOCUS_RULE_VERSION = 1;
+
+// focusKey is computed HERE, never trusted from the client: window
+// start + window end + the health snapshot version (the snapshot
+// payload's updatedAt — the same version caliber the readiness archive
+// stores as snapshotVersion). One key therefore names exactly one
+// review window of exactly one snapshot version.
+function weekFocusKey(windowStart: string, windowEnd: string, snapshotVersion: string): string {
+  return `${windowStart}|${windowEnd}|${snapshotVersion}`;
+}
+
+function isRealDateString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const candidate = new Date(`${value}T12:00:00Z`);
+  return !Number.isNaN(candidate.getTime()) && candidate.toISOString().slice(0, 10) === value;
+}
+
+const saveWeekFocusFeedbackRequest = z.object({
+  windowStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  windowEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  focusText: z.string().min(1).max(500),
+  basisText: z.string().max(1000),
+  snapshotVersion: z.string().min(1).max(200),
+  feedback: z.enum(["有帮助", "不适用"]),
+});
+
+const saveWeekFocusFeedbackResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  focusKey: z.string().nullable(),
+  feedback: z.enum(["有帮助", "不适用"]).nullable(),
+  revision: z.number().int().nullable(),
+  message: z.string(),
+});
+
 const getDashboardResponse = z.object({
   forbidden: z.boolean(),
   snapshot: snapshotSchema.nullable(),
   readiness: readinessSchema.nullable(),
+  // H3.5: the owner's feedback on the current review window's focus
+  // (current) and the most recent feedback row belonging to any other
+  // window/snapshot (previous), for the rolling look-back. Both null
+  // for non-owners and whenever no row exists — never fabricated.
+  focusFeedback: z.object({
+    current: weekFocusFeedbackRowSchema.nullable(),
+    previous: weekFocusFeedbackRowSchema.nullable(),
+  }),
   // The 7 archive-backed trend points ending at the readiness date,
   // ascending. Empty when there is no usable health snapshot.
   readinessHistory: z.array(readinessHistoryPointSchema).max(7),
@@ -2058,6 +2119,46 @@ async function loadReadinessTrendPoints(ctx: Ctx, endDate: string): Promise<Read
   }
 }
 
+type WeekFocusFeedbackRow = z.infer<typeof weekFocusFeedbackRowSchema>;
+
+// H3.5: read the two feedback rows the week-review panel needs. current
+// is the row whose server-computed key matches THIS snapshot's review
+// window (window_end = snapshot.dataDate, window_start = dataDate − 6)
+// and THIS snapshot version — a row from an older snapshot of the same
+// window is NOT current, because the focus wording may have changed
+// with the data. previous is the most recent other row (window_end
+// desc, updated_at desc) for the rolling look-back. A read failure
+// degrades to two nulls rather than breaking the dashboard response.
+async function loadFocusFeedback(ctx: Ctx, dataDate: string, snapshotVersion: string): Promise<{ current: WeekFocusFeedbackRow | null; previous: WeekFocusFeedbackRow | null }> {
+  const empty = { current: null, previous: null };
+  try {
+    const db = ctx.db<typeof schema>();
+    const currentKey = weekFocusKey(shiftDate(dataDate, -6), dataDate, snapshotVersion);
+    const toRow = (row: typeof schema.weekFocusFeedback.$inferSelect): WeekFocusFeedbackRow => ({
+      focusKey: row.focusKey,
+      windowStart: row.windowStart,
+      windowEnd: row.windowEnd,
+      focusText: row.focusText,
+      basisText: row.basisText,
+      ruleVersion: row.ruleVersion,
+      feedback: row.feedback,
+      revision: row.revision,
+      updatedAt: row.updatedAt.toISOString(),
+    });
+    const currentRows = await db.select().from(schema.weekFocusFeedback).where(eq(schema.weekFocusFeedback.focusKey, currentKey)).limit(1);
+    const previousRows = await db.select().from(schema.weekFocusFeedback)
+      .where(ne(schema.weekFocusFeedback.focusKey, currentKey))
+      .orderBy(desc(schema.weekFocusFeedback.windowEnd), desc(schema.weekFocusFeedback.updatedAt))
+      .limit(1);
+    return {
+      current: currentRows[0] ? toRow(currentRows[0]) : null,
+      previous: previousRows[0] ? toRow(previousRows[0]) : null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 // Archive one computed readiness under its date (H-LOAD-001, owner-
 // approved 2026-10-18; H-ARCHIVE-SAFE-001 hardening). Two safety gates:
 // (1) Date gate: only LA today may be archived. `todayLA` is the caller's
@@ -3077,7 +3178,7 @@ export const Actions = {
   getDashboard: defineAction({
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3097,7 +3198,7 @@ export const Actions = {
       if (healthLoad.state !== "ok" || !healthLoad.snapshot) {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
-        return { forbidden: false, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
+        return { forbidden: false, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3141,7 +3242,13 @@ export const Actions = {
       // displayed for LA today is recorded.
       await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, checkinRevision, laTodayString());
       const readinessHistory = await loadReadinessTrendPoints(ctx, readinessDate);
-      return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength };
+      // H3.5: the current window is derived from the same snapshot the
+      // client renders (window_end = dataDate) and the snapshot version
+      // is the payload updatedAt — the caliber the readiness archive
+      // uses — so the server's current key and the client's card key
+      // name the same focus identity.
+      const focusFeedback = await loadFocusFeedback(ctx, health.dataDate, health.updatedAt);
+      return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
 
@@ -3394,6 +3501,65 @@ export const Actions = {
         .onConflictDoUpdate({ target: schema.morningCheckin.date, set: { feeling: args.feeling, revision: sql`COALESCE(${schema.morningCheckin.revision}, 0) + 1`, updatedAt: now } });
       ctx.invalidateQueries(["dashboard"]);
       return { ok: true, forbidden: false };
+    },
+  }),
+
+  // H3.5: save the owner's feedback （有帮助 / 不适用） on one derived
+  // week-review focus. STRICT owner gate — a non-owner gets forbidden
+  // and ZERO writes. The focus key is computed here from window +
+  // snapshot version; any key the client might send is ignored (it is
+  // not even in the request schema). The upsert is idempotent for a
+  // repeated identical choice (no revision bump, no write at all) and
+  // advances revision atomically inside the statement when the choice
+  // changes. Feedback is an applicability opinion only: it touches no
+  // plan, score, XP/gold, or training record.
+  saveWeekFocusFeedback: defineAction({
+    request: saveWeekFocusFeedbackRequest, response: saveWeekFocusFeedbackResponse,
+    async handler(ctx, args): Promise<z.infer<typeof saveWeekFocusFeedbackResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, focusKey: null, feedback: null, revision: null, message: "仅所有者可提交反馈" };
+      if (!isRealDateString(args.windowStart) || !isRealDateString(args.windowEnd) || args.windowStart > args.windowEnd) {
+        return { ok: false, forbidden: false, focusKey: null, feedback: null, revision: null, message: "复盘窗口日期不合法" };
+      }
+      const focusKey = weekFocusKey(args.windowStart, args.windowEnd, args.snapshotVersion);
+      const db = ctx.db<typeof schema>();
+      const existingRows = await db.select({ feedback: schema.weekFocusFeedback.feedback, revision: schema.weekFocusFeedback.revision })
+        .from(schema.weekFocusFeedback).where(eq(schema.weekFocusFeedback.focusKey, focusKey)).limit(1);
+      const existing = existingRows[0];
+      if (existing && existing.feedback === args.feedback) {
+        // Same key, same choice: idempotent — no write, no revision bump.
+        return { ok: true, forbidden: false, focusKey, feedback: args.feedback, revision: existing.revision, message: "反馈已保存" };
+      }
+      const now = new Date();
+      await db.insert(schema.weekFocusFeedback).values({
+        focusKey,
+        windowStart: args.windowStart,
+        windowEnd: args.windowEnd,
+        focusText: args.focusText,
+        basisText: args.basisText,
+        ruleVersion: WEEK_FOCUS_RULE_VERSION,
+        snapshotVersion: args.snapshotVersion,
+        feedback: args.feedback,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }).onConflictDoUpdate({
+        target: schema.weekFocusFeedback.focusKey,
+        set: {
+          windowStart: args.windowStart,
+          windowEnd: args.windowEnd,
+          focusText: args.focusText,
+          basisText: args.basisText,
+          ruleVersion: WEEK_FOCUS_RULE_VERSION,
+          snapshotVersion: args.snapshotVersion,
+          feedback: args.feedback,
+          revision: sql`${schema.weekFocusFeedback.revision} + 1`,
+          updatedAt: now,
+        },
+      });
+      const savedRows = await db.select({ revision: schema.weekFocusFeedback.revision })
+        .from(schema.weekFocusFeedback).where(eq(schema.weekFocusFeedback.focusKey, focusKey)).limit(1);
+      ctx.invalidateQueries(["dashboard"]);
+      return { ok: true, forbidden: false, focusKey, feedback: args.feedback, revision: savedRows[0]?.revision ?? 1, message: "反馈已保存" };
     },
   }),
 

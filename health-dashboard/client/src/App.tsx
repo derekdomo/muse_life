@@ -31,6 +31,7 @@ type UnifiedDay = DashboardResponse["unifiedTimeline"][number];
 type StrengthTraining = NonNullable<DashboardResponse["strength"]>;
 type ReadinessHistoryPoint = DashboardResponse["readinessHistory"][number];
 type SourceState = DashboardResponse["healthState"];
+type FocusFeedbackData = DashboardResponse["focusFeedback"];
 type GameState = ApiResponse<typeof api, "getGameState">;
 type GameCategory = GameState["settlements"][number]["category"];
 type RewardsState = ApiResponse<typeof api, "getRewards">;
@@ -1768,7 +1769,7 @@ export function weekReview(
   })();
   const listAtCap = historyWorkouts.length >= 100;
   const windowRangeCovered = (dates: string[]): boolean =>
-    !listAtCap && (storedRangeStart === null || (dates.length > 0 && storedRangeStart <= dates[0]));
+    !listAtCap && (storedRangeStart === null || (dates.length > 0 && storedRangeStart <= (dates[0] ?? "")));
   const reviewRangeCovered = windowRangeCovered(reviewDates);
   const comparisonRangeCovered = windowRangeCovered(comparisonDates);
   const baselineRangeCovered = windowRangeCovered(baselineDates);
@@ -1825,22 +1826,6 @@ export function weekReview(
       { versus: "comparison" as const, label: "前 7 天", mean: stat.comparisonMean, n: stat.comparisonN, days: comparisonDates.length, start: comparisonDates[0] ?? dataDate, end: comparisonDates[comparisonDates.length - 1] ?? dataDate, dated: stat.comparisonDated },
       { versus: "baseline" as const, label: "28 天基线", mean: stat.baselineMean, n: stat.baselineN, days: baselineDates.length, start: baselineDates[0] ?? dataDate, end: baselineDates[baselineDates.length - 1] ?? dataDate, dated: stat.baselineDated },
     ];
-    // H3.3 leave-one-out single-day influence: the mean of a dated
-    // window with its single most-deviating day removed. If the
-    // apparent difference collapses below the practical threshold
-    // after removing ONE day from either side, that day alone is
-    // driving the "trend" and no insight may be generated from it.
-    const looMean = (dated: Array<{ date: string; value: number }>, mean: number): number | null => {
-      if (dated.length < 2) return null;
-      let worstIndex = 0;
-      let worstDeviation = -1;
-      dated.forEach((entry, index) => {
-        const deviation = Math.abs(entry.value - mean);
-        if (deviation > worstDeviation) { worstDeviation = deviation; worstIndex = index; }
-      });
-      const rest = dated.filter((_, index) => index !== worstIndex).map((entry) => entry.value);
-      return meanOf(rest);
-    };
     let best: WeekReviewInsight | null = null;
     for (const other of versusWindows) {
       const otherMean = other.mean;
@@ -1864,28 +1849,39 @@ export function weekReview(
         return deviation * directionSign > 0 && Math.abs(deviation) >= thresholdAbs;
       }).length;
       if (supportDays < MIN_SUPPORT_DAYS) continue;
-      // H3.3 (PM 2026-10-23): the support rule above counts review
-      // days against the OTHER window's mean — but one isolated
-      // abnormal day INSIDE the other window drags that mean until
-      // every normal review day looks like support. Leave-one-out on
-      // both sides: with the single most-deviating day removed from
-      // the other window, and separately from the review window, the
-      // difference must still reach the practical threshold (the
-      // threshold itself is recomputed against the reduced mean for
-      // percentage metrics). Otherwise a single原始日期 is the whole
-      // "trend" and this candidate is skipped; the day's value stays
-      // in every reported mean and count exactly as recorded.
-      const otherLooMean = looMean(other.dated, otherMean);
-      if (otherLooMean !== null) {
-        const looDiff = reviewMean - otherLooMean;
-        const looThreshold = def.thresholdKind === "abs" ? def.threshold : def.threshold * otherLooMean;
-        if (looThreshold <= 0 || Math.abs(looDiff) < looThreshold || Math.sign(looDiff) !== directionSign) continue;
+      // H3.3 leave-one-out influence check, applied to BOTH windows:
+      // removing the single most influential day from either side
+      // must leave a difference that still reaches the practical
+      // threshold — percentage thresholds recomputed against the
+      // post-removal other-window mean — and keeps its direction.
+      // (Checking every single-day removal is equivalent: the mean
+      // moves monotonically with the removed value, so the removal
+      // that hurts the difference most is the binding one.) An
+      // isolated abnormal day on the comparison or baseline side —
+      // invisible to the review-side support rule above — fails
+      // here, so it generates no insight and no action. The stored
+      // values themselves are untouched: every mean and count above
+      // still includes the day exactly as recorded. Three-plus
+      // consecutive same-direction days and a whole shifted week
+      // survive, because no single removal collapses them.
+      const reviewValuesOnly = stat.reviewDated.map((entry) => entry.value);
+      const otherValuesOnly = other.dated.map((entry) => entry.value);
+      const looHolds = (rMean: number, oMean: number): boolean => {
+        const looDiff = rMean - oMean;
+        if (looDiff === 0 || (looDiff > 0) !== (directionSign > 0)) return false;
+        const looThreshold = def.thresholdKind === "abs" ? def.threshold : def.threshold * oMean;
+        return looThreshold > 0 && Math.abs(looDiff) >= looThreshold;
+      };
+      let looSurvives = true;
+      for (let i = 0; i < reviewValuesOnly.length && looSurvives; i++) {
+        const restMean = meanOf(reviewValuesOnly.filter((_, j) => j !== i));
+        if (restMean === null || !looHolds(restMean, otherMean)) looSurvives = false;
       }
-      const reviewLooMean = looMean(stat.reviewDated, reviewMean);
-      if (reviewLooMean !== null) {
-        const looDiff = reviewLooMean - otherMean;
-        if (Math.abs(looDiff) < thresholdAbs || Math.sign(looDiff) !== directionSign) continue;
+      for (let i = 0; i < otherValuesOnly.length && looSurvives; i++) {
+        const restMean = meanOf(otherValuesOnly.filter((_, j) => j !== i));
+        if (restMean === null || !looHolds(reviewMean, restMean)) looSurvives = false;
       }
+      if (!looSurvives) continue;
       const magnitude = Math.abs(diff) / thresholdAbs;
       const direction: "up" | "down" = diff > 0 ? "up" : "down";
       const pctText = otherMean > 0 ? `（约 ${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff / otherMean) * 100, 0)}%）` : "";
@@ -1903,7 +1899,7 @@ export function weekReview(
         explanation: `${copyFor(explanations, def.key, direction, "可能与近期生活与训练安排的变化有关")}；这只是可能性，不是因果结论，也不是医疗判断。`,
         action: copyFor(actions, def.key, direction, "保持现有节奏，下周继续观察。"),
         confidence,
-        confidenceNote: `复盘窗有效 ${stat.reviewN}/${reviewDates.length} 天 · 对照窗有效 ${other.n}/${other.days} 天 · 复盘窗 ${supportDays} 天单独达到同向实用差异（趋势洞察要求至少 ${MIN_SUPPORT_DAYS} 天，单日异常不触发）· 已做两侧留一单日影响检查（任一侧去掉影响最大的一天后差异仍达到阈值）${coverageComplete ? "" : " · 完整性未确认"}`,
+        confidenceNote: `复盘窗有效 ${stat.reviewN}/${reviewDates.length} 天 · 对照窗有效 ${other.n}/${other.days} 天 · 复盘窗 ${supportDays} 天单独达到同向实用差异（趋势洞察要求至少 ${MIN_SUPPORT_DAYS} 天，单日异常不触发） · 已做两侧留一单日影响检查${coverageComplete ? "" : " · 完整性未确认"}`,
         magnitude,
       };
       if (best === null || insight.magnitude > best.magnitude) best = insight;
@@ -2028,8 +2024,9 @@ function freshnessShort(freshness: DataStatus["health"]["freshness"] | undefined
   return "未同步";
 }
 
-function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, onSyncHealth, onSyncStrength, syncing }: {
+function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, focusFeedback, focusReadFailed, onSyncHealth, onSyncStrength, syncing }: {
   snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null;
+  focusFeedback: FocusFeedbackData; focusReadFailed: boolean;
   onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean;
 }) {
   const recovery = recoveryScore(readiness);
@@ -2116,7 +2113,7 @@ function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, onSyncHe
         ) : null}
       </div>
       <SevenDayFacts snapshot={snapshot} />
-      <WeekReviewPanel snapshot={snapshot} />
+      <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />
     </section>
   );
 }
@@ -2182,14 +2179,101 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// H3.5: pure save-state machine for the week-review focus feedback card.
+// No React, no I/O — the panel feeds it server reads and save outcomes
+// and renders whatever state comes back; repo validators extract these
+// functions by name and run them standalone.
+//
+// boundKey is the focus identity the card is bound to: review-window
+// start + end + health snapshot version — the same string the server
+// computes its focus_key from. confirmed is the last server-confirmed
+// feedback for that key (or a save this machine has seen succeed);
+// selection is what the card currently shows as chosen; status is the
+// save lifecycle. The two guards that matter:
+//  - a save callback only lands when the key it was started for still
+//    equals boundKey: a late success for a previous window/snapshot can
+//    never stamp its choice onto the new focus;
+//  - a failed re-read (readFailed) never overwrites a known confirmed
+//    value with "not yet given" — the unknown stays visibly unknown.
+
+export type FocusFeedbackChoice = "有帮助" | "不适用";
+export type FocusFeedbackSaveStatus = "idle" | "saving" | "saved" | "error";
+
+export interface FocusFeedbackState {
+  boundKey: string | null;
+  confirmed: FocusFeedbackChoice | null;
+  selection: FocusFeedbackChoice | null;
+  status: FocusFeedbackSaveStatus;
+  readFailed: boolean;
+}
+
+export function focusFeedbackKey(windowStart: string, windowEnd: string, snapshotVersion: string): string {
+  return `${windowStart}|${windowEnd}|${snapshotVersion}`;
+}
+
+export function createFocusFeedbackState(): FocusFeedbackState {
+  return { boundKey: null, confirmed: null, selection: null, status: "idle", readFailed: false };
+}
+
+// Bind the card to a (possibly new) focus identity and merge the latest
+// server read. A different key starts a fresh card state from the
+// server row for THAT key — feedback never migrates across windows or
+// snapshot versions, even when the focus wording is identical. On the
+// same key, a failed re-read keeps the previously confirmed value and
+// flags readFailed; a successful re-read updates confirmed but never
+// clobbers an in-flight save or an unsaved choice awaiting retry.
+export function syncFocusFeedbackState(
+  state: FocusFeedbackState,
+  boundKey: string,
+  serverConfirmed: FocusFeedbackChoice | null,
+  readFailed: boolean,
+): FocusFeedbackState {
+  if (state.boundKey !== boundKey) {
+    return { boundKey, confirmed: serverConfirmed, selection: serverConfirmed, status: serverConfirmed ? "saved" : "idle", readFailed };
+  }
+  if (readFailed) return { ...state, readFailed: true };
+  if (state.status === "saving" || state.status === "error") {
+    return { ...state, confirmed: serverConfirmed, readFailed: false };
+  }
+  return { boundKey, confirmed: serverConfirmed, selection: serverConfirmed, status: serverConfirmed ? "saved" : "idle", readFailed: false };
+}
+
+// The owner tapped a feedback choice: show it immediately and mark the
+// save in flight. Choosing the other option is the same transition
+// (re-selection re-saves under the same key).
+export function beginFocusFeedbackSave(state: FocusFeedbackState, choice: FocusFeedbackChoice): FocusFeedbackState {
+  return { ...state, selection: choice, status: "saving" };
+}
+
+// A save resolved. It lands only when the key it was started for is
+// still the card's bound key; a stale callback for a previous
+// window/snapshot is dropped whole.
+export function completeFocusFeedbackSave(state: FocusFeedbackState, boundKey: string, choice: FocusFeedbackChoice): FocusFeedbackState {
+  if (state.boundKey !== boundKey) return state;
+  return { boundKey, confirmed: choice, selection: choice, status: "saved", readFailed: false };
+}
+
+// A save failed: keep the attempted choice on screen and mark it
+// unsaved, so the card can offer a retry of the same key + choice.
+export function failFocusFeedbackSave(state: FocusFeedbackState, boundKey: string): FocusFeedbackState {
+  if (state.boundKey !== boundKey) return state;
+  return { ...state, status: "error" };
+}
+
 // H3.1/H3.2/H3.3: the weekly review panel on the 今日 page, rendered
 // inside the hero after the load verdict block and the seven-day facts
-// strip. Purely presentational — every number comes from the weekReview
-// derivation above; nothing is scored, graded, or persisted, and there
-// is no helpful/not-applicable feedback control in this slice (H3.5).
+// strip. Every number comes from the weekReview derivation above;
+// nothing is scored or graded. H3.5 adds the persisted focus feedback
+// loop at the end of the panel: the owner can mark the single derived
+// focus 有帮助 / 不适用 (owner-only server action, keyed by window +
+// snapshot version), and the previous window's focus rolls back in a
+// collapsed look-back below. Feedback is an applicability opinion only
+// — it changes no plan, score, XP/gold, or training record.
 // Direction is always carried by the ▲/▼/— symbol plus 增加/减少/持平
 // wording, never by color alone.
-function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
+function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed }: { snapshot: Snapshot; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+  const queryClient = useQueryClient();
   const review = useMemo(
     () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
       coverageIncomplete: snapshot.coverageIncomplete,
@@ -2197,6 +2281,60 @@ function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
     }),
     [snapshot],
   );
+  // The card's focus identity: this review window of this snapshot
+  // version — the same identity the server keys stored feedback by.
+  const cardKey = focusFeedbackKey(review.reviewWindow.start, review.reviewWindow.end, snapshot.updatedAt);
+  const serverConfirmed: FocusFeedbackChoice | null =
+    focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.feedback : null;
+  const [feedbackState, setFeedbackState] = useState<FocusFeedbackState>(() => createFocusFeedbackState());
+  useEffect(() => {
+    setFeedbackState((prev) => syncFocusFeedbackState(prev, cardKey, serverConfirmed, focusReadFailed));
+  }, [cardKey, serverConfirmed, focusReadFailed]);
+  // The save-time basis snapshot: already-derived facts only (coverage
+  // status, first insight label + confidence) as a text summary — the
+  // same wording family the panel itself shows.
+  const firstInsight = review.insights[0];
+  const basisText = [
+    review.coverageStatusNote,
+    firstInsight ? `首条洞察：${firstInsight.label}（置信度${firstInsight.confidence}）` : "无可用洞察",
+  ].join(" · ");
+  const saveFeedback = useMutation({
+    mutationFn: (vars: { key: string; choice: FocusFeedbackChoice }) => api.saveWeekFocusFeedback({
+      windowStart: review.reviewWindow.start,
+      windowEnd: review.reviewWindow.end,
+      focusText: review.focus,
+      basisText,
+      snapshotVersion: snapshot.updatedAt,
+      feedback: vars.choice,
+    }),
+    onSuccess: (result, vars) => {
+      if (result.ok) {
+        setFeedbackState((prev) => completeFocusFeedbackSave(prev, vars.key, vars.choice));
+        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else {
+        setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key));
+      }
+    },
+    onError: (_error, vars) => setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key)),
+  });
+  const chooseFeedback = (choice: FocusFeedbackChoice) => {
+    setFeedbackState((prev) => beginFocusFeedbackSave(prev, choice));
+    saveFeedback.mutate({ key: cardKey, choice });
+  };
+  const retryFeedback = () => {
+    if (feedbackState.selection) chooseFeedback(feedbackState.selection);
+  };
+  const feedbackStatusText = feedbackState.status === "saving"
+    ? "保存中…"
+    : feedbackState.status === "error"
+      ? "未保存：这次反馈还没有记下来。"
+      : feedbackState.readFailed
+        ? feedbackState.confirmed
+          ? `读取失败：暂时读不到最新状态，上次保存的反馈是「${feedbackState.confirmed}」。`
+          : "读取失败：暂时无法确认反馈状态。"
+        : feedbackState.selection
+          ? `已反馈：${feedbackState.selection}`
+          : "尚未反馈";
   const valueText = (metric: WeekReviewMetricRow, value: number | null): string => {
     if (value === null) return metric.kind === "count" ? "未知" : "—／无记录";
     return metric.kind === "count" ? `${value} 次` : `${numberLabel(value, metric.digits)} ${metric.unit}`;
@@ -2219,7 +2357,7 @@ function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
             <li><span>基线窗</span>{fullDateLabel(review.baselineWindow.start)} – {fullDateLabel(review.baselineWindow.end)}（28 天）</li>
           </ul>
           <p className="week-review-note">健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。</p>
-          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作——对照窗或基线窗里的单个异常日同样不行：任一侧去掉影响最大的一天后差异若跌破阈值，就不生成洞察。原始单日值照常计入均值，不删除、不改动。运动次数按来源查询范围呈现：查询未覆盖基线窗全程时只标已存次数、完整性未确认，不称 28 天总数。</p>
+          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作。对照窗与基线窗一侧的单个异常日同样不会触发：生成前已做两侧留一单日影响检查，去掉任一侧影响最大的一天后，差异若跌破实用阈值或方向翻转，则不生成该洞察。原始单日值照常计入均值，不删除、不改动。运动次数按来源查询范围呈现：来源只查询最近 30 个完整日，基线窗回溯 35 天；查询范围未覆盖全程的窗口只呈现已存次数并注明完整性未确认，不作 28 天总量，存 0 次也不当作确切的 0。</p>
           <div className="week-review-rows">
             {review.metrics.map((metric) => (
               <div className="week-review-row" key={metric.key}>
@@ -2265,7 +2403,45 @@ function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
           ) : (
             <p className="week-review-nodata">无法判断：现有数据未达到生成洞察的门槛。</p>
           )}
-          <p className="week-review-focus"><span>下周重点</span>{review.focus}</p>
+          <div className="week-review-focus-block">
+            <p className="week-review-focus"><span>下周重点</span>{review.focus}</p>
+            <p className="week-review-focus-meta">本次复盘：{fullDateLabel(review.reviewWindow.start)}–{fullDateLabel(review.reviewWindow.end)}／{review.coverageStatusNote}</p>
+            {review.canJudge ? (
+              <div className="week-review-feedback">
+                <div className="week-review-feedback-actions" role="group" aria-label="下周重点反馈">
+                  {(["有帮助", "不适用"] as const).map((choice) => {
+                    const selected = feedbackState.selection === choice;
+                    return (
+                      <button
+                        key={choice}
+                        type="button"
+                        className={`week-review-feedback-btn${selected ? " selected" : ""}`}
+                        aria-pressed={selected}
+                        aria-label={`反馈这条重点：${choice}`}
+                        disabled={feedbackState.status === "saving"}
+                        onClick={() => chooseFeedback(choice)}
+                      >
+                        {selected ? "✓ " : ""}{choice}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="week-review-feedback-status" role="status">{feedbackStatusText}</p>
+                {feedbackState.status === "error" ? (
+                  <button type="button" className="week-review-retry-btn" aria-label="重试保存反馈" onClick={retryFeedback}>重试保存</button>
+                ) : null}
+                <p className="week-review-note">反馈只记录这条重点对你是否适用，不会改变任何计划、评分或记录，也不代表效果证明。</p>
+              </div>
+            ) : null}
+          </div>
+          {focusFeedback.previous ? (
+            <details className="week-review-previous">
+              <summary>上次重点 · {dateLabel(focusFeedback.previous.windowStart)}–{dateLabel(focusFeedback.previous.windowEnd)} · 已反馈：{focusFeedback.previous.feedback}</summary>
+              <p className="week-review-previous-focus">{focusFeedback.previous.focusText}</p>
+              <p className="week-review-previous-basis">当时依据：{focusFeedback.previous.basisText}</p>
+              <p className="week-review-previous-rule">规则 v{focusFeedback.previous.ruleVersion}</p>
+            </details>
+          ) : null}
         </>
       ) : null}
     </section>
@@ -2436,7 +2612,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[] }) {
+function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline, focusFeedback, focusReadFailed }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
   const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineIncomplete ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
@@ -2444,7 +2620,7 @@ function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSync
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} />
       {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
       <section className="verdict" aria-labelledby="verdict-title">
         <p>昨日概览</p>
@@ -3619,7 +3795,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null }) {
+function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -3660,7 +3836,7 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -3744,7 +3920,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.isRefetchError} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}

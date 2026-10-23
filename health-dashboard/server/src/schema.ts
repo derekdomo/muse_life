@@ -220,6 +220,35 @@ export const gameRewardGoal = sqliteTable("game_reward_goal", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// H3.5 周复盘「下周重点」反馈 (additive, migration 0016): the owner's
+// applicability opinion on ONE derived focus, keyed by the focus
+// identity the server computes itself — `${window_start}|${window_end}|
+// ${snapshot_version}` — so a feedback row belongs to exactly one
+// review window of exactly one health snapshot version; a new window
+// or a new snapshot never inherits an old row's feedback. focus_text
+// and basis_text are save-time snapshots of the derived wording (the
+// basis is a text summary of already-derived facts: confidence,
+// coverage status, first insight label). rule_version is the fixed
+// WEEK_FOCUS_RULE_VERSION constant. feedback is only ever 「有帮助」 or
+// 「不适用」. revision starts at 1 and advances atomically inside the
+// upsert statement when the owner changes their choice; re-submitting
+// the same choice is idempotent and does not advance it. This table
+// holds NO health values — only the focus wording the owner already
+// saw and their opinion of it.
+export const weekFocusFeedback = sqliteTable("week_focus_feedback", {
+  focusKey: text("focus_key").primaryKey(),
+  windowStart: text("window_start").notNull(),
+  windowEnd: text("window_end").notNull(),
+  focusText: text("focus_text").notNull(),
+  basisText: text("basis_text").notNull(),
+  ruleVersion: integer("rule_version").notNull(),
+  snapshotVersion: text("snapshot_version").notNull(),
+  feedback: text("feedback", { enum: ["有帮助", "不适用"] }).notNull(),
+  revision: integer("revision").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const syncLog = sqliteTable("sync_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   source: text("source", { enum: ["health", "strength", "system"] }).notNull(),

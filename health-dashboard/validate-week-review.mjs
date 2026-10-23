@@ -76,10 +76,10 @@ check('source: rolling-window vs natural-week note is present verbatim',
 check('source: the cannot-judge line is present verbatim',
   clientSrc.includes('无法判断：现有数据未达到生成洞察的门槛。'));
 check('source: panel is rendered on the today page inside the hero',
-  clientSrc.includes('<WeekReviewPanel snapshot={snapshot} />'));
+  clientSrc.includes('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />'));
 check('source: panel renders after the load verdict block and the seven-day facts strip',
-  clientSrc.indexOf('whoop-load') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} />')
-  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} />'));
+  clientSrc.indexOf('whoop-load') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />')
+  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />'));
 check('source: weekReview never touches readiness (formula untouched)',
   !/readiness/i.test(extractFunction(clientSrc, 'weekReview')));
 
