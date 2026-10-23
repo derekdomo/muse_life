@@ -192,6 +192,39 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .seven-facts-detail dt { color: var(--whoop-dim); font-size: 9px; font-weight: 700; }
 .seven-facts-detail dd { margin: 2px 0 0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 
+/* H3.1/H3.2/H3.3 上周复盘： lives inside the dark hero, after the load
+   verdict. Meaning rides on text, symbols (▲/▼/—) and numbers; color is
+   never the only channel, per the owner's color-vision rule. */
+.week-review { margin-top: 14px; padding: 13px 14px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
+.week-review-title { margin: 0; font-size: 14px; font-weight: 800; letter-spacing: -.01em; }
+.week-review-warn { margin: 8px 0 0; color: #f2c66d; font-size: 11px; font-weight: 700; line-height: 1.55; overflow-wrap: anywhere; }
+.week-review-windows { list-style: none; display: grid; gap: 4px; margin: 10px 0 0; padding: 0; color: #c3ccc4; font-size: 11px; line-height: 1.55; }
+.week-review-windows span { display: inline-block; min-width: 42px; margin-right: 8px; color: var(--whoop-dim); font-weight: 800; }
+.week-review-note { margin: 8px 0 0; color: var(--whoop-dim); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.week-review-rows { margin-top: 12px; border-top: 1px solid rgba(255, 255, 255, .1); }
+.week-review-row { padding: 11px 0; border-bottom: 1px solid rgba(255, 255, 255, .08); }
+.week-review-row:last-child { border-bottom: 0; padding-bottom: 2px; }
+.week-review-row-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.week-review-row-head > span { font-size: 12px; font-weight: 800; }
+.week-review-row-head strong { font-size: 16px; font-variant-numeric: tabular-nums; }
+.week-review-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.week-review-cells > div { min-width: 0; }
+.week-review-cells span { display: block; color: var(--whoop-dim); font-size: 9px; font-weight: 700; line-height: 1.4; }
+.week-review-cells strong { display: block; margin-top: 2px; font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.week-review-coverage { margin: 7px 0 0; color: var(--whoop-dim); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.week-review-insights { margin-top: 14px; }
+.week-review-insights h3 { margin: 0; font-size: 12px; font-weight: 800; }
+.week-review-insight { padding: 11px 0 2px; border-top: 1px solid rgba(255, 255, 255, .1); margin-top: 10px; }
+.week-review-insight-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.week-review-insight-head strong { font-size: 13px; }
+.week-review-confidence { padding: 3px 8px; border: 1px solid rgba(255, 255, 255, .18); border-radius: 999px; color: #cfe3d2; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.week-review-insight p { margin: 6px 0 0; color: #c3ccc4; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.week-review-insight p b { color: #f2f5f0; font-weight: 800; }
+.week-review-insight .week-review-confidence-note { color: var(--whoop-dim); font-size: 10px; }
+.week-review-nodata { margin: 12px 0 0; color: #f2c66d; font-size: 11px; font-weight: 700; line-height: 1.55; overflow-wrap: anywhere; }
+.week-review-focus { display: flex; gap: 10px; margin: 14px 0 0; padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, .12); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.week-review-focus span { flex: 0 0 auto; color: var(--accent); font-weight: 800; }
+
 .verdict { padding: 28px 0 22px; }
 .verdict > p { margin: 0 0 8px; color: var(--dim); font-size: 13px; font-weight: 700; }
 .verdict h1 { max-width: 840px; margin: 0; font-size: clamp(24px, 6.8vw, 42px); line-height: 1.28; letter-spacing: -.035em; font-weight: 650; }

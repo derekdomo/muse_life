@@ -1365,6 +1365,347 @@ function sevenDayFacts(
   };
 }
 
+// H3.1/H3.2/H3.3 weekly health review (first slice): a pure client-side
+// derivation over the already-stored snapshot history — no server,
+// schema, sync, readiness-formula, or permission change, and nothing is
+// persisted. Windows are anchored on snapshot.dataDate, the most recent
+// complete day (history dates are already America/Los_Angeles calendar
+// dates; the current partial day never enters because dataDate is by
+// definition complete): review = dataDate-6..dataDate (rolling complete
+// 7 days), comparison = dataDate-13..dataDate-7, baseline =
+// dataDate-34..dataDate-7 (28 days). Missing values are EXCLUDED from
+// every mean — never counted as 0 — and a window with no usable value
+// yields a null mean, never a fabricated one; duplicate rows for one
+// date whose values disagree mark that date unusable for that metric
+// (same rule as sevenDayFacts). An insight is generated only when BOTH
+// windows carry >= 5 valid days AND the mean difference reaches the
+// metric's pre-defined practical threshold (sleep ±30 min, HRV ±10%,
+// resting HR ±3 bpm, respiratory rate ±1 /min, steps ±20%, exercise
+// minutes ±30%), so a single abnormal day can never trigger one on its
+// own. At most 3 insights, ordered by normalized difference magnitude.
+// Self-contained (own date math, own formatting) so repo-side
+// validate-week-review.mjs can extract it by name and run the real
+// production function over synthetic fixtures.
+
+export interface WeekReviewWindowInfo {
+  start: string;
+  end: string;
+  days: number;
+}
+
+export interface WeekReviewMetricRow {
+  key: string;
+  label: string;
+  unit: string;
+  digits: number;
+  kind: "mean" | "count";
+  // Window means for kind "mean", session counts for kind "count".
+  // A null mean means the window held no usable value — never a 0.
+  reviewValue: number | null;
+  reviewN: number;
+  comparisonValue: number | null;
+  comparisonN: number;
+  // Null unless the baseline window carries at least 5 valid days;
+  // baselineNote then reads 基线数据不足 instead of a mean.
+  baselineValue: number | null;
+  baselineN: number;
+  baselineSufficient: boolean;
+  baselineNote: string | null;
+  coverageNote: string;
+  // Difference of the review window against the comparison window.
+  diff: number | null;
+  diffSymbol: "▲" | "▼" | "—";
+  diffText: string;
+}
+
+export interface WeekReviewInsight {
+  metricKey: string;
+  label: string;
+  versus: "comparison" | "baseline";
+  observation: string;
+  explanation: string;
+  action: string;
+  confidence: "较高" | "中等";
+  confidenceNote: string;
+  // |diff| / practical threshold for the chosen comparison; the sort
+  // key for the at-most-3 selection. Not a score and never rendered.
+  magnitude: number;
+}
+
+export interface WeekReviewResult {
+  valid: boolean;
+  note: string | null;
+  dataDate: string;
+  reviewWindow: WeekReviewWindowInfo;
+  comparisonWindow: WeekReviewWindowInfo;
+  baselineWindow: WeekReviewWindowInfo;
+  metrics: WeekReviewMetricRow[];
+  insights: WeekReviewInsight[];
+  canJudge: boolean;
+  focus: string;
+}
+
+interface WeekReviewMetricDef {
+  key: string;
+  label: string;
+  unit: string;
+  digits: number;
+  thresholdKind: "abs" | "pct";
+  threshold: number;
+  pick: (date: string) => number | null;
+}
+
+export function weekReview(
+  historyDaily: Array<Pick<Daily, "date" | "steps" | "exerciseMinutes" | "hrvMs" | "restingHr" | "respiratoryRate">>,
+  historySleeps: Array<Pick<Snapshot["historySleeps"][number], "date" | "totalHours">>,
+  historyWorkouts: Array<Pick<Snapshot["historyWorkouts"][number], "date">>,
+  dataDate: string,
+): WeekReviewResult {
+  const MIN_DAYS = 5;
+  const fallbackFocus = "保持现有节奏，继续积累完整数据。";
+  const shift = (date: string, days: number): string => {
+    const shifted = new Date(`${date}T12:00:00Z`);
+    shifted.setUTCDate(shifted.getUTCDate() + days);
+    return shifted.toISOString().slice(0, 10);
+  };
+  const isRealDate = (value: string): boolean => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const candidate = new Date(`${value}T12:00:00Z`);
+    return !Number.isNaN(candidate.getTime()) && candidate.toISOString().slice(0, 10) === value;
+  };
+  const fmt = (value: number, digits: number): string =>
+    value.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const md = (date: string): string => `${Number(date.slice(5, 7))}月${Number(date.slice(8, 10))}日`;
+  const anchorWindow: WeekReviewWindowInfo = { start: dataDate, end: dataDate, days: 0 };
+  if (!isRealDate(dataDate)) {
+    return {
+      valid: false,
+      note: `数据日期「${dataDate}」不合法，无法确定复盘窗口。`,
+      dataDate,
+      reviewWindow: anchorWindow,
+      comparisonWindow: anchorWindow,
+      baselineWindow: anchorWindow,
+      metrics: [],
+      insights: [],
+      canJudge: false,
+      focus: fallbackFocus,
+    };
+  }
+  const datesBack = (count: number, endOffset: number): string[] =>
+    Array.from({ length: count }, (_, index) => shift(dataDate, endOffset - (count - 1 - index)));
+  const reviewDates = datesBack(7, 0);
+  const comparisonDates = datesBack(7, -7);
+  const baselineDates = datesBack(28, -7);
+
+  type DailyField = "steps" | "exerciseMinutes" | "hrvMs" | "restingHr" | "respiratoryRate";
+  const dailyFields: DailyField[] = ["steps", "exerciseMinutes", "hrvMs", "restingHr", "respiratoryRate"];
+  const dailyByDate = new Map<string, Record<DailyField, number | null>>();
+  const dailyConflicts = new Set<string>();
+  for (const row of historyDaily) {
+    const existing = dailyByDate.get(row.date);
+    if (existing === undefined) {
+      const record = {} as Record<DailyField, number | null>;
+      for (const field of dailyFields) record[field] = row[field] ?? null;
+      dailyByDate.set(row.date, record);
+      continue;
+    }
+    for (const field of dailyFields) {
+      if (existing[field] !== (row[field] ?? null)) dailyConflicts.add(`${row.date}|${field}`);
+    }
+  }
+  const dailyValue = (date: string, field: DailyField): number | null => {
+    if (dailyConflicts.has(`${date}|${field}`)) return null;
+    return dailyByDate.get(date)?.[field] ?? null;
+  };
+  const sleepByDate = new Map<string, number>();
+  const sleepConflicts = new Set<string>();
+  for (const row of historySleeps) {
+    const value = typeof row.totalHours === "number" && Number.isFinite(row.totalHours) ? row.totalHours : null;
+    if (value === null) continue;
+    const existing = sleepByDate.get(row.date);
+    if (existing === undefined) sleepByDate.set(row.date, value);
+    else if (existing !== value) sleepConflicts.add(row.date);
+  }
+  const sleepValue = (date: string): number | null =>
+    sleepConflicts.has(date) ? null : sleepByDate.get(date) ?? null;
+
+  // The only place window values are gathered: a day contributes its
+  // value only when one is actually recorded. A missing day adds
+  // nothing — it is never pushed as 0.
+  const collect = (dates: string[], pick: (date: string) => number | null): number[] => {
+    const values: number[] = [];
+    for (const date of dates) {
+      const value = pick(date);
+      if (value !== null) values.push(value);
+    }
+    return values;
+  };
+  const meanOf = (values: number[]): number | null =>
+    values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+
+  const defs: WeekReviewMetricDef[] = [
+    { key: "sleep", label: "睡眠", unit: "小时", digits: 1, thresholdKind: "abs", threshold: 0.5, pick: sleepValue },
+    { key: "hrv", label: "HRV", unit: "ms", digits: 1, thresholdKind: "pct", threshold: 0.1, pick: (date) => dailyValue(date, "hrvMs") },
+    { key: "restingHr", label: "静息心率", unit: "bpm", digits: 1, thresholdKind: "abs", threshold: 3, pick: (date) => dailyValue(date, "restingHr") },
+    { key: "respiratoryRate", label: "呼吸频率", unit: "次/分", digits: 1, thresholdKind: "abs", threshold: 1, pick: (date) => dailyValue(date, "respiratoryRate") },
+    { key: "steps", label: "步数", unit: "步", digits: 0, thresholdKind: "pct", threshold: 0.2, pick: (date) => dailyValue(date, "steps") },
+    { key: "exerciseMinutes", label: "运动分钟", unit: "分钟", digits: 0, thresholdKind: "pct", threshold: 0.3, pick: (date) => dailyValue(date, "exerciseMinutes") },
+  ];
+  // Possible explanations only: every entry is a possibility, and the
+  // fixed disclaimer appended at build time states it is neither a
+  // causal conclusion nor a medical judgment.
+  const explanations: Record<string, { up: string; down: string }> = {
+    sleep: { up: "可能与这段时间作息更规律、白天活动量或训练安排的变化有关", down: "可能与这段时间就寝时间推迟、白天活动或训练安排的变化有关" },
+    hrv: { up: "可能与近期恢复更充分、训练与休息安排更均衡有关", down: "可能与近期训练负荷、睡眠或生活节奏的变化有关" },
+    restingHr: { up: "可能与近期训练负荷偏高、睡眠不足或身体状态波动有关", down: "可能与近期有氧状态改善或恢复更充分有关" },
+    respiratoryRate: { up: "可能与近期身体状态、睡眠环境或测量时点的变化有关", down: "可能与近期身体状态趋于平稳或睡眠环境变化有关" },
+    steps: { up: "可能与这段时间出行或日常活动安排增多有关", down: "可能与这段时间出行减少或久坐安排增多有关" },
+    exerciseMinutes: { up: "可能与这段时间训练或活动安排加密有关", down: "可能与这段时间训练安排减少或休息日增多有关" },
+  };
+  const actions: Record<string, { up: string; down: string }> = {
+    sleep: { up: "保持现在的作息节奏，下周继续按同一时间上床睡觉", down: "下周把上床时间提前 15–30 分钟，先稳定一周再看变化" },
+    hrv: { up: "保持当前训练与休息节奏，下周维持现有强度即可", down: "下周安排 1–2 天低强度活动（散步或轻松游泳），避免连续高强度训练" },
+    restingHr: { up: "下周训练先不加量，保证睡眠与补水，继续观察一周", down: "保持现有训练与作息节奏，下周维持当前安排" },
+    respiratoryRate: { up: "下周先降低训练强度并保证睡眠；若持续升高或伴随不适，请咨询医生", down: "保持现有节奏，下周继续记录观察" },
+    steps: { up: "保持当前活动量，下周不要再突然加量，给身体留出恢复空间", down: "下周每天多安排一次 10 分钟步行，把日均步数慢慢补回来" },
+    exerciseMinutes: { up: "下周运动量先维持不加，留出至少 1 天完整恢复日", down: "下周先恢复每周 2–3 次短时运动，不急于把量补满" },
+  };
+  const copyFor = (table: Record<string, { up: string; down: string }>, key: string, direction: "up" | "down", fallback: string): string =>
+    table[key]?.[direction] ?? fallback;
+
+  const diffOf = (reviewValue: number | null, comparisonValue: number | null, digits: number, unit: string): { diff: number | null; diffSymbol: "▲" | "▼" | "—"; diffText: string } => {
+    if (reviewValue === null || comparisonValue === null) return { diff: null, diffSymbol: "—", diffText: "无法比较" };
+    const diff = reviewValue - comparisonValue;
+    if (diff === 0) return { diff, diffSymbol: "—", diffText: "持平" };
+    return {
+      diff,
+      diffSymbol: diff > 0 ? "▲" : "▼",
+      diffText: `${diff > 0 ? "增加" : "减少"} ${fmt(Math.abs(diff), digits)} ${unit}`,
+    };
+  };
+
+  const metrics: WeekReviewMetricRow[] = [];
+  const stats = new Map<string, { reviewMean: number; reviewN: number; comparisonMean: number | null; comparisonN: number; baselineMean: number | null; baselineN: number }>();
+  for (const def of defs) {
+    const reviewValues = collect(reviewDates, def.pick);
+    const comparisonValues = collect(comparisonDates, def.pick);
+    const baselineValues = collect(baselineDates, def.pick);
+    const reviewMean = meanOf(reviewValues);
+    const comparisonMean = meanOf(comparisonValues);
+    const baselineSufficient = baselineValues.length >= MIN_DAYS;
+    const baselineMean = baselineSufficient ? meanOf(baselineValues) : null;
+    const coverageNote = reviewValues.length === 0
+      ? "无记录"
+      : reviewValues.length === reviewDates.length
+        ? "覆盖完整"
+        : `缺 ${reviewDates.length - reviewValues.length} 天记录`;
+    const baselineNote = !baselineSufficient
+      ? "基线数据不足"
+      : def.key === "sleep" && baselineValues.length < baselineDates.length
+        ? `睡眠历史仅保留近 14 晚，基线可用 ${baselineValues.length} 晚`
+        : null;
+    const d = diffOf(reviewMean, comparisonMean, def.digits, def.unit);
+    metrics.push({
+      key: def.key, label: def.label, unit: def.unit, digits: def.digits, kind: "mean",
+      reviewValue: reviewMean, reviewN: reviewValues.length,
+      comparisonValue: comparisonMean, comparisonN: comparisonValues.length,
+      baselineValue: baselineMean, baselineN: baselineValues.length,
+      baselineSufficient, baselineNote, coverageNote,
+      diff: d.diff, diffSymbol: d.diffSymbol, diffText: d.diffText,
+    });
+    if (reviewMean !== null) {
+      stats.set(def.key, {
+        reviewMean, reviewN: reviewValues.length,
+        comparisonMean, comparisonN: comparisonValues.length,
+        baselineMean, baselineN: baselineValues.length,
+      });
+    }
+  }
+
+  // Training sessions are counted per window from historyWorkouts —
+  // a count, not a mean, so it never feeds an insight.
+  const countSessions = (dates: string[]): { sessions: number; days: number } => {
+    const inWindow = new Set(dates);
+    let sessions = 0;
+    const days = new Set<string>();
+    for (const workout of historyWorkouts) {
+      if (!inWindow.has(workout.date)) continue;
+      sessions += 1;
+      days.add(workout.date);
+    }
+    return { sessions, days: days.size };
+  };
+  const reviewWorkouts = countSessions(reviewDates);
+  const comparisonWorkouts = countSessions(comparisonDates);
+  const baselineWorkouts = countSessions(baselineDates);
+  const workoutDiff = diffOf(reviewWorkouts.sessions, comparisonWorkouts.sessions, 0, "次");
+  metrics.push({
+    key: "workouts", label: "训练次数", unit: "次", digits: 0, kind: "count",
+    reviewValue: reviewWorkouts.sessions, reviewN: reviewWorkouts.days,
+    comparisonValue: comparisonWorkouts.sessions, comparisonN: comparisonWorkouts.days,
+    baselineValue: baselineWorkouts.sessions, baselineN: baselineWorkouts.days,
+    baselineSufficient: true,
+    baselineNote: `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
+    coverageNote: `复盘窗 ${reviewWorkouts.days}/7 天有训练记录`,
+    diff: workoutDiff.diff, diffSymbol: workoutDiff.diffSymbol, diffText: workoutDiff.diffText,
+  });
+
+  const candidates: WeekReviewInsight[] = [];
+  const reviewStart = reviewDates[0] ?? dataDate;
+  const reviewEnd = reviewDates[reviewDates.length - 1] ?? dataDate;
+  for (const def of defs) {
+    const stat = stats.get(def.key);
+    if (stat === undefined) continue;
+    const reviewMean = stat.reviewMean;
+    const versusWindows = [
+      { versus: "comparison" as const, label: "前 7 天", mean: stat.comparisonMean, n: stat.comparisonN, days: comparisonDates.length, start: comparisonDates[0] ?? dataDate, end: comparisonDates[comparisonDates.length - 1] ?? dataDate },
+      { versus: "baseline" as const, label: "28 天基线", mean: stat.baselineMean, n: stat.baselineN, days: baselineDates.length, start: baselineDates[0] ?? dataDate, end: baselineDates[baselineDates.length - 1] ?? dataDate },
+    ];
+    let best: WeekReviewInsight | null = null;
+    for (const other of versusWindows) {
+      const otherMean = other.mean;
+      if (otherMean === null) continue;
+      if (stat.reviewN < MIN_DAYS || other.n < MIN_DAYS) continue;
+      const diff = reviewMean - otherMean;
+      const thresholdAbs = def.thresholdKind === "abs" ? def.threshold : def.threshold * otherMean;
+      if (thresholdAbs <= 0) continue;
+      if (Math.abs(diff) < thresholdAbs) continue;
+      const magnitude = Math.abs(diff) / thresholdAbs;
+      const direction: "up" | "down" = diff > 0 ? "up" : "down";
+      const pctText = otherMean > 0 ? `（约 ${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff / otherMean) * 100, 0)}%）` : "";
+      const observation = `${def.label}：复盘窗（${md(reviewStart)}–${md(reviewEnd)}）均值 ${fmt(reviewMean, def.digits)} ${def.unit}，${other.label}（${md(other.start)}–${md(other.end)}）均值 ${fmt(otherMean, def.digits)} ${def.unit}，${direction === "up" ? "增加" : "减少"} ${fmt(Math.abs(diff), def.digits)} ${def.unit}${pctText}。`;
+      const confidence: "较高" | "中等" = stat.reviewN === reviewDates.length && other.n === other.days ? "较高" : "中等";
+      const insight: WeekReviewInsight = {
+        metricKey: def.key,
+        label: def.label,
+        versus: other.versus,
+        observation,
+        explanation: `${copyFor(explanations, def.key, direction, "可能与近期生活与训练安排的变化有关")}；这只是可能性，不是因果结论，也不是医疗判断。`,
+        action: copyFor(actions, def.key, direction, "保持现有节奏，下周继续观察。"),
+        confidence,
+        confidenceNote: `复盘窗有效 ${stat.reviewN}/${reviewDates.length} 天 · 对照窗有效 ${other.n}/${other.days} 天`,
+        magnitude,
+      };
+      if (best === null || insight.magnitude > best.magnitude) best = insight;
+    }
+    if (best !== null) candidates.push(best);
+  }
+  candidates.sort((a, b) => b.magnitude - a.magnitude);
+  const insights = candidates.slice(0, 3);
+  return {
+    valid: true,
+    note: null,
+    dataDate,
+    reviewWindow: { start: reviewStart, end: reviewEnd, days: reviewDates.length },
+    comparisonWindow: { start: comparisonDates[0] ?? dataDate, end: comparisonDates[comparisonDates.length - 1] ?? dataDate, days: comparisonDates.length },
+    baselineWindow: { start: baselineDates[0] ?? dataDate, end: baselineDates[baselineDates.length - 1] ?? dataDate, days: baselineDates.length },
+    metrics,
+    insights,
+    canJudge: insights.length > 0,
+    focus: insights[0]?.action ?? fallbackFocus,
+  };
+}
+
 type HeroActionKind = "sync-health" | "sync-strength" | "view-status";
 
 interface HeroSourceStatus {
@@ -1547,6 +1888,7 @@ function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, onSyncHe
         ) : null}
       </div>
       <SevenDayFacts snapshot={snapshot} />
+      <WeekReviewPanel snapshot={snapshot} />
     </section>
   );
 }
@@ -1609,6 +1951,81 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
         </dl>
       ) : null}
     </div>
+  );
+}
+
+// H3.1/H3.2/H3.3: the weekly review panel on the 今日 page, rendered
+// inside the hero after the load verdict block and the seven-day facts
+// strip. Purely presentational — every number comes from the weekReview
+// derivation above; nothing is scored, graded, or persisted, and there
+// is no helpful/not-applicable feedback control in this slice (H3.5).
+// Direction is always carried by the ▲/▼/— symbol plus 增加/减少/持平
+// wording, never by color alone.
+function WeekReviewPanel({ snapshot }: { snapshot: Snapshot }) {
+  const review = useMemo(
+    () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate),
+    [snapshot],
+  );
+  const valueText = (metric: WeekReviewMetricRow, value: number | null): string => {
+    if (value === null) return "—／无记录";
+    return metric.kind === "count" ? `${value} 次` : `${numberLabel(value, metric.digits)} ${metric.unit}`;
+  };
+  return (
+    <section className="week-review" aria-labelledby="week-review-title">
+      <h2 id="week-review-title" className="week-review-title">上周复盘 · 滚动 7 天</h2>
+      {!review.valid ? <p className="week-review-warn">{review.note}</p> : null}
+      {review.valid ? (
+        <>
+          <ul className="week-review-windows">
+            <li><span>复盘窗</span>{fullDateLabel(review.reviewWindow.start)} – {fullDateLabel(review.reviewWindow.end)}（最近完整 7 天）</li>
+            <li><span>对比窗</span>{fullDateLabel(review.comparisonWindow.start)} – {fullDateLabel(review.comparisonWindow.end)}（此前 7 天）</li>
+            <li><span>基线窗</span>{fullDateLabel(review.baselineWindow.start)} – {fullDateLabel(review.baselineWindow.end)}（28 天）</li>
+          </ul>
+          <p className="week-review-note">健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。</p>
+          <div className="week-review-rows">
+            {review.metrics.map((metric) => (
+              <div className="week-review-row" key={metric.key}>
+                <div className="week-review-row-head">
+                  <span>{metric.label}</span>
+                  <strong>{valueText(metric, metric.reviewValue)}</strong>
+                </div>
+                <div className="week-review-cells">
+                  <div><span>{metric.kind === "count" ? "对比窗次数" : "对比窗均值"}</span><strong>{valueText(metric, metric.comparisonValue)}</strong></div>
+                  <div><span>{metric.kind === "count" ? "基线窗次数（28 天）" : "基线均值（28 天）"}</span><strong>{metric.baselineSufficient ? valueText(metric, metric.baselineValue) : "基线数据不足"}</strong></div>
+                  <div><span>差值（较对比窗）</span><strong><span aria-hidden="true">{metric.diffSymbol}</span> {metric.diffText}</strong></div>
+                </div>
+                <p className="week-review-coverage">
+                  {metric.kind === "count"
+                    ? metric.coverageNote
+                    : <>复盘窗有效 {metric.reviewN}/7 天 · {metric.coverageNote}</>}
+                  {metric.baselineNote ? <> · {metric.baselineNote}</> : null}
+                </p>
+              </div>
+            ))}
+          </div>
+          {review.insights.length ? (
+            <div className="week-review-insights">
+              <h3>复盘洞察</h3>
+              {review.insights.map((insight) => (
+                <article className="week-review-insight" key={insight.metricKey}>
+                  <div className="week-review-insight-head">
+                    <strong>{insight.label}</strong>
+                    <span className="week-review-confidence">置信度{insight.confidence}</span>
+                  </div>
+                  <p><b>观察：</b>{insight.observation}</p>
+                  <p><b>可能解释：</b>{insight.explanation}</p>
+                  <p><b>下周动作：</b>{insight.action}</p>
+                  <p className="week-review-confidence-note">{insight.confidenceNote}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="week-review-nodata">无法判断：现有数据未达到生成洞察的门槛。</p>
+          )}
+          <p className="week-review-focus"><span>下周重点</span>{review.focus}</p>
+        </>
+      ) : null}
+    </section>
   );
 }
 
