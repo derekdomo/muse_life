@@ -245,6 +245,16 @@ export const weekFocusFeedback = sqliteTable("week_focus_feedback", {
   snapshotVersion: text("snapshot_version").notNull(),
   feedback: text("feedback", { enum: ["有帮助", "不适用"] }).notNull(),
   revision: integer("revision").notNull(),
+  // Save arbitration identity (H3.5 follow-up, migration 0017,
+  // additive + nullable): the client operation id of the user intent
+  // that produced the currently stored feedback. Written in the SAME
+  // conditional statement that arbitrates on `revision`, so a retry of
+  // an intent whose response was lost can be recognised from the row
+  // itself and answered idempotently without a second write. Rows
+  // saved before this column existed carry null and stay fully
+  // readable — a null never matches a real operation id, so legacy
+  // rows simply arbitrate on revision alone until their next save.
+  lastOperationId: text("last_operation_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

@@ -875,6 +875,36 @@ function isRealDateString(value: string): boolean {
   return !Number.isNaN(candidate.getTime()) && candidate.toISOString().slice(0, 10) === value;
 }
 
+// H3.5 save arbitration — pure decision core (no I/O, no imports, so
+// repo-side validation can extract and run it verbatim). One user
+// intent carries one operationId and the expectedRevision the client
+// last had confirmed (null/0 = it knows of no stored row). Given the
+// row as stored AFTER the single conditional save statement ran, the
+// outcome classifies as:
+// - "saved": this intent is what the row now holds — the statement
+//   landed (insert, or revision advanced to expected + 1 stamping
+//   this operationId), OR it had already landed earlier and this call
+//   is its retry (the row's lastOperationId is this operationId: the
+//   lost-response replay, answered from the row with no second write).
+// - "noop": the row already holds this exact choice at exactly the
+//   expected revision under a DIFFERENT operation — the same choice
+//   re-stated; success with no write and no revision bump.
+// - "conflict": anything else — the stored row moved past the
+//   caller's expectation (a newer opinion won, in this tab or
+//   another). Nothing was written; the response carries the stored
+//   feedback + revision so the client can show what stands.
+type FocusSaveOutcome = "saved" | "noop" | "conflict";
+function decideFocusSaveOutcome(
+  stored: { feedback: "有帮助" | "不适用"; revision: number; lastOperationId: string | null } | null,
+  request: { feedback: "有帮助" | "不适用"; expectedRevision: number | null; operationId: string },
+): FocusSaveOutcome {
+  if (stored === null) return "conflict";
+  if (stored.lastOperationId !== null && stored.lastOperationId === request.operationId) return "saved";
+  const expected = request.expectedRevision ?? 0;
+  if (stored.feedback === request.feedback && stored.revision === expected) return "noop";
+  return "conflict";
+}
+
 const saveWeekFocusFeedbackRequest = z.object({
   windowStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   windowEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -882,11 +912,24 @@ const saveWeekFocusFeedbackRequest = z.object({
   basisText: z.string().max(1000),
   snapshotVersion: z.string().min(1).max(200),
   feedback: z.enum(["有帮助", "不适用"]),
+  // Save arbitration (H3.5 follow-up): the revision the client last
+  // had confirmed for this key (null or 0 when it knows of no stored
+  // row) and the operation id of this user intent. One intent = one
+  // operationId: a retry of the same attempt (lost response, network
+  // failure) reuses it, a new choice mints a new one. The server
+  // arbitrates on both inside a single conditional statement — a
+  // stale request can never overwrite a newer saved opinion.
+  expectedRevision: z.number().int().min(0).nullable(),
+  operationId: z.string().min(1).max(100),
 });
 
 const saveWeekFocusFeedbackResponse = z.object({
   ok: z.boolean(),
   forbidden: z.boolean(),
+  // True when the save was refused by version arbitration: nothing
+  // was written, and feedback/revision carry the server's currently
+  // saved values so the client can show exactly what stands.
+  conflict: z.boolean(),
   focusKey: z.string().nullable(),
   feedback: z.enum(["有帮助", "不适用"]).nullable(),
   revision: z.number().int().nullable(),
@@ -904,6 +947,13 @@ const getDashboardResponse = z.object({
   focusFeedback: z.object({
     current: weekFocusFeedbackRowSchema.nullable(),
     previous: weekFocusFeedbackRowSchema.nullable(),
+    // H3.5 follow-up: the LOCAL feedback read's own outcome, decided
+    // server-side and independent of the dashboard's overall success.
+    // True only when reading the feedback rows themselves failed (the
+    // rows then read as nulls, which must NOT be rendered as "no
+    // feedback yet"); false on every no-permission / no-snapshot path
+    // and on every successful read, including a true no-row read.
+    readFailed: z.boolean(),
   }),
   // The 7 archive-backed trend points ending at the readiness date,
   // ascending. Empty when there is no usable health snapshot.
@@ -2128,9 +2178,14 @@ type WeekFocusFeedbackRow = z.infer<typeof weekFocusFeedbackRowSchema>;
 // window is NOT current, because the focus wording may have changed
 // with the data. previous is the most recent other row (window_end
 // desc, updated_at desc) for the rolling look-back. A read failure
-// degrades to two nulls rather than breaking the dashboard response.
-async function loadFocusFeedback(ctx: Ctx, dataDate: string, snapshotVersion: string): Promise<{ current: WeekFocusFeedbackRow | null; previous: WeekFocusFeedbackRow | null }> {
-  const empty = { current: null, previous: null };
+// still degrades to two nulls rather than breaking the dashboard
+// response, but it is now REPORTED via readStatus (H3.5 follow-up):
+// swallowing the error into plain nulls made a failed local read
+// indistinguishable from "no feedback yet", so the client cleared the
+// confirmed value and the look-back. readStatus "error" lets the
+// dashboard mark focusFeedback.readFailed and the client keep the
+// last successfully read values under an explicit 读取失败 label.
+async function loadFocusFeedback(ctx: Ctx, dataDate: string, snapshotVersion: string): Promise<{ current: WeekFocusFeedbackRow | null; previous: WeekFocusFeedbackRow | null; readStatus: "ok" | "error" }> {
   try {
     const db = ctx.db<typeof schema>();
     const currentKey = weekFocusKey(shiftDate(dataDate, -6), dataDate, snapshotVersion);
@@ -2153,9 +2208,10 @@ async function loadFocusFeedback(ctx: Ctx, dataDate: string, snapshotVersion: st
     return {
       current: currentRows[0] ? toRow(currentRows[0]) : null,
       previous: previousRows[0] ? toRow(previousRows[0]) : null,
+      readStatus: "ok",
     };
   } catch {
-    return empty;
+    return { current: null, previous: null, readStatus: "error" };
   }
 }
 
@@ -3178,7 +3234,7 @@ export const Actions = {
   getDashboard: defineAction({
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3198,7 +3254,7 @@ export const Actions = {
       if (healthLoad.state !== "ok" || !healthLoad.snapshot) {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
-        return { forbidden: false, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null } };
+        return { forbidden: false, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3247,7 +3303,8 @@ export const Actions = {
       // is the payload updatedAt — the caliber the readiness archive
       // uses — so the server's current key and the client's card key
       // name the same focus identity.
-      const focusFeedback = await loadFocusFeedback(ctx, health.dataDate, health.updatedAt);
+      const focusLoad = await loadFocusFeedback(ctx, health.dataDate, health.updatedAt);
+      const focusFeedback = { current: focusLoad.current, previous: focusLoad.previous, readFailed: focusLoad.readStatus === "error" };
       return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
@@ -3508,29 +3565,39 @@ export const Actions = {
   // week-review focus. STRICT owner gate — a non-owner gets forbidden
   // and ZERO writes. The focus key is computed here from window +
   // snapshot version; any key the client might send is ignored (it is
-  // not even in the request schema). The upsert is idempotent for a
-  // repeated identical choice (no revision bump, no write at all) and
-  // advances revision atomically inside the statement when the choice
-  // changes. Feedback is an applicability opinion only: it touches no
-  // plan, score, XP/gold, or training record.
+  // not even in the request schema). Feedback is an applicability
+  // opinion only: it touches no plan, score, XP/gold, or training
+  // record.
+  //
+  // Arbitration (H3.5 follow-up, P0): the save is ONE conditional
+  // statement — insert, or a conflict update gated in its WHERE on
+  // (stored revision = the caller's expectedRevision AND the choice
+  // actually changes) OR (stored last_operation_id = this operation
+  // id). There is no read-then-write dedupe and no reliance on the
+  // client disabling buttons: a late request built on a stale
+  // pre-read fails the gate inside the statement itself and writes
+  // nothing, whichever tab it came from. The replay arm (same
+  // operationId) re-enters the update with every value CASE-guarded to
+  // keep the stored one, so a retry after a lost response changes
+  // nothing observable — no write effect, no revision bump — while
+  // still letting the post-statement read classify it as saved. The
+  // classification of the row AFTER the statement is the pure
+  // decideFocusSaveOutcome above; a "conflict" outcome returns the
+  // stored feedback + revision so the client can show what stands.
   saveWeekFocusFeedback: defineAction({
     request: saveWeekFocusFeedbackRequest, response: saveWeekFocusFeedbackResponse,
     async handler(ctx, args): Promise<z.infer<typeof saveWeekFocusFeedbackResponse>> {
-      if (!isOwner(ctx)) return { ok: false, forbidden: true, focusKey: null, feedback: null, revision: null, message: "仅所有者可提交反馈" };
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, conflict: false, focusKey: null, feedback: null, revision: null, message: "仅所有者可提交反馈" };
       if (!isRealDateString(args.windowStart) || !isRealDateString(args.windowEnd) || args.windowStart > args.windowEnd) {
-        return { ok: false, forbidden: false, focusKey: null, feedback: null, revision: null, message: "复盘窗口日期不合法" };
+        return { ok: false, forbidden: false, conflict: false, focusKey: null, feedback: null, revision: null, message: "复盘窗口日期不合法" };
       }
       const focusKey = weekFocusKey(args.windowStart, args.windowEnd, args.snapshotVersion);
+      const expectedRevision = args.expectedRevision ?? 0;
       const db = ctx.db<typeof schema>();
-      const existingRows = await db.select({ feedback: schema.weekFocusFeedback.feedback, revision: schema.weekFocusFeedback.revision })
-        .from(schema.weekFocusFeedback).where(eq(schema.weekFocusFeedback.focusKey, focusKey)).limit(1);
-      const existing = existingRows[0];
-      if (existing && existing.feedback === args.feedback) {
-        // Same key, same choice: idempotent — no write, no revision bump.
-        return { ok: true, forbidden: false, focusKey, feedback: args.feedback, revision: existing.revision, message: "反馈已保存" };
-      }
+      const table = schema.weekFocusFeedback;
       const now = new Date();
-      await db.insert(schema.weekFocusFeedback).values({
+      const replayed = sql`${table.lastOperationId} = ${args.operationId}`;
+      await db.insert(table).values({
         focusKey,
         windowStart: args.windowStart,
         windowEnd: args.windowEnd,
@@ -3540,26 +3607,41 @@ export const Actions = {
         snapshotVersion: args.snapshotVersion,
         feedback: args.feedback,
         revision: 1,
+        lastOperationId: args.operationId,
         createdAt: now,
         updatedAt: now,
       }).onConflictDoUpdate({
-        target: schema.weekFocusFeedback.focusKey,
+        target: table.focusKey,
         set: {
-          windowStart: args.windowStart,
-          windowEnd: args.windowEnd,
-          focusText: args.focusText,
-          basisText: args.basisText,
+          windowStart: sql`CASE WHEN ${replayed} THEN ${table.windowStart} ELSE ${args.windowStart} END`,
+          windowEnd: sql`CASE WHEN ${replayed} THEN ${table.windowEnd} ELSE ${args.windowEnd} END`,
+          focusText: sql`CASE WHEN ${replayed} THEN ${table.focusText} ELSE ${args.focusText} END`,
+          basisText: sql`CASE WHEN ${replayed} THEN ${table.basisText} ELSE ${args.basisText} END`,
           ruleVersion: WEEK_FOCUS_RULE_VERSION,
-          snapshotVersion: args.snapshotVersion,
-          feedback: args.feedback,
-          revision: sql`${schema.weekFocusFeedback.revision} + 1`,
-          updatedAt: now,
+          snapshotVersion: sql`CASE WHEN ${replayed} THEN ${table.snapshotVersion} ELSE ${args.snapshotVersion} END`,
+          feedback: sql`CASE WHEN ${replayed} THEN ${table.feedback} ELSE ${args.feedback} END`,
+          revision: sql`CASE WHEN ${replayed} THEN ${table.revision} ELSE ${table.revision} + 1 END`,
+          lastOperationId: args.operationId,
+          updatedAt: sql`CASE WHEN ${replayed} THEN ${table.updatedAt} ELSE ${now.getTime()} END`,
         },
+        setWhere: sql`${replayed} OR (${table.revision} = ${expectedRevision} AND ${table.feedback} != ${args.feedback})`,
       });
-      const savedRows = await db.select({ revision: schema.weekFocusFeedback.revision })
-        .from(schema.weekFocusFeedback).where(eq(schema.weekFocusFeedback.focusKey, focusKey)).limit(1);
+      const savedRows = await db.select({ feedback: table.feedback, revision: table.revision, lastOperationId: table.lastOperationId })
+        .from(table).where(eq(table.focusKey, focusKey)).limit(1);
+      const saved = savedRows[0];
+      const outcome = decideFocusSaveOutcome(saved ?? null, args);
+      if (!saved || outcome === "conflict") {
+        return {
+          ok: false, forbidden: false, conflict: true, focusKey,
+          feedback: saved?.feedback ?? null,
+          revision: saved?.revision ?? null,
+          message: saved
+            ? `未覆盖：服务端已保存了「${saved.feedback}」（版本 ${saved.revision}），你这次的「${args.feedback}」没有保存。`
+            : "未保存：服务端状态异常，请稍后重试。",
+        };
+      }
       ctx.invalidateQueries(["dashboard"]);
-      return { ok: true, forbidden: false, focusKey, feedback: args.feedback, revision: savedRows[0]?.revision ?? 1, message: "反馈已保存" };
+      return { ok: true, forbidden: false, conflict: false, focusKey, feedback: saved.feedback, revision: saved.revision, message: "反馈已保存" };
     },
   }),
 

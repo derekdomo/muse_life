@@ -25,7 +25,20 @@
 // direction, large enough to push the window mean past the practical
 // threshold) generates no insight for any insight-capable metric on
 // either comparison path, while 3 consecutive same-direction days and
-// a whole shifted week still do. Pure Node, no deps.
+// a whole shifted week still do. PM re-review follow-up (H3.1/H3.3)
+// adds: (13) stored-range count provenance — the refresh contract
+// queries only the last 30 complete days while the baseline window
+// reaches back 35, so under a 30-day stored span the baseline count
+// is labelled 已存 with completeness unconfirmed (a stored 0 there is
+// unknown, never a true 0; in-range windows keep provable zeros), a
+// full 35-day span keeps the original total wording, an empty store
+// keeps the plain coverage rule, and a stored list at the 100-row
+// cap proves no total; plus the both-sides leave-one-out rule — an
+// isolated abnormal day on the comparison side (RHR 88 / 32, one
+// 3.5h sleep night) or the baseline side (RHR 172) generates no
+// insight even when the review-side support rule passes, while a
+// whole shifted week still does and its confidence note names the
+// check. Pure Node, no deps.
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -76,10 +89,10 @@ check('source: rolling-window vs natural-week note is present verbatim',
 check('source: the cannot-judge line is present verbatim',
   clientSrc.includes('无法判断：现有数据未达到生成洞察的门槛。'));
 check('source: panel is rendered on the today page inside the hero',
-  clientSrc.includes('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />'));
+  clientSrc.includes('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />'));
 check('source: panel renders after the load verdict block and the seven-day facts strip',
-  clientSrc.indexOf('whoop-load') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />')
-  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />'));
+  clientSrc.indexOf('whoop-load') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />')
+  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />'));
 check('source: weekReview never touches readiness (formula untouched)',
   !/readiness/i.test(extractFunction(clientSrc, 'weekReview')));
 
@@ -217,9 +230,14 @@ const fixture1 = {
     (() => { const w = metric(weekReview(dailyRows({}, ALL_DATES), [], [], DATA_DATE), 'workouts');
       return w.reviewValue === null && w.comparisonValue === null && w.baselineValue === null
         && w.baselineSufficient === false && w.coverageNote.includes('快照内 0 次，完整性未确认'); })());
-  check('missing: empty input with explicitly complete coverage -> count is a true 0',
-    (() => { const w = metric(weekReview(dailyRows({}, ALL_DATES), [], [], DATA_DATE, { coverageIncomplete: false }), 'workouts');
-      return w.reviewValue === 0 && w.comparisonValue === 0 && w.baselineValue === 0 && w.baselineSufficient === true; })());
+  // Criterion changed by PM re-review 2026-10-23 03:59 (H3.1
+  // source-separated proof): an EMPTY workout list proves no workout
+  // coverage at all — daily rows, however complete, cannot testify
+  // for workouts — so even with coverageIncomplete === false the
+  // count is unknown, never a borrowed true 0.
+  check('missing: empty workout list with explicitly complete coverage and full daily rows -> count is still unknown (per-source proof)',
+    (() => { const w = metric(weekReview(dailyRows(), [], [], DATA_DATE, { coverageIncomplete: false }), 'workouts');
+      return w.reviewValue === null && w.comparisonValue === null && w.baselineValue === null && w.baselineSufficient === false; })());
 }
 
 // ------------------------------------------------- (5) baseline under 5 days
@@ -339,13 +357,17 @@ check('source: panel labels the HealthKit count with its source and the strength
   const strengthDates = ['2026-10-17', '2026-10-20', '2026-10-20', '2026-10-10', '2026-09-25', '2026-10-23'];
   const r = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)), [], DATA_DATE, { coverageIncomplete: false, strengthDates });
   const w = metric(r, 'workouts');
-  check('sources: with only strength records and complete coverage, the HealthKit count stays a true 0',
-    w.reviewValue === 0 && w.comparisonValue === 0 && w.baselineValue === 0);
+  // Criterion changed by PM re-review 2026-10-23 03:59 (H3.1
+  // source-separated proof): the HealthKit list is empty here, and an
+  // empty list proves no coverage — the count is unknown, not a true
+  // 0 borrowed from the strength source or the daily rows.
+  check('sources: with only strength records and complete coverage, the HealthKit count is unknown (empty workout list proves nothing)',
+    w.reviewValue === null && w.comparisonValue === null && w.baselineValue === null && w.baselineSufficient === false);
   check('sources: strength sessions are counted per window from their own dates (review 3, comparison 1, baseline 2 incl. comparison week; post-dataDate excluded)',
     r.strengthCounts !== null && r.strengthCounts.review === 3 && r.strengthCounts.comparison === 1 && r.strengthCounts.baseline === 2);
   check('sources: the two counts are never merged into one total anywhere in the result',
     r.metrics.length === 7 && r.metrics.every((m) => m.reviewValue !== 3 || m.key !== 'workouts')
-    && w.reviewValue === 0 && r.strengthCounts.review === 3);
+    && w.reviewValue === null && r.strengthCounts.review === 3);
   check('sources: no strength dates passed -> strengthCounts is null (unknown), never a fabricated 0 object',
     weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)), [], DATA_DATE).strengthCounts === null);
 }
@@ -459,67 +481,143 @@ check('source: panel labels the HealthKit count with its source and the strength
     Math.abs(metric(rs, 'sleep').reviewValue - (7.5 * 6 + 3.0) / 7) < 1e-9 && rs.insights.length === 0);
 }
 
-// ----------------- (13) PM 2026-10-23 00:57: baseline range + other-side spikes
+// ----------------- (13) H3.1 stored-range counts + H3.3 leave-one-out
 {
-  // H3.1 repro: the source query spans only the latest 30 completed
-  // days (daily rows 2026-09-23..10-22), coverageIncomplete === false
-  // for that queried range, one stored session inside the baseline
-  // window (10-12). A second real session on 09-20 sits OUTSIDE the
-  // queried range and is therefore absent from the list. The 30-day
-  // completeness must not be read as a 28-day baseline total.
-  const daily30 = dailyRows().filter((row) => row.date >= '2026-09-23'); // exactly the 30 queried days
-  const r = weekReview(daily30, sleepRows(flatSleeps(LAST14, 7.5)), [{ date: '2026-10-12' }], DATA_DATE, { coverageIncomplete: false });
-  const w = metric(r, 'workouts');
-  check('range: 30-day query keeps the stored baseline count as a fact (1) but not as a total',
-    w.baselineValue === 1 && w.baselineSufficient === false
-    && w.baselineNote !== null && w.baselineNote.includes('已存 1 次') && w.baselineNote.includes('完整性未确认')
-    && !w.baselineNote.includes('共 1 次'));
-  check('range: windows inside the queried range keep provable counts (review 0 is a true 0, comparison 1)',
-    w.reviewValue === 0 && w.comparisonValue === 1);
-  // Empty list under the same 30-day query: baseline 0 is NOT provable.
-  const r0 = weekReview(daily30, sleepRows(flatSleeps(LAST14, 7.5)), [], DATA_DATE, { coverageIncomplete: false });
-  const w0 = metric(r0, 'workouts');
-  check('range: empty list under a 30-day query -> baseline count unknown, not a claimed 共0次',
-    w0.baselineValue === null && w0.baselineSufficient === false
-    && w0.baselineNote !== null && w0.baselineNote.includes('已存 0 次'));
-  // 35-day complete control: the same two sessions ARE the total.
-  const r35 = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)),
-    [{ date: '2026-10-12' }, { date: '2026-09-20' }], DATA_DATE, { coverageIncomplete: false });
-  const w35 = metric(r35, 'workouts');
-  check('range: 35-day complete input -> baseline total 2 stands with the 共 wording',
-    w35.baselineValue === 2 && w35.baselineSufficient === true
-    && w35.baselineNote === '基线窗 28 天共 2 次');
-  // 100-entry cap: a list at the schema cap may be truncated.
-  const capped = Array.from({ length: 100 }, () => ({ date: '2026-10-20' }));
-  const rc = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)), capped, DATA_DATE, { coverageIncomplete: false });
-  const wc = metric(rc, 'workouts');
-  check('range: a list at the 100-entry cap proves no baseline total (stored 0 -> unknown)',
-    wc.baselineValue === null && wc.baselineSufficient === false
-    && wc.baselineNote !== null && wc.baselineNote.includes('100 条上限'));
+  // The refresh contract stores only the last 30 complete days:
+  // daily rows and workouts span 2026-09-23..2026-10-22, while the
+  // baseline window starts 2026-09-18 — its first 5 days were never
+  // queried, so no baseline total can be proven from this store.
+  const SPAN30 = datesBack(30, 0); // 2026-09-23..2026-10-22
+  const daily30 = SPAN30.map((date) => ({ date, ...BASE_DAILY }));
+  const flat = sleepRows(flatSleeps(LAST14, 7.5));
+  const workouts30 = [{ date: '2026-09-25' }, { date: '2026-10-01' }, { date: '2026-10-20' }];
+  const r30 = weekReview(daily30, flat, workouts30, DATA_DATE, { coverageIncomplete: false });
+  const w30 = metric(r30, 'workouts');
+  check('range: 30-day stored span keeps the stored baseline count as a fact but labels it 已存， never a 28-day total, and not sufficient',
+    w30.baselineValue === 2 && w30.baselineSufficient === false
+    && w30.baselineNote === '基线窗内已存 2 次，完整性未确认（来源查询范围未覆盖基线窗全程）');
+  const r30zero = weekReview(daily30, flat, [{ date: '2026-10-20' }], DATA_DATE, { coverageIncomplete: false });
+  const w30zero = metric(r30zero, 'workouts');
+  // Criterion changed by PM re-review 2026-10-23 03:59 (H3.1
+  // source-separated proof): the only stored workout is 2026-10-20,
+  // which postdates the comparison window's start too — under
+  // per-source proof the comparison 0 is unproven as well (the daily
+  // rows' 30-day span can no longer testify for it). The stored
+  // review count of 1 stands as a fact.
+  check('range: a stored baseline 0 outside the workouts-proven range is unknown (null), the comparison 0 is likewise unproven, the stored review count stands',
+    w30zero.baselineValue === null && w30zero.baselineSufficient === false
+    && w30zero.comparisonValue === null && w30zero.reviewValue === 1);
+  // Full 35-day stored span OF WORKOUTS THEMSELVES (earliest stored
+  // workout on the baseline window's first day): the original total
+  // wording is unchanged.
+  const workouts35 = [
+    { date: '2026-09-18' }, { date: '2026-09-20' }, { date: '2026-09-25' }, { date: '2026-10-01' }, { date: '2026-10-05' }, { date: '2026-10-10' },
+  ];
+  const w35 = metric(weekReview(dailyRows(), flat, workouts35, DATA_DATE, { coverageIncomplete: false }), 'workouts');
+  check('range: workouts spanning the full 35 days keep the original total wording （基线窗 28 天共 6 次） and a sufficient baseline',
+    w35.baselineValue === 6 && w35.baselineSufficient === true && w35.baselineNote === '基线窗 28 天共 6 次');
+  // No stored records at all (PM 2026-10-23 03:59 case b): with the
+  // workout list empty there is no coverage proof from any source, so
+  // even coverageIncomplete === false leaves every window unknown —
+  // no true 0, no sufficient baseline, no 「共 0 次」 wording.
+  const wEmptyResult = weekReview([], [], [], DATA_DATE, { coverageIncomplete: false });
+  const wEmpty = metric(wEmptyResult, 'workouts');
+  check('range: empty store (daily/sleeps/workouts all empty, flag false) -> baseline unknown, not sufficient, no 共 0 次 wording',
+    wEmpty.reviewValue === null && wEmpty.comparisonValue === null && wEmpty.baselineValue === null
+    && wEmpty.baselineSufficient === false && !JSON.stringify(wEmpty).includes('共 0 次'));
+  // A stored list at the 100-row cap may be truncated: even with a
+  // full 35-day daily span it proves no baseline total.
+  const workouts100 = [
+    ...Array.from({ length: 97 }, () => ({ date: '2026-10-20' })),
+    { date: '2026-09-25' }, { date: '2026-10-01' }, { date: '2026-10-05' },
+  ];
+  const wCap = metric(weekReview(dailyRows(), flat, workouts100, DATA_DATE, { coverageIncomplete: false }), 'workouts');
+  check('range: a 100-row stored workout list is treated as possibly truncated — stored baseline count kept, total unproven, not sufficient',
+    wCap.baselineValue === 3 && wCap.baselineSufficient === false
+    && wCap.baselineNote.includes('完整性未确认') && !wCap.baselineNote.includes('基线窗 28 天共'));
 }
 {
-  // H3.3 repro: an isolated abnormal day on the COMPARISON or
-  // BASELINE side drags that window's mean until every normal review
-  // day counts as support. Leave-one-out must block all of these.
   const flat = sleepRows(flatSleeps(LAST14, 7.5));
-  const cmp88 = weekReview(dailyRows({ '2026-10-14': { restingHr: 88 } }), flat, [], DATA_DATE, { coverageIncomplete: false });
-  check('other-side spike: comparison-day RHR 88 (mean 64 vs 60) generates no resting-HR insight',
-    Math.abs(metric(cmp88, 'restingHr').comparisonValue - 64) < 1e-9
-    && !cmp88.insights.some((i) => i.metricKey === 'restingHr'));
-  const cmp32 = weekReview(dailyRows({ '2026-10-14': { restingHr: 32 } }), flat, [], DATA_DATE, { coverageIncomplete: false });
-  check('other-side spike: comparison-day RHR 32 generates no resting-HR insight and no 不加量 action',
-    !cmp32.insights.some((i) => i.metricKey === 'restingHr') && !cmp32.focus.includes('先不加量'));
-  const base172 = weekReview(dailyRows({ '2026-10-02': { restingHr: 172 } }), flat, [], DATA_DATE, { coverageIncomplete: false });
-  check('other-side spike: baseline-day RHR 172 generates no resting-HR insight',
-    !base172.insights.some((i) => i.metricKey === 'restingHr'));
-  const cmpSleep = weekReview(dailyRows(),
-    sleepRows({ ...flatSleeps(LAST14, 7.5), '2026-10-14': 3.5 }), [], DATA_DATE, { coverageIncomplete: false });
-  check('other-side spike: one short comparison night (3.5h) generates no sleep insight',
-    !cmpSleep.insights.some((i) => i.metricKey === 'sleep'));
-  // Sustained differences survive leave-one-out on both sides.
-  const sustained = weekReview(dailyRows(perDates(REVIEW, { restingHr: 65 })), flat, [], DATA_DATE, { coverageIncomplete: false });
-  check('other-side spike: a whole shifted review week still trends after the LOO check',
-    sustained.insights.some((i) => i.metricKey === 'restingHr'));
+  // Comparison-side isolated RHR days: the comparison mean moves to
+  // 64 (88) or 56 (32), so every flat review day deviates past the
+  // ±3 threshold and the review-side support rule passes 7/7 — only
+  // the leave-one-out check on the comparison side can block these.
+  const looCases = [];
+  for (const spike of [88, 32]) {
+    const r = weekReview(dailyRows({ '2026-10-15': { restingHr: spike } }), flat, [], DATA_DATE, { coverageIncomplete: false });
+    looCases.push(Math.abs(metric(r, 'restingHr').diff) >= 3 && !r.insights.some((i) => i.metricKey === 'restingHr'));
+  }
+  check('loo: isolated comparison-day RHR 88 and RHR 32 each cross the mean threshold yet generate no insight (leave-one-out collapses the diff)',
+    looCases.every(Boolean));
+  // Baseline-side isolated day: RHR 172 on a baseline-only day lifts
+  // the 28-day baseline mean to exactly 64; removing it returns the
+  // baseline to 60 and the difference vanishes.
+  const rBase = weekReview(dailyRows({ '2026-09-20': { restingHr: 172 } }), flat, [], DATA_DATE, { coverageIncomplete: false });
+  check('loo: isolated baseline-day RHR 172 (baseline mean 64, diff −4) generates no insight',
+    metric(rBase, 'restingHr').baselineValue === 64 && rBase.insights.length === 0);
+  // Comparison-side short night: comparison sleep mean ≈6.93h, the
+  // flat 7.5h review nights each clear the 0.5h support threshold;
+  // removing the 3.5h night restores 7.5h and the diff disappears.
+  const sleeps35 = sleepRows({ ...flatSleeps(LAST14, 7.5), '2026-10-15': 3.5 });
+  const rSleep = weekReview(dailyRows(), sleeps35, [], DATA_DATE, { coverageIncomplete: false });
+  check('loo: isolated comparison night of 3.5h sleep crosses the mean threshold yet generates no sleep insight',
+    Math.abs(metric(rSleep, 'sleep').diff) >= 0.5 && !rSleep.insights.some((i) => i.metricKey === 'sleep'));
+  // A whole shifted week has no single influential day: the insight
+  // still generates and its confidence note names the LOO check.
+  const rShift = weekReview(dailyRows(perDates(REVIEW, { restingHr: 65 })), flat, [], DATA_DATE, { coverageIncomplete: false });
+  check('loo: a whole review week shifted +5 bpm still generates the insight, with the both-sides leave-one-out check named in the confidence note',
+    rShift.insights.some((i) => i.metricKey === 'restingHr')
+    && rShift.insights[0].confidenceNote.includes('已做两侧留一单日影响检查'));
+}
+check('source: panel rules text covers comparison/baseline-side single-day anomalies and counts presented per source query range',
+  clientSrc.includes('对照窗与基线窗一侧的单个异常日同样不会触发')
+  && clientSrc.includes('运动次数按来源查询范围呈现'));
+
+// ------------- (14) H3.1 source-separated workout coverage proof
+// (PM re-review 2026-10-23 03:59): workout-window coverage is proven
+// ONLY by historyWorkouts itself — its earliest date and list state.
+// Daily rows reaching back 35 days testify for nothing here.
+{
+  const flat = sleepRows(flatSleeps(LAST14, 7.5));
+  // (a) Daily covers the full 35 days; the ONLY stored workout sits
+  // inside the baseline window (2026-10-05). The baseline count must
+  // not be called a 28-day total, must not be sufficient, and must
+  // read as the stored count with completeness unconfirmed.
+  const oneWorkout = [{ date: '2026-10-05' }];
+  const wa = metric(weekReview(dailyRows(), flat, oneWorkout, DATA_DATE, { coverageIncomplete: false }), 'workouts');
+  check('per-source (a): daily 35d + a single baseline-window workout -> baseline is the stored count, not a 28-day total, not sufficient',
+    wa.baselineValue === 1 && wa.baselineSufficient === false
+    && wa.baselineNote !== null && wa.baselineNote.includes('已存 1 次，完整性未确认')
+    && !wa.baselineNote.includes('基线窗 28 天共'));
+  check('per-source (a): the review window, which the stored workout predates and coverage completes, keeps its provable true 0',
+    wa.reviewValue === 0 && wa.comparisonValue === 0);
+  // Adding an earlier workout INSIDE the baseline window moves the
+  // stored count (the count is a live function of the workout list,
+  // not of the daily rows) while the window stays unproven.
+  const twoWorkouts = [{ date: '2026-09-25' }, { date: '2026-10-05' }];
+  const wa2 = metric(weekReview(dailyRows(), flat, twoWorkouts, DATA_DATE, { coverageIncomplete: false }), 'workouts');
+  check('per-source (a): an earlier in-window workout changes the stored baseline count 1 -> 2, still unproven',
+    wa2.baselineValue === 2 && wa2.baselineSufficient === false
+    && wa2.baselineNote !== null && wa2.baselineNote.includes('已存 2 次，完整性未确认'));
+  // Only a workout ON/BEFORE the baseline start proves the window:
+  // the total wording and sufficiency return.
+  const coveringWorkouts = [{ date: '2026-09-18' }, { date: '2026-09-25' }, { date: '2026-10-05' }];
+  const wa3 = metric(weekReview(dailyRows(), flat, coveringWorkouts, DATA_DATE, { coverageIncomplete: false }), 'workouts');
+  check('per-source (a): a workout on the baseline start day proves coverage -> total wording and sufficiency restored',
+    wa3.baselineValue === 3 && wa3.baselineSufficient === true && wa3.baselineNote === '基线窗 28 天共 3 次');
+  // A single workout inside the REVIEW window only: the review count
+  // is a stored count labelled 已存 with completeness unconfirmed
+  // (its own window is not proven either — the earliest workout
+  // postdates the review start).
+  const reviewOnly = metric(weekReview(dailyRows(), flat, [{ date: '2026-10-20' }], DATA_DATE, { coverageIncomplete: false }), 'workouts');
+  check('per-source: a lone review-window workout labels the review count 已存 1 次，完整性未确认',
+    reviewOnly.reviewValue === 1 && reviewOnly.coverageNote === '已存 1 次，完整性未确认');
+  // Source check: the range proof reads historyWorkouts only — the
+  // daily rows are never consulted for the workout range start.
+  const weekReviewSrc = extractFunction(clientSrc, 'weekReview');
+  check('source: workout range proof is derived from historyWorkouts alone (no historyDaily loop feeds it)',
+    weekReviewSrc.includes('for (const workout of historyWorkouts) if (earliest === null || workout.date < earliest) earliest = workout.date;')
+    && !weekReviewSrc.includes('storedRangeStart'));
 }
 
 // ------------------------------------------------------- mutation sensitivity
