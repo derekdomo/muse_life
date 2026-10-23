@@ -1412,24 +1412,33 @@ function sevenDayFacts(
 // to cannot-judge / keep observing. undefined (legacy payload,
 // completeness unknown) likewise never claims completeness, caps
 // insight confidence at 中等, and marks the completeness as unconfirmed.
-// A HealthKit session count of 0 is a provable true zero ONLY when
-// coverageIncomplete === false; under true/undefined it is reported as
-// unknown (null) with the note 快照内 0 次，完整性未确认.
+// A HealthKit session count is a provable TOTAL only when the window
+// holds total qualification (below); otherwise ANY stored count —
+// 0 or N > 0 — is reported as unknown (null), with the stored count
+// kept only in the notes （已存 N 次，完整性未确认 / 快照内 0 次，
+// 完整性未确认）.
 //
-// H3.1 baseline-count completeness (PM re-review 2026-10-23 00:57;
-// source-separated proof, PM re-review 2026-10-23 03:59):
-// coverageIncomplete === false only proves the QUERIED range was
-// complete — the refresh contract queries workouts over the latest
-// 30 completed days while the baseline window reaches back 35, so a
-// complete 30-day query still cannot prove a 28-day baseline total.
-// The count logic therefore also checks the stored range — and since
-// the 03:59 re-review it checks it PER SOURCE: workout coverage is
-// proven only by historyWorkouts itself. If the workout list is
-// empty, is at the 100-entry cap, or its earliest stored date is
-// later than a window's start, that window's workout count is
-// presented as 已存 (stored) with 完整性未确认 — never as a total,
-// never as a provable zero, and never baseline-sufficient. Daily
-// rows reaching back 35 days no longer testify for workouts.
+// H3.1 total qualification (baseline-count completeness, PM
+// re-review 2026-10-23 00:57; source-separated proof, PM re-review
+// 2026-10-23 03:59; N>0 tightening, this round): a window's HealthKit
+// count earns total qualification only when BOTH hold — (a) source
+// completeness is explicitly confirmed (coverageIncomplete ===
+// false), and (b) the window is proven covered end to end by the
+// workout records themselves. coverageIncomplete === false only
+// proves the QUERIED range was complete — the refresh contract
+// queries workouts over the latest 30 completed days while the
+// baseline window reaches back 35, so a complete 30-day query still
+// cannot prove a 28-day baseline total. The count logic therefore
+// also checks the stored range — and since the 03:59 re-review it
+// checks it PER SOURCE: workout coverage is proven only by
+// historyWorkouts itself. If the workout list is empty, is at the
+// 100-entry cap, or its earliest stored date is later than a
+// window's start, that window is not range-covered. A window without
+// total qualification returns a null count whatever it stores —
+// a stored N > 0 no longer stands as the value (earlier rounds let
+// it through as a labelled stored count; that is exactly the
+// masquerade this round removes) — and is never baseline-sufficient.
+// Daily rows reaching back 35 days no longer testify for workouts.
 // H3.3 (same re-review): the multi-day support rule guards the
 // REVIEW side; the comparison/baseline side gets a leave-one-out
 // single-day influence check — if removing the single most
@@ -1452,9 +1461,11 @@ export interface WeekReviewMetricRow {
   kind: "mean" | "count";
   // Window means for kind "mean", session counts for kind "count".
   // A null mean means the window held no usable value — never a 0.
-  // For kind "count" a null value means UNKNOWN, not zero: the
-  // HealthKit list held no session in that window but source coverage
-  // was not confirmed complete (H3.1), so a true 0 cannot be proven.
+  // For kind "count" a null value means UNKNOWN, not zero: the window
+  // lacks total qualification (source completeness unconfirmed, or
+  // the window not proven covered end to end), so no stored count —
+  // 0 or N > 0 — may stand as the window's total (H3.1); the stored
+  // count survives only in the notes.
   reviewValue: number | null;
   reviewN: number;
   comparisonValue: number | null;
@@ -1748,12 +1759,18 @@ export function weekReview(
   const reviewWorkouts = countSessions(reviewDates);
   const comparisonWorkouts = countSessions(comparisonDates);
   const baselineWorkouts = countSessions(baselineDates);
-  // H3.1 count trust rule: an empty HealthKit list is a provable true
-  // 0 ONLY when coverageIncomplete is explicitly false AND the window
-  // is proven covered (below). When coverage is incomplete (true) or
-  // unknown (undefined), a stored 0 is reported as unknown (null) —
-  // never as a definite 0 — and the baseline is not marked sufficient
-  // on the strength of it.
+  // H3.1 total qualification (PM re-review): a window's HealthKit
+  // count may stand as a TOTAL only when BOTH hold — (a) source
+  // completeness is explicitly confirmed (coverageIncomplete ===
+  // false) and (b) the window is proven covered end to end by the
+  // workout records themselves (rangeCovered below). Without total
+  // qualification the value is null for ANY stored count: a stored 0
+  // stays unknown, and a stored N > 0 is presented only as a stored
+  // count in the notes （已存 N 次，完整性未确认） — never as a total
+  // value, and the baseline is never sufficient on it. The diff is
+  // computed only when both windows are qualified (diffOf already
+  // yields null when either side is null). With qualification, a
+  // stored 0 IS a provable true 0.
   // H3.1 (PM 2026-10-23) + source-separated proof (PM 2026-10-23
   // re-review): completeness of the QUERIED range is not completeness
   // of the WINDOW, and each source's coverage is proven ONLY by that
@@ -1764,11 +1781,9 @@ export function weekReview(
   // reach — daily dates must never testify for workouts), a list at
   // the 100-entry schema cap may be truncated and proves no total,
   // and a window whose start predates the earliest stored workout was
-  // not covered for its whole span. An unproven window's count is a
-  // stored count （已存） only: a stored 0 there is unknown, a stored
-  // N is labelled 已存 with 完整性未确认， and the baseline is not
-  // sufficient. No unproven coverage field is invented to paper over
-  // the gap — the list itself is the only evidence admitted.
+  // not covered for its whole span. No unproven coverage field is
+  // invented to paper over the gap — the list itself is the only
+  // evidence admitted.
   const workoutRangeStart = (() => {
     let earliest: string | null = null;
     for (const workout of historyWorkouts) if (earliest === null || workout.date < earliest) earliest = workout.date;
@@ -1780,29 +1795,42 @@ export function weekReview(
   const reviewRangeCovered = windowRangeCovered(reviewDates);
   const comparisonRangeCovered = windowRangeCovered(comparisonDates);
   const baselineRangeCovered = windowRangeCovered(baselineDates);
+  const totalQualified = (rangeCovered: boolean): boolean => coverageComplete && rangeCovered;
   const trustedCount = (sessions: number, rangeCovered: boolean): number | null =>
-    sessions === 0 && !(coverageComplete && rangeCovered) ? null : sessions;
+    totalQualified(rangeCovered) ? sessions : null;
+  // Why a window missed total qualification, named distinctly: source
+  // coverage incomplete / source completeness unconfirmed / the query
+  // range did not cover the whole window (with the 100-entry cap
+  // called out when it applies). Null when the window IS qualified.
+  const qualificationGap = (rangeCovered: boolean): string | null => {
+    if (coverageIncomplete === true) return "来源覆盖不完整";
+    if (coverageIncomplete === null) return "来源完整性未确认";
+    if (!rangeCovered) return `查询范围未覆盖窗口全程${listAtCap ? "（列表已达 100 条上限）" : ""}`;
+    return null;
+  };
   const reviewWorkoutValue = trustedCount(reviewWorkouts.sessions, reviewRangeCovered);
   const comparisonWorkoutValue = trustedCount(comparisonWorkouts.sessions, comparisonRangeCovered);
   const baselineWorkoutValue = trustedCount(baselineWorkouts.sessions, baselineRangeCovered);
   const workoutDiff = diffOf(reviewWorkoutValue, comparisonWorkoutValue, 0, "次");
+  const baselineGap = qualificationGap(baselineRangeCovered);
+  const reviewGap = qualificationGap(reviewRangeCovered);
   metrics.push({
     key: "workouts", label: "运动次数（HealthKit 来源）", unit: "次", digits: 0, kind: "count",
     reviewValue: reviewWorkoutValue, reviewN: reviewWorkouts.days,
     comparisonValue: comparisonWorkoutValue, comparisonN: comparisonWorkouts.days,
     baselineValue: baselineWorkoutValue, baselineN: baselineWorkouts.days,
-    baselineSufficient: baselineWorkoutValue !== null && baselineRangeCovered,
-    baselineNote: !baselineRangeCovered
-      ? `基线窗内已存 ${baselineWorkouts.sessions} 次，完整性未确认（来源查询范围未覆盖基线窗全程${listAtCap ? "，且列表已达 100 条上限" : ""}）`
-      : baselineWorkoutValue === null
-        ? "快照内 0 次，完整性未确认"
-        : `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
-    coverageNote: !reviewRangeCovered
+    baselineSufficient: baselineWorkoutValue !== null,
+    baselineNote: baselineGap !== null
+      ? baselineWorkouts.sessions === 0
+        ? `快照内 0 次，完整性未确认（${baselineGap}）`
+        : `基线窗内已存 ${baselineWorkouts.sessions} 次，完整性未确认（${baselineGap}）`
+      : `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
+    coverageNote: reviewGap !== null
       ? reviewWorkouts.sessions === 0
         ? "快照内 0 次，完整性未确认"
         : `已存 ${reviewWorkouts.sessions} 次，完整性未确认`
-      : reviewWorkoutValue === null
-        ? "快照内 0 次，完整性未确认"
+      : reviewWorkouts.sessions === 0
+        ? "复盘窗 7 天共 0 次（HealthKit）"
         : `复盘窗 ${reviewWorkouts.days}/7 天有训练记录（HealthKit）`,
     diff: workoutDiff.diff, diffSymbol: workoutDiff.diffSymbol, diffText: workoutDiff.diffText,
   });
@@ -2255,6 +2283,15 @@ export function createFocusFeedbackState(): FocusFeedbackState {
 // its revision) and flags readFailed; a successful re-read updates
 // confirmed but never clobbers an in-flight save, an unsaved choice
 // awaiting retry, or a conflict awaiting the owner's decision.
+// Monotonicity (H3.5 re-review): within one boundKey the confirmed
+// revision only ever moves forward. A successful read that arrives
+// with a LOWER revision than the one already confirmed is a stale
+// read (an older response landing late) — its content is refused
+// whole: confirmed, confirmedRevision, selection and status all stay
+// exactly as they are and only readFailed clears. A read reporting
+// NO row (serverConfirmed null) for a key this card has already
+// confirmed at revision > 0 is stale for the same reason — that row
+// cannot have vanished — and is refused the same way.
 export function syncFocusFeedbackState(
   state: FocusFeedbackState,
   boundKey: string,
@@ -2275,11 +2312,18 @@ export function syncFocusFeedbackState(
     };
   }
   if (readFailed) return { ...state, readFailed: true };
+  const incomingRevision = serverConfirmed ? (serverRevision ?? 0) : 0;
+  const staleRead = serverConfirmed === null
+    ? state.confirmed !== null && state.confirmedRevision > 0
+    : incomingRevision < state.confirmedRevision;
+  if (staleRead) return { ...state, readFailed: false };
   if (state.status === "saving" || state.status === "error" || state.status === "conflict") {
     return {
       ...state,
-      confirmed: serverConfirmed,
-      confirmedRevision: serverConfirmed ? (serverRevision ?? state.confirmedRevision) : 0,
+      confirmed: serverConfirmed ?? state.confirmed,
+      confirmedRevision: serverConfirmed
+        ? Math.max(incomingRevision, state.confirmedRevision)
+        : state.confirmedRevision,
       readFailed: false,
     };
   }
@@ -2316,9 +2360,13 @@ export function beginFocusFeedbackSave(state: FocusFeedbackState, choice: FocusF
 // A save resolved successfully. It lands only when the key it was
 // started for is still the card's bound key; a stale callback for a
 // previous window/snapshot is dropped whole. The confirmed revision
-// advances to the revision the server returned.
+// advances to the revision the server returned — and only forward:
+// a completion carrying a revision LOWER than the one already
+// confirmed is a late callback from an older save and is dropped
+// whole too, so it can never rewind the card to an older opinion.
 export function completeFocusFeedbackSave(state: FocusFeedbackState, boundKey: string, choice: FocusFeedbackChoice, revision?: number): FocusFeedbackState {
   if (state.boundKey !== boundKey) return state;
+  if (revision !== undefined && revision < state.confirmedRevision) return state;
   return {
     ...state,
     boundKey,
@@ -2357,7 +2405,14 @@ export function conflictFocusFeedbackSave(
     ...state,
     status: "conflict",
     confirmed: serverFeedback ?? state.confirmed,
-    confirmedRevision: serverRevision ?? state.confirmedRevision,
+    // Monotonicity: a conflict report can only push the confirmed
+    // revision forward — if the arbitrating response itself is older
+    // than what this card already confirmed, the higher local
+    // revision stands (the conflict fields below still name exactly
+    // what the server reported for this refusal).
+    confirmedRevision: serverRevision === null
+      ? state.confirmedRevision
+      : Math.max(serverRevision, state.confirmedRevision),
     conflictFeedback: serverFeedback,
     conflictRevision: serverRevision,
     readFailed: false,
@@ -2546,7 +2601,7 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
             <li><span>基线窗</span>{fullDateLabel(review.baselineWindow.start)} – {fullDateLabel(review.baselineWindow.end)}（28 天）</li>
           </ul>
           <p className="week-review-note">健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。</p>
-          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作。对照窗与基线窗一侧的单个异常日同样不会触发：生成前已做两侧留一单日影响检查，去掉任一侧影响最大的一天后，差异若跌破实用阈值或方向翻转，则不生成该洞察。原始单日值照常计入均值，不删除、不改动。运动次数按来源查询范围呈现：覆盖只由运动记录自身证明（最早一条运动记录的日期与列表是否达到 100 条上限），每日指标的日期再长也不能为运动次数作证；未被证明覆盖全程的窗口只呈现已存次数并注明完整性未确认，不作 28 天总量，存 0 次按未知处理，不当作确切的 0。</p>
+          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作。对照窗与基线窗一侧的单个异常日同样不会触发：生成前已做两侧留一单日影响检查，去掉任一侧影响最大的一天后，差异若跌破实用阈值或方向翻转，则不生成该洞察。原始单日值照常计入均值，不删除、不改动。运动次数按来源查询范围呈现：只在同时满足两个条件时才作总量——来源完整性已确认（覆盖完整），且窗口被运动记录自身证明覆盖全程（覆盖只由运动记录自身证明——最早一条运动记录的日期与列表是否达到 100 条上限）；每日指标的日期再长也不能为运动次数作证。来源完整性未确认或窗口未被证明覆盖时，只呈现已存次数并注明完整性未确认，不作总量，存 0 次按未知处理，不当作确切的 0。</p>
           <div className="week-review-rows">
             {review.metrics.map((metric) => (
               <div className="week-review-row" key={metric.key}>
@@ -2964,7 +3019,13 @@ function allWorkoutsList(historyWorkouts: HistoryWorkout[]): HistoryWorkout[] {
   });
 }
 
-function HistoryView({ snapshot, unifiedTimeline, focusRange }: { snapshot: Snapshot; unifiedTimeline?: UnifiedDay[]; focusRange?: { start: string; end: string } | null }) {
+function HistoryView({ snapshot, unifiedTimeline, focusRange, onReturnToFocus, onClearFocusRange }: {
+  snapshot: Snapshot;
+  unifiedTimeline?: UnifiedDay[];
+  focusRange?: { start: string; end: string } | null;
+  onReturnToFocus?: () => void;
+  onClearFocusRange?: () => void;
+}) {
   const strengths = [...snapshot.strengthTraining.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const allWorkouts = allWorkoutsList(snapshot.historyWorkouts);
   const swims = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).slice().reverse();
@@ -2982,23 +3043,66 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange }: { snapshot: Snap
   const focusWorkouts = focusRange
     ? allWorkouts.filter((workout) => workout.date >= focusRange.start && workout.date <= focusRange.end)
     : [];
+  // H3.5 range landing loop: arriving WITH a range presents only the
+  // range section — every full-history section below stays folded
+  // until the owner taps 查看全部历史 (or clears the range, which
+  // restores the ordinary history page). This view remounts on every
+  // entry, so the fold always starts closed for a fresh landing.
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const fullHistoryVisible = !focusRange || showAllHistory;
+  const focusActiveCount = focusStrengths.filter((workout) => workout.status === "active").length;
+  const focusCompletedCount = focusStrengths.length - focusActiveCount;
+  // Rolling window vs natural week, presented separately (H3.5):
+  // the Monday natural-week buckets from weeklyTrend that overlap
+  // the range. A bucket may be shown as a whole-week total ONLY when
+  // its whole-week coverage is confirmed complete
+  // (coverageComplete === true) and it carries a session count; the
+  // gap named beside it is that week's full count minus the
+  // COMPLETED stored-sample sessions inside the same natural week
+  // (in-progress sessions never count as completed). No qualifying
+  // bucket -> the page says so plainly and shows the sample only.
+  const focusWeeks = focusRange
+    ? snapshot.strengthTraining.weeklyTrend
+        .filter((week) => week.coverageComplete === true && week.weekStart <= focusRange.end && shiftDateStr(week.weekStart, 6) >= focusRange.start)
+        .map((week) => {
+          const weekEnd = shiftDateStr(week.weekStart, 6);
+          const sampleCompleted = focusStrengths.filter((workout) => workout.status === "completed" && workout.date >= week.weekStart && workout.date <= weekEnd).length;
+          return { week, weekEnd, sampleCompleted };
+        })
+    : [];
   return (
     <div className="history-view">
       {focusRange ? (
         <section className="history-section history-focus-range" aria-labelledby="history-focus-range-title">
           <div className="section-heading"><div><p className="section-kicker">周复盘窗口</p><h2 id="history-focus-range-title">{fullDateLabel(focusRange.start)} – {fullDateLabel(focusRange.end)} 的已存训练记录</h2></div></div>
-          <p className="unified-note">以下只呈现快照内已存的明细，两来源分列，不合并为一个总数。</p>
-          <h3 className="history-focus-subtitle">力量训练（来源：训练记录）· 已存明细样本 {focusStrengths.length} 次</h3>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "10px" }} role="group" aria-label="范围视图控制">
+            <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label="返回本次重点" onClick={onReturnToFocus}>返回本次重点</button>
+            <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label={showAllHistory ? "只看这段记录" : "查看全部历史"} aria-pressed={showAllHistory} onClick={() => setShowAllHistory((value) => !value)}>{showAllHistory ? "只看这段记录" : "查看全部历史"}</button>
+            <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label="清除范围" onClick={onClearFocusRange}>清除范围</button>
+          </div>
+          <p className="unified-note">以下只呈现快照内已存的明细，两来源分列，不合并为一个总数。{showAllHistory ? "下方已展开全部历史。" : "全量历史各区已收起，点「查看全部历史」才展开。"}</p>
+          <h3 className="history-focus-subtitle">力量训练（来源：训练记录）· 已存明细样本 {focusStrengths.length} 次（已完成 {focusCompletedCount} 次{focusActiveCount ? ` · 进行中 ${focusActiveCount} 次，进行中不计入完成` : ""}）</h3>
           {focusStrengths.length ? (
             <div className="strength-history-list">{focusStrengths.map((workout) => (
-              <div className="strength-history-row history-focus-row" key={`focus-${workout.id}`}>
-                <span className={`routine-dot routine-${workout.routine}`}>{ROUTINE_LABELS[workout.routine]}</span>
-                <span><strong>{dateLabel(workout.date)} · {workout.status === "active" ? "进行中" : durationLabel(workout.durationMinutes)}</strong><small>{workout.completedSets}/{workout.totalSets} 组</small></span>
-                <span className="history-volume">{volumeLabel(workout.totalVolume)} {workout.unit}</span>
-              </div>
+              <details className="strength-history-row" key={`focus-${workout.id}`}>
+                <summary>
+                  <span className={`routine-dot routine-${workout.routine}`}>{ROUTINE_LABELS[workout.routine]}</span>
+                  <span><strong>{dateLabel(workout.date)} · {workout.status === "active" ? "进行中（不计入完成）" : `已完成 · ${durationLabel(workout.durationMinutes)}`}</strong><small>{workout.completedSets}/{workout.totalSets} 组 · 来源：训练记录</small></span>
+                  <span className="history-volume">{volumeLabel(workout.totalVolume)} {workout.unit}</span>
+                  <i aria-hidden="true">›</i>
+                </summary>
+                <div className="strength-exercise-list">
+                  {workout.exercises.length ? workout.exercises.map((exercise) => <div key={exercise.key}><span>{exercise.name}</span><strong>{volumeLabel(exercise.volume)} {workout.unit}</strong><small>{exercise.sets.filter((set) => set.completed).map((set) => `${set.weight ?? "自重"}×${set.reps ?? "—"}`).join(" / ") || "未完成"}</small></div>) : <p className="empty-inline">该条未收录动作明细。</p>}
+                </div>
+              </details>
             ))}</div>
           ) : <p className="empty-inline">这段时间没有已存的力量训练明细。</p>}
           <p className="unified-note">力量明细是快照内已存明细样本（仅最近若干次），可能少于完整周汇总；完整周次数以复盘卡的周汇总为准，两者缺口分开呈现，不用样本冒充全量。</p>
+          {focusWeeks.length ? focusWeeks.map(({ week, weekEnd, sampleCompleted }) => (
+            <p className="unified-note" key={week.weekStart}>全量周汇总（自然周 {fullDateLabel(week.weekStart)}–{fullDateLabel(weekEnd)}）：{week.sessions} 次 · 容量 {volumeLabel(week.volume)} {snapshot.strengthTraining.displayUnit}。与范围内已存明细样本相差 {week.sessions - sampleCompleted} 次（全量周汇总 {week.sessions} 次 − 样本已完成 {sampleCompleted} 次）；自然周与上面的滚动复盘窗不是同一窗口，数字分开呈现。</p>
+          )) : (
+            <p className="unified-note">本页未取得全量周汇总：与这段时间重叠的自然周没有已确认整周覆盖的周汇总；下面仍可查看已存明细样本，不新造数字。</p>
+          )}
           <h3 className="history-focus-subtitle">运动记录（HealthKit 来源）{focusWorkouts.length} 次</h3>
           {focusWorkouts.length ? (
             <div className="record-list">{focusWorkouts.map((workout) => (
@@ -3010,6 +3114,7 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange }: { snapshot: Snap
           ) : <p className="empty-inline">这段时间没有已存的 HealthKit 运动记录。</p>}
         </section>
       ) : null}
+      {fullHistoryVisible ? (<>
       {unifiedTimeline && unifiedTimeline.length ? (
         <section className="history-section" aria-labelledby="unified-history-title">
           <div className="section-heading"><div><p className="section-kicker">一体时间线</p><h2 id="unified-history-title">每天合在一起看</h2></div><span className="record-count">{unifiedTimeline.length} 天</span></div>
@@ -3063,6 +3168,7 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange }: { snapshot: Snap
         <div className="section-heading"><div><p className="section-kicker">最近记录</p><h2 id="sleep-history-title">睡眠历史</h2></div><span className="record-count">{sleeps.length} 晚</span></div>
         {sleeps.length ? <div className="sleep-list">{sleeps.map((sleep) => <article key={`${sleep.date}-${sleep.start}`}><div><strong>{dateLabel(sleep.date)}</strong><span>{sleep.start}–{sleep.end}</span></div><div><strong>{sleep.totalHours.toFixed(1)} 小时</strong><span>质量 {numberLabel(sleep.quality)}</span></div></article>)}</div> : <p className="empty-inline">暂无睡眠历史记录。</p>}
       </section>
+      </>) : null}
     </div>
   );
 }
@@ -4061,6 +4167,12 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
     setHistoryFocusRange(range);
     setTab("history");
   };
+  // H3.5 range landing loop: from the range section the owner can go
+  // straight back to today's page (the focus card re-renders there
+  // from the same dashboard data) or clear the range and return to
+  // the ordinary history page.
+  const backToFocus = () => setTab("today");
+  const clearHistoryFocusRange = () => setHistoryFocusRange(null);
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const polling = useTaskPolling();
@@ -4100,7 +4212,7 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
