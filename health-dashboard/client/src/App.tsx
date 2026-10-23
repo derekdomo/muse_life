@@ -1416,18 +1416,20 @@ function sevenDayFacts(
 // coverageIncomplete === false; under true/undefined it is reported as
 // unknown (null) with the note 快照内 0 次，完整性未确认.
 //
-// H3.1 baseline-count completeness (PM re-review 2026-10-23 00:57):
+// H3.1 baseline-count completeness (PM re-review 2026-10-23 00:57;
+// source-separated proof, PM re-review 2026-10-23 03:59):
 // coverageIncomplete === false only proves the QUERIED range was
 // complete — the refresh contract queries workouts over the latest
 // 30 completed days while the baseline window reaches back 35, so a
 // complete 30-day query still cannot prove a 28-day baseline total.
-// The count logic therefore also checks the stored range: if the
-// earliest stored daily/workout date is later than a window's start,
-// that window was not fully covered by the source query and its
-// count is presented as 已存 (stored) with 完整性未确认 — never as a
-// total, never as a provable zero, and never baseline-sufficient.
-// The stored list hitting the 100-entry schema cap is likewise
-// treated as possibly truncated: totals are unprovable then too.
+// The count logic therefore also checks the stored range — and since
+// the 03:59 re-review it checks it PER SOURCE: workout coverage is
+// proven only by historyWorkouts itself. If the workout list is
+// empty, is at the 100-entry cap, or its earliest stored date is
+// later than a window's start, that window's workout count is
+// presented as 已存 (stored) with 完整性未确认 — never as a total,
+// never as a provable zero, and never baseline-sufficient. Daily
+// rows reaching back 35 days no longer testify for workouts.
 // H3.3 (same re-review): the multi-day support rule guards the
 // REVIEW side; the comparison/baseline side gets a leave-one-out
 // single-day influence check — if removing the single most
@@ -1747,29 +1749,34 @@ export function weekReview(
   const comparisonWorkouts = countSessions(comparisonDates);
   const baselineWorkouts = countSessions(baselineDates);
   // H3.1 count trust rule: an empty HealthKit list is a provable true
-  // 0 ONLY when coverageIncomplete is explicitly false. When coverage
-  // is incomplete (true) or unknown (undefined), a stored 0 is
-  // reported as unknown (null) — never as a definite 0 — and the
-  // baseline is not marked sufficient on the strength of it.
-  // H3.1 (PM 2026-10-23): completeness of the QUERIED range is not
-  // completeness of the WINDOW. The source query span is evidenced by
-  // the stored data itself: the earliest stored daily/workout date.
-  // A window whose start predates that earliest date was only partly
-  // queried, so its count is a stored count （已存）, not a total —
-  // a stored 0 there is unknown, a stored N is labelled 已存 with
-  // 完整性未确认， and the baseline is not sufficient. A list at the
-  // 100-entry schema cap may be truncated and proves no total either.
-  // With no stored rows at all there is no range evidence either way
-  // and the coverageComplete rule above decides alone.
-  const storedRangeStart = (() => {
+  // 0 ONLY when coverageIncomplete is explicitly false AND the window
+  // is proven covered (below). When coverage is incomplete (true) or
+  // unknown (undefined), a stored 0 is reported as unknown (null) —
+  // never as a definite 0 — and the baseline is not marked sufficient
+  // on the strength of it.
+  // H3.1 (PM 2026-10-23) + source-separated proof (PM 2026-10-23
+  // re-review): completeness of the QUERIED range is not completeness
+  // of the WINDOW, and each source's coverage is proven ONLY by that
+  // source itself. For the HealthKit workout count the evidence is
+  // historyWorkouts alone — its own earliest date and its list state:
+  // an EMPTY workout list proves nothing (a window may simply have
+  // never been queried for sessions, however far back the daily rows
+  // reach — daily dates must never testify for workouts), a list at
+  // the 100-entry schema cap may be truncated and proves no total,
+  // and a window whose start predates the earliest stored workout was
+  // not covered for its whole span. An unproven window's count is a
+  // stored count （已存） only: a stored 0 there is unknown, a stored
+  // N is labelled 已存 with 完整性未确认， and the baseline is not
+  // sufficient. No unproven coverage field is invented to paper over
+  // the gap — the list itself is the only evidence admitted.
+  const workoutRangeStart = (() => {
     let earliest: string | null = null;
-    for (const row of historyDaily) if (earliest === null || row.date < earliest) earliest = row.date;
     for (const workout of historyWorkouts) if (earliest === null || workout.date < earliest) earliest = workout.date;
     return earliest;
   })();
   const listAtCap = historyWorkouts.length >= 100;
   const windowRangeCovered = (dates: string[]): boolean =>
-    !listAtCap && (storedRangeStart === null || (dates.length > 0 && storedRangeStart <= (dates[0] ?? "")));
+    !listAtCap && workoutRangeStart !== null && dates.length > 0 && workoutRangeStart <= (dates[0] ?? "");
   const reviewRangeCovered = windowRangeCovered(reviewDates);
   const comparisonRangeCovered = windowRangeCovered(comparisonDates);
   const baselineRangeCovered = windowRangeCovered(baselineDates);
@@ -1790,9 +1797,13 @@ export function weekReview(
       : baselineWorkoutValue === null
         ? "快照内 0 次，完整性未确认"
         : `基线窗 28 天共 ${baselineWorkouts.sessions} 次`,
-    coverageNote: reviewWorkoutValue === null
-      ? "快照内 0 次，完整性未确认"
-      : `复盘窗 ${reviewWorkouts.days}/7 天有训练记录（HealthKit）`,
+    coverageNote: !reviewRangeCovered
+      ? reviewWorkouts.sessions === 0
+        ? "快照内 0 次，完整性未确认"
+        : `已存 ${reviewWorkouts.sessions} 次，完整性未确认`
+      : reviewWorkoutValue === null
+        ? "快照内 0 次，完整性未确认"
+        : `复盘窗 ${reviewWorkouts.days}/7 天有训练记录（HealthKit）`,
     diff: workoutDiff.diff, diffSymbol: workoutDiff.diffSymbol, diffText: workoutDiff.diffText,
   });
 
@@ -2024,10 +2035,11 @@ function freshnessShort(freshness: DataStatus["health"]["freshness"] | undefined
   return "未同步";
 }
 
-function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, focusFeedback, focusReadFailed, onSyncHealth, onSyncStrength, syncing }: {
+function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, focusFeedback, focusReadFailed, onSyncHealth, onSyncStrength, syncing, onViewTraining }: {
   snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null;
   focusFeedback: FocusFeedbackData; focusReadFailed: boolean;
   onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean;
+  onViewTraining?: (range: { start: string; end: string }) => void;
 }) {
   const recovery = recoveryScore(readiness);
   const sleep = sleepScore(snapshot, readiness);
@@ -2113,7 +2125,7 @@ function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, focusFee
         ) : null}
       </div>
       <SevenDayFacts snapshot={snapshot} />
-      <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} />
+      <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />
     </section>
   );
 }
@@ -2198,14 +2210,28 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
 //    value with "not yet given" — the unknown stays visibly unknown.
 
 export type FocusFeedbackChoice = "有帮助" | "不适用";
-export type FocusFeedbackSaveStatus = "idle" | "saving" | "saved" | "error";
+export type FocusFeedbackSaveStatus = "idle" | "saving" | "saved" | "error" | "conflict";
 
 export interface FocusFeedbackState {
   boundKey: string | null;
   confirmed: FocusFeedbackChoice | null;
+  // The confirmed row's revision — the expectedRevision the next new
+  // intent arbitrates against. 0 means no confirmed row is known.
+  confirmedRevision: number;
   selection: FocusFeedbackChoice | null;
   status: FocusFeedbackSaveStatus;
   readFailed: boolean;
+  // The in-flight (or last attempted) intent's arbitration identity.
+  // A network-failure retry reuses pendingOperationId verbatim; only a
+  // genuinely new intent (a fresh choice, or 「改用我的选择」 after a
+  // conflict) mints a new one. pendingExpectedRevision is the revision
+  // that attempt was gated on.
+  pendingOperationId: string | null;
+  pendingExpectedRevision: number;
+  // On conflict: the server's currently saved choice + revision, kept
+  // so the card can name exactly what stands and what was refused.
+  conflictFeedback: FocusFeedbackChoice | null;
+  conflictRevision: number | null;
 }
 
 export function focusFeedbackKey(windowStart: string, windowEnd: string, snapshotVersion: string): string {
@@ -2213,52 +2239,166 @@ export function focusFeedbackKey(windowStart: string, windowEnd: string, snapsho
 }
 
 export function createFocusFeedbackState(): FocusFeedbackState {
-  return { boundKey: null, confirmed: null, selection: null, status: "idle", readFailed: false };
+  return {
+    boundKey: null, confirmed: null, confirmedRevision: 0, selection: null,
+    status: "idle", readFailed: false,
+    pendingOperationId: null, pendingExpectedRevision: 0,
+    conflictFeedback: null, conflictRevision: null,
+  };
 }
 
 // Bind the card to a (possibly new) focus identity and merge the latest
 // server read. A different key starts a fresh card state from the
 // server row for THAT key — feedback never migrates across windows or
 // snapshot versions, even when the focus wording is identical. On the
-// same key, a failed re-read keeps the previously confirmed value and
-// flags readFailed; a successful re-read updates confirmed but never
-// clobbers an in-flight save or an unsaved choice awaiting retry.
+// same key, a failed re-read keeps the previously confirmed value (and
+// its revision) and flags readFailed; a successful re-read updates
+// confirmed but never clobbers an in-flight save, an unsaved choice
+// awaiting retry, or a conflict awaiting the owner's decision.
 export function syncFocusFeedbackState(
   state: FocusFeedbackState,
   boundKey: string,
   serverConfirmed: FocusFeedbackChoice | null,
   readFailed: boolean,
+  serverRevision?: number | null,
 ): FocusFeedbackState {
   if (state.boundKey !== boundKey) {
-    return { boundKey, confirmed: serverConfirmed, selection: serverConfirmed, status: serverConfirmed ? "saved" : "idle", readFailed };
+    return {
+      boundKey,
+      confirmed: serverConfirmed,
+      confirmedRevision: serverConfirmed ? (serverRevision ?? 0) : 0,
+      selection: serverConfirmed,
+      status: serverConfirmed ? "saved" : "idle",
+      readFailed,
+      pendingOperationId: null, pendingExpectedRevision: 0,
+      conflictFeedback: null, conflictRevision: null,
+    };
   }
   if (readFailed) return { ...state, readFailed: true };
-  if (state.status === "saving" || state.status === "error") {
-    return { ...state, confirmed: serverConfirmed, readFailed: false };
+  if (state.status === "saving" || state.status === "error" || state.status === "conflict") {
+    return {
+      ...state,
+      confirmed: serverConfirmed,
+      confirmedRevision: serverConfirmed ? (serverRevision ?? state.confirmedRevision) : 0,
+      readFailed: false,
+    };
   }
-  return { boundKey, confirmed: serverConfirmed, selection: serverConfirmed, status: serverConfirmed ? "saved" : "idle", readFailed: false };
+  return {
+    boundKey,
+    confirmed: serverConfirmed,
+    confirmedRevision: serverConfirmed ? (serverRevision ?? 0) : 0,
+    selection: serverConfirmed,
+    status: serverConfirmed ? "saved" : "idle",
+    readFailed: false,
+    pendingOperationId: null, pendingExpectedRevision: 0,
+    conflictFeedback: null, conflictRevision: null,
+  };
 }
 
-// The owner tapped a feedback choice: show it immediately and mark the
-// save in flight. Choosing the other option is the same transition
-// (re-selection re-saves under the same key).
-export function beginFocusFeedbackSave(state: FocusFeedbackState, choice: FocusFeedbackChoice): FocusFeedbackState {
-  return { ...state, selection: choice, status: "saving" };
+// The owner expressed a NEW intent (a fresh choice, or 「改用我的
+// 选择」 after a conflict): show the choice immediately, mark the save
+// in flight, and record the arbitration identity — the fresh
+// operationId the caller minted for this intent, gated on the
+// currently confirmed revision (after a conflict that is the server's
+// revision, adopted by conflictFocusFeedbackSave).
+export function beginFocusFeedbackSave(state: FocusFeedbackState, choice: FocusFeedbackChoice, operationId?: string): FocusFeedbackState {
+  return {
+    ...state,
+    selection: choice,
+    status: "saving",
+    pendingOperationId: operationId ?? state.pendingOperationId,
+    pendingExpectedRevision: state.confirmedRevision,
+    conflictFeedback: null,
+    conflictRevision: null,
+  };
 }
 
-// A save resolved. It lands only when the key it was started for is
-// still the card's bound key; a stale callback for a previous
-// window/snapshot is dropped whole.
-export function completeFocusFeedbackSave(state: FocusFeedbackState, boundKey: string, choice: FocusFeedbackChoice): FocusFeedbackState {
+// A save resolved successfully. It lands only when the key it was
+// started for is still the card's bound key; a stale callback for a
+// previous window/snapshot is dropped whole. The confirmed revision
+// advances to the revision the server returned.
+export function completeFocusFeedbackSave(state: FocusFeedbackState, boundKey: string, choice: FocusFeedbackChoice, revision?: number): FocusFeedbackState {
   if (state.boundKey !== boundKey) return state;
-  return { boundKey, confirmed: choice, selection: choice, status: "saved", readFailed: false };
+  return {
+    ...state,
+    boundKey,
+    confirmed: choice,
+    confirmedRevision: revision ?? state.confirmedRevision,
+    selection: choice,
+    status: "saved",
+    readFailed: false,
+    conflictFeedback: null,
+    conflictRevision: null,
+  };
 }
 
-// A save failed: keep the attempted choice on screen and mark it
-// unsaved, so the card can offer a retry of the same key + choice.
+// A save failed at the transport level: keep the attempted choice on
+// screen and mark it unsaved, so the card can offer a retry of the
+// same key + choice + operationId (the pending identity is untouched).
 export function failFocusFeedbackSave(state: FocusFeedbackState, boundKey: string): FocusFeedbackState {
   if (state.boundKey !== boundKey) return state;
   return { ...state, status: "error" };
+}
+
+// The server arbitrated against this intent: a newer saved opinion
+// (this tab or another) already stands. The stored truth is adopted
+// as confirmed （上次确认值留在原卡）, the attempted choice stays as
+// the selection so the owner can still insist with 「改用我的选择」 —
+// that retry is a new intent gated on conflictRevision, which is why
+// confirmedRevision advances to it here.
+export function conflictFocusFeedbackSave(
+  state: FocusFeedbackState,
+  boundKey: string,
+  serverFeedback: FocusFeedbackChoice | null,
+  serverRevision: number | null,
+): FocusFeedbackState {
+  if (state.boundKey !== boundKey) return state;
+  return {
+    ...state,
+    status: "conflict",
+    confirmed: serverFeedback ?? state.confirmed,
+    confirmedRevision: serverRevision ?? state.confirmedRevision,
+    conflictFeedback: serverFeedback,
+    conflictRevision: serverRevision,
+    readFailed: false,
+  };
+}
+
+// H3.5 look-back preservation: the previous window's feedback row the
+// panel shows. On a successful read the incoming row (possibly null —
+// genuinely no earlier feedback) replaces what was known; on a FAILED
+// local read the last successfully read row stays, so a read failure
+// never masquerades as "no history".
+export function resolvePreviousLookback(
+  lastKnown: FocusFeedbackData["previous"],
+  incoming: FocusFeedbackData["previous"],
+  readFailed: boolean,
+): FocusFeedbackData["previous"] {
+  return readFailed ? lastKnown : incoming;
+}
+
+// The three windows derived from a stored previous-focus row's own
+// review window (H3.5 look-back): the review window is the row's
+// windowStart–windowEnd; the comparison window is the 7 days before
+// windowStart; the baseline window is the 28 days ending the day
+// before windowStart. Derived from the ROW, never from the current
+// card's windows — an old record is never backfilled with current
+// data.
+export function previousFocusWindows(windowStart: string, windowEnd: string): {
+  review: { start: string; end: string };
+  comparison: { start: string; end: string };
+  baseline: { start: string; end: string };
+} {
+  const shift = (date: string, days: number): string => {
+    const shifted = new Date(`${date}T12:00:00Z`);
+    shifted.setUTCDate(shifted.getUTCDate() + days);
+    return shifted.toISOString().slice(0, 10);
+  };
+  return {
+    review: { start: windowStart, end: windowEnd },
+    comparison: { start: shift(windowStart, -7), end: shift(windowStart, -1) },
+    baseline: { start: shift(windowStart, -28), end: shift(windowStart, -1) },
+  };
 }
 
 // H3.1/H3.2/H3.3: the weekly review panel on the 今日 page, rendered
@@ -2272,7 +2412,10 @@ export function failFocusFeedbackSave(state: FocusFeedbackState, boundKey: strin
 // — it changes no plan, score, XP/gold, or training record.
 // Direction is always carried by the ▲/▼/— symbol plus 增加/减少/持平
 // wording, never by color alone.
-function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed }: { snapshot: Snapshot; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTraining }: {
+  snapshot: Snapshot; focusFeedback: FocusFeedbackData; focusReadFailed: boolean;
+  onViewTraining?: (range: { start: string; end: string }) => void;
+}) {
   const queryClient = useQueryClient();
   const review = useMemo(
     () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
@@ -2286,10 +2429,20 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed }: { snapsho
   const cardKey = focusFeedbackKey(review.reviewWindow.start, review.reviewWindow.end, snapshot.updatedAt);
   const serverConfirmed: FocusFeedbackChoice | null =
     focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.feedback : null;
+  const serverRevision: number | null =
+    focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.revision : null;
   const [feedbackState, setFeedbackState] = useState<FocusFeedbackState>(() => createFocusFeedbackState());
   useEffect(() => {
-    setFeedbackState((prev) => syncFocusFeedbackState(prev, cardKey, serverConfirmed, focusReadFailed));
-  }, [cardKey, serverConfirmed, focusReadFailed]);
+    setFeedbackState((prev) => syncFocusFeedbackState(prev, cardKey, serverConfirmed, focusReadFailed, serverRevision));
+  }, [cardKey, serverConfirmed, focusReadFailed, serverRevision]);
+  // The previous look-back survives a failed local read: the last
+  // successfully read row is kept in state and the failed read never
+  // replaces it with null (which would masquerade as "no history").
+  const [lastPrevious, setLastPrevious] = useState<FocusFeedbackData["previous"]>(null);
+  useEffect(() => {
+    if (!focusReadFailed) setLastPrevious(focusFeedback.previous);
+  }, [focusFeedback.previous, focusReadFailed]);
+  const shownPrevious = resolvePreviousLookback(lastPrevious, focusFeedback.previous, focusReadFailed);
   // The save-time basis snapshot: already-derived facts only (coverage
   // status, first insight label + confidence) as a text summary — the
   // same wording family the panel itself shows.
@@ -2299,42 +2452,78 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed }: { snapsho
     firstInsight ? `首条洞察：${firstInsight.label}（置信度${firstInsight.confidence}）` : "无可用洞察",
   ].join(" · ");
   const saveFeedback = useMutation({
-    mutationFn: (vars: { key: string; choice: FocusFeedbackChoice }) => api.saveWeekFocusFeedback({
+    mutationFn: (vars: { key: string; choice: FocusFeedbackChoice; operationId: string; expectedRevision: number }) => api.saveWeekFocusFeedback({
       windowStart: review.reviewWindow.start,
       windowEnd: review.reviewWindow.end,
       focusText: review.focus,
       basisText,
       snapshotVersion: snapshot.updatedAt,
       feedback: vars.choice,
+      expectedRevision: vars.expectedRevision,
+      operationId: vars.operationId,
     }),
     onSuccess: (result, vars) => {
       if (result.ok) {
-        setFeedbackState((prev) => completeFocusFeedbackSave(prev, vars.key, vars.choice));
+        setFeedbackState((prev) => completeFocusFeedbackSave(prev, vars.key, vars.choice, result.revision ?? undefined));
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else if (result.conflict) {
+        // Arbitration refused the write: the server's saved value
+        // stands. Adopt it as confirmed and keep the attempted choice
+        // as the selection — the owner decides whether to insist.
+        setFeedbackState((prev) => conflictFocusFeedbackSave(prev, vars.key, result.feedback, result.revision));
       } else {
         setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key));
       }
     },
     onError: (_error, vars) => setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key)),
   });
+  // A fresh user intent: mint a new operationId, gated on the
+  // currently confirmed revision (after a conflict that is the
+  // server's revision, adopted into confirmedRevision).
   const chooseFeedback = (choice: FocusFeedbackChoice) => {
-    setFeedbackState((prev) => beginFocusFeedbackSave(prev, choice));
-    saveFeedback.mutate({ key: cardKey, choice });
+    const operationId = newRewardRequestId();
+    const begun = beginFocusFeedbackSave(feedbackState, choice, operationId);
+    setFeedbackState(begun);
+    saveFeedback.mutate({ key: cardKey, choice, operationId, expectedRevision: begun.pendingExpectedRevision });
   };
+  // A transport-failure retry is the SAME intent: it reuses the
+  // recorded operationId and expectedRevision verbatim, so the server
+  // can recognise a landed-but-unreported save and answer idempotently.
   const retryFeedback = () => {
-    if (feedbackState.selection) chooseFeedback(feedbackState.selection);
+    if (!feedbackState.selection) return;
+    if (feedbackState.status === "conflict") {
+      chooseFeedback(feedbackState.selection);
+      return;
+    }
+    const operationId = feedbackState.pendingOperationId ?? newRewardRequestId();
+    const expectedRevision = feedbackState.pendingExpectedRevision;
+    const choice = feedbackState.selection;
+    setFeedbackState((prev) => ({ ...prev, status: "saving" }));
+    saveFeedback.mutate({ key: cardKey, choice, operationId, expectedRevision });
   };
   const feedbackStatusText = feedbackState.status === "saving"
     ? "保存中…"
-    : feedbackState.status === "error"
-      ? "未保存：这次反馈还没有记下来。"
-      : feedbackState.readFailed
-        ? feedbackState.confirmed
-          ? `读取失败：暂时读不到最新状态，上次保存的反馈是「${feedbackState.confirmed}」。`
-          : "读取失败：暂时无法确认反馈状态。"
-        : feedbackState.selection
-          ? `已反馈：${feedbackState.selection}`
-          : "尚未反馈";
+    : feedbackState.status === "conflict"
+      ? feedbackState.conflictFeedback
+        ? `另一处已保存了『${feedbackState.conflictFeedback}』，你这次的『${feedbackState.selection ?? ""}』未覆盖它，这次的选择还没有记下来。`
+        : "保存冲突：服务端已有更新的反馈，你这次的选择还没有记下来。"
+      : feedbackState.status === "error"
+        ? "未保存：这次反馈还没有记下来。"
+        : feedbackState.readFailed
+          ? feedbackState.confirmed
+            ? `读取失败：暂时读不到最新状态，上次保存的反馈是「${feedbackState.confirmed}」。`
+            : "读取失败：反馈状态未知，暂时读不到已保存的反馈。"
+          : feedbackState.selection
+            ? `已反馈：${feedbackState.selection}`
+            : "尚未反馈";
+  // Item 4 training entry: stored training evidence inside THIS review
+  // window — strength sessions (训练记录） or HealthKit sessions, each
+  // from its own stored list, never merged. The button exists only
+  // when at least one source has a stored session in the window.
+  const hkSessionsInWindow = snapshot.historyWorkouts.filter(
+    (workout) => workout.date >= review.reviewWindow.start && workout.date <= review.reviewWindow.end,
+  ).length;
+  const hasTrainingInWindow = (review.strengthCounts?.review ?? 0) > 0 || hkSessionsInWindow > 0;
   const valueText = (metric: WeekReviewMetricRow, value: number | null): string => {
     if (value === null) return metric.kind === "count" ? "未知" : "—／无记录";
     return metric.kind === "count" ? `${value} 次` : `${numberLabel(value, metric.digits)} ${metric.unit}`;
@@ -2357,7 +2546,7 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed }: { snapsho
             <li><span>基线窗</span>{fullDateLabel(review.baselineWindow.start)} – {fullDateLabel(review.baselineWindow.end)}（28 天）</li>
           </ul>
           <p className="week-review-note">健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。</p>
-          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作。对照窗与基线窗一侧的单个异常日同样不会触发：生成前已做两侧留一单日影响检查，去掉任一侧影响最大的一天后，差异若跌破实用阈值或方向翻转，则不生成该洞察。原始单日值照常计入均值，不删除、不改动。运动次数按来源查询范围呈现：来源只查询最近 30 个完整日，基线窗回溯 35 天；查询范围未覆盖全程的窗口只呈现已存次数并注明完整性未确认，不作 28 天总量，存 0 次也不当作确切的 0。</p>
+          <p className="week-review-note">趋势洞察的生成规则：复盘窗与对照窗有效天数均 ≥5 天、均值差达到该指标的实用阈值，且复盘窗至少 3 天单独达到同向实用差异才生成；单个异常日即使把周均值推过阈值，也不会触发周趋势或下周动作。对照窗与基线窗一侧的单个异常日同样不会触发：生成前已做两侧留一单日影响检查，去掉任一侧影响最大的一天后，差异若跌破实用阈值或方向翻转，则不生成该洞察。原始单日值照常计入均值，不删除、不改动。运动次数按来源查询范围呈现：覆盖只由运动记录自身证明（最早一条运动记录的日期与列表是否达到 100 条上限），每日指标的日期再长也不能为运动次数作证；未被证明覆盖全程的窗口只呈现已存次数并注明完整性未确认，不作 28 天总量，存 0 次按未知处理，不当作确切的 0。</p>
           <div className="week-review-rows">
             {review.metrics.map((metric) => (
               <div className="week-review-row" key={metric.key}>
@@ -2430,16 +2619,44 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed }: { snapsho
                 {feedbackState.status === "error" ? (
                   <button type="button" className="week-review-retry-btn" aria-label="重试保存反馈" onClick={retryFeedback}>重试保存</button>
                 ) : null}
+                {feedbackState.status === "conflict" ? (
+                  <button type="button" className="week-review-retry-btn" aria-label="改用我的选择重新保存反馈" onClick={retryFeedback}>改用我的选择</button>
+                ) : null}
                 <p className="week-review-note">反馈只记录这条重点对你是否适用，不会改变任何计划、评分或记录，也不代表效果证明。</p>
               </div>
             ) : null}
+            {hasTrainingInWindow && onViewTraining ? (
+              <button
+                type="button"
+                className="week-review-training-btn"
+                aria-label="查看这段训练记录"
+                onClick={() => onViewTraining({ start: review.reviewWindow.start, end: review.reviewWindow.end })}
+              >
+                查看这段训练记录
+              </button>
+            ) : null}
           </div>
-          {focusFeedback.previous ? (
+          {shownPrevious ? (
             <details className="week-review-previous">
-              <summary>上次重点 · {dateLabel(focusFeedback.previous.windowStart)}–{dateLabel(focusFeedback.previous.windowEnd)} · 已反馈：{focusFeedback.previous.feedback}</summary>
-              <p className="week-review-previous-focus">{focusFeedback.previous.focusText}</p>
-              <p className="week-review-previous-basis">当时依据：{focusFeedback.previous.basisText}</p>
-              <p className="week-review-previous-rule">规则 v{focusFeedback.previous.ruleVersion}</p>
+              <summary>上次已反馈重点 · {dateLabel(shownPrevious.windowStart)}–{dateLabel(shownPrevious.windowEnd)} · {shownPrevious.feedback}</summary>
+              {focusReadFailed ? (
+                <p className="week-review-previous-readnote">读取失败：暂时读不到最新状态，下面是上次成功读到的回看。</p>
+              ) : null}
+              {shownPrevious.windowEnd === review.reviewWindow.end ? (
+                <p className="week-review-previous-same-window">同一复盘窗的较早依据</p>
+              ) : null}
+              <p className="week-review-previous-focus">当时重点：{shownPrevious.focusText}</p>
+              <p className="week-review-previous-basis">当时依据：{shownPrevious.basisText ? shownPrevious.basisText : "旧记录未保存该项"}</p>
+              <p className="week-review-previous-rule">规则 v{shownPrevious.ruleVersion}</p>
+              {(() => {
+                const windows = previousFocusWindows(shownPrevious.windowStart, shownPrevious.windowEnd);
+                return (
+                  <p className="week-review-previous-windows">
+                    当时窗口（按当时复盘窗推导）：复盘窗 {fullDateLabel(windows.review.start)}–{fullDateLabel(windows.review.end)} · 对比窗 {fullDateLabel(windows.comparison.start)}–{fullDateLabel(windows.comparison.end)} · 基线窗 {fullDateLabel(windows.baseline.start)}–{fullDateLabel(windows.baseline.end)}
+                  </p>
+                );
+              })()}
+              <p className="week-review-note">上次的意见只记录当时这条重点是否适用，不代表已完成或有效改善。</p>
             </details>
           ) : null}
         </>
@@ -2612,7 +2829,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline, focusFeedback, focusReadFailed }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline, focusFeedback, focusReadFailed, onViewTraining }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; focusFeedback: FocusFeedbackData; focusReadFailed: boolean; onViewTraining?: (range: { start: string; end: string }) => void }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
   const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineIncomplete ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
@@ -2620,7 +2837,7 @@ function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSync
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} onViewTraining={onViewTraining} />
       {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
       <section className="verdict" aria-labelledby="verdict-title">
         <p>昨日概览</p>
@@ -2747,14 +2964,52 @@ function allWorkoutsList(historyWorkouts: HistoryWorkout[]): HistoryWorkout[] {
   });
 }
 
-function HistoryView({ snapshot, unifiedTimeline }: { snapshot: Snapshot; unifiedTimeline?: UnifiedDay[] }) {
+function HistoryView({ snapshot, unifiedTimeline, focusRange }: { snapshot: Snapshot; unifiedTimeline?: UnifiedDay[]; focusRange?: { start: string; end: string } | null }) {
   const strengths = [...snapshot.strengthTraining.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const allWorkouts = allWorkoutsList(snapshot.historyWorkouts);
   const swims = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).slice().reverse();
   const weights = snapshot.historyDaily.filter((row): row is Daily & { weightKg: number } => row.weightKg !== null).slice().reverse();
   const sleeps = snapshot.historySleeps.slice().reverse();
+  // H3.5 training entry landing: the stored sessions inside the
+  // review window the owner came from, per source and never merged.
+  // The strength list is the snapshot's stored sample (latest
+  // sessions only), so it is labelled 已存明细样本 and its possible
+  // gap against the full weekly count is stated separately — the
+  // weekly totals live in the review card, not in this sample.
+  const focusStrengths = focusRange
+    ? strengths.filter((workout) => workout.date >= focusRange.start && workout.date <= focusRange.end)
+    : [];
+  const focusWorkouts = focusRange
+    ? allWorkouts.filter((workout) => workout.date >= focusRange.start && workout.date <= focusRange.end)
+    : [];
   return (
     <div className="history-view">
+      {focusRange ? (
+        <section className="history-section history-focus-range" aria-labelledby="history-focus-range-title">
+          <div className="section-heading"><div><p className="section-kicker">周复盘窗口</p><h2 id="history-focus-range-title">{fullDateLabel(focusRange.start)} – {fullDateLabel(focusRange.end)} 的已存训练记录</h2></div></div>
+          <p className="unified-note">以下只呈现快照内已存的明细，两来源分列，不合并为一个总数。</p>
+          <h3 className="history-focus-subtitle">力量训练（来源：训练记录）· 已存明细样本 {focusStrengths.length} 次</h3>
+          {focusStrengths.length ? (
+            <div className="strength-history-list">{focusStrengths.map((workout) => (
+              <div className="strength-history-row history-focus-row" key={`focus-${workout.id}`}>
+                <span className={`routine-dot routine-${workout.routine}`}>{ROUTINE_LABELS[workout.routine]}</span>
+                <span><strong>{dateLabel(workout.date)} · {workout.status === "active" ? "进行中" : durationLabel(workout.durationMinutes)}</strong><small>{workout.completedSets}/{workout.totalSets} 组</small></span>
+                <span className="history-volume">{volumeLabel(workout.totalVolume)} {workout.unit}</span>
+              </div>
+            ))}</div>
+          ) : <p className="empty-inline">这段时间没有已存的力量训练明细。</p>}
+          <p className="unified-note">力量明细是快照内已存明细样本（仅最近若干次），可能少于完整周汇总；完整周次数以复盘卡的周汇总为准，两者缺口分开呈现，不用样本冒充全量。</p>
+          <h3 className="history-focus-subtitle">运动记录（HealthKit 来源）{focusWorkouts.length} 次</h3>
+          {focusWorkouts.length ? (
+            <div className="record-list">{focusWorkouts.map((workout) => (
+              <article className="record-row" key={`focus-${workout.id}`}>
+                <div><strong>{dateLabel(workout.date)} · {workoutTypeLabel(workout.type)}</strong><span>{workout.distanceMeters === null ? "—" : workout.distanceMeters === 0 ? "0 米" : `${numberLabel(workout.distanceMeters)} 米`}</span></div>
+                <dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl>
+              </article>
+            ))}</div>
+          ) : <p className="empty-inline">这段时间没有已存的 HealthKit 运动记录。</p>}
+        </section>
+      ) : null}
       {unifiedTimeline && unifiedTimeline.length ? (
         <section className="history-section" aria-labelledby="unified-history-title">
           <div className="section-heading"><div><p className="section-kicker">一体时间线</p><h2 id="unified-history-title">每天合在一起看</h2></div><span className="record-count">{unifiedTimeline.length} 天</span></div>
@@ -3797,6 +4052,15 @@ function GameView() {
 
 function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
+  // H3.5 training entry: the review window the owner asked to inspect
+  // from the week-review focus card. Set when they tap 查看这段训练
+  // 记录 (which also switches to the history tab); the history view
+  // presents the stored sessions inside exactly this range.
+  const [historyFocusRange, setHistoryFocusRange] = useState<{ start: string; end: string } | null>(null);
+  const viewTrainingRange = (range: { start: string; end: string }) => {
+    setHistoryFocusRange(range);
+    setTab("history");
+  };
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const polling = useTaskPolling();
@@ -3836,7 +4100,7 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -3920,7 +4184,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.isRefetchError} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
