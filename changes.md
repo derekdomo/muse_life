@@ -1191,3 +1191,12 @@
 - 队列核对：`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T 均待所有者确认，不执行；旧 H 系列（L1-RACE-001/H-UNITS-001/H-SOURCE-001/H-WORKOUTS-001 等）源码返工已关闭、整项为运行待验，缺平台/owner 证据不可推进；EVID 旧四套脚本/平台 A 证据尾巴保留。CWEB-MVP-001 完整养成闭环原目标 10-26 18:00，未到期。
 - 进度面板（静态 artifact「Life 进度」slug life）：已定向更新 F0.7 bullet 时长 49¾→约 51¾ 小时、时间戳 13 时→15 时与页脚截至时间 2026-10-22 15:13 PDT，构建回传已核验 index.html 两处「截至」与 F0.7 条目替换、其余条目未动。
 - 本轮无代码改动、无用户可见增量；未提交 app.db/.env/任何真实数据。
+
+## 2026-10-22（muse-life-plans-sync 17:13 轮次：CMP-READ-IMPORT-001 三项 P0 一致性余项＋CMP-READ-001 显示快照/Home 同版交付；F0.7 只读续查）
+
+- 队列来源：git pull 快进 d82b6d7→fc7b9b2（PM 2026-10-22 15:52 增量复验，只改 plans.md）；新入队 = 原 P0 `CMP-READ-IMPORT-001` 三调度（一致读取、摘录提交点守卫、NULL 基准 CAS；原 queuedAt=2026-10-22T13:51:12Z 不重置）＋同链用户 P1 `CMP-READ-001` 显示快照/只检查版本/显式切换/Home 同版判断（原 10-23/24 不重置）。已关文件隔离/冻结范围不重做；F0.7 仅只读。
+- 改了什么（space-15「读书复利」，经 artifact 构建通道交付并上线）：(1) getChapter 改单条 JOIN 一致快照——正文/目录/liveVersion/versionLabel 同源同版，零章节行才补查 books 行，删除书零内容；新增只读动作 getBookLiveVersion（仅 books 一行元信息、owner 校验）。(2) createSnippet 提交点原子守卫——片段与 request_keys 账本插入同为受守卫 insert-select（books 未删除且 live_gen 与读基准严格相等、NULL=NULL 同算相等），守卫不成立零片段零账本、typed conflict；已提交原键仍先行仲裁重放；provenance 取 batch 内 books 当前行值。(3) savePosition NULL 分支 WHERE 补 live_gen IS NULL CAS，0 行沿既有逻辑 typed conflict。(4) Reader 显示快照——异版迟到回包只置 stale 不覆盖正文/目录/版标/选文；「检查新版本」只查元信息、同版提示已是最新；stale 时翻章/目录禁用、横幅补明旧版后续章节不可用；显式切换一次性重置钉版＋第 0 章＋offset 0＋清选文。(5) 片段三态判断抽为 client lib 共享 helper snippetVersionState，Snippets 与 Home「片刻回味」共用（replaced/unknown 显示说明＋「打开当前版本」不带旧定位）。
+- 验证证据：构建方在已发布源码树实跑（内存库 synthetic、未触生产库）validate-import-generations **138/138**（原 113＋本轮新增 24：12 源码＋12 行为，含代理注入提升的 NULL 基准竞态、提交点守卫、同版 provenance、getChapter 提升前后严格同版、getBookLiveVersion 权限）、validate-reading-qa 107/107、validate-save-atomicity 123/123；构建（类型检查＋打包）成功、审计通过；生产只读核对行数编辑前后一致（books=1、其余 0）。
+- 局限/尾巴：本轮受工件文件访问规矩所限，未直接搬运已发布源码回灌仓库 reading-compounding/ 镜像，源码逐字节回灌与仓库副本独立复跑列 `EVID-LIFE-001` 尾巴待后续轮次以许可通道补齐——本条计数以构建方已发布树实跑为准，不冒称仓库独立复跑。React 显示快照/横幅未做 owner 像素级实测，所有者本人打开为准。回滚：经 artifact 构建通道回退本轮改动；无 schema 迁移（本轮零迁移），无数据回滚项。
+- `F0.7`（P0，只读续查，遵丙(ii)，未触发 run、未清冻/重置）：17:13 PDT 经 space-3 `getRefreshObservations`——access=owner、currentAttempt=1、status=running、diagnosis=awaiting_callback，观测行仅 refresh_started(claimed)＋spawn_attached（2026-10-20T18:27:22Z），state.updatedAt 冻结于 2026-10-20T18:27:22Z，距启动约 53¾ 小时无本代回调/终态行、新快照未核实，断点未变（平台任务执行/回调段）。
+- 队列核对：`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T 仍（需用户确认），不执行；CWEB-MVP-001 完整养成闭环原目标 10-26 18:00 未到期。本轮用户可见增量：1 组（READ 一致性三 P0＋显示快照/Home 同版）。未提交 app.db/.env/任何真实数据。此登记仅表示实现方已交付，PM 结论以其评审记录为准。
