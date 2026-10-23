@@ -3,6 +3,12 @@
 // version mid-switch, a post-switch chapter must not restore the
 // pre-switch offsets, and a held selection must save against the
 // chapter it was captured in — never the requested chapter.
+// Failure-recovery remainder: a failed chapter-0 target request
+// must land in an honest switch-failed phase (display + draft
+// kept, writes still blocked, same-target retry), the version
+// check must never claim 已是最新版本 under an unset pin, and
+// non-target responses / navigation must never complete the
+// switch ahead of the chapter-0 target.
 //
 // Two layers:
 //  1. Source wiring: Reader.tsx routes admission / restore /
@@ -43,13 +49,21 @@ const {
   captureSelectionBinding,
   snippetSavePayload,
   readerWritesBlocked,
+  resolveSwitchPhase,
+  resolveVersionCheck,
 } = await import("./client/src/Reader.tsx");
 
 check(
-  "source: Reader exports the pure decisions (admission / restore / capture / payload / write gate)",
-  [admitChapterResponse, restoreTargetOffset, captureSelectionBinding, snippetSavePayload, readerWritesBlocked].every(
-    (f) => typeof f === "function",
-  ),
+  "source: Reader exports the pure decisions (admission / restore / capture / payload / write gate / switch phase / version check)",
+  [
+    admitChapterResponse,
+    restoreTargetOffset,
+    captureSelectionBinding,
+    snippetSavePayload,
+    readerWritesBlocked,
+    resolveSwitchPhase,
+    resolveVersionCheck,
+  ].every((f) => typeof f === "function"),
 );
 check(
   "source: admission decision refuses old-version responses while awaiting (switchFromVersion comparison)",
@@ -105,6 +119,69 @@ check(
   "source: the reader shows a switching state while awaiting (display kept, loading stated)",
   readerSrc.includes("正在加载新版本"),
 );
+check(
+  "source: admission carries the switch target and refuses non-target responses while awaiting",
+  readerSrc.includes("requestedIdx !== (state.switchTargetIdx ?? 0)") &&
+    readerSrc.includes("switchTargetIdx: switchTargetRef.current") &&
+    readerSrc.includes("switchTargetRef.current = 0"),
+);
+check(
+  "source: a settled target-request failure (query error or forbidden response) is recorded while awaiting, fetch-in-flight excluded",
+  readerSrc.includes("if (!awaitingRef.current || chapter.isFetching) return;") &&
+    readerSrc.includes("chapter.isError || chapter.data?.forbidden === true") &&
+    readerSrc.includes("setSwitchFailed(true)"),
+);
+{
+  const retrySlice = readerSrc.slice(
+    readerSrc.indexOf("const retrySwitch"),
+    readerSrc.indexOf("const checkVersion"),
+  );
+  check(
+    "source: retry re-issues ONLY the switch-target chapter query — same switchFrom / generation / target, pin never restored",
+    retrySlice.includes('queryKey: ["chapter", book.id, switchTargetRef.current]') &&
+      retrySlice.includes("invalidateQueries") &&
+      !retrySlice.includes("generationRef") &&
+      !retrySlice.includes("switchFromRef") &&
+      !retrySlice.includes("pinnedVersionRef"),
+  );
+}
+check(
+  "source: the failed phase renders an honest failure notice with a 重试切换 entry, gated on the phase (not on switching alone)",
+  readerSrc.includes('switchPhase === "switch-failed"') &&
+    readerSrc.includes("新版本切换失败") &&
+    readerSrc.includes("重试切换") &&
+    readerSrc.includes("onClick={retrySwitch}") &&
+    readerSrc.includes("resolveSwitchPhase({"),
+);
+{
+  const checkSlice = readerSrc.slice(
+    readerSrc.indexOf("const checkVersion"),
+    readerSrc.indexOf("const safeHtml"),
+  );
+  check(
+    "source: checkVersion delegates to resolveVersionCheck and no longer treats an unset pin as 已是最新版本",
+    checkSlice.includes("resolveVersionCheck({") &&
+      checkSlice.includes("awaitingNewVersion: awaitingRef.current") &&
+      !checkSlice.includes("=== undefined ||"),
+  );
+}
+check(
+  "source: TOC / previous / next navigation is disabled for the whole unresolved switch attempt (loading AND failed phases)",
+  readerSrc.includes("disabled={versionStale || switching}") &&
+    readerSrc.includes("disabled={versionStale || switching || chapterIdx <= 0}") &&
+    readerSrc.includes("disabled={versionStale || switching || toc.length === 0"),
+);
+{
+  const switchStart = readerSrc.indexOf("switchFromRef.current = pinnedVersionRef.current");
+  const switchSlice = readerSrc.slice(
+    switchStart,
+    readerSrc.indexOf('queryKey: ["library"]', switchStart),
+  );
+  check(
+    "source: starting a switch resets the failure ledger and KEEPS any held selection draft (no setSelection(null))",
+    switchSlice.includes("setSwitchFailed(false)") && !switchSlice.includes("setSelection(null)"),
+  );
+}
 
 /* ---------------- 2. behavior: real functions ---------------- */
 
@@ -141,12 +218,15 @@ function makeReaderSim() {
     generation: 0,
     snapshot: null,
     staleRaised: false,
+    switchTarget: 0,
+    targetFailed: false,
     onResponse(requestedIdx, data) {
       const res = admitChapterResponse(
         {
           pinned: this.pinned,
           awaitingNewVersion: this.awaiting,
           switchFromVersion: this.switchFrom,
+          switchTargetIdx: this.switchTarget,
         },
         requestedIdx,
         this.generation,
@@ -155,7 +235,10 @@ function makeReaderSim() {
       if (res.kind === "admit") {
         this.pinned = res.pinned;
         this.snapshot = res.snapshot;
-        if (this.awaiting) this.awaiting = false;
+        if (this.awaiting) {
+          this.awaiting = false;
+          this.targetFailed = false;
+        }
       } else if (res.kind === "stale") {
         this.staleRaised = true;
       }
@@ -167,6 +250,26 @@ function makeReaderSim() {
       this.pinned = undefined;
       this.generation += 1;
       this.staleRaised = false;
+      this.switchTarget = 0;
+      this.targetFailed = false;
+    },
+    // Mirrors the component's failure effect: a settled
+    // target-request failure (query error / forbidden response)
+    // while awaiting moves ONLY the failure ledger.
+    markTargetFailed() {
+      if (this.awaiting) this.targetFailed = true;
+    },
+    // Mirrors retrySwitch: same switchFrom, same generation,
+    // same chapter-0 target — only the request re-issues.
+    retrySwitch() {
+      this.targetFailed = false;
+    },
+    phase() {
+      return resolveSwitchPhase({
+        awaitingNewVersion: this.awaiting,
+        targetFailed: this.targetFailed,
+        switchCompleted: (this.snapshot?.generation ?? 0) > 0,
+      });
     },
     writesBlocked() {
       return readerWritesBlocked({
@@ -436,6 +539,150 @@ function makeReaderSim() {
   check(
     "E: a payload built from the REQUESTED chapter flips the C fixture (chapterIdx 1 ≠ captured 0)",
     mutantPayload.chapterIdx === 1 && snippetSavePayload(5, "req-mutant", sel).chapterIdx === 0,
+  );
+}
+
+/* --- F: target chapter-0 request fails → honest failed phase + same-target retry --- */
+{
+  const sim = makeReaderSim();
+  sim.onResponse(2, resp("G", 2));
+  const heldSel = captureSelectionBinding(sim.snapshot, "切换前选好的句子", 3);
+  const heldSnapshot = sim.snapshot;
+  sim.switchToNewVersion();
+  check(
+    "F: phase is switching while the target chapter-0 request is in flight",
+    sim.phase() === "switching",
+  );
+  // The target request REJECTS (query error): no data arrives.
+  const noData = sim.onResponse(0, undefined);
+  sim.markTargetFailed();
+  check(
+    "F: a rejected target request lands in switch-failed — the attempt is not stuck at switching forever",
+    noData.kind === "skip" && sim.phase() === "switch-failed" && sim.awaiting === true && sim.pinned === undefined,
+  );
+  check(
+    "F: the failed switch keeps the current display (G chapter 2) and the held selection draft (bound to G chapter 2)",
+    sim.snapshot === heldSnapshot &&
+      sim.snapshot?.liveVersion === "G" &&
+      snippetSavePayload(5, "req-f1", heldSel).chapterIdx === 2 &&
+      snippetSavePayload(5, "req-f1", heldSel).liveVersion === "G",
+  );
+  check(
+    "F: writes stay blocked for the whole failed phase",
+    sim.writesBlocked() === true,
+  );
+  // A forbidden target response is a failure too, not a completion.
+  sim.retrySwitch();
+  const forb = sim.onResponse(0, FORBIDDEN);
+  sim.markTargetFailed();
+  check(
+    "F: a forbidden target response also lands in switch-failed (pin still unset, display untouched)",
+    forb.kind === "skip" && sim.phase() === "switch-failed" && sim.pinned === undefined && sim.snapshot === heldSnapshot,
+  );
+  const genBefore = sim.generation;
+  const fromBefore = sim.switchFrom;
+  sim.retrySwitch();
+  check(
+    "F: retry keeps the SAME switchFromVersion, generation and chapter-0 target, and returns the phase to switching",
+    sim.phase() === "switching" &&
+      sim.generation === genBefore &&
+      sim.switchFrom === fromBefore &&
+      sim.switchTarget === 0 &&
+      sim.pinned === undefined,
+  );
+  const landed = sim.onResponse(0, resp("H", 0));
+  check(
+    "F: the retried chapter-0 response completes the switch (phase switch-done, pin H, snapshot H chapter 0, writes unblocked)",
+    landed.kind === "admit" &&
+      sim.phase() === "switch-done" &&
+      sim.pinned === "H" &&
+      sim.snapshot?.idx === 0 &&
+      sim.snapshot?.liveVersion === "H" &&
+      sim.writesBlocked() === false,
+  );
+}
+
+/* --- G: navigation cannot preempt the switch; post-switch navigation + capture still work --- */
+{
+  const sim = makeReaderSim();
+  sim.onResponse(0, resp("G", 0));
+  sim.switchToNewVersion();
+  // H chapter 1 lands BEFORE the H chapter-0 target (e.g. a
+  // stray navigation request raced the switch): it must not
+  // complete the switch or skip the owner's 从头 choice.
+  const early = sim.onResponse(1, resp("H", 1));
+  check(
+    "G: a non-target chapter response during the switch is ignored — switch NOT completed, chapter 0 not skipped",
+    early.kind === "ignore" &&
+      sim.awaiting === true &&
+      sim.pinned === undefined &&
+      sim.snapshot?.idx === 0 &&
+      sim.snapshot?.liveVersion === "G" &&
+      sim.phase() === "switching",
+  );
+  const oldEcho = sim.onResponse(2, resp("G", 2));
+  check(
+    "G: a non-target old-version response during the switch is likewise ignored",
+    oldEcho.kind === "ignore" && sim.awaiting === true && sim.phase() === "switching",
+  );
+  const target = sim.onResponse(0, resp("H", 0));
+  check(
+    "G: the target chapter-0 response then completes the switch",
+    target.kind === "admit" && sim.pinned === "H" && sim.phase() === "switch-done",
+  );
+  const nav = sim.onResponse(1, resp("H", 1));
+  const sel = captureSelectionBinding(sim.snapshot, "新版里的句子", 4);
+  const payload = sel ? snippetSavePayload(5, "req-g1", sel) : null;
+  check(
+    "G: after the switch, normal navigation works and capture/payload bind the NEW version's chapter",
+    nav.kind === "admit" &&
+      sim.snapshot?.idx === 1 &&
+      sel?.liveVersion === "H" &&
+      payload?.chapterIdx === 1 &&
+      payload?.liveVersion === "H" &&
+      sim.writesBlocked() === false,
+  );
+}
+
+/* --- H: version-check verdict honesty + the phase mapping itself --- */
+{
+  const base = { forbidden: false, found: true };
+  const pending = resolveVersionCheck({ ...base, pinned: undefined, awaitingNewVersion: true, liveVersion: "H" });
+  check(
+    "H: pin unset with a switch unresolved → switch-pending, never 已是最新版本 (the G-body / unset-pin misreport)",
+    pending.kind === "switch-pending" && pending.message !== "已是最新版本。" && pending.message.includes("尚未切换完成"),
+  );
+  const unsettled = resolveVersionCheck({ ...base, pinned: undefined, awaitingNewVersion: false, liveVersion: "G" });
+  check(
+    "H: pin unset outside a switch → unsettled, never 已是最新版本",
+    unsettled.kind === "unsettled" && unsettled.message !== "已是最新版本。",
+  );
+  const current = resolveVersionCheck({ ...base, pinned: "G", awaitingNewVersion: false, liveVersion: "G" });
+  check(
+    "H: settled pin equal to the live version → current (已是最新版本） is the only path to that claim",
+    current.kind === "current" && current.message === "已是最新版本。",
+  );
+  check(
+    "H: settled pin behind the live version → stale",
+    resolveVersionCheck({ ...base, pinned: "G", awaitingNewVersion: false, liveVersion: "H" }).kind === "stale",
+  );
+  check(
+    "H: forbidden / not-found metadata → unknown, never current",
+    resolveVersionCheck({ forbidden: true, found: false, pinned: undefined, awaitingNewVersion: false, liveVersion: null }).kind ===
+      "unknown" &&
+      resolveVersionCheck({ ...base, pinned: "G", awaitingNewVersion: false, liveVersion: "G" }).kind === "current",
+  );
+  check(
+    "H: a legacy null pin equal to a null live version → current (unchanged legacy behavior)",
+    resolveVersionCheck({ ...base, pinned: null, awaitingNewVersion: false, liveVersion: null }).kind === "current",
+  );
+  check(
+    "H: resolveSwitchPhase maps idle / switching / switch-failed / switch-done exactly",
+    resolveSwitchPhase({ awaitingNewVersion: false, targetFailed: false, switchCompleted: false }) === "idle" &&
+      resolveSwitchPhase({ awaitingNewVersion: true, targetFailed: false, switchCompleted: false }) === "switching" &&
+      resolveSwitchPhase({ awaitingNewVersion: true, targetFailed: true, switchCompleted: false }) === "switch-failed" &&
+      resolveSwitchPhase({ awaitingNewVersion: false, targetFailed: false, switchCompleted: true }) === "switch-done" &&
+      resolveSwitchPhase({ awaitingNewVersion: true, targetFailed: true, switchCompleted: true }) === "switch-failed",
   );
 }
 

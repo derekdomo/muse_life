@@ -241,6 +241,14 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .week-review-previous .week-review-previous-readnote { color: #f2c66d; font-weight: 700; }
 .week-review-training-btn { min-height: 44px; margin-top: 10px; padding: 10px 18px; border: 1px solid rgba(255, 255, 255, .25); border-radius: 10px; background: transparent; color: #e8eee9; font-size: 13px; font-weight: 700; cursor: pointer; }
 .history-focus-subtitle { margin: 14px 0 8px; font-size: 12px; font-weight: 800; }
+.history-focus-basis { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.history-focus-basis-heading { margin: 0; font-size: 12px; font-weight: 800; line-height: 1.55; overflow-wrap: anywhere; }
+.history-focus-basis-focus { margin: 6px 0 0; font-size: 13px; font-weight: 700; line-height: 1.6; overflow-wrap: anywhere; }
+.history-focus-basis-feedback { margin: 6px 0 0; color: var(--dim); font-size: 11px; font-weight: 700; line-height: 1.55; overflow-wrap: anywhere; }
+.history-focus-basis-text { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.history-focus-basis-update { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.history-focus-basis-update p { margin: 0 0 8px; color: var(--amber); font-size: 11px; font-weight: 700; line-height: 1.55; overflow-wrap: anywhere; }
+.history-focus-weeks { margin-top: 6px; }
 .history-focus-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
 
 .verdict { padding: 28px 0 22px; }
