@@ -24,6 +24,31 @@
 //   missing days are not zeros). There is no uniform-spreading
 //   estimate path: without daily evidence the verdict is
 //   "insufficient".
+//
+// PM 2026-10-24 01:07 fixes (TXN-1 asOf/scope remainder, ANOM-1
+// baseline identity/coverage remainder):
+// - Spend determines the candidate set from asOf FIRST and only then
+//   arbitrates the lifecycle: a row dated after asOf does not yet
+//   exist in that view, so a future posted row cannot erase a
+//   pending row that was the latest known state at the cutoff, and
+//   a future same-status twin cannot turn a settled past row into
+//   a conflict. Conflicts are scoped: a conflict group is reported
+//   for a month only when its rows belong to that month or a refund
+//   dated in that month depends on the conflicted ID; an unrelated
+//   month's conflict never makes this month incomplete. Views are
+//   honestly labelled as transaction-date cutoffs: with no source
+//   observation timestamps the function does NOT claim to rebuild
+//   what a source knew at the cutoff, only what is dated by it.
+// - Anomaly baselines are normalized by month identity before any
+//   picking: identical duplicate months dedupe to one, conflicting
+//   duplicates disqualify that month, only months strictly before
+//   the asOf month are eligible, and each eligible month needs its
+//   OWN explicit complete coverage (per-entry fields or the
+//   coverageByMonth entry for that month; conflicting explicit
+//   signals disqualify the month) — the current month's coverage
+//   never substitutes for a baseline month's. The result names the
+//   adopted baseline months with their coverage, and an
+//   "insufficient" verdict names why months were rejected.
 
 // ---------- Small date helpers (string months, no Date mutation) ----
 function parseMonth(month) {
@@ -141,19 +166,39 @@ export function summarizeSpendMonth(txns, month, options = {}) {
   const afterAsOf = (row) => asOf !== null && row.date > asOf;
   const coverageStatus = coverageStatusFromOptions(options, month);
 
-  // Lifecycle normalization by stable ID, before anything is counted:
-  // identical duplicates dedupe; a posted row supersedes a pending
-  // row for the same ID regardless of input order; distinct rows with
-  // the same ID AND the same status but different amount/kind/date
-  // are a conflict — listed in `conflicts`, excluded from every sum
-  // (never resolved by picking one), and the month is incomplete.
+  // Candidate set FIRST, lifecycle arbitration SECOND (TXN-1 01:07):
+  // rows dated after asOf are not candidates at all — at the cutoff
+  // they do not exist yet, so they can neither supersede a pending
+  // row that was the latest dated state nor conflict with a settled
+  // past row. Within the candidate set: identical duplicates dedupe;
+  // a posted row supersedes a pending row for the same ID regardless
+  // of input order; distinct rows with the same ID AND the same
+  // status but different amount/kind/date are a conflict — excluded
+  // from every sum (never resolved by picking one). A conflict is
+  // REPORTED for this month (and makes it incomplete) only when it
+  // is in scope: its rows belong to this month, or a refund dated in
+  // this month depends on the conflicted ID. The full (unfiltered)
+  // grouping is kept only to judge refunds whose original row is a
+  // future or conflicted row.
   const groups = new Map();
   for (const t of txns) {
+    if (afterAsOf(t)) continue;
     if (!groups.has(t.id)) groups.set(t.id, []);
     groups.get(t.id).push(t);
   }
+  const allMonthsById = new Map(); // id -> Set of row months (all rows)
+  for (const t of txns) {
+    if (!allMonthsById.has(t.id)) allMonthsById.set(t.id, new Set());
+    allMonthsById.get(t.id).add(t.date.slice(0, 7));
+  }
+  const refundMonthsByOriginal = new Map(); // original id -> Set of refund months (candidate refunds)
+  for (const t of txns) {
+    if (t.kind !== "refund" || t.refundOf == null || afterAsOf(t)) continue;
+    if (!refundMonthsByOriginal.has(t.refundOf)) refundMonthsByOriginal.set(t.refundOf, new Set());
+    refundMonthsByOriginal.get(t.refundOf).add(t.date.slice(0, 7));
+  }
   const canonical = new Map();
-  const conflicts = [];
+  const allConflicts = [];
   for (const [id, rows] of groups) {
     const seenKeys = new Set();
     const uniq = [];
@@ -169,12 +214,15 @@ export function summarizeSpendMonth(txns, month, options = {}) {
     let hasConflict = false;
     for (const sameStatus of byStatus.values()) if (sameStatus.length > 1) hasConflict = true;
     if (hasConflict) {
-      conflicts.push({ id, reason: "conflicting-duplicates" });
+      allConflicts.push({ id, reason: "conflicting-duplicates" });
       continue;
     }
     canonical.set(id, byStatus.get("posted")?.[0] ?? byStatus.get("pending")?.[0] ?? uniq[0]);
   }
-  const conflictIds = new Set(conflicts.map((c) => c.id));
+  const conflicts = allConflicts.filter((c) =>
+    (allMonthsById.get(c.id)?.has(month) ?? false) ||
+    (refundMonthsByOriginal.get(c.id)?.has(month) ?? false));
+  const conflictIds = new Set(allConflicts.map((c) => c.id));
 
   let postedSpend = 0;
   let pendingSpend = 0;
@@ -214,12 +262,24 @@ export function summarizeSpendMonth(txns, month, options = {}) {
   for (const r of refundRows) {
     if (afterAsOf(r)) continue; // future refund: not counted at all
     const orig = r.refundOf != null ? canonical.get(r.refundOf) : undefined;
-    const belongingMonth = orig ? orig.date.slice(0, 7) : r.date.slice(0, 7);
-    if (belongingMonth !== month) continue; // judged in the original's month
     const amt = Math.abs(r.amount);
     if (r.status !== "posted") continue; // pending refund has not landed yet
-    if (!orig) { unappliedRefunds.push({ refundId: r.id, of: r.refundOf ?? null, amount: amt, reason: "original-missing" }); continue; }
-    if (conflictIds.has(orig.id)) { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-conflicted" }); continue; }
+    if (!orig) {
+      // The original has no canonical candidate row: it is either
+      // conflicted, dated entirely after asOf, or truly absent. The
+      // refund is judged in the ORIGINAL's month(s); a refund whose
+      // original belongs to another month is not this month's gap.
+      const origMonths = r.refundOf != null ? allMonthsById.get(r.refundOf) : undefined;
+      if (origMonths && !origMonths.has(month)) continue;
+      if (!origMonths && r.date.slice(0, 7) !== month) continue;
+      const reason = r.refundOf != null && conflictIds.has(r.refundOf)
+        ? "original-conflicted"
+        : origMonths ? "original-after-asof" : "original-missing";
+      unappliedRefunds.push({ refundId: r.id, of: r.refundOf ?? null, amount: amt, reason });
+      continue;
+    }
+    const belongingMonth = orig.date.slice(0, 7);
+    if (belongingMonth !== month) continue; // judged in the original's month
     if (orig.kind !== "spend") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-not-spend" }); continue; }
     if (afterAsOf(orig)) { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-after-asof" }); continue; }
     if (orig.status !== "posted") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-pending" }); continue; }
@@ -446,23 +506,72 @@ export function anomalyV0(input) {
   if (!currentWindow) return insufficient("当前月同日窗内有缺日");
   const currentToDate = currentWindow.sum;
 
-  // Baseline: most recent 3 comparable complete months.
-  const entries = normalizeBaselineDaily(input)
-    .filter((e) => e.daily && e.complete !== false && e.coverageStatus !== "incomplete" && e.coverageStatus !== "unknown")
-    .sort((a, b) => (String(b.month ?? "")).localeCompare(String(a.month ?? "")));
+  // Baseline (ANOM-1 01:07): normalize by month identity first.
+  // Only months strictly before the asOf month are eligible; rows
+  // for the same month must agree (identical duplicates dedupe,
+  // conflicting versions disqualify the month); each month needs
+  // its OWN explicit complete coverage — an entry's coverageStatus /
+  // coverage / complete fields or that month's coverageByMonth
+  // entry, with conflicting signals disqualifying the month. Only
+  // when a month carries no coverage signal of its own at all does
+  // the call-level coverageStatus (already required "complete"
+  // above) stand in for it; the current month's coverageByMonth
+  // entry never substitutes for a baseline month's missing one.
+  const coverageSignal = (e) => {
+    const signals = [];
+    if (typeof e.coverageStatus === "string") signals.push(e.coverageStatus);
+    if (e.coverage !== undefined) signals.push(e.coverage === true ? "complete" : e.coverage === false ? "incomplete" : "unknown");
+    if (e.complete !== undefined) signals.push(e.complete === true ? "complete" : "incomplete");
+    if (input.coverageByMonth !== undefined && e.month) signals.push(monthCoverage(input.coverageByMonth, e.month));
+    if (signals.length === 0) return coverageStatus;
+    const uniq = [...new Set(signals)];
+    return uniq.length > 1 ? "conflict" : uniq[0];
+  };
+  const rejectedMonths = [];
+  const byMonthMap = new Map();
+  for (const e of normalizeBaselineDaily(input)) {
+    if (!e.daily) continue;
+    if (!e.month) { rejectedMonths.push({ month: null, reason: "缺月份标识" }); continue; }
+    if (month && e.month >= month) {
+      rejectedMonths.push({ month: e.month, reason: e.month === month ? "当月不作基准" : "未来月不作基准" });
+      continue;
+    }
+    if (!byMonthMap.has(e.month)) byMonthMap.set(e.month, []);
+    byMonthMap.get(e.month).push(e);
+  }
+  const eligibleEntries = [];
+  for (const [m, rows] of byMonthMap) {
+    if (new Set(rows.map((r) => JSON.stringify(r.daily))).size > 1) {
+      rejectedMonths.push({ month: m, reason: "同月冲突版本，无权威版本不任挑" });
+      continue;
+    }
+    const cov = coverageSignal(rows[0]);
+    const covs = new Set(rows.map((r) => coverageSignal(r)));
+    if (covs.size > 1) { rejectedMonths.push({ month: m, reason: "覆盖信号冲突" }); continue; }
+    if (cov !== "complete") { rejectedMonths.push({ month: m, reason: `覆盖${cov}` }); continue; }
+    eligibleEntries.push({ month: m, daily: rows[0].daily, coverageStatus: "complete" });
+  }
+  eligibleEntries.sort((a, b) => b.month.localeCompare(a.month));
   const comparable = [];
-  for (const e of entries) {
+  for (const e of eligibleEntries) {
     if (comparable.length >= 3) break;
     let required = asOfDay;
-    if (comparisonKind === "month-end" && e.month) {
+    if (comparisonKind === "month-end") {
       const { y, m } = parseMonth(e.month);
       required = daysInMonth(y, m);
     }
     const w = windowSum(e.daily, required);
-    if (!w) continue; // missing day / truncated month: not comparable
-    comparable.push({ month: e.month, window: w });
+    if (!w) { rejectedMonths.push({ month: e.month, reason: "同日窗内有缺日" }); continue; }
+    comparable.push({ month: e.month, window: w, coverageStatus: "complete" });
   }
-  if (comparable.length < 3) return insufficient("可比完整月少于 3 个（缺逐日证据或同日窗内有缺日）");
+  const adoptedBaseline = comparable.map((c) => ({ month: c.month, coverageStatus: c.coverageStatus }));
+  if (comparable.length < 3) {
+    return {
+      ...insufficient(`可比完整月少于 3 个（合格 ${comparable.length} 个：须为截至月之前的唯一月份、逐月覆盖明确 complete、同日窗无缺日）`),
+      baselineMonths: adoptedBaseline,
+      rejectedMonths,
+    };
+  }
   const baselineWindow = medianOf(comparable.map((c) => c.window.sum));
   if (baselineWindow === 0) return insufficient("基准为 0");
   const dailyMedian = medianOf(comparable.flatMap((c) => c.window.values));
@@ -478,6 +587,8 @@ export function anomalyV0(input) {
     medianDaily: dailyMedian,
     currentToDate,
     comparableMonths: comparable.map((c) => c.month),
+    baselineMonths: adoptedBaseline,
+    rejectedMonths,
     absDev,
     relDev,
     thresholds: { rel: 0.30, absFloor: dailyMedian * 7 },
