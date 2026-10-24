@@ -1,24 +1,87 @@
 // F-ARCH-001 synthetic calculation contract (see F-ARCH-001-SPEC.md).
 // Pure functions over SYNTHETIC fixtures only — no real accounts, no
 // production data, no writes. Defines: mixed-freshness net worth,
-// single-stream spend (lifecycle-normalized, posted/pending split, two
-// definitional exclusions, traceable refund offsets, unified as-of
-// cutoff, explicit coverage contract), FIRE fixed 12-month grid
-// gating, and the anomaly v0 candidate rule over real daily facts.
+// single-stream spend (posted/pending split, two definitional
+// exclusions, traceable refund offsets), FIRE complete-month gating,
+// and the anomaly v0 candidate rule.
+//
+// PM 2026-10-23 22:06 fixes (CAL-1 / COV-1 / TXN-1 / ANOM-1):
+// - FIRE eligibility is evaluated on a FIXED grid of the 12 ended
+//   natural months before throughMonth; earlier months never backfill.
+// - Coverage is one shared contract: only an explicit `true` counts as
+//   complete; `false` (incomplete) and a missing/null key (unknown)
+//   are recorded as different reasons everywhere (spend / FIRE /
+//   anomaly all go through monthCoverage).
+// - Spend first normalizes the transaction lifecycle by stable ID
+//   (posted supersedes pending regardless of input order, identical
+//   duplicates dedupe, conflicting duplicates are listed, never
+//   silently picked), applies one asOf cutoff to spends AND refunds,
+//   and only lets a refund offset an original that was actually
+//   counted as spend; every other refund is listed, never dropped.
+// - Anomaly compares REAL daily facts over the same day-of-month
+//   window of the last 3 comparable complete months, with a daily
+//   median computed from real daily values (real zero days count,
+//   missing days are not zeros). There is no uniform-spreading
+//   estimate path: without daily evidence the verdict is
+//   "insufficient".
+
+// ---------- Small date helpers (string months, no Date mutation) ----
+function parseMonth(month) {
+  const [y, m] = String(month).split("-").map(Number);
+  return { y, m };
+}
+function formatMonth(y, m) {
+  return `${y}-${String(m).padStart(2, "0")}`;
+}
+export function daysInMonth(year, month1to12) {
+  const lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month1to12 === 2) {
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    return leap ? 29 : 28;
+  }
+  return lengths[month1to12 - 1];
+}
+// The fixed 12-month grid: the 12 ended natural months immediately
+// before throughMonth ("YYYY-MM"), ascending.
+export function targetMonths12(throughMonth) {
+  const { y, m } = parseMonth(throughMonth);
+  const out = [];
+  for (let back = 12; back >= 1; back--) {
+    let mm = m - back;
+    let yy = y;
+    while (mm <= 0) { mm += 12; yy -= 1; }
+    out.push(formatMonth(yy, mm));
+  }
+  return out;
+}
+function medianOf(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
 
 // ---------- Coverage contract (COV-1) ----------
-// One contract shared by spend, FIRE and anomaly: a month's source
-// coverage is "complete" ONLY when coverageByMonth[month] === true
-// (explicit, with the caller's date/account/window evidence behind
-// it). false is "incomplete"; a missing key, null, or any other value
-// is "unknown". Unknown is never silently treated as complete, and
-// amounts under non-complete coverage are stored subtotals, never a
-// proven real zero.
+// Only coverageByMonth[month] === true is complete coverage. `false`
+// means a source is known to be incomplete; a missing key / null /
+// anything else means coverage is UNKNOWN. The three states are never
+// conflated, and spend / FIRE / anomaly all use this one function.
 export function monthCoverage(coverageByMonth, month) {
-  const v = coverageByMonth ? coverageByMonth[month] : undefined;
-  if (v === true) return { status: "complete", reason: null };
-  if (v === false) return { status: "incomplete", reason: "来源覆盖标记为不完整" };
-  return { status: "unknown", reason: "覆盖未知（无明确完整标记）" };
+  if (!coverageByMonth || typeof coverageByMonth !== "object") return "unknown";
+  const v = coverageByMonth[month];
+  if (v === true) return "complete";
+  if (v === false) return "incomplete";
+  return "unknown";
+}
+function coverageStatusFromOptions(options, month) {
+  if (options && typeof options.coverageStatus === "string") return options.coverageStatus;
+  if (options && options.coverageByMonth !== undefined) return monthCoverage(options.coverageByMonth, month);
+  if (options && options.coverage !== undefined) {
+    return options.coverage === true ? "complete" : options.coverage === false ? "incomplete" : "unknown";
+  }
+  if (options && options.coverageOk !== undefined) {
+    return options.coverageOk === true ? "complete" : options.coverageOk === false ? "incomplete" : "unknown";
+  }
+  return "unknown";
 }
 
 // ---------- Net worth: mixed-freshness latest-known total ----------
@@ -62,221 +125,359 @@ export function summarizeNetWorth(accounts) {
 //   kind: "spend"|"transfer"|"loan_principal"|"refund"|"loan_mixed"|"unmatched_transfer",
 //   refundOf?: txnId (for kind "refund") }]
 // Only two definitional exclusions: own-account transfers and loan
-// principal. Lifecycle normalization happens BEFORE any summing and
-// is input-order independent:
-//   - exact duplicate rows (same id + full tuple) dedupe;
-//   - a posted row supersedes a pending twin of the same id with the
-//     same amount/kind/date (the transaction matured) — either order;
-//   - any other same-id disagreement is a CONFLICT: listed, counted
-//     as nothing, and the month is incomplete (never pick one side).
-// Refunds offset only an original that is actually in the spend
-// stream (kind "spend", counted, inside the as-of cutoff); the offset
-// lands in the ORIGINAL transaction's month, traceable via `offsets`.
-// A refund whose original is missing from the sample, excluded, of a
-// non-spend kind, or beyond the cutoff is listed in
-// `unappliedRefunds` and makes the month incomplete — it never
-// silently vanishes and never drives spend negative on its own.
-// opts.asOf ("YYYY-MM-DD") is a unified cutoff: transactions AND
-// refunds dated after it are excluded entirely, not just relabeled.
-// opts.coverageByMonth feeds the shared coverage contract above;
-// `complete` requires classification-complete AND no conflicts AND
-// no unapplied refunds AND coverage explicitly complete. Pure: the
-// input rows are never mutated.
-export function summarizeSpendMonth(txns, month, opts = {}) {
-  const asOf = opts.asOf ?? null;
-  const coverage = monthCoverage(opts.coverageByMonth, month);
-  const inMonth = (d) => d.startsWith(month);
-  const withinCutoff = (d) => asOf === null || d <= asOf;
+// principal. Refunds offset in the ORIGINAL transaction's month via a
+// traceable pair, never by deleting the original spend. Unclassifiable
+// rows stay visible in `unclassified` and make the month incomplete.
+//
+// options: { asOf?: "YYYY-MM-DD", coverageByMonth?, coverage?,
+//   coverageStatus? }
+// - asOf: rows (spends AND refunds) dated after asOf are not counted
+//   at all — and do not count as unclassified either.
+// - The function is pure: inputs are never mutated.
+export function summarizeSpendMonth(txns, month, options = {}) {
+  if (typeof options === "string") options = { asOf: options };
+  options = options ?? {};
+  const asOf = options.asOf ?? options.asOfDate ?? null;
+  const afterAsOf = (row) => asOf !== null && row.date > asOf;
+  const coverageStatus = coverageStatusFromOptions(options, month);
 
-  // Lifecycle normalization: group by id, dedupe exact tuples,
-  // resolve posted-over-pending, flag the rest as conflicts.
+  // Lifecycle normalization by stable ID, before anything is counted:
+  // identical duplicates dedupe; a posted row supersedes a pending
+  // row for the same ID regardless of input order; distinct rows with
+  // the same ID AND the same status but different amount/kind/date
+  // are a conflict — listed in `conflicts`, excluded from every sum
+  // (never resolved by picking one), and the month is incomplete.
   const groups = new Map();
   for (const t of txns) {
     if (!groups.has(t.id)) groups.set(t.id, []);
     groups.get(t.id).push(t);
   }
-  const normalized = new Map(); // id -> the one authoritative row
+  const canonical = new Map();
   const conflicts = [];
   for (const [id, rows] of groups) {
-    const seenTuples = new Set();
-    const unique = [];
+    const seenKeys = new Set();
+    const uniq = [];
     for (const r of rows) {
-      const tuple = JSON.stringify([r.date, r.amount, r.status, r.kind, r.refundOf ?? null]);
-      if (seenTuples.has(tuple)) continue;
-      seenTuples.add(tuple);
-      unique.push(r);
+      const key = JSON.stringify([r.date, r.amount, r.status, r.kind, r.refundOf ?? null]);
+      if (!seenKeys.has(key)) { seenKeys.add(key); uniq.push(r); }
     }
-    if (unique.length === 1) { normalized.set(id, unique[0]); continue; }
-    if (unique.length === 2) {
-      const posted = unique.find((r) => r.status === "posted");
-      const pending = unique.find((r) => r.status === "pending");
-      if (posted && pending && posted.amount === pending.amount && posted.kind === pending.kind && posted.date === pending.date) {
-        normalized.set(id, posted);
-        continue;
-      }
+    const byStatus = new Map();
+    for (const r of uniq) {
+      if (!byStatus.has(r.status)) byStatus.set(r.status, []);
+      byStatus.get(r.status).push(r);
     }
-    conflicts.push(id);
+    let hasConflict = false;
+    for (const sameStatus of byStatus.values()) if (sameStatus.length > 1) hasConflict = true;
+    if (hasConflict) {
+      conflicts.push({ id, reason: "conflicting-duplicates" });
+      continue;
+    }
+    canonical.set(id, byStatus.get("posted")?.[0] ?? byStatus.get("pending")?.[0] ?? uniq[0]);
   }
+  const conflictIds = new Set(conflicts.map((c) => c.id));
 
   let postedSpend = 0;
   let pendingSpend = 0;
   const unclassified = [];
-  const offsets = [];
-  const unappliedRefunds = [];
-
-  for (const t of normalized.values()) {
-    if (t.kind === "refund") {
-      if (!withinCutoff(t.date)) continue; // beyond the as-of view entirely
-      const orig = normalized.get(t.refundOf);
-      if (!orig) { unappliedRefunds.push(t.id); continue; } // original not in the sample (or conflicted away)
-      if (orig.date.slice(0, 7) !== month) continue; // judged in the original month's own summary
-      if (orig.kind !== "spend" || !withinCutoff(orig.date)) { unappliedRefunds.push(t.id); continue; }
-      if (t.status === "posted" && orig.status === "posted") {
-        postedSpend -= Math.abs(t.amount);
-        offsets.push({ refundId: t.id, of: t.refundOf, amount: Math.abs(t.amount), month });
-      }
-      continue;
-    }
-    if (!inMonth(t.date)) continue;
-    if (!withinCutoff(t.date)) continue;
-    if (t.kind === "transfer" || t.kind === "loan_principal") continue; // the two exclusions
-    if (t.kind === "loan_mixed" || t.kind === "unmatched_transfer") { unclassified.push(t.id); continue; }
-    if (t.kind === "spend") {
-      if (t.status === "pending") pendingSpend += Math.abs(t.amount);
-      else postedSpend += Math.abs(t.amount);
+  const countedSpend = new Map(); // id -> remaining refundable amount
+  for (const [id, row] of canonical) {
+    if (row.kind === "refund") continue;
+    if (afterAsOf(row)) continue;
+    if (!row.date.startsWith(month)) continue;
+    if (row.kind === "transfer" || row.kind === "loan_principal") continue; // the two exclusions
+    if (row.kind === "spend") {
+      const amt = Math.abs(row.amount);
+      if (row.status === "pending") pendingSpend += amt;
+      else { postedSpend += amt; countedSpend.set(id, amt); }
+    } else {
+      // loan_mixed / unmatched_transfer / any unknown kind: visible,
+      // never silently excluded.
+      unclassified.push(id);
     }
   }
-  const classificationComplete = unclassified.length === 0;
-  const complete = classificationComplete && conflicts.length === 0 && unappliedRefunds.length === 0 && coverage.status === "complete";
+
+  // Refunds: a refund belongs to its ORIGINAL transaction's month.
+  // It offsets only when the original exists, was counted above as
+  // posted spend (kind "spend", in this month, not excluded, not
+  // conflicted, not after asOf), and the refund itself is posted and
+  // not after asOf. Anything else that belongs to this month is
+  // listed in `unappliedRefunds` and makes the month incomplete —
+  // it never silently disappears and never drives spend negative.
+  // Multiple partial refunds pair per original in date order and the
+  // applied chain is preserved in `offsets`; any excess over the
+  // original amount is listed as unapplied, not over-offset.
+  const refundRows = [...canonical.values()]
+    .filter((r) => r.kind === "refund")
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const offsets = [];
+  const unappliedRefunds = [];
+  for (const r of refundRows) {
+    if (afterAsOf(r)) continue; // future refund: not counted at all
+    const orig = r.refundOf != null ? canonical.get(r.refundOf) : undefined;
+    const belongingMonth = orig ? orig.date.slice(0, 7) : r.date.slice(0, 7);
+    if (belongingMonth !== month) continue; // judged in the original's month
+    const amt = Math.abs(r.amount);
+    if (r.status !== "posted") continue; // pending refund has not landed yet
+    if (!orig) { unappliedRefunds.push({ refundId: r.id, of: r.refundOf ?? null, amount: amt, reason: "original-missing" }); continue; }
+    if (conflictIds.has(orig.id)) { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-conflicted" }); continue; }
+    if (orig.kind !== "spend") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-not-spend" }); continue; }
+    if (afterAsOf(orig)) { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-after-asof" }); continue; }
+    if (orig.status !== "posted") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-pending" }); continue; }
+    const remaining = countedSpend.get(orig.id);
+    if (remaining === undefined) { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-not-counted" }); continue; }
+    const applied = Math.min(amt, remaining);
+    if (applied > 0) {
+      postedSpend -= applied;
+      countedSpend.set(orig.id, remaining - applied);
+      offsets.push({ refundId: r.id, of: orig.id, amount: applied, month });
+    }
+    if (amt > applied) {
+      unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt - applied, reason: "exceeds-original" });
+    }
+  }
+
+  // Completeness has two separately reported dimensions; the legacy
+  // `complete` field is exactly their AND.
+  // - classificationComplete: no unclassified rows, no conflicting
+  //   duplicates, no unapplied refunds in this month.
+  // - coverage: monthCoverage(...) === "complete". When coverage is
+  //   not complete the amounts are only a stored subtotal, never a
+  //   proven real zero / full total.
+  const classificationComplete = unclassified.length === 0 && conflicts.length === 0 && unappliedRefunds.length === 0;
+  const coverageComplete = coverageStatus === "complete";
   return {
     month,
     postedSpend,
     pendingSpend,
     unclassified,
     offsets,
-    unappliedRefunds,
     conflicts,
+    unappliedRefunds,
     classificationComplete,
-    coverageStatus: coverage.status,
-    coverageReason: coverage.reason,
-    amountBasis: coverage.status === "complete" ? "complete" : "stored-subtotal",
-    complete,
+    coverageStatus,
+    coverageComplete,
+    amountBasis: coverageComplete ? "actual" : "stored-subtotal",
+    complete: classificationComplete && coverageComplete,
   };
 }
 
-// ---------- FIRE fixed 12-month grid (CAL-1) ----------
-// The grid is the 12 natural months immediately before throughMonth
-// (throughMonth itself is the current, partial month and is never in
-// the grid). Earlier months can NEVER backfill a gap. Summaries are
-// normalized by month: duplicate rows with the same completeness
-// collapse; conflicting duplicates mark the month as a conflict.
-// Every grid month is accounted for: eligible, or listed in `missing`
-// with a reason (missing-row / incomplete / conflict /
-// coverage-incomplete / coverage-unknown). complete12 is true only
-// when all 12 unique grid months are eligible.
-function shiftMonth(month, delta) {
-  const [y, m] = month.split("-").map(Number);
-  const total = y * 12 + (m - 1) + delta;
-  const yy = Math.floor(total / 12);
-  const mm = (total % 12) + 1;
-  return `${yy}-${String(mm).padStart(2, "0")}`;
-}
-
+// ---------- FIRE eligibility (CAL-1) ----------
+// Evaluated on the FIXED grid of the 12 ended natural months before
+// throughMonth. Summaries are normalized by month: duplicate rows for
+// the same month with identical values dedupe; duplicate rows with
+// conflicting values mark that grid cell as a conflict (never picked
+// arbitrarily). Months outside the grid — earlier months, the current
+// partial month, future months — never enter eligible or missing and
+// never backfill a gap. `missing` stays a plain month list (legacy
+// shape); `missingDetails` gives the per-cell reasons: missing-row /
+// incomplete / conflict / coverage-incomplete / coverage-unknown.
 export function fireEligibleMonths(monthSummaries, coverageByMonth, throughMonth) {
-  const grid = [];
-  for (let i = 12; i >= 1; i--) grid.push(shiftMonth(throughMonth, -i));
+  const targets = targetMonths12(throughMonth);
+  const targetSet = new Set(targets);
   const byMonth = new Map();
-  const conflicted = new Set();
   for (const s of monthSummaries ?? []) {
-    if (!byMonth.has(s.month)) { byMonth.set(s.month, s); continue; }
-    if (byMonth.get(s.month).complete !== s.complete) conflicted.add(s.month);
+    if (!targetSet.has(s.month)) continue;
+    if (!byMonth.has(s.month)) byMonth.set(s.month, []);
+    byMonth.get(s.month).push(s);
   }
   const eligible = [];
   const missing = [];
-  const missingDetail = [];
-  for (const m of grid) {
-    const coverage = monthCoverage(coverageByMonth, m);
-    let reason = null;
-    if (conflicted.has(m)) reason = "conflict";
-    else if (!byMonth.has(m)) reason = "missing-row";
-    else if (!byMonth.get(m).complete) reason = "incomplete";
-    else if (coverage.status === "incomplete") reason = "coverage-incomplete";
-    else if (coverage.status !== "complete") reason = "coverage-unknown";
-    if (reason) { missing.push(m); missingDetail.push({ month: m, reason }); }
-    else eligible.push(m);
+  const missingDetails = [];
+  for (const m of targets) {
+    const cov = monthCoverage(coverageByMonth, m);
+    const covReasons = cov === "incomplete" ? ["coverage-incomplete"] : cov === "unknown" ? ["coverage-unknown"] : [];
+    const rows = byMonth.get(m) ?? [];
+    if (rows.length === 0) {
+      missing.push(m);
+      missingDetails.push({ month: m, reasons: ["missing-row", ...covReasons] });
+      continue;
+    }
+    const signatures = new Set(rows.map((r) => JSON.stringify([
+      r.complete ?? null, r.classificationComplete ?? null, r.spend ?? null, r.postedSpend ?? null,
+    ])));
+    if (signatures.size > 1) {
+      missing.push(m);
+      missingDetails.push({ month: m, reasons: ["conflict", ...covReasons] });
+      continue;
+    }
+    const r = rows[0];
+    const summaryComplete = r.complete === true && (r.classificationComplete === undefined || r.classificationComplete === true);
+    const reasons = [...(summaryComplete ? [] : ["incomplete"]), ...covReasons];
+    if (reasons.length > 0) {
+      missing.push(m);
+      missingDetails.push({ month: m, reasons });
+    } else {
+      eligible.push(m);
+    }
   }
-  return { eligible, complete12: eligible.length === 12, missing, missingDetail, grid };
+  eligible.sort();
+  return { eligible, complete12: eligible.length === 12, missing, missingDetails, targetMonths: targets };
 }
 
-// ---------- Anomaly v0 (candidate thresholds, NOT adopted) (ANOM-1) ----------
-// Facts, not estimates: baseline months and the current month arrive
-// as DAILY spend arrays (index 0 = day 1; a real zero day is 0; a
-// missing day is null/absent and is NOT a zero). The current month is
-// compared against the SAME elapsed-days window of the last 3
-// comparable complete baseline months; the absolute floor uses the
-// median of the baselines' real daily values (zero days included).
-// Month-end is decided by the month's actual day count: only an
-// as-of date on the month's last day is a month-end comparison.
-// Uniform spreading (monthly total / days) is never used as a fact.
-// Insufficient evidence — fewer than 3 comparable months, a missing
-// day inside any compared window, non-complete coverage, or a zero
-// baseline — yields "insufficient" with a reason, never a verdict.
-function daysInMonth(month) {
-  const [y, m] = month.split("-").map(Number);
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+// ---------- Anomaly v0 (candidate thresholds, NOT adopted) ----------
+// Signature (ANOM-1): anomalyV0({ baselineDaily, currentDaily, month,
+//   asOfDate, coverageStatus })
+// - baselineDaily: [{ month, daily: [day1, day2, ...], complete?,
+//     coverageStatus? }] or a { "YYYY-MM": [daily...] } record. A
+//     daily entry is a number (a real 0 counts) or null/undefined for
+//     a MISSING day — missing is not zero and makes that month
+//     non-comparable for any window covering the gap.
+// - currentDaily: [day1, ...] (or { daily: [...] }).
+// - comparisonKind comes from the REAL number of days in the asOf
+//   month: "month-end" only when asOfDate is that month's last day
+//   (28/29/30/31 handled), otherwise "mid-month-progress".
+// - Baseline: the most recent 3 comparable complete months. Each
+//   contributes the cumulative spend of its own same-day window
+//   (days 1..asOf day-of-month; for a month-end reading, its full
+//   month). The baseline figure is the median of those 3 window
+//   sums; the daily median is the median of the pooled REAL daily
+//   values inside those windows.
+// - No daily evidence, fewer than 3 comparable months, a zero
+//   baseline, a missing day in the current window, or coverage that
+//   is not "complete" -> verdict "insufficient" with a reason. There
+//   is deliberately NO uniform-spreading path (no median*(days/30),
+//   no median/30): estimates are never dressed up as daily facts.
+// - Candidate rule (thresholds NOT adopted, kept for discussion
+//   only): fires when relative deviation > 30% AND absolute
+//   deviation > dailyMedian * 7.
+// Legacy callers that pass only monthly totals ({ baselineMonths:
+// [{ spend }], currentToDate, currentElapsedDays, coverageOk }) are
+// still accepted at the boundary, but monthly totals carry no daily
+// evidence, so they now return "insufficient" (缺逐日证据) instead
+// of the old spread estimate. buildArchPreview and the validation
+// script have been migrated to the daily signature.
+function normalizeDaily(daily) {
+  if (!Array.isArray(daily)) return null;
+  return daily.map((v) => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === "number") return Number.isFinite(v) ? v : null;
+    if (typeof v === "object") {
+      const n = v.spend ?? v.amount ?? null;
+      return typeof n === "number" && Number.isFinite(n) ? n : null;
+    }
+    return null;
+  });
 }
-function medianOf(values) {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+function normalizeBaselineDaily(input) {
+  const raw = input.baselineDaily ?? input.dailyByMonth ?? null;
+  if (Array.isArray(raw)) {
+    return raw.map((e) => ({
+      month: e.month ?? null,
+      daily: normalizeDaily(e.daily ?? e.days ?? e.values),
+      complete: e.complete,
+      coverageStatus: e.coverageStatus,
+    }));
+  }
+  if (raw && typeof raw === "object") {
+    return Object.entries(raw).map(([month, daily]) => ({
+      month,
+      daily: normalizeDaily(Array.isArray(daily) ? daily : daily?.daily),
+      complete: undefined,
+      coverageStatus: undefined,
+    }));
+  }
+  if (Array.isArray(input.baselineMonths)) {
+    // Legacy monthly-total entries only become daily entries when
+    // they actually carry daily data.
+    return input.baselineMonths
+      .filter((e) => e && (e.daily || e.days || e.values))
+      .map((e) => ({
+        month: e.month ?? null,
+        daily: normalizeDaily(e.daily ?? e.days ?? e.values),
+        complete: e.complete,
+        coverageStatus: e.coverageStatus,
+      }));
+  }
+  return [];
 }
-// A daily array covers a window of `elapsed` days only when every one
-// of those days is a real number (zero allowed, gaps are not).
-function windowSum(daily, elapsed) {
-  if (!Array.isArray(daily) || daily.length < elapsed) return null;
+function windowSum(daily, requiredDays) {
+  if (!daily || daily.length < requiredDays) return null;
   let sum = 0;
-  for (let i = 0; i < elapsed; i++) {
-    if (typeof daily[i] !== "number" || Number.isNaN(daily[i])) return null;
+  const values = [];
+  for (let i = 0; i < requiredDays; i++) {
+    if (daily[i] === null || daily[i] === undefined) return null;
     sum += daily[i];
+    values.push(daily[i]);
   }
-  return sum;
+  return { sum, values };
 }
-
-export function anomalyV0({ month, asOfDate, baselineDaily, currentDaily, coverageStatus }) {
-  const dim = daysInMonth(month);
-  const elapsed = Number(asOfDate.slice(8, 10));
-  const comparisonKind = elapsed >= dim ? "month-end" : "mid-month-progress";
-  if (coverageStatus !== "complete") return { verdict: "insufficient", reason: "覆盖未完整", comparisonKind };
-  const currentWindow = windowSum(currentDaily, elapsed);
-  if (currentWindow === null) return { verdict: "insufficient", reason: "当前月逐日事实缺日", comparisonKind };
-  const comparable = [];
-  const sortedBaseline = [...(baselineDaily ?? [])].sort((a, b) => b.month.localeCompare(a.month));
-  for (const b of sortedBaseline) {
-    if (comparable.length >= 3) break;
-    if (b.coverage !== "complete" && b.coverageStatus !== "complete") continue;
-    // A comparable month must carry its full month of daily facts so
-    // the daily median is a fact too, and its same-window sum must be
-    // computable without gaps.
-    if (!Array.isArray(b.daily) || b.daily.length < daysInMonth(b.month)) continue;
-    if (b.daily.some((v) => typeof v !== "number" || Number.isNaN(v))) continue;
-    const w = windowSum(b.daily, elapsed);
-    if (w === null) continue;
-    comparable.push({ month: b.month, window: w, daily: b.daily });
+export function anomalyV0(input) {
+  const month = input.month ?? (input.asOfDate ? input.asOfDate.slice(0, 7) : null);
+  const asOfDate = input.asOfDate ?? null;
+  let asOfDay = null;
+  let dim = null;
+  if (asOfDate) {
+    const [y, m, d] = asOfDate.split("-").map(Number);
+    asOfDay = d;
+    dim = daysInMonth(y, m);
+  } else if (month) {
+    const { y, m } = parseMonth(month);
+    dim = daysInMonth(y, m);
+    asOfDay = typeof input.currentElapsedDays === "number" ? input.currentElapsedDays : dim;
   }
-  if (comparable.length < 3) return { verdict: "insufficient", reason: "可比完整月少于 3 个", comparisonKind };
-  const baselineWindow = medianOf(comparable.map((c) => c.window));
-  if (baselineWindow === 0) return { verdict: "insufficient", reason: "基准为 0", comparisonKind };
-  const dailyMedian = medianOf(comparable.flatMap((c) => c.daily.slice(0, elapsed)));
-  const absDev = Math.abs(currentWindow - baselineWindow);
+  const comparisonKind = dim !== null && asOfDay === dim ? "month-end" : "mid-month-progress";
+  const insufficient = (reason) => ({ verdict: "insufficient", reason, comparisonKind });
+
+  // Coverage: one shared contract. An explicit coverageStatus wins;
+  // legacy coverageOk true/false maps onto complete/incomplete; no
+  // coverage information at all is unknown — and anything that is
+  // not "complete" forbids a verdict.
+  let coverageStatus = input.coverageStatus ?? null;
+  if (coverageStatus === null && input.coverageByMonth !== undefined && month) {
+    coverageStatus = monthCoverage(input.coverageByMonth, month);
+  }
+  if (coverageStatus === null && input.coverageOk !== undefined) {
+    coverageStatus = input.coverageOk === true ? "complete" : input.coverageOk === false ? "incomplete" : "unknown";
+  }
+  if (coverageStatus === null && input.coverage !== undefined) {
+    coverageStatus = input.coverage === true ? "complete" : input.coverage === false ? "incomplete" : "unknown";
+  }
+  if (coverageStatus !== "complete") {
+    return insufficient(coverageStatus === "incomplete" ? "coverage 不完整" : "coverage 未知");
+  }
+  if (asOfDay === null || dim === null) return insufficient("缺 asOf 日期，无法确定同日窗");
+
+  // Current month daily facts.
+  const currentDaily = normalizeDaily(
+    Array.isArray(input.currentDaily) ? input.currentDaily : input.currentDaily?.daily,
+  );
+  if (!currentDaily) return insufficient("缺逐日证据（当前月）");
+  const currentWindow = windowSum(currentDaily, asOfDay);
+  if (!currentWindow) return insufficient("当前月同日窗内有缺日");
+  const currentToDate = currentWindow.sum;
+
+  // Baseline: most recent 3 comparable complete months.
+  const entries = normalizeBaselineDaily(input)
+    .filter((e) => e.daily && e.complete !== false && e.coverageStatus !== "incomplete" && e.coverageStatus !== "unknown")
+    .sort((a, b) => (String(b.month ?? "")).localeCompare(String(a.month ?? "")));
+  const comparable = [];
+  for (const e of entries) {
+    if (comparable.length >= 3) break;
+    let required = asOfDay;
+    if (comparisonKind === "month-end" && e.month) {
+      const { y, m } = parseMonth(e.month);
+      required = daysInMonth(y, m);
+    }
+    const w = windowSum(e.daily, required);
+    if (!w) continue; // missing day / truncated month: not comparable
+    comparable.push({ month: e.month, window: w });
+  }
+  if (comparable.length < 3) return insufficient("可比完整月少于 3 个（缺逐日证据或同日窗内有缺日）");
+  const baselineWindow = medianOf(comparable.map((c) => c.window.sum));
+  if (baselineWindow === 0) return insufficient("基准为 0");
+  const dailyMedian = medianOf(comparable.flatMap((c) => c.window.values));
+  const absDev = Math.abs(currentToDate - baselineWindow);
   const relDev = absDev / baselineWindow;
   const fires = relDev > 0.30 && absDev > dailyMedian * 7;
   return {
     verdict: fires ? "anomaly" : "normal",
     comparisonKind,
-    comparableMonths: comparable.map((c) => c.month),
+    median: baselineWindow,
     baselineWindow,
-    currentWindow,
     dailyMedian,
+    medianDaily: dailyMedian,
+    currentToDate,
+    comparableMonths: comparable.map((c) => c.month),
     absDev,
     relDev,
     thresholds: { rel: 0.30, absFloor: dailyMedian * 7 },
@@ -284,22 +485,31 @@ export function anomalyV0({ month, asOfDate, baselineDaily, currentDaily, covera
 }
 
 // ---------- Synthetic preview: the first-slice card model ----------
-// Composes the contracts above into exactly the card model the
+// Composes the three contracts above into exactly the card model the
 // 2026-10-25 calculation/presentation slice will render, over purely
 // synthetic input. This is a preview contract, not production data:
 // no account is read and nothing is written anywhere.
 // input: { accounts, txns, currentMonth, asOfDate, monthSummaries,
 //   coverageByMonth, baselineDaily, currentDaily }
+// (baselineDaily / currentDaily are the逐日事实 the anomaly contract
+// consumes; without them the anomaly card is "insufficient".)
 export function buildArchPreview(input) {
   const netWorth = summarizeNetWorth(input.accounts);
-  const spend = summarizeSpendMonth(input.txns, input.currentMonth, { asOf: input.asOfDate, coverageByMonth: input.coverageByMonth });
+  const spend = summarizeSpendMonth(input.txns, input.currentMonth, {
+    asOf: input.asOfDate,
+    coverageByMonth: input.coverageByMonth,
+  });
   const fire = fireEligibleMonths(input.monthSummaries, input.coverageByMonth, input.currentMonth);
+  const covStatus = monthCoverage(input.coverageByMonth, input.currentMonth);
   const anomaly = anomalyV0({
-    month: input.currentMonth,
-    asOfDate: input.asOfDate,
     baselineDaily: input.baselineDaily,
     currentDaily: input.currentDaily,
-    coverageStatus: monthCoverage(input.coverageByMonth, input.currentMonth).status,
+    month: input.currentMonth,
+    asOfDate: input.asOfDate,
+    // The anomaly verdict needs source coverage AND a fully
+    // classified spend stream; a classification gap downgrades the
+    // shared coverage status to incomplete for this card.
+    coverageStatus: covStatus !== "complete" ? covStatus : spend.classificationComplete ? "complete" : "incomplete",
   });
   return {
     // Main card: mixed-date latest-known total, two freshness layers
@@ -315,24 +525,29 @@ export function buildArchPreview(input) {
     },
     // Daily spend replaces any fixed/flexible pair with three lines:
     // posted so far / pending not yet counted / coverage gaps. The gap
-    // line names its completeness basis explicitly: fully covered,
-    // partially covered, or unknown — a stored subtotal is visually
-    // distinct from a proven real zero.
+    // line reports classification and coverage as separate dimensions.
     spendCard: {
       title: `本月花销（截至 ${input.asOfDate}）`,
       lines: [
         { key: "posted", label: "已发生 spend", amount: spend.postedSpend, amountBasis: spend.amountBasis },
         { key: "pending", label: "待入账交易（未计入已发生）", amount: spend.pendingSpend },
-        { key: "gap", label: "覆盖缺口", amount: null, unclassified: spend.unclassified, unappliedRefunds: spend.unappliedRefunds, conflicts: spend.conflicts, coverageStatus: spend.coverageStatus, complete: spend.complete },
+        {
+          key: "gap", label: "覆盖缺口", amount: null,
+          unclassified: spend.unclassified, complete: spend.complete,
+          classificationComplete: spend.classificationComplete, coverageStatus: spend.coverageStatus,
+        },
       ],
       offsets: spend.offsets,
+      conflicts: spend.conflicts,
+      unappliedRefunds: spend.unappliedRefunds,
+      coverageStatus: spend.coverageStatus,
+      classificationComplete: spend.classificationComplete,
     },
     fireCard: {
       eligibleMonths: fire.eligible,
       complete12: fire.complete12,
       missingMonths: fire.missing,
-      missingDetail: fire.missingDetail,
-      grid: fire.grid,
+      missingDetails: fire.missingDetails,
       note: fire.complete12 ? "近 12 个完整月同口径" : "完整月不足 12 个，缺月如实列出、不补数",
     },
     anomalyCard: anomaly,
