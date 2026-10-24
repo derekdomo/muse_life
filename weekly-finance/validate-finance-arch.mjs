@@ -528,5 +528,51 @@ check("ANOM2 most recent 3 of 5 eligible months win, unsorted", (() => {
   return r.verdict === "normal" && r.comparableMonths.join() === "2026-09,2026-08,2026-07";
 })());
 
+// =====================================================================
+// REPLAY matrix (PM 2026-10-24 01:07 product advancement): the same
+// synthetic ledger replayed at two asOf dates through buildArchPreview.
+// SYN-p moves pending -> posted only when the cutoff allows it, and the
+// anomaly card leads with the adopted unique past months + coverage.
+// =====================================================================
+const replayTxns = [
+  { id: "SYN-p", date: "2026-10-01", amount: -40, status: "pending", kind: "spend" },
+  { id: "SYN-p", date: "2026-10-20", amount: -40, status: "posted", kind: "spend" },
+  { id: "SYN-a", date: "2026-10-03", amount: -100, status: "posted", kind: "spend" },
+];
+const replayTxnsSnapshot = JSON.stringify(replayTxns);
+const replayInput = (asOfDate, over = {}) => ({
+  accounts: [], txns: replayTxns, currentMonth: "2026-10", asOfDate,
+  monthSummaries: [], coverageByMonth: { "2026-10": true },
+  baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15), ...over,
+});
+const replay15 = buildArchPreview(replayInput("2026-10-15"));
+const replay23 = buildArchPreview(replayInput("2026-10-23"));
+check("REPLAY asOf 10-15: SYN-p still pending in preview", (() => {
+  const posted = replay15.spendCard.lines.find((l) => l.key === "posted");
+  const pending = replay15.spendCard.lines.find((l) => l.key === "pending");
+  return replay15.spendCard.title.includes("2026-10-15") && eq(posted.amount, 100) && eq(pending.amount, 40);
+})());
+check("REPLAY asOf 10-23: SYN-p posted, pending line moves to 0", (() => {
+  const posted = replay23.spendCard.lines.find((l) => l.key === "posted");
+  const pending = replay23.spendCard.lines.find((l) => l.key === "pending");
+  return replay23.spendCard.title.includes("2026-10-23") && eq(posted.amount, 140) && eq(pending.amount, 0);
+})());
+check("REPLAY deterministic: same input + same asOf reproduces same spend lines", (() => {
+  const again = buildArchPreview(replayInput("2026-10-15"));
+  return JSON.stringify(again.spendCard.lines) === JSON.stringify(replay15.spendCard.lines);
+})());
+check("REPLAY preview does not mutate the shared ledger", JSON.stringify(replayTxns) === replayTxnsSnapshot);
+check("REPLAY anomaly card leads with adopted 3 unique past months + coverage", (() => {
+  const b = replay15.anomalyCard.baselineMonths || [];
+  return replay15.anomalyCard.verdict === "normal"
+    && b.map((x) => x.month).join() === "2026-09,2026-08,2026-07"
+    && b.every((x) => x.coverageStatus === "complete");
+})());
+check("REPLAY anomaly insufficient shows adopted months, no verdict overclaim", (() => {
+  const p = buildArchPreview(replayInput("2026-10-15", { baselineDaily: baseDaily.slice(0, 2) }));
+  return p.anomalyCard.verdict === "insufficient"
+    && (p.anomalyCard.baselineMonths || []).length === 2;
+})());
+
 console.log(`validate-finance-arch: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

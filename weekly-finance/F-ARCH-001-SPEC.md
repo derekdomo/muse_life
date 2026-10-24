@@ -110,6 +110,12 @@
   完整才标完整；覆盖未完整时金额只是已存小计、与真实 0 区分。
   生命周期冲突（`conflicts`）与未抵减退款（`unappliedRefunds`）
   随卡列明，不静默消失。
+- 截至日可重放（2026-10-24 03 时补，PM 01:07 产品推进）：同一份合成
+  账本以不同 `asOfDate` 重放 `buildArchPreview` 必须确定性一致——同一
+  交易（SYN-p）仅在截至日达到其 posted 日期时才从「待入账」行移入
+  「已发生」行，截点之前保持 pending；重放不得修改输入账本。异常卡
+  首列本次采用的 3 个唯一过去月份及各月覆盖状态，不足 3 个时直接
+  给 `insufficient` 与已采用月份，不先亮正常/异常再把原因藏进下钻。
 - 异常卡：`anomalyV0` 接受逐日事实（`baselineDaily` / `currentDaily`）
   与 `month` / `asOfDate` / `coverageStatus`，输出 `comparisonKind`
   ——`month-end` 仅当 asOf 是当月实际最后一天（按 28/29/30/31 天

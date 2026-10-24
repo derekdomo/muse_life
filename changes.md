@@ -1394,3 +1394,12 @@
 - `F0.7` 只读续查（2026-10-24 01:13 PDT，遵丙(ii)，未触发 run/reset/clear）：space-3 `getRefreshObservations`——access=owner、currentAttempt=2、status=running、diagnosis=awaiting_callback，观测行仅 refresh_started(claimed)＋spawn_attached（2026-10-24T00:55:24Z），state.updatedAt 冻结于启动时刻，距启动约 7.3 小时无本代回调/终态行、新快照未核实，断点未变（平台任务执行/回调段）；触发来源仍未知。脱敏：只记状态/事件类型/时刻。
 - 队列核对：仍（需用户确认）：`F-ARCH-001` 生产写回通道、`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T，不执行；`F-ARCH-001` 计算/呈现首片沿 10-25 18:00；`CWEB-MVP-001` 完整养成原目标 10-26 18:00 未到期。本轮用户可见增量：0 组（财务合成契约层修正，不计产品增量）。
 - 回滚：`git revert` 本提交即可（纯函数＋验证脚本＋SPEC/文档，无迁移、无生产写入）。
+
+## 2026-10-24 03 时 PDT（muse-life-plans-sync 03:13 轮次：F-ARCH-001 截至日可重放预览场景、F0.7 只读续查）
+
+- 队列来源：git pull 已最新（HEAD c9f309a＝上轮基线），无新提交、无新编号条目、无新 PM bug 单。本轮按队列规则推进 backlog：`F-ARCH-001` PM 01:07 产品推进的纯合成可重放预览场景（10-25 18:00 计算/呈现首片的前置契约）＞`F0.7` 只读续查（丙(ii)）。`H-SLEEP-REG-001` 已有 builder 在建（plans 明示勿重复接单、目标 10-24 18:00），本轮未接；`H3.5·RT-2`/`H-FRESH-001·PHASE-1` 仓库回灌仍为 EVID 尾巴（本轮运行环境同样无 space-4 最新源码访问通道，不冒称已回灌）。
+- `F-ARCH-001` REPLAY（P1，用户直提，A 合成口径）：改了什么——仅 `weekly-finance/validate-finance-arch.mjs` 新增 REPLAY 矩阵 6 项与 `weekly-finance/F-ARCH-001-SPEC.md` 第 7 节补重放口径；`finance-arch.mjs` 生产函数未改（01:13 已交付的截点仲裁与基准月输出在本轮被预览级场景首次串联验证）。场景：同一合成账本 SYN-p（2026-10-01 pending 支出 40、2026-10-20 posted 支出 40）＋已入账支出 100，经 `buildArchPreview` 重放——asOf=2026-10-15 时花销卡 posted=100／pending=40、标题带该截点；asOf=2026-10-23 时 posted=140／pending=0（仅截点允许时才移行）；同输入同截点二次重放 spend 三行逐字一致；两次重放后共享账本 JSON 与重放前逐字一致（纯函数不改输入）；异常卡 `baselineMonths` 首列 2026-09/08/07 三个唯一过去月且各月 coverageStatus=complete、verdict=normal；基准只剩 2 个月时预览级 verdict=insufficient 且只列已采用的 2 个月。
+- 验证证据：仓库实跑 `node weekly-finance/validate-finance-arch.mjs` **108/108**（原 102 项全保留全过＋REPLAY 6 项）。未提交 app.db/.env/任何真实数据（全部 fixture 为 synthetic）；零生产写入，生产写回通道仍（需用户确认）。
+- `F0.7` 只读续查（2026-10-24 03:13 PDT，遵丙(ii)，未触发 run/reset/clear）：space-3 `getRefreshObservations`——access=owner、currentAttempt=2、status=running、diagnosis=awaiting_callback，观测行仅 refresh_started(claimed)＋spawn_attached（2026-10-24T00:55:24Z），state.updatedAt 冻结于启动时刻，距启动约 9.3 小时无本代回调/终态行、新快照未核实，断点未变（平台任务执行/回调段）；触发来源仍未知。脱敏：只记状态/事件类型/时刻。
+- 队列核对：仍（需用户确认）：`F-ARCH-001` 生产写回通道、`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T，不执行；`F-ARCH-001` 计算/呈现首片沿 10-25 18:00；`CWEB-MVP-001` 完整养成原目标 10-26 18:00 未到期；`H-SLEEP-REG-001` 沿原 builder 与 10-24 18:00 目标。本轮用户可见增量：0 组（财务合成预览契约推进，不计产品增量）。
+- 回滚：`git revert` 本提交即可（验证脚本＋SPEC 文档，无生产函数改动、无迁移、无生产写入）。
