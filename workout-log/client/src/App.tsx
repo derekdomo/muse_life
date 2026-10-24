@@ -378,6 +378,17 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["后脚猛蹬借力", "膝盖向内塌", "下放直接掉落"],
     demo: EXERCISE_DEMOS["bench-step-up"],
   },
+  // W-HOMEB-001: text-only guide, prepared ahead of the dated swap —
+  // from 2026-11-16 until the first snowboard trip this replaces the
+  // bench-step-up slot in Home B at equal volume (2 sets); the stored
+  // plan itself is unchanged until then.
+  "lateral-lunge": {
+    title: "侧向弓步",
+    focus: "横向力量与耐力 · 单板横向重心转移",
+    setup: "双脚并拢站立，胸口抬起，双手叉腰或在胸前交握。三周渐进：第 1 周只做体重侧向弓步；第 2 周在底部加 1–2 次小幅脉冲再蹬回；第 3 周以脉冲弓步为主。不做跳跃版。",
+    cues: ["向侧面迈一大步，髋部向后坐下", "下蹲腿膝盖对准脚尖方向", "全脚掌压地发力蹬回起始位", "支撑腿保持伸直，躯干别向侧倒"],
+    mistakes: ["膝盖向内塌", "步幅太小，练不到横向发力", "蹬回时靠伸直支撑腿把身体拉回来"],
+  },
   "home-calf-raise": {
     title: "提踵 · 抱片",
     focus: "腓肠肌 · 比目鱼肌",
@@ -956,6 +967,7 @@ export const MUSCLE_MAP: Record<string, MuscleMapping> = {
   "single-leg-balance": { primary: ["小腿", "臀大肌"], secondary: ["核心"] },
   "home-bulgarian-split-squat": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿", "核心"] },
   "bench-step-up": { primary: ["股四头肌", "臀大肌"], secondary: ["小腿"] },
+  "lateral-lunge": { primary: ["股四头肌", "臀大肌"], secondary: ["核心"] },
   "home-calf-raise": { primary: ["小腿"], secondary: [] },
   "wall-sit": { primary: ["股四头肌"], secondary: ["臀大肌"] },
   "dead-bug": { primary: ["核心"], secondary: [] },

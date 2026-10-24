@@ -66,7 +66,7 @@ export const DEFAULT_PLAN_TEMPLATES: PlanTemplateMap = {
 export const DEFAULT_PLAN_SCHEDULE: { day_index: number; routine_code: string; note: string }[] = [
   { day_index: 0, routine_code: "home_posture", note: "在家 A · 体态 20 分钟" },
   { day_index: 1, routine_code: "push", note: "健身房重练" },
-  { day_index: 2, routine_code: "home_snowboard", note: "在家 B · 单板 25 分钟，与腿日隔 48 小时以上" },
+  { day_index: 2, routine_code: "home_snowboard", note: "在家 B · 单板 25 分钟，与腿日隔 48 小时以上；【2026-11-16 起至出行前】Bench 登阶换侧向弓步（侧向弓步→脉冲弓步渐进，等量 2 组），出行周停练" },
   { day_index: 3, routine_code: "pull", note: "健身房重练" },
   { day_index: 4, routine_code: "home_posture", note: "在家 A · 体态 20 分钟" },
   { day_index: 5, routine_code: "swim", note: "游泳 1–2 次安排在本日或休息日" },
