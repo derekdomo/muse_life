@@ -854,6 +854,17 @@ const weekFocusFeedbackRowSchema = z.object({
   ruleVersion: z.number().int(),
   feedback: z.enum(["有帮助", "不适用"]),
   revision: z.number().int(),
+  // H3.5 RT-2 identity fix: the persistent identity of the intent
+  // that actually wrote this row (migration 0017's last_operation_id,
+  // stamped by the same conditional statement that saved the value).
+  // The client may confirm a pending intent as landed ONLY when this
+  // names that intent — value + revision equality is not proof,
+  // because another tab's intent can commit the same choice and
+  // advance the revision while this intent's own save failed. Null
+  // for rows saved before the column existed: identity unknown,
+  // which the client must present as read-back-unconfirmed, never as
+  // a confirmation.
+  lastOperationId: z.string().nullable(),
   updatedAt: z.string(),
 });
 
@@ -2198,6 +2209,7 @@ async function loadFocusFeedback(ctx: Ctx, dataDate: string, snapshotVersion: st
       ruleVersion: row.ruleVersion,
       feedback: row.feedback,
       revision: row.revision,
+      lastOperationId: row.lastOperationId,
       updatedAt: row.updatedAt.toISOString(),
     });
     const currentRows = await db.select().from(schema.weekFocusFeedback).where(eq(schema.weekFocusFeedback.focusKey, currentKey)).limit(1);

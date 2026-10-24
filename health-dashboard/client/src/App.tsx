@@ -309,6 +309,21 @@ export interface SyncAttemptSourceState {
   // the task's end proves nothing about the save (H-FRESH-001
   // PHASE-1 strict ordering; mere difference is not evidence).
   taskEndStamp: string | null;
+  // H-FRESH-001 PHASE-1 follow-up (post-task-end read sequence): the
+  // sequence number of the latest dashboard read that had ARRIVED
+  // when this source's task ended. The stamp above is only a cache
+  // reading: a late read generated after the baseline but before the
+  // task actually ended can sit in the cache at callback time, and a
+  // null cache used to block every later read from ever confirming.
+  // So the wiring no longer trusts the cache stamp as the moment of
+  // task end: at task end it explicitly initiates a fresh dashboard
+  // read for this attempt, and the first read that RETURNS with a
+  // strictly higher sequence is that post-task-end read's own return
+  // — it may confirm through the sequence path in applySyncReadback
+  // (its stamp must still parse; it need not beat a cache stamp that
+  // may not exist). Null when the wiring supplied no sequence, in
+  // which case only the strict stamp path can ever confirm.
+  taskEndReadSeq: number | null;
 }
 
 export interface SyncAttemptState {
@@ -333,6 +348,7 @@ export function beginSyncAttempt(
       baselineUpdatedAt: baselines[source],
       confirmedUpdatedAt: null,
       taskEndStamp: null,
+      taskEndReadSeq: null,
     };
   }
   return next;
@@ -361,15 +377,21 @@ export function applySyncDispatchResult(
 // failed task, or a completed one whose save contract was not
 // satisfied, fails the source. Anything else — including a clean
 // completion — only proves the task ended: the source becomes
-// "unconfirmed" and the end stamp is recorded, so the following
-// read-back can be told apart from reads that predate the end. A
-// task end NEVER produces confirmed-new directly.
+// "unconfirmed" and the end evidence is recorded, so the following
+// read-back can be told apart from reads that predate the end. The
+// end evidence is twofold: the cache stamp current at the callback
+// (kept for the strict stamp path) AND the read sequence current at
+// the callback — the wiring explicitly initiates a post-task-end
+// read at this moment, and only a return sequenced strictly after
+// this point is that read's own return. A task end NEVER produces
+// confirmed-new directly.
 export function applySyncTaskEnd(
   state: SyncAttemptState | null,
   attemptId: string,
   source: SyncAttemptSource,
   result: { status: string; contractSatisfied: boolean },
   stamp: string | null,
+  readSeq?: number | null,
 ): SyncAttemptState | null {
   if (!state || state.attemptId !== attemptId) return state;
   const entry = state.sources[source];
@@ -378,7 +400,7 @@ export function applySyncTaskEnd(
   const failed = result.status === "failed" || (result.status === "completed" && !result.contractSatisfied);
   const nextEntry: SyncAttemptSourceState = failed
     ? { ...entry, stage: "failed" }
-    : { ...entry, stage: "unconfirmed", taskEndStamp: stamp };
+    : { ...entry, stage: "unconfirmed", taskEndStamp: stamp, taskEndReadSeq: readSeq ?? null };
   return { ...state, sources: { ...state.sources, [source]: nextEntry } };
 }
 
@@ -386,10 +408,27 @@ export function applySyncTaskEnd(
 // after the task ended. Only an "unconfirmed" source is judged.
 //
 // H-FRESH-001 · PHASE-1 (strict ordering): "confirmed-new" requires
-// STRICT temporal evidence on BOTH stamps —
-//   (a) the read-back's own stamp (dataStatus.generatedAt) must
-//       parse and be STRICTLY later than this source's taskEndStamp
-//       (the read must have been generated after the task ended);
+// STRICT evidence on BOTH axes —
+//   (a) the read-back must be proven to postdate the task's end, by
+//       ONE of two strict paths:
+//       · stamp path — the read-back's own stamp
+//         (dataStatus.generatedAt) parses and is STRICTLY later than
+//         this source's taskEndStamp (the read was generated after
+//         the task ended); or
+//       · sequence path (PHASE-1 follow-up) — the read-back carries
+//         the sequence of a dashboard read the wiring explicitly
+//         initiated at this source's task end (see taskEndReadSeq):
+//         its seq parses as a number STRICTLY greater than the
+//         sequence recorded at task end, so this return IS the
+//         post-task-end read's own return, and its stamp still
+//         parses. This path exists because the cache stamp at
+//         callback time is not the task's end: a late read generated
+//         after the baseline but before the actual end could pose as
+//         the boundary, and a null cache blocked legitimate
+//         post-task reads outright. No arbitrary client clock is
+//         ever compared against the server's generatedAt — the
+//         sequence orders READS, and the stamp still comes from the
+//         server's own clock.
 //   (b) the source's read-back updatedAt must parse and be STRICTLY
 //       later than the attempt baseline (when a baseline exists; a
 //       non-null but unparseable baseline can never be strictly
@@ -397,20 +436,21 @@ export function applySyncTaskEnd(
 // Anything weaker keeps the source "unconfirmed" — the page goes on
 // showing the last successful data with its own timestamp and never
 // dresses it up as a new save: a missing / unparseable / older /
-// equal read stamp, a missing / unparseable / not-advanced
-// updatedAt, a failed read (ok=false), and a same-version read-back
-// ALL stay unconfirmed. (The earlier rule confirmed on mere stamp
-// difference, so an older, null or garbage stamp could pose as a
-// fresh save.) Each source is judged independently against its own
-// baseline and its own task-end stamp, and the attemptId guard
-// above means a late read-back offered under an older attempt can
-// never confirm a newer one. Self-contained (no outside helper) so
-// a repo-side validator can extract it by name and run it standalone.
+// equal read stamp with no sequence proof, a missing / unparseable
+// / not-advanced updatedAt, a failed read (ok=false), and a
+// same-version read-back ALL stay unconfirmed. (The earlier rule
+// confirmed on mere stamp difference, so an older, null or garbage
+// stamp could pose as a fresh save.) Each source is judged
+// independently against its own baseline and its own task-end
+// evidence, and the attemptId guard above means a late read-back
+// offered under an older attempt can never confirm a newer one.
+// Self-contained (no outside helper) so a repo-side validator can
+// extract it by name and run it standalone.
 export function applySyncReadback(
   state: SyncAttemptState | null,
   attemptId: string,
   source: SyncAttemptSource,
-  readback: { ok: boolean; updatedAt: string | null; stamp: string | null },
+  readback: { ok: boolean; updatedAt: string | null; stamp: string | null; seq?: number },
 ): SyncAttemptState | null {
   if (!state || state.attemptId !== attemptId) return state;
   const entry = state.sources[source];
@@ -425,7 +465,13 @@ export function applySyncReadback(
   const taskEndTime = parseStamp(entry.taskEndStamp);
   const updatedTime = parseStamp(readback.updatedAt);
   const baselineTime = parseStamp(entry.baselineUpdatedAt);
-  const readAfterTaskEnd = readTime !== null && taskEndTime !== null && readTime > taskEndTime;
+  const stampPath = readTime !== null && taskEndTime !== null && readTime > taskEndTime;
+  const sequencePath = readTime !== null
+    && entry.taskEndReadSeq !== null
+    && typeof readback.seq === "number"
+    && Number.isFinite(readback.seq)
+    && readback.seq > entry.taskEndReadSeq;
+  const readAfterTaskEnd = stampPath || sequencePath;
   const versionAdvanced = updatedTime !== null
     && (entry.baselineUpdatedAt === null || (baselineTime !== null && updatedTime > baselineTime));
   if (!readAfterTaskEnd || !versionAdvanced) return state;
@@ -855,15 +901,26 @@ function StrengthPanel({ strength, onSync, syncing }: { strength: Snapshot["stre
       </div>
       {latest ? (
         <>
-          <div className="strength-latest">
-            <div className={`routine-badge routine-${latest.routine}`}><span>{dateLabel(latest.date)}</span><strong>{ROUTINE_LABELS[latest.routine]}</strong></div>
-            <div className="strength-primary"><span>{latest.status === "active" ? "当前已完成训练量" : "总训练量"}</span><strong>{volumeLabel(latest.totalVolume)} <small>{latest.unit}</small></strong><p>{latest.completedSets}/{latest.totalSets} 组 · {durationLabel(latest.durationMinutes)}</p></div>
-          </div>
-          <div className="strength-week">
-            <div><span>本周负荷</span><strong>{volumeLabel(currentWeek?.volume ?? 0)} {strength.displayUnit}{currentWeekTag ? <small className="incomplete-tag">{currentWeekTag}</small> : null}</strong></div>
-            <div><span>对比上周</span><strong>{comparison}</strong></div>
-          </div>
-          <p className="strength-note">{comparisonReason ?? "仅计算已完成且同时填写重量与次数的组。"}</p>
+          {/* LIFE-DESIGN-001-B1B shrink: the default layer keeps the
+              source-limited this-week count (heading above), the most
+              recent training and the record entry (sync row above).
+              The traceable detail — latest session volume/sets, this
+              week's load, the week-over-week comparison and its
+              explanation — moves to the expanded layer below; the
+              same facts keep their full home in 历史/趋势. */}
+          <p className="strength-latest-line">最近一次：{dateLabel(latest.date)} · {ROUTINE_LABELS[latest.routine]} · {latest.status === "active" ? "进行中" : durationLabel(latest.durationMinutes)}</p>
+          <details className="strength-details-fold">
+            <summary aria-label="展开力量训练明细">训练明细</summary>
+            <div className="strength-latest">
+              <div className={`routine-badge routine-${latest.routine}`}><span>{dateLabel(latest.date)}</span><strong>{ROUTINE_LABELS[latest.routine]}</strong></div>
+              <div className="strength-primary"><span>{latest.status === "active" ? "当前已完成训练量" : "总训练量"}</span><strong>{volumeLabel(latest.totalVolume)} <small>{latest.unit}</small></strong><p>{latest.completedSets}/{latest.totalSets} 组 · {durationLabel(latest.durationMinutes)}</p></div>
+            </div>
+            <div className="strength-week">
+              <div><span>本周负荷</span><strong>{volumeLabel(currentWeek?.volume ?? 0)} {strength.displayUnit}{currentWeekTag ? <small className="incomplete-tag">{currentWeekTag}</small> : null}</strong></div>
+              <div><span>对比上周</span><strong>{comparison}</strong></div>
+            </div>
+            <p className="strength-note">{comparisonReason ?? "仅计算已完成且同时填写重量与次数的组。"}</p>
+          </details>
         </>
       ) : <p className="empty-inline">{strength.note}</p>}
     </section>
@@ -1752,8 +1809,15 @@ interface SleepRegularityResult {
 //
 // Window (A 公式/窗口）: a 14-CALENDAR-day grid over wake dates (each
 // record's dataDate, already an America/Los_Angeles calendar date),
-// anchored on the LATEST record's date — the window is anchor−13 ..
-// anchor. A missing night is simply absent: it is never filled with
+// anchored on the SNAPSHOT's dataDate — the LA wake-day the dashboard
+// itself is showing — passed in by the caller (H-SLEEP-REG-001 fix:
+// the window used to anchor on the latest record's date, so stale
+// records could pose as a recent window). The window is anchor−13 ..
+// anchor whether or not any record falls inside it: a snapshot dated
+// 2032-05-20 whose records all sit in April yields n=0 for the May
+// window, not a full April window. Only a caller that supplies no
+// usable anchor (standalone use) falls back to the latest record's
+// date. A missing night is simply absent: it is never filled with
 // 0 and never back-filled from older records outside the window (the
 // previous rule took the last 14 SESSIONS, so several sessions of one
 // night could crowd out real nights and stale sessions could pose as
@@ -1794,6 +1858,7 @@ interface SleepRegularityResult {
 function sleepRegularity(
   historySleeps: Array<Pick<Snapshot["historySleeps"][number], "date" | "start" | "end">>,
   coverageIncomplete?: boolean,
+  anchorDate?: string | null,
 ): SleepRegularityResult {
   const REQUIRED = 7;
   const WINDOW_DAYS = 14;
@@ -1820,11 +1885,16 @@ function sleepRegularity(
     return shifted.toISOString().slice(0, 10);
   };
   const rows = Array.isArray(historySleeps) ? historySleeps : [];
-  // Anchor: the latest record's wake date. Records without a usable
-  // date can neither anchor nor enter the window.
-  let anchor: string | null = null;
-  for (const row of rows) {
-    if (isRealDate(row?.date) && (anchor === null || row.date > anchor)) anchor = row.date;
+  // Anchor: the caller-supplied snapshot dataDate when it is a real
+  // date; records can neither move it nor extend the window around
+  // themselves. Without a usable supplied anchor, the latest
+  // record's wake date anchors (standalone fallback). Records
+  // without a usable date can never enter the window.
+  let anchor: string | null = isRealDate(anchorDate) ? anchorDate : null;
+  if (anchor === null) {
+    for (const row of rows) {
+      if (isRealDate(row?.date) && (anchor === null || row.date > anchor)) anchor = row.date;
+    }
   }
   const emptyResult = (windowStart: string | null, windowEnd: string | null): SleepRegularityResult => ({
     sampleCount: 0,
@@ -2755,22 +2825,27 @@ function WeekLoadBlock({ snapshot, readiness, readinessHistory }: {
     <div className="dark-panel">
       <div className={`whoop-load whoop-${load.band}`}>
         <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong><span className="band-symbol" aria-hidden="true">{bandSymbol(load.band)}</span> {load.verdict}</strong></div>
-        <p>{load.detail}</p>
+        {/* LIFE-DESIGN-001-B1B shrink: the default layer keeps only
+            the verdict line. The traceable detail — this week's load
+            basis, last week's same-period data and the 7-day
+            readiness archive — lives in this expanded layer, one tap
+            away, worded exactly as before (nothing deleted). */}
         <details>
-          <summary className="whoop-load-note">上周同期数据</summary>
+          <summary className="whoop-load-note">负荷依据 · 上周同期数据 · readiness 近 7 天</summary>
+          <p>{load.detail}</p>
           <p>{load.previousDetail}</p>
+          {readinessHistory.length ? (
+            <>
+              <div className="whoop-readiness-trend" aria-label="readiness 近 7 天趋势">
+                <span className="whoop-trend-label">readiness 近 7 天</span>
+                {readinessHistory.map((point) => (
+                  <span className="whoop-trend-point" key={point.date}>{dateLabel(point.date)} {point.score === null ? "—" : point.score.toFixed(1)}</span>
+                ))}
+              </div>
+              <p className="whoop-load-note">readiness 近 7 天：有存档的日期显示当日分数；无存档的日期历史未提供，显示缺口，不复制今日值。存档自上线日起逐日积累，旧日期不回补。</p>
+            </>
+          ) : null}
         </details>
-        {readinessHistory.length ? (
-          <>
-            <div className="whoop-readiness-trend" aria-label="readiness 近 7 天趋势">
-              <span className="whoop-trend-label">readiness 近 7 天</span>
-              {readinessHistory.map((point) => (
-                <span className="whoop-trend-point" key={point.date}>{dateLabel(point.date)} {point.score === null ? "—" : point.score.toFixed(1)}</span>
-              ))}
-            </div>
-            <p className="whoop-load-note">readiness 近 7 天：有存档的日期显示当日分数；无存档的日期历史未提供，显示缺口，不复制今日值。存档自上线日起逐日积累，旧日期不回补。</p>
-          </>
-        ) : null}
       </div>
     </div>
   );
@@ -2848,8 +2923,9 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
 // H-SLEEP-REG-001: the sleep-regularity reference panel, rendered on the
 // today page directly after the seven-day facts strip. It presents ONLY
 // the descriptive output of sleepRegularity above — circular standard
-// deviations of the sleep midpoint and the start time over the latest
-// 14 calendar days by wake date — labelled 参考指标， with the fixed
+// deviations of the sleep midpoint and the start time over the 14
+// calendar days by wake date ending at the snapshot's own dataDate —
+// labelled 参考指标， with the fixed
 // note that it is a descriptive statistic, not a medical conclusion,
 // and never counts toward the recovery (readiness) score or any other
 // score. No 好坏等级 and no health score is attached. Meaning is
@@ -2869,7 +2945,20 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
 // 当天没戴表） from the derivation itself.
 function SleepRegularityPanel({ snapshot }: { snapshot: Snapshot }) {
   const [expanded, setExpanded] = useState(false);
-  const result = sleepRegularity(snapshot.historySleeps, snapshot.coverageIncomplete);
+  // H-SLEEP-REG-001: the window anchors on the snapshot's dataDate
+  // (the LA wake-day this dashboard shows), never on the last sleep
+  // record — old records outside the window cannot fill it.
+  const result = sleepRegularity(snapshot.historySleeps, snapshot.coverageIncomplete, snapshot.dataDate);
+  // The newest record anywhere in the snapshot, named only to label
+  // the gap when it falls outside the current window — it is never
+  // substituted for the recent window or its statistics.
+  const latestRecordDate = snapshot.historySleeps.reduce<string | null>(
+    (max, row) => (/^\d{4}-\d{2}-\d{2}$/.test(row.date) && (max === null || row.date > max) ? row.date : max),
+    null,
+  );
+  const outOfWindowLatest = latestRecordDate !== null && result.windowStart !== null && latestRecordDate < result.windowStart
+    ? latestRecordDate
+    : null;
   const clockLabel = (clockMinutes: number | null): string => {
     if (clockMinutes === null) return "—";
     const rounded = ((Math.round(clockMinutes) % 1440) + 1440) % 1440;
@@ -2923,6 +3012,9 @@ function SleepRegularityPanel({ snapshot }: { snapshot: Snapshot }) {
           ) : (
             <p className="sleep-reg-warn"><span aria-hidden="true">—</span> 暂无可用睡眠记录 · {result.missingLabel ?? "当天没戴表"}，同步到睡眠记录后自动计算。</p>
           )}
+          {outOfWindowLatest && result.windowStart && result.windowEnd ? (
+            <p className="sleep-reg-note">窗口外最近一条睡眠记录在 {outOfWindowLatest}，早于本窗口（{result.windowStart} – {result.windowEnd}，以快照日期为锚），不计入本窗口：本窗口仍为 {result.sampleCount}/{result.windowDays} 晚，上面的数字不拿旧窗口顶替。</p>
+          ) : null}
           <p className="sleep-reg-note">公式：每晚时刻换成圆周角度 θ = 时刻（分钟）÷ 1440 × 360°；R = 各晚单位向量的平均长度；圆周标准差 = √(−2 ln R) × (1440 ÷ 2π)，单位：分钟。平均时刻为平均向量的方向换回的时钟时刻。睡眠中点 = 开始时刻 + 时长 ÷ 2（跨午夜按圆周处理）。开始时刻（代理）是睡眠记录的开始时刻，不是测得的确切入睡时刻。</p>
           {result.windowStart && result.windowEnd ? (
             <p className="sleep-reg-note">窗口：{result.windowStart} – {result.windowEnd}（按醒来日期的近 {result.windowDays} 个日历日）· 有效 {result.sampleCount}/{result.windowDays} 晚 · 来源：Apple 健康睡眠记录；同一晚多条记录只取主睡眠（在床最长的一条），午睡/小憩不另计，缺晚不补、不向窗口外借数。</p>
@@ -2961,7 +3053,13 @@ function SleepRegularityPanel({ snapshot }: { snapshot: Snapshot }) {
 //    value with "not yet given" — the unknown stays visibly unknown.
 
 export type FocusFeedbackChoice = "有帮助" | "不适用";
-export type FocusFeedbackSaveStatus = "idle" | "saving" | "saved" | "error" | "conflict";
+// "unconfirmed" (H3.5 RT-2 identity fix): a re-read has brought back
+// the server's existing value, but the row's persistent identity
+// (lastOperationId) does not name THIS card's current intent — the
+// value may be another tab's commit of the same choice while this
+// intent's own save failed. The submission is unconfirmed, never
+// "saved"; it stays retryable against the real (just-read) baseline.
+export type FocusFeedbackSaveStatus = "idle" | "saving" | "saved" | "error" | "conflict" | "unconfirmed";
 
 export interface FocusFeedbackState {
   boundKey: string | null;
@@ -3040,6 +3138,7 @@ export function syncFocusFeedbackState(
   serverConfirmed: FocusFeedbackChoice | null,
   readFailed: boolean,
   serverRevision?: number | null,
+  serverOperationId?: string | null,
 ): FocusFeedbackState {
   if (state.boundKey !== boundKey) {
     return {
@@ -3071,12 +3170,53 @@ export function syncFocusFeedbackState(
   // DIFFERENT value, or one at/below the gated revision, proves
   // nothing about this intent — the ordinary saving merge below
   // stands (confirmed only moves forward, selection never clobbered).
+  //
+  // RT-2 identity fix (H3.5 re-review): value + revision alone do NOT
+  // prove THIS intent landed — another tab's intent can commit the
+  // SAME choice and advance the revision while this intent's own save
+  // failed. The exit above therefore adjudicates the server row's
+  // persistent identity (serverOperationId = the row's actual
+  // lastOperationId, read back from the server) against this card's
+  // current intent:
+  //  - identity matches this intent -> the RT-1 exit stands, with
+  //    the readback-confirmation evidence recorded as before;
+  //  - identity is a DIFFERENT operation, or unknown (null — a row
+  //    the server cannot attribute): the server's existing value HAS
+  //    been read back, so confirmed advances to it, but THIS
+  //    submission is NOT confirmed: status "unconfirmed", no
+  //    readback-confirmation evidence is recorded, the pending
+  //    identity is kept, and the retry re-gates on the real baseline
+  //    (the revision just read) — the card reads 服务端现存值已读回，
+  //    本次提交未确认；
+  //  - a caller that cannot supply the identity at all (undefined —
+  //    the legacy standalone path) keeps the prior value+revision
+  //    behaviour.
   if (
     state.status === "saving"
     && serverConfirmed !== null
     && serverConfirmed === state.selection
     && incomingRevision > state.pendingExpectedRevision
   ) {
+    const identityMatches = serverOperationId === undefined
+      || (serverOperationId !== null
+        && state.lastIntentOperationId !== null
+        && serverOperationId === state.lastIntentOperationId);
+    if (!identityMatches) {
+      return {
+        boundKey,
+        confirmed: serverConfirmed,
+        confirmedRevision: incomingRevision,
+        selection: state.selection,
+        status: "unconfirmed",
+        readFailed: false,
+        pendingOperationId: state.pendingOperationId,
+        lastIntentOperationId: state.lastIntentOperationId,
+        pendingExpectedRevision: incomingRevision,
+        readbackConfirmedOperationId: null,
+        readbackConfirmedRevision: 0,
+        conflictFeedback: null, conflictRevision: null,
+      };
+    }
     return {
       boundKey,
       confirmed: serverConfirmed,
@@ -3095,7 +3235,7 @@ export function syncFocusFeedbackState(
       conflictFeedback: null, conflictRevision: null,
     };
   }
-  if (state.status === "saving" || state.status === "error" || state.status === "conflict") {
+  if (state.status === "saving" || state.status === "error" || state.status === "conflict" || state.status === "unconfirmed") {
     return {
       ...state,
       confirmed: serverConfirmed ?? state.confirmed,
@@ -3321,6 +3461,17 @@ export function settleFocusSaveOutcome(
   ) {
     return state;
   }
+  // RT-2 identity fix: the "unconfirmed" state already records the
+  // adjudicated truth — the server's existing value was read back
+  // and THIS submission was not confirmed as its author. The pending
+  // intent's own late failure adds nothing to that (it is exactly
+  // the failure the state already accounts for): it must not flip
+  // the card to a plain error that hides the read-back, and the
+  // intent stays retryable against the real baseline recorded in
+  // pendingExpectedRevision.
+  if (outcome.kind === "failure" && state.status === "unconfirmed" && isPendingOperation) {
+    return state;
+  }
   if (isPendingOperation || isCurrentIntentEcho || unattributed) {
     return outcome.kind === "success"
       ? completeFocusFeedbackSave(state, boundKey, outcome.choice, outcome.revision)
@@ -3419,7 +3570,7 @@ export function buildCurrentFocusContext(
   basisText: string,
 ): FocusRangeContext {
   const unsaved = state.selection !== null
-    && (state.status === "saving" || state.status === "error" || state.status === "conflict"
+    && (state.status === "saving" || state.status === "error" || state.status === "conflict" || state.status === "unconfirmed"
       || state.selection !== state.confirmed);
   return {
     source: "current",
@@ -3708,6 +3859,13 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
     focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.feedback : null;
   const serverRevision: number | null =
     focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.revision : null;
+  // RT-2 identity fix: the server row's ACTUAL lastOperationId — the
+  // persistent identity of the intent that wrote the stored value.
+  // The state machine confirms a pending intent from a re-read only
+  // when this names that intent; null (a row the server cannot
+  // attribute) reads as identity unknown, never as a match.
+  const serverOperationId: string | null =
+    focusFeedback.current && focusFeedback.current.focusKey === cardKey ? focusFeedback.current.lastOperationId : null;
   // Round-trip restore (H3.5): the panel unmounts while the owner is
   // on the training range page, so the feedback state is seeded from
   // the session draft store for THIS card key and re-saved there on
@@ -3720,8 +3878,8 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
     () => loadFocusDraft(focusDraftStore, cardKey) ?? createFocusFeedbackState(),
   );
   useEffect(() => {
-    setFeedbackState((prev) => syncFocusFeedbackState(prev, cardKey, serverConfirmed, focusReadFailed, serverRevision));
-  }, [cardKey, serverConfirmed, focusReadFailed, serverRevision]);
+    setFeedbackState((prev) => syncFocusFeedbackState(prev, cardKey, serverConfirmed, focusReadFailed, serverRevision, serverOperationId));
+  }, [cardKey, serverConfirmed, focusReadFailed, serverRevision, serverOperationId]);
   useEffect(() => {
     if (feedbackState.boundKey) saveFocusDraft(focusDraftStore, feedbackState.boundKey, feedbackState);
   }, [feedbackState]);
@@ -3824,7 +3982,9 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
       ? feedbackState.conflictFeedback
         ? `另一处已保存了『${feedbackState.conflictFeedback}』，你这次的『${feedbackState.selection ?? ""}』未覆盖它，这次的选择还没有记下来。`
         : "保存冲突：服务端已有更新的反馈，你这次的选择还没有记下来。"
-      : feedbackState.status === "error"
+      : feedbackState.status === "unconfirmed"
+        ? `服务端现存值已读回（『${feedbackState.confirmed ?? ""}』），本次提交未确认：这条现存值不是这次提交写下的。可以重试保存，把你的『${feedbackState.selection ?? ""}』记下来。`
+        : feedbackState.status === "error"
         ? "未保存：这次反馈还没有记下来。"
         : feedbackState.readFailed
           ? feedbackState.confirmed
@@ -3933,7 +4093,7 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
                   })}
                 </div>
                 <p className="week-review-feedback-status" role="status">{feedbackStatusText}</p>
-                {feedbackState.status === "error" ? (
+                {feedbackState.status === "error" || feedbackState.status === "unconfirmed" ? (
                   <button type="button" className="week-review-retry-btn" aria-label="重试保存反馈" onClick={retryFeedback}>重试保存</button>
                 ) : null}
                 {feedbackState.status === "conflict" ? (
@@ -4342,13 +4502,14 @@ function allWorkoutsList(historyWorkouts: HistoryWorkout[]): HistoryWorkout[] {
   });
 }
 
-function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, currentFocusKey, onReturnToFocus, onClearFocusRange, dataStatus, focusFeedback, focusReadFailed, onViewTraining }: {
+function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, currentFocusKey, onReturnToFocus, onViewCurrentFocus, onClearFocusRange, dataStatus, focusFeedback, focusReadFailed, onViewTraining }: {
   snapshot: Snapshot;
   unifiedTimeline?: UnifiedDay[];
   focusRange?: { start: string; end: string } | null;
   focusContext?: FocusRangeContext | null;
   currentFocusKey?: string | null;
   onReturnToFocus?: () => void;
+  onViewCurrentFocus?: () => void;
   onClearFocusRange?: () => void;
   dataStatus?: DataStatus | null;
   focusFeedback?: FocusFeedbackData;
@@ -4471,7 +4632,7 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
               {focusKeyChanged ? (
                 <div className="history-focus-basis-update">
                   <p>已有更新依据：打开这张卡之后，当前重点已经更新（新快照或新窗口）。这张卡仍按打开时的重点呈现，不自动切换。</p>
-                  <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label="查看当前重点" onClick={onReturnToFocus}>查看当前重点</button>
+                  <button type="button" className="week-review-training-btn" style={{ marginTop: 0 }} aria-label="查看当前重点" onClick={onViewCurrentFocus ?? onReturnToFocus}>查看当前重点</button>
                 </div>
               ) : null}
               <h3 className="history-focus-subtitle">当时记录的依据</h3>
@@ -5664,11 +5825,6 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
     setHistoryFocusRange(range);
     setTab("history");
   };
-  // H3.5 range landing loop: from the range section the owner can go
-  // straight back to today's page (the focus card re-renders there
-  // from the same dashboard data) or clear the range and return to
-  // the ordinary history page.
-  const backToFocus = () => setTab("today");
   const clearHistoryFocusRange = () => {
     setHistoryFocusRange(null);
     setHistoryFocusContext(null);
@@ -5684,10 +5840,34 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
     setHistoryScrollTarget(targetId);
     setTab("history");
   };
+  // LIFE-DESIGN-001-B1B P1 (return routing): 「返回本次/上次重点」 from
+  // the training-range page must land on the FULL focus/feedback
+  // card in one hop. That card lives on the history page (today
+  // carries only the teaser), so returning reuses the history route:
+  // the range restriction is cleared (the full history, week review
+  // included, renders again) and the card is located by the stored
+  // context's source — the current focus block for a current-source
+  // visit, the previous look-back for a previous-source one. Draft /
+  // save state is untouched by the hop: the remounted panel re-reads
+  // it from the same per-key draft store. (The old behaviour only
+  // switched to the today tab, where no full card exists.)
+  const backToFocus = () => {
+    const targetId = historyFocusContext?.source === "previous" ? "week-review-previous-lookback" : "week-review-panel";
+    goToHistoryPanel(targetId);
+  };
   useEffect(() => {
     if (tab !== "history" || !historyScrollTarget) return;
     const timer = window.setTimeout(() => {
-      document.getElementById(historyScrollTarget)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      let target: HTMLElement | null = document.getElementById(historyScrollTarget);
+      if (!target && historyScrollTarget === "week-review-previous-lookback") {
+        // The previous look-back carries no id of its own; it is the
+        // panel's one .week-review-previous element.
+        target = document.querySelector<HTMLElement>(".week-review-previous");
+      }
+      // The previous look-back is a collapsed <details>: locating it
+      // means showing the full card, so open it before scrolling.
+      if (target instanceof HTMLDetailsElement) target.open = true;
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
       setHistoryScrollTarget(null);
     }, 90);
     return () => window.clearTimeout(timer);
@@ -5718,28 +5898,58 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
   const [syncAttempt, setSyncAttempt] = useState<SyncAttemptState | null>(null);
   const dataStatusRef = useRef(dataStatus);
   useEffect(() => { dataStatusRef.current = dataStatus; }, [dataStatus]);
+  // H-FRESH-001 PHASE-1 follow-up: dashboard reads are sequenced in
+  // arrival order (the ref only ever moves when a NEW dataStatus
+  // object lands). The task-end callback records the sequence current
+  // at that moment and explicitly initiates a fresh dashboard read;
+  // the first arrival sequenced strictly after it is that
+  // post-task-end read's own return and is offered to the machine
+  // with its sequence attached (see applySyncReadback's sequence
+  // path). The cache stamp alone is no longer treated as the task's
+  // end.
+  const dashboardReadSeqRef = useRef(0);
+  const lastDataStatusRef = useRef(dataStatus);
   const polling = useTaskPolling((results, taskMeta) => {
+    let needsPostTaskRead = false;
     setSyncAttempt((prev) => {
       let next = prev;
       for (const result of results) {
         const meta = taskMeta[result.taskId];
         if (!meta) continue;
-        next = applySyncTaskEnd(next, meta.attemptId, meta.source, { status: result.status, contractSatisfied: result.contractSatisfied }, dataStatusRef.current?.generatedAt ?? null);
+        const failed = result.status === "failed" || (result.status === "completed" && !result.contractSatisfied);
+        if (!failed) needsPostTaskRead = true;
+        next = applySyncTaskEnd(next, meta.attemptId, meta.source, { status: result.status, contractSatisfied: result.contractSatisfied }, dataStatusRef.current?.generatedAt ?? null, dashboardReadSeqRef.current);
       }
       return next;
     });
+    // Explicitly initiate the post-task-end read for this attempt:
+    // cancelRefetch makes it a genuinely new read started after the
+    // task end, not a pre-end read that happens to return late. Its
+    // return is recognised by sequence in the read-back effect
+    // below. A failed source needs no such read — it is already
+    // terminal — and the read is a plain dashboard query refetch:
+    // no permissions change, the background sync is untouched.
+    if (needsPostTaskRead) {
+      void queryClient.refetchQueries({ queryKey: ["dashboard"] }, { cancelRefetch: true });
+    }
   });
   // Read-back confirmation: every dashboard data arrival is offered
-  // to the machine; it only adjudicates sources sitting in
-  // "unconfirmed", and only against a read generated after that
-  // source's task ended (the stamp guard inside applySyncReadback).
+  // to the machine with its arrival sequence; it only adjudicates
+  // sources sitting in "unconfirmed", and only against a read proven
+  // to postdate that source's task end (the strict stamp path or the
+  // post-task-end sequence path inside applySyncReadback).
   useEffect(() => {
     if (!dataStatus) return;
+    if (lastDataStatusRef.current !== dataStatus) {
+      lastDataStatusRef.current = dataStatus;
+      dashboardReadSeqRef.current += 1;
+    }
+    const arrivalSeq = dashboardReadSeqRef.current;
     setSyncAttempt((prev) => {
       if (!prev) return prev;
       let next = prev;
       for (const source of ["health", "strength"] as const) {
-        const applied = applySyncReadback(next, prev.attemptId, source, { ok: true, updatedAt: dataStatus[source].updatedAt, stamp: dataStatus.generatedAt });
+        const applied = applySyncReadback(next, prev.attemptId, source, { ok: true, updatedAt: dataStatus[source].updatedAt, stamp: dataStatus.generatedAt, seq: arrivalSeq });
         if (applied) next = applied;
       }
       return next;
@@ -5823,7 +6033,7 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );

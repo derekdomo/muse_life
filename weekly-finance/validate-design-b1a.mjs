@@ -162,6 +162,30 @@ check("card: two freshness layers + coverage line kept",
 check("card: archived snapshot compare line kept", card.includes("月度快照 · {data.sourceMonth}（存档口径）") && card.includes("环比"));
 check("card: delta wording unchanged", card.includes("较上次成功快照（日期未留存）") && card.includes("本次未更新"));
 
+// --- F-ARCH labeling (PM 2026-10-24): every fact labelled in
+// place with its own caliber. The headline is the NEW
+// architecture total; weeklyDelta and its percent denominator
+// are the OLD live.netWorth — the card must never let the old
+// delta read as the new total's change (synthetic case: new
+// total 100, old sync net worth 80, old delta 5 must NOT imply
+// the new figure went 95 -> 100). ---
+check("label: headline labelled 混合余额日期的最近已知净值 (new architecture)",
+  card.includes("混合余额日期的最近已知净值（新架构 F-ARCH-001）"));
+check("label: amounts/dates coverage counts + Plaid pull time adjacent to the headline",
+  card.includes("金额已计入 {arch.amountIncluded}/{arch.amountTotal} 个账户 · 有效余额日期 {arch.validDateCount}/{arch.dateTotal} 个账户 · Plaid 层拉取于 {pulledText}"));
+check("label: delta row labelled 旧同步口径 in place",
+  card.includes("旧同步口径 · 较上次成功快照") && card.includes("旧同步口径 · 较上次成功快照（日期未留存）"));
+check("label: delta note states its denominator is the old caliber and forbids cross-derivation",
+  card.includes("分母同为旧同步净资产") && card.includes("不是上方新架构主数字的变化，两者不要互相推导"));
+check("label: old sync net worth amount is named on the card as the delta's basis",
+  card.includes("旧同步口径净资产 {currency.format(data.live.netWorth)}"));
+check("label: delta view is never computed against the arch total (no 95->100 implication)",
+  !appSrc.includes("weeklyDeltaView(delta, arch") && !card.includes("arch.total -"));
+check("label: detail view traces back to the old sync net worth",
+  appSrc.includes("旧同步口径对照（明细追溯）：旧同步净资产 {currency.format(liveNetWorth)}")
+  && appSrc.includes("旧同步口径 · 较上次成功快照（日期未留存）${trendIndicator(weeklyDelta)}")
+  && appSrc.includes("与旧同步口径不要互相推导"));
+
 // --- feature reachability: every former feature still present ---
 for (const marker of [
   "立即更新财务数据", "检查进度", "来源台账", "刷新观测",

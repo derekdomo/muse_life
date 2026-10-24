@@ -41,7 +41,14 @@ export const financeState = sqliteTable("finance_state", {
 // total-assets figure, written solely through the controlled
 // ingestArchNetWorth action. Each row carries the full stored
 // payload (JSON) plus the Plaid-layer pull instant; rows are never
-// updated or deleted — the latest row by id is the current figure.
+// updated or deleted — the current figure is the row with the
+// greatest source pulledAt (ties: greatest id), selected on read.
+// SAVE-1 concurrency arbitration deliberately lives in the write
+// STATEMENT (a conditional INSERT ... SELECT evaluated by the
+// database at commit time), not in a unique index on pulled_at:
+// a unique constraint would fail to build over — or force the
+// deletion of — same-version duplicate rows the pre-fix race may
+// already have stored, and history must be preserved verbatim.
 export const archNetWorth = sqliteTable("arch_net_worth", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   payload: text("payload").notNull(),

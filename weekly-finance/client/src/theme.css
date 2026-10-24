@@ -269,6 +269,12 @@ main {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+.conclusion-card__caliber {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.55;
+}
 .conclusion-card__value {
   margin-top: 4px;
   font-family: "SF Mono", ui-monospace, monospace;

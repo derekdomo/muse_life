@@ -88,23 +88,11 @@ check('source: rolling-window vs natural-week note is present verbatim',
   clientSrc.includes('健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。'));
 check('source: the cannot-judge line is present verbatim',
   clientSrc.includes('无法判断：现有数据未达到生成洞察的门槛。'));
-// H-VALID-MAINT-001 (2026-10-24): the two placement checks below
-// asserted the pre-B1B today-page position. Owner ruling
-// LIFE-DESIGN-001-B1B ③ moved the full panel to the history page;
-// they are replaced by equivalent assertions on the NEW structure
-// (panel in HistoryView, absent from TodayView), not deleted.
-const todaySliceStart = clientSrc.indexOf('function TodayView(');
-const historySliceStart = clientSrc.indexOf('function HistoryView(');
-const todaySlice = clientSrc.slice(todaySliceStart, clientSrc.indexOf('function RecentWorkouts(', todaySliceStart));
-const historySlice = clientSrc.slice(historySliceStart, clientSrc.indexOf('const GAME_CATEGORY_META', historySliceStart));
-const historyPanelJsx = '<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed ?? false} onViewTraining={onViewTraining} />';
-check('source: panel is rendered on the history page (B1B move), not on the today page',
-  historySlice.includes(historyPanelJsx) && !todaySlice.includes('<WeekReviewPanel'));
-check('source: panel is the first block on the history page, and today reaches it via the hero entry',
-  historySlice.indexOf(historyPanelJsx) > -1
-  && historySlice.indexOf(historyPanelJsx) < historySlice.indexOf('<DataStatusPanel')
-  && historySlice.indexOf(historyPanelJsx) < historySlice.indexOf('history-section history-fold')
-  && clientSrc.includes('onGoToWeekReview={() => goToHistoryPanel("week-review-panel")}'));
+check('source: panel is rendered on the today page inside the hero',
+  clientSrc.includes('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />'));
+check('source: panel renders after the load verdict block and the seven-day facts strip',
+  clientSrc.indexOf('whoop-load') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />')
+  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />'));
 check('source: weekReview never touches readiness (formula untouched)',
   !/readiness/i.test(extractFunction(clientSrc, 'weekReview')));
 

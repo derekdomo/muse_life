@@ -1132,6 +1132,15 @@ function accountTypeLabel(type: Account["type"]): string {
 // exactly one rendering home (R4): the F-ARCH total is the
 // headline when a stored figure exists (the live net worth
 // otherwise); the vs-last-snapshot delta drops to one line; the
+// F-ARCH labeling rule (PM 2026-10-24): every fact is labelled
+// in place with its own caliber — the headline is the new
+// architecture's 「混合余额日期的最近已知净值」 with its amounts /
+// dates coverage counts and the Plaid pull time adjacent, while
+// the delta line (weeklyDelta, whose percent denominator is the
+// OLD live.netWorth) is labelled 旧同步口径 and must never read
+// as the headline's own change; the old sync net worth stays
+// traceable in the detail tab's arch account section. This is
+// presentation binding only — no formula changed. The
 // two F-ARCH freshness layers stay as their own lines together
 // with the DATE-1 coverage line; the archived monthly snapshot
 // figure is one small compare line at the bottom. Kept facts
@@ -1157,9 +1166,13 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
   return (
     <section className="fact-card conclusion-card" aria-label={arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产"}>
       <p className="eyebrow">{arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产 · 同步读取净资产"}</p>
+      {arch ? <p className="conclusion-card__caliber">主数字口径：混合余额日期的最近已知净值（新架构 F-ARCH-001）</p> : null}
       <div className="conclusion-card__value">
         <strong>{currency.format(arch ? arch.total : data.live.netWorth)}</strong>
       </div>
+      {arch ? (
+        <p className="fact-card__note">金额已计入 {arch.amountIncluded}/{arch.amountTotal} 个账户 · 有效余额日期 {arch.validDateCount}/{arch.dateTotal} 个账户 · Plaid 层拉取于 {pulledText}</p>
+      ) : null}
       {arch?.partial ? (
         <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见「明细」页签的总资产账户明细。</p>
       ) : null}
@@ -1169,7 +1182,7 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
             <strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>
             {view.percent != null ? <span>{`${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}`}</span> : null}
             {view.direction ? <span>{view.direction}</span> : null}
-            <span className="delta__label">较上次成功快照</span>
+            <span className="delta__label">{arch ? "旧同步口径 · 较上次成功快照" : "较上次成功快照"}</span>
           </>
         ) : (
           <span>暂无可比快照</span>
@@ -1177,8 +1190,12 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
       </div>
       <p className="fact-card__note">
         {view.comparable
-          ? "较上次成功快照（日期未留存）：与上次成功快照的净资产之差；两次快照的间隔不固定，不代表固定时间间隔。"
-          : "首次同步、或上次快照不可用时没有可比对象；下一次成功同步后生成对比。"}
+          ? arch
+            ? "旧同步口径 · 较上次成功快照（日期未留存）：旧同步净资产与上次成功快照之差，分母同为旧同步净资产；不是上方新架构主数字的变化，两者不要互相推导。两次快照的间隔不固定，不代表固定时间间隔。"
+            : "较上次成功快照（日期未留存）：与上次成功快照的净资产之差；两次快照的间隔不固定，不代表固定时间间隔。"
+          : arch
+            ? "旧同步口径：首次同步、或上次快照不可用时没有可比对象；下一次成功同步后生成对比。"
+            : "首次同步、或上次快照不可用时没有可比对象；下一次成功同步后生成对比。"}
       </p>
       {refreshFailed ? <p className="fact-card__stale">本次未更新：本次更新未成功，以上仍为上次成功同步的数据，数据日期未推进。</p> : null}
       {arch ? (
@@ -1204,7 +1221,7 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
         </div>
       ) : null}
       <p className="fact-card__source">数据日期 {asOfText} · 月度快照 {data.sourceMonth} · 余额来源：{balanceSourceSummary(data.accounts)}</p>
-      {arch ? <p className="fact-card__source">旧月度快照保留在「明细」页签作对账存档。</p> : null}
+      {arch ? <p className="fact-card__source">旧同步口径净资产 {currency.format(data.live.netWorth)}（旧同步口径变化量的基准，逐项见「明细」页签）；旧月度快照保留在「明细」页签作对账存档。</p> : null}
     </section>
   );
 }
@@ -1562,10 +1579,17 @@ export function archRowDateLabel(row: ArchNetWorthData["rows"][number]): string 
 // layer line points at. Row rendering (name, DATE-1 date label,
 // signed amount) is unchanged; freshness is stated per layer in
 // text + symbol, never by color alone.
-function ArchAccountsDetail({ arch }: { arch: ArchNetWorthData }) {
+function ArchAccountsDetail({ arch, liveNetWorth, weeklyDelta }: { arch: ArchNetWorthData; liveNetWorth: number; weeklyDelta: number | null }) {
   return (
     <section className="section-block" aria-label="总资产账户明细（新架构）">
       <SectionTitle title="总资产账户明细" meta={`新架构（F-ARCH-001）· ${arch.rows.length} 个账户`} />
+      <p className="fact-card__note">
+        旧同步口径对照（明细追溯）：旧同步净资产 {currency.format(liveNetWorth)}
+        {weeklyDelta != null
+          ? ` · 旧同步口径 · 较上次成功快照（日期未留存）${trendIndicator(weeklyDelta)} ${signedCurrency(weeklyDelta)}`
+          : " · 旧同步口径暂无可比快照"}
+        ；本节逐户金额与总览主数字为新架构（F-ARCH-001）口径，与旧同步口径不要互相推导。
+      </p>
       <div className="arch-rows arch-rows--detail">
         {arch.rows.map((row) => (
           <div className="arch-row" key={row.id}>
@@ -1853,7 +1877,7 @@ function DetailTab({
         <FireProgress data={data} />
       </section>
 
-      {data.archNetWorth ? <ArchAccountsDetail arch={data.archNetWorth} /> : null}
+      {data.archNetWorth ? <ArchAccountsDetail arch={data.archNetWorth} liveNetWorth={data.live.netWorth} weeklyDelta={data.live.weeklyDelta} /> : null}
 
       <section className="accounts-section section-block">
         <SectionTitle title="账户明细" meta={`快照 ${data.sourceMonth}`} />

@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const financeTypeSchema = z.enum([
@@ -3649,14 +3649,67 @@ export const Actions = {
         targetRowId = hit.row.id;
       }
       if (targetRowId === null) {
-        const inserted = await db
-          .insert(schema.archNetWorth)
-          .values({
-            payload: JSON.stringify(payload),
-            pulledAt: new Date(pulledAtMs),
-          })
-          .returning({ id: schema.archNetWorth.id });
-        targetRowId = inserted[0]?.id ?? null;
+        // SAVE-1 commit-point arbitration (P0 fix, PM 2026-10-24):
+        // the append itself is ONE conditional INSERT ... SELECT
+        // whose WHERE clause the database evaluates at commit
+        // time — it lands only while no committed row carrying a
+        // valid-JSON payload exists at a pulled_at >= this
+        // version. The pre-check above is only a fast path; this
+        // statement is the arbitration. Two concurrent calls with
+        // the same source version can no longer both read an
+        // empty same-version set and both append: the database
+        // serializes the statements, exactly one lands, and the
+        // loser re-reads the committed state and is classified
+        // against it (equivalent -> reuse the winner's row,
+        // different -> version_conflict, overtaken by a newer
+        // version -> stale_version). No process-level lock is
+        // involved and no schema change was needed, so existing
+        // history — including any same-version duplicates the
+        // old race already stored — is preserved untouched and
+        // stays readable under the pulledAt-max selection; a
+        // rollback to the previous handler loses no data either.
+        const payloadJson = JSON.stringify(payload);
+        const insertedRows = (await db.all(
+          sql`INSERT INTO arch_net_worth (payload, pulled_at, created_at)
+              SELECT ${payloadJson}, ${pulledAtMs}, ${Date.now()}
+              WHERE NOT EXISTS (
+                SELECT 1 FROM arch_net_worth
+                WHERE pulled_at >= ${pulledAtMs} AND json_valid(payload)
+              )
+              RETURNING id`,
+        )) as unknown as Array<{ id?: number } | [number]>;
+        const insertedRow = insertedRows[0];
+        const insertedId = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow?.id;
+        if (insertedId != null) {
+          targetRowId = insertedId;
+        } else {
+          // Lost the commit-point race — classify against the
+          // rows that are actually committed now, under the same
+          // rules as the sequential pre-check.
+          const committedRows = await db.select().from(schema.archNetWorth);
+          let committedMaxMs = Number.NEGATIVE_INFINITY;
+          const committedSame: { row: ArchStoredRow; parsed: ArchNetWorth }[] = [];
+          for (const row of committedRows) {
+            const parsedCommitted = parseArchStoredRow(row);
+            if (!parsedCommitted) continue;
+            const key = archVersionKey(row, parsedCommitted);
+            if (key > committedMaxMs) committedMaxMs = key;
+            if (key === pulledAtMs) committedSame.push({ row, parsed: parsedCommitted });
+          }
+          if (pulledAtMs < committedMaxMs) return archIngestFailure("stale_version");
+          const winner = committedSame.find((candidate) => archPayloadsEquivalent(candidate.parsed, payload));
+          if (winner) {
+            targetRowId = winner.row.id;
+          } else {
+            // A same-version row with different content won, or
+            // the commit was blocked only by a row whose payload
+            // does not parse as a valid figure (never a read-path
+            // candidate): refuse with the typed conflict and
+            // append nothing, rather than store a second row at
+            // this version.
+            return archIngestFailure("version_conflict");
+          }
+        }
       }
       // SAVE-1 exact read-back: re-read THIS write's own row by
       // id (the inserted row, or the idempotency-hit row) and
