@@ -38,10 +38,19 @@ function extractFunction(source, name) {
 // --- source-level wiring checks ---
 check('source: 全部运动记录 section exists with its own title id',
   clientSrc.includes('id="all-workouts-title"') && clientSrc.includes('全部运动记录'));
-check('source: all-workouts section renders before the swim section',
-  clientSrc.indexOf('all-workouts-title') > -1 && clientSrc.indexOf('all-workouts-title') < clientSrc.indexOf('swim-history-title'));
-check('source: swim section retained unchanged in HistoryView',
-  clientSrc.includes('id="swim-history-title"') && clientSrc.includes('近30天没有游泳 workout 记录。'));
+// H-VALID-MAINT-001 (2026-10-24): the two checks below asserted a
+// standalone swim section after the all-workouts section. Owner
+// ruling LIFE-DESIGN-001-B1B removed that section; swimming is now
+// carried by the filter inside the all-workouts section. Replaced
+// by equivalent assertions on the NEW structure, not deleted.
+check('source: swim records are carried by the in-section filter (standalone swim section removed)',
+  !clientSrc.includes('id="swim-history-title"')
+  && clientSrc.includes('workoutFilter === "swim" ? allWorkouts.filter((workout) => isSwimWorkout(workout.type)) : allWorkouts')
+  && clientSrc.indexOf('workout-filter') > clientSrc.indexOf('all-workouts-title')
+  && clientSrc.includes('aria-label="只看游泳记录"') && clientSrc.includes('setWorkoutFilter("swim")'));
+check('source: swim reachability retained in HistoryView (filter empty state + fold summary swim count)',
+  clientSrc.includes('workoutFilter === "swim" ? "近30天没有游泳 workout 记录。" : "近30天没有 HealthKit 运动记录。"')
+  && clientSrc.includes('其中游泳 {swimWorkoutCount} 次'));
 check('source: empty state for the all-workouts list',
   clientSrc.includes('近30天没有 HealthKit 运动记录。'));
 check('source: HistoryView consumes allWorkoutsList(snapshot.historyWorkouts)',

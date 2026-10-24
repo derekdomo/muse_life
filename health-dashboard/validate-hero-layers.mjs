@@ -60,7 +60,14 @@ check('basis button scrolls to the readiness panel', heroSrc.includes('scrollToI
 const todayStart = clientSrc.indexOf('function TodayView(');
 const todayEnd = clientSrc.indexOf('function HistoryView(', todayStart);
 const todaySrc = clientSrc.slice(todayStart, todayEnd);
-check('full week review panel rendered once, below the hero', countOccurrences(todaySrc, '<WeekReviewPanel') === 1 && todaySrc.indexOf('<WeekReviewPanel') > todaySrc.indexOf('<WhoopHero'));
+// H-VALID-MAINT-001 (2026-10-24): this check asserted the panel
+// below the hero on the today page. Owner ruling
+// LIFE-DESIGN-001-B1B ③ moved the full panel to the history page;
+// replaced by the equivalent new-structure assertion (exactly
+// once overall, zero on today, first block of HistoryView).
+const historyStart = clientSrc.indexOf('function HistoryView(');
+const historySrc = clientSrc.slice(historyStart, clientSrc.indexOf('const GAME_CATEGORY_META', historyStart));
+check('full week review panel rendered once, on the history page (B1B move off today)', countOccurrences(clientSrc, '<WeekReviewPanel') === 1 && countOccurrences(todaySrc, '<WeekReviewPanel') === 0 && historySrc.indexOf('<WeekReviewPanel') > -1 && historySrc.indexOf('<WeekReviewPanel') < historySrc.indexOf('<DataStatusPanel'));
 check('week review panel carries its anchor id exactly once', countOccurrences(clientSrc, 'id="week-review-panel"') === 1);
 check('seven-day facts rendered once, below the hero', countOccurrences(todaySrc, '<SevenDayFacts') === 1 && todaySrc.indexOf('<SevenDayFacts') > todaySrc.indexOf('<WhoopHero'));
 check('readiness basis anchor id present once', countOccurrences(clientSrc, 'id="readiness-basis"') === 1);
