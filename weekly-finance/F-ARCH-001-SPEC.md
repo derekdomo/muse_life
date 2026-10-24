@@ -142,3 +142,55 @@
 贷款本金排除、混合贷款支付未分类、pending 单列、未知账户不当 0、
 两层新鲜度日期范围、异常 v0 触发与不触发（样本不足/仅相对超/仅绝对超）。
 实跑计数以脚本输出为准，写入 changes.md 本条登记。
+
+## 8. 日粒度分片（2026-10-24 所有者直令「我现在要 daily granularity」）
+
+- **日花销计算**：`summarizeSpendDaily`（finance-arch.mjs）与月度同一账本口径
+  ——同一 asOf 候选集、同一生命周期仲裁（同键去重不含类目、posted 取代
+  pending、冲突行不计数并列明）、同两项定义性排除、同退款规则（退款冲销
+  归**原交易日**、按原类目抵减，配对保留在 offsets；其余退款列
+  unappliedRefunds 带原因）。按日输出 posted/pending、类目构成、计数与
+  未分类行（落在自身日期）。与月度口径的交叉判据：同一账本逐月求和的日
+  posted 必须等于 `summarizeSpendMonth` 的 postedSpend（验证脚本已立此断言）。
+- **覆盖窗与零填充**：调用方给出 [fromDate, toDate] 闭区间时逐日全发；
+  区间内无计数行的日子是该拉取窗内的**真实 0**。区间外不发明数据。
+  覆盖诚实：交易行可带 `account`（不透明账户键）；有计数 spend 的账户
+  为「门控账户」，其数据起点为其最早候选行日期；早于任一门控账户起点
+  的日子标 `partial`（该账户花销不可能在其中——保留真实小计、不删、
+  不冒充完整日）；`fullCoverageStart` 为全部门控账户都已起步的首日。
+- **Plaid 分类映射**（实现方运行时计算口径，连接器原始流 → 上述账本；
+  2026-10-24 首写时按真实拉取数据校准为 v3）：金额取 finance-arch 符号
+  （流出为负）＝ −Plaid amount；Plaid pending → pending，其余 posted。
+  一级类目（personal_finance_category.primary）为类目键。流出侧：
+  TRANSFER_OUT 须与不同已连接账户的 TRANSFER_IN／LOAN_PAYMENTS 流入
+  同额、±3 天内配成对才记 `transfer`（本人账户间转账，定义性排除）；
+  配不成的记 `unmatched_transfer`（未分类、可见——含 Zelle 对外付款与
+  向未连接账户的划转，无类目依据不冒充 spend）。LOAN_PAYMENTS 流出
+  一律 `loan_mixed`（信用卡还款与房贷月供在 Plaid 同类目、无本金/利息
+  拆分依据；整笔不进 spend、本金部分也不单独排除计数）。其實質规则（v4）：同一笔房贷月供经 Bilt 卡通道支付时，Plaid 会把
+  它标成 RENT_AND_UTILITIES／TRANSPORTATION（名称 BILT CARD HOUSING／
+  BPS*BILT RENT），直付时则是 LOAN_PAYMENTS——处理不得随通道与标签
+  漂移：名称含 BILT 且含 HOUSING／RENT 的流出一律按 `loan_mixed`。
+  其余流出记
+  `spend`。流入侧：INCOME 不入流（收入流）；名称与某笔未被占用的已入账
+  spend 流出同名（归一化后相等/前缀/首词一致）、同账户、同额、180 天
+  内 → 名称救援记 `refund`＋refundOf（Plaid 常把真退款标成 OTHER，
+  而卡账户的还款镜像/积分兑现永不与购买同名——以此区分）；信用卡/贷款
+  账户的其余流入是还款镜像，不入流，其中一级类目属 spend 类目者记无
+  配对 `refund`（多为部分退款，进 unappliedRefunds 可见）；存款账户的
+  TRANSFER_IN 是镜像/外部转入，不入流；存款账户其余流入记无配对
+  `refund`（可见，不静默丢弃）。
+- **写入通道**：新表 `arch_daily_spend`（迁移 0006，只追加），经
+  `ingestArchDailySpend` 受控写入——门禁与 `ingestArchNetWorth` 同级
+  （owner-or-no-viewer 内部通道），请求带原始交易行与日载荷，服务端以
+  同口径 TypeScript 端口独立重算日载荷并逐日比对（金额容差 0.01），
+  不一致拒绝且不写；版本仲裁与 SAVE-1 同规则（pulledAt 最大为当前版、
+  同版同内容逻辑幂等、异内容冲突、旧版迟到拒绝、条件 INSERT 提交点
+  仲裁、按行 id 精确读回深比对）；响应只回计数、日期与布尔，不含金额。
+  授权来源＝所有者 2026-10-24 本直令，仅限本分片，不扩及其他写入。
+- **呈现**：日净值序列由 `arch_net_worth` 全部版本按 pulledAt 日期归并
+  （同日取当日最新版）成日点，序列起始日为首个 arch 写入日
+  （2026-10-24），此前无日数据、不回造。日花销呈现当月逐日序列＋逐日
+  类目展开，承载于「明细」页签（LIFE-DESIGN-001 结构不变，总览不拉
+  长）；覆盖窗起止与 partial 日在页内明示；月度 Firance 快照在页内
+  标明为对账存档。

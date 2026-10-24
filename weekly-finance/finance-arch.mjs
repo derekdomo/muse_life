@@ -362,6 +362,245 @@ export function summarizeSpendMonth(txns, month, options = {}) {
   };
 }
 
+// ---------- Daily spend stream (F-ARCH-001 daily granularity) --
+// The SAME ledger caliber as summarizeSpendMonth, aggregated per
+// DAY: identical asOf candidate set, identical lifecycle
+// arbitration (identical duplicates dedupe on the same key —
+// category is presentation metadata and never splits a duplicate;
+// a posted row supersedes a pending row; conflicting duplicates
+// are excluded and listed), the identical two definitional
+// exclusions, and the identical refund rule — a posted refund
+// offsets its ORIGINAL transaction, here on the original's DAY
+// and in the original's category, with the traceable pair kept in
+// `offsets`; every other refund lands in `unappliedRefunds` with
+// a reason, never silently dropped and never driving a day
+// negative. Rows may carry `category` (a source category key);
+// absent means "UNCATEGORIZED".
+// options: { asOf?, fromDate?, toDate? }
+// - asOf: rows dated after it are not candidates at all (same
+//   cutoff semantics as the monthly contract).
+// - fromDate + toDate: when BOTH are given, every date in the
+//   closed range is emitted, including dates with no counted
+//   rows (posted 0). A zero inside the range is a REAL zero for
+//   the pulled window — the caller asserts the window was fully
+//   pulled; dates outside the range are absent, never invented
+//   by this function, and days before the source's history are
+//   the caller's coverage problem, not a zero.
+// - totals describe the passed ledger (all candidate rows),
+//   whether or not a display range was requested.
+export function nextDateKey(dateKey) {
+  const [y, m, d] = String(dateKey).split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + 1);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+export function summarizeSpendDaily(txns, options = {}) {
+  if (typeof options === "string") options = { asOf: options };
+  options = options ?? {};
+  const asOf = options.asOf ?? options.asOfDate ?? null;
+  const fromDate = options.fromDate ?? null;
+  const toDate = options.toDate ?? null;
+  const afterAsOf = (row) => asOf !== null && row.date > asOf;
+
+  // Candidate set first, lifecycle arbitration second — the same
+  // order, dedupe key and rules as summarizeSpendMonth (TXN-1).
+  const groups = new Map();
+  for (const t of txns) {
+    if (afterAsOf(t)) continue;
+    if (!groups.has(t.id)) groups.set(t.id, []);
+    groups.get(t.id).push(t);
+  }
+  const allDatesById = new Map(); // id -> Set of dates over ALL rows (diagnosis only)
+  for (const t of txns) {
+    if (!allDatesById.has(t.id)) allDatesById.set(t.id, new Set());
+    allDatesById.get(t.id).add(t.date);
+  }
+  const canonical = new Map();
+  const conflicts = [];
+  for (const [id, rows] of groups) {
+    const seenKeys = new Set();
+    const uniq = [];
+    for (const r of rows) {
+      const key = JSON.stringify([r.date, r.amount, r.status, r.kind, r.refundOf ?? null]);
+      if (!seenKeys.has(key)) { seenKeys.add(key); uniq.push(r); }
+    }
+    const byStatus = new Map();
+    for (const r of uniq) {
+      if (!byStatus.has(r.status)) byStatus.set(r.status, []);
+      byStatus.get(r.status).push(r);
+    }
+    let hasConflict = false;
+    for (const sameStatus of byStatus.values()) if (sameStatus.length > 1) hasConflict = true;
+    if (hasConflict) {
+      conflicts.push({ id, reason: "conflicting-duplicates" });
+      continue;
+    }
+    canonical.set(id, byStatus.get("posted")?.[0] ?? byStatus.get("pending")?.[0] ?? uniq[0]);
+  }
+  const conflictIds = new Set(conflicts.map((c) => c.id));
+
+  const dayMap = new Map();
+  const emptyDay = (date) => ({
+    date, posted: 0, pending: 0, categories: new Map(), spendCount: 0, pendingCount: 0, unclassified: [],
+  });
+  const dayFor = (date) => {
+    if (!dayMap.has(date)) dayMap.set(date, emptyDay(date));
+    return dayMap.get(date);
+  };
+  const addCategory = (day, key, delta) => {
+    day.categories.set(key, (day.categories.get(key) ?? 0) + delta);
+  };
+
+  const countedSpend = new Map(); // id -> remaining refundable amount
+  const originOf = new Map(); // id -> { date, category } of the counted original
+  const unclassified = [];
+  const excludedCounts = { transfer: 0, loanPrincipal: 0 };
+  let totalPosted = 0;
+  let totalPending = 0;
+  for (const [id, row] of canonical) {
+    if (row.kind === "refund") continue;
+    if (row.kind === "transfer") { excludedCounts.transfer += 1; continue; }
+    if (row.kind === "loan_principal") { excludedCounts.loanPrincipal += 1; continue; }
+    if (row.kind === "spend") {
+      const amt = Math.abs(row.amount);
+      const category = typeof row.category === "string" && row.category ? row.category : "UNCATEGORIZED";
+      if (row.status === "pending") {
+        const day = dayFor(row.date);
+        day.pending += amt;
+        day.pendingCount += 1;
+        totalPending += amt;
+      } else {
+        const day = dayFor(row.date);
+        day.posted += amt;
+        day.spendCount += 1;
+        addCategory(day, category, amt);
+        totalPosted += amt;
+        countedSpend.set(id, amt);
+        originOf.set(id, { date: row.date, category });
+      }
+    } else {
+      // loan_mixed / unmatched_transfer / unknown kinds: visible
+      // on their own day and in the dataset list, never silently
+      // excluded (same rule as the monthly contract).
+      unclassified.push({ id, date: row.date, kind: row.kind });
+      dayFor(row.date).unclassified.push(id);
+    }
+  }
+
+  // Refunds: judged globally (no month scope at day granularity),
+  // applied to the ORIGINAL's day and category. Same reason
+  // taxonomy as the monthly contract.
+  const refundRows = [...canonical.values()]
+    .filter((r) => r.kind === "refund")
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const offsets = [];
+  const unappliedRefunds = [];
+  for (const r of refundRows) {
+    if (r.status !== "posted") continue; // a pending refund has not landed yet
+    const amt = Math.abs(r.amount);
+    const orig = r.refundOf != null ? canonical.get(r.refundOf) : undefined;
+    if (!orig) {
+      let reason = "original-missing";
+      if (r.refundOf != null && conflictIds.has(r.refundOf)) reason = "original-conflicted";
+      else if (r.refundOf != null && (allDatesById.get(r.refundOf)?.size ?? 0) > 0) reason = "original-after-asof";
+      unappliedRefunds.push({ refundId: r.id, of: r.refundOf ?? null, amount: amt, reason, date: r.date });
+      continue;
+    }
+    if (orig.kind !== "spend") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-not-spend", date: r.date }); continue; }
+    if (orig.status !== "posted") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-pending", date: r.date }); continue; }
+    const remaining = countedSpend.get(orig.id);
+    if (remaining === undefined) { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-not-counted", date: r.date }); continue; }
+    const applied = Math.min(amt, remaining);
+    if (applied > 0) {
+      const origin = originOf.get(orig.id);
+      const day = dayFor(origin.date);
+      day.posted -= applied;
+      addCategory(day, origin.category, -applied);
+      totalPosted -= applied;
+      countedSpend.set(orig.id, remaining - applied);
+      offsets.push({ refundId: r.id, of: orig.id, amount: applied, date: origin.date, refundDate: r.date });
+    }
+    if (amt > applied) {
+      unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt - applied, reason: "exceeds-original", date: r.date });
+    }
+  }
+
+  // Coverage honesty (daily backfill): rows may carry `account`
+  // (an opaque source-account key). An account GATES coverage
+  // when it has at least one counted posted spend row; its data
+  // starts at its earliest candidate row date (any kind/status).
+  // A day earlier than some gating account's start is `partial`:
+  // that account's spend cannot be in it, so the day must not be
+  // read as a complete day — it is still emitted with its real
+  // subtotal (never dropped, never upgraded to complete).
+  // fullCoverageStart is the first date from which every gating
+  // account's data has started (null when nothing gates).
+  const accountStart = new Map();
+  for (const t of txns) {
+    if (afterAsOf(t) || typeof t.account !== "string" || !t.account) continue;
+    if (!accountStart.has(t.account) || t.date < accountStart.get(t.account)) {
+      accountStart.set(t.account, t.date);
+    }
+  }
+  const gatingStarts = [];
+  {
+    const gatingAccounts = new Set();
+    for (const [id, row] of canonical) {
+      if (row.kind === "spend" && row.status === "posted" && typeof row.account === "string" && row.account) {
+        gatingAccounts.add(row.account);
+      }
+    }
+    for (const account of gatingAccounts) {
+      if (accountStart.has(account)) gatingStarts.push(accountStart.get(account));
+    }
+  }
+  const fullCoverageStart = gatingStarts.length ? gatingStarts.reduce((a, b) => (a > b ? a : b)) : null;
+
+  let dates;
+  if (fromDate && toDate && fromDate <= toDate) {
+    dates = [];
+    for (let cur = fromDate; ; cur = nextDateKey(cur)) {
+      dates.push(cur);
+      if (cur === toDate) break;
+    }
+  } else {
+    dates = [...dayMap.keys()].sort();
+  }
+  const days = dates.map((date) => {
+    const day = dayMap.get(date) ?? emptyDay(date);
+    const categories = [...day.categories.entries()]
+      .map(([key, amount]) => ({ key, amount }))
+      .filter((c) => Math.abs(c.amount) > 1e-9)
+      .sort((a, b) => b.amount - a.amount || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return {
+      date,
+      posted: day.posted,
+      pending: day.pending,
+      categories,
+      spendCount: day.spendCount,
+      pendingCount: day.pendingCount,
+      unclassified: day.unclassified,
+      partial: fullCoverageStart !== null && date < fullCoverageStart,
+    };
+  });
+  return {
+    days,
+    totals: { posted: totalPosted, pending: totalPending },
+    offsets,
+    conflicts,
+    unappliedRefunds,
+    unclassified,
+    excludedCounts,
+    accountStarts: Object.fromEntries([...accountStart.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))),
+    fullCoverageStart,
+    classificationComplete: unclassified.length === 0 && conflicts.length === 0 && unappliedRefunds.length === 0,
+  };
+}
+
 // ---------- FIRE eligibility (CAL-1) ----------
 // Evaluated on the FIXED grid of the 12 ended natural months before
 // throughMonth. Summaries are normalized by month: duplicate rows for

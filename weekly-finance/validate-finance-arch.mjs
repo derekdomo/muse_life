@@ -8,7 +8,7 @@
 // explicit coverage, fixed 12-month grid, daily-fact anomaly input).
 // Four PM criteria matrices (CAL / COV / TXN / ANOM) follow them.
 import {
-  summarizeNetWorth, summarizeSpendMonth, fireEligibleMonths, anomalyV0, buildArchPreview,
+  summarizeNetWorth, summarizeSpendMonth, summarizeSpendDaily, nextDateKey, fireEligibleMonths, anomalyV0, buildArchPreview,
   monthCoverage, targetMonths12, daysInMonth,
 } from "./finance-arch.mjs";
 
@@ -741,6 +741,82 @@ check("ANOM3 preview full-history explicit true positive agrees with direct (nor
   return direct.verdict === "normal" && prev.verdict === "normal"
     && prev.baselineMonths.map((b) => b.month).join() === direct.baselineMonths.map((b) => b.month).join();
 })());
+
+// --- Daily spend stream (F-ARCH-001 daily granularity): same
+// ledger caliber as the monthly contract, per-day aggregation.
+check("nextDateKey month/year boundaries", nextDateKey("2026-02-28") === "2026-03-01" && nextDateKey("2024-02-28") === "2024-02-29" && nextDateKey("2026-12-31") === "2027-01-01");
+const dailyTxns = [
+  { id: "d1", date: "2026-09-29", amount: -50, status: "posted", kind: "spend", category: "FOOD_AND_DRINK" },
+  { id: "d2", date: "2026-09-30", amount: -20, status: "posted", kind: "spend", category: "TRANSPORTATION" },
+  { id: "d3", date: "2026-10-01", amount: -70, status: "posted", kind: "spend", category: "FOOD_AND_DRINK" },
+  { id: "d3", date: "2026-10-01", amount: -70, status: "posted", kind: "spend", category: "FOOD_AND_DRINK" },
+  { id: "d4", date: "2026-10-01", amount: -10, status: "pending", kind: "spend", category: "FOOD_AND_DRINK" },
+  { id: "d5", date: "2026-10-02", amount: -500, status: "posted", kind: "transfer" },
+  { id: "d6", date: "2026-10-02", amount: -300, status: "posted", kind: "loan_principal" },
+  { id: "d7", date: "2026-10-03", amount: 25, status: "posted", kind: "refund", refundOf: "d3" },
+  { id: "d8", date: "2026-10-03", amount: -40, status: "posted", kind: "spend", category: "ENTERTAINMENT" },
+];
+const daily = summarizeSpendDaily(dailyTxns, { fromDate: "2026-09-29", toDate: "2026-10-04" });
+const dayOf = (res, date) => res.days.find((d) => d.date === date);
+check("daily emits every date in the closed range", daily.days.length === 6 && daily.days[0].date === "2026-09-29" && daily.days[5].date === "2026-10-04");
+check("daily per-day posted", eq(dayOf(daily, "2026-09-29").posted, 50) && eq(dayOf(daily, "2026-09-30").posted, 20) && eq(dayOf(daily, "2026-10-03").posted, 40));
+check("daily refund offsets the ORIGINAL day, not the refund day", eq(dayOf(daily, "2026-10-01").posted, 45) && daily.offsets.length === 1 && daily.offsets[0].date === "2026-10-01" && daily.offsets[0].refundDate === "2026-10-03");
+check("daily category breakdown nets the refund into the original category", (() => { const c = dayOf(daily, "2026-10-01").categories; return c.length === 1 && c[0].key === "FOOD_AND_DRINK" && eq(c[0].amount, 45); })());
+check("daily pending separate on its own day", eq(dayOf(daily, "2026-10-01").pending, 10) && dayOf(daily, "2026-10-01").pendingCount === 1);
+check("daily exclusion-only day is a real 0 inside the range", eq(dayOf(daily, "2026-10-02").posted, 0) && dayOf(daily, "2026-10-02").spendCount === 0);
+check("daily inactive day zero-filled only inside the range", eq(dayOf(daily, "2026-10-04").posted, 0));
+check("daily totals + exclusion counts", eq(daily.totals.posted, 155) && eq(daily.totals.pending, 10) && daily.excludedCounts.transfer === 1 && daily.excludedCounts.loanPrincipal === 1);
+check("daily classification complete on the clean fixture", daily.classificationComplete === true && daily.conflicts.length === 0 && daily.unappliedRefunds.length === 0);
+const dailyNoRange = summarizeSpendDaily(dailyTxns, {});
+check("daily without a range emits only activity dates (no invented zeros)", !dailyNoRange.days.some((d) => d.date === "2026-10-02" || d.date === "2026-10-04") && dailyNoRange.days.length === 4);
+// Cross-check: daily sums per month equal the monthly contract on
+// the same ledger — the two aggregations must never drift apart.
+for (const m of ["2026-09", "2026-10"]) {
+  const monthSum = summarizeSpendMonth(dailyTxns, m, COV(m));
+  const dailySum = daily.days.filter((d) => d.date.startsWith(m)).reduce((s, d) => s + d.posted, 0);
+  check(`daily sums match monthly contract for ${m}`, eq(dailySum, monthSum.postedSpend));
+}
+// asOf cutoff: a future refund is not a candidate, so the
+// original day keeps its full amount; future rows do not exist.
+const dailyAsOf = summarizeSpendDaily(dailyTxns, { asOf: "2026-10-01" });
+check("daily asOf drops the future refund + future exclusions", eq(dayOf(dailyAsOf, "2026-10-01").posted, 70) && eq(dailyAsOf.totals.posted, 140) && dailyAsOf.excludedCounts.transfer === 0 && dailyAsOf.offsets.length === 0);
+const futRows = [
+  { id: "f1", date: "2026-10-01", amount: -44, status: "pending", kind: "spend", category: "FOOD_AND_DRINK" },
+  { id: "f1", date: "2026-10-05", amount: -44, status: "posted", kind: "spend", category: "FOOD_AND_DRINK" },
+];
+const futAsOf = summarizeSpendDaily(futRows, { asOf: "2026-10-03" });
+check("daily asOf keeps the pending state a future posted cannot erase", eq(dayOf(futAsOf, "2026-10-01").pending, 44) && eq(futAsOf.totals.posted, 0));
+const futFull = summarizeSpendDaily(futRows, {});
+check("daily posted supersedes pending on the posted row's own day", eq(dayOf(futFull, "2026-10-05").posted, 44) && eq(futFull.totals.pending, 0));
+// Messy ledger: unclassified kinds stay visible on their day,
+// conflicting duplicates count nothing, refunds without a counted
+// original are listed with reasons — nothing silently disappears.
+const dailyMessy = summarizeSpendDaily([
+  { id: "m1", date: "2026-10-05", amount: -90, status: "posted", kind: "loan_mixed" },
+  { id: "m2", date: "2026-10-05", amount: -15, status: "posted", kind: "unmatched_transfer" },
+  { id: "m3", date: "2026-10-06", amount: -33, status: "posted", kind: "spend", category: "MEDICAL" },
+  { id: "m3", date: "2026-10-06", amount: -34, status: "posted", kind: "spend", category: "MEDICAL" },
+  { id: "m4", date: "2026-10-07", amount: 12, status: "posted", kind: "refund", refundOf: "ghost" },
+  { id: "m5", date: "2026-10-07", amount: -60, status: "pending", kind: "spend", category: "TRAVEL" },
+  { id: "m6", date: "2026-10-08", amount: 20, status: "posted", kind: "refund", refundOf: "m5" },
+], {});
+check("daily unclassified visible on their day + dataset list", dayOf(dailyMessy, "2026-10-05").unclassified.join() === "m1,m2" && dailyMessy.unclassified.length === 2);
+check("daily conflicting duplicates count nothing", dailyMessy.conflicts.length === 1 && dailyMessy.conflicts[0].id === "m3" && eq(dayOf(dailyMessy, "2026-10-06")?.posted ?? 0, 0));
+check("daily unapplied refunds listed with reasons", dailyMessy.unappliedRefunds.length === 2 && dailyMessy.unappliedRefunds.some((r) => r.refundId === "m4" && r.reason === "original-missing") && dailyMessy.unappliedRefunds.some((r) => r.refundId === "m6" && r.reason === "original-pending"));
+check("daily messy totals stay honest", eq(dailyMessy.totals.posted, 0) && eq(dailyMessy.totals.pending, 60) && dailyMessy.classificationComplete === false);
+// Coverage gating: an account that starts later makes earlier
+// days partial (its spend cannot be in them) without erasing
+// them; an account with no counted spend never gates.
+const dailyCov = summarizeSpendDaily([
+  { id: "a1", date: "2026-09-01", amount: -10, status: "posted", kind: "spend", category: "FOOD_AND_DRINK", account: "acctA" },
+  { id: "a2", date: "2026-09-15", amount: -20, status: "posted", kind: "spend", category: "FOOD_AND_DRINK", account: "acctA" },
+  { id: "b1", date: "2026-10-02", amount: -30, status: "posted", kind: "spend", category: "TRAVEL", account: "acctB" },
+  { id: "c1", date: "2026-08-01", amount: -999, status: "posted", kind: "transfer", account: "acctC" },
+], { fromDate: "2026-09-01", toDate: "2026-10-03" });
+check("daily fullCoverageStart is the latest gating account start", dailyCov.fullCoverageStart === "2026-10-02" && dailyCov.accountStarts.acctA === "2026-09-01" && dailyCov.accountStarts.acctB === "2026-10-02");
+check("daily days before a gating start are partial, from it on full", dayOf(dailyCov, "2026-09-01").partial === true && dayOf(dailyCov, "2026-10-01").partial === true && dayOf(dailyCov, "2026-10-02").partial === false && dayOf(dailyCov, "2026-10-03").partial === false);
+check("daily partial days keep their real subtotal", eq(dayOf(dailyCov, "2026-09-01").posted, 10) && eq(dayOf(dailyCov, "2026-09-15").posted, 20));
+check("daily ledger without account keys never claims partial", daily.days.every((d) => d.partial === false) && daily.fullCoverageStart === null);
 
 console.log(`validate-finance-arch: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
