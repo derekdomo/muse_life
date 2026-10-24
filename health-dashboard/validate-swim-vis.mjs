@@ -4,13 +4,12 @@
 // health-dashboard/client/src/App.tsx, plus source checks on the
 // SevenDayFacts and TodayView wiring. Pure Node, no deps.
 //
-// Reconciliation basis: the per-day values below are the owner-verified
-// data-layer values for this bug (HealthKit + getDashboard, checked
-// 2026-10-24): swims on 10/15 600m/19min, 10/16 600m/22min, 10/21
-// 600m/20min, 10/23 700m/23min; 12 historyWorkouts of which 7 swimming;
-// workouts.count7d = 2 (both in-window sessions are the 10/21 + 10/23
-// swims). The fixtures are synthetic copies shaped exactly like those
-// verified values — no real records are read here.
+// H-SWIM-PRIV-001: fixtures are FULLY SYNTHETIC and unrelated to any
+// real record (invented calendar 2027-03, invented distances/durations).
+// The original reconciliation against real data-layer values was done
+// only in the private runtime and is not recorded in this repository.
+// Shape: 4 swim days in historyDaily, 12 historyWorkouts of which 7
+// swimming, and exactly 2 swims inside the trailing 7-day window.
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -76,45 +75,46 @@ const { swimInfoByDate, swimDayLabel, swimDayDetail, swimWeekSummary } = buildFn
 // ------------------------------------------------------------- fixtures
 // historyDaily rows: only date + swimMeters are read by swimInfoByDate.
 const historyDaily = [
-  { date: '2026-10-14', swimMeters: null },
-  { date: '2026-10-15', swimMeters: 600 },
-  { date: '2026-10-16', swimMeters: 600 },
-  { date: '2026-10-17', swimMeters: null },
-  { date: '2026-10-18', swimMeters: null },
-  { date: '2026-10-19', swimMeters: 0 },
-  { date: '2026-10-20', swimMeters: null },
-  { date: '2026-10-21', swimMeters: 600 },
-  { date: '2026-10-22', swimMeters: null },
-  { date: '2026-10-23', swimMeters: 700 },
+  { date: '2027-03-02', swimMeters: null },
+  { date: '2027-03-03', swimMeters: 425 },
+  { date: '2027-03-04', swimMeters: 510 },
+  { date: '2027-03-05', swimMeters: null },
+  { date: '2027-03-06', swimMeters: null },
+  { date: '2027-03-07', swimMeters: 0 },
+  { date: '2027-03-08', swimMeters: null },
+  { date: '2027-03-09', swimMeters: 380 },
+  { date: '2027-03-10', swimMeters: null },
+  { date: '2027-03-11', swimMeters: 640 },
 ];
-// 12 sessions, 7 swimming (owner-verified shape). The 5 non-swim sessions
-// all fall outside the last-7 window (10/17–10/23), matching count7d = 2.
+// 12 sessions, 7 swimming (synthetic shape). The 5 non-swim sessions
+// all fall outside the last-7 window (2027-03-05–03-11), so the window
+// holds exactly the 2 in-window swims.
 const historyWorkouts = [
-  { id: 'w01', date: '2026-09-28', type: 'swimming', distanceMeters: 500, durationMinutes: 18 },
-  { id: 'w02', date: '2026-10-02', type: 'swimming', distanceMeters: 550, durationMinutes: 19 },
-  { id: 'w03', date: '2026-10-07', type: 'swimming', distanceMeters: 500, durationMinutes: 17 },
-  { id: 'w04', date: '2026-10-09', type: 'walking', distanceMeters: 3000, durationMinutes: 40 },
-  { id: 'w05', date: '2026-10-10', type: 'cycling', distanceMeters: 12000, durationMinutes: 45 },
-  { id: 'w06', date: '2026-10-12', type: 'running', distanceMeters: 5000, durationMinutes: 30 },
-  { id: 'w07', date: '2026-10-13', type: 'elliptical', distanceMeters: null, durationMinutes: 25 },
-  { id: 'w08', date: '2026-10-14', type: 'rowing', distanceMeters: 2000, durationMinutes: 15 },
-  { id: 'w09', date: '2026-10-15', type: 'swimming', distanceMeters: 600, durationMinutes: 19 },
-  { id: 'w10', date: '2026-10-16', type: 'swimming', distanceMeters: 600, durationMinutes: 22 },
-  { id: 'w11', date: '2026-10-21', type: 'swimming', distanceMeters: 600, durationMinutes: 20 },
-  { id: 'w12', date: '2026-10-23', type: 'swimming', distanceMeters: 700, durationMinutes: 23 },
+  { id: 'w01', date: '2027-02-14', type: 'swimming', distanceMeters: 455, durationMinutes: 16 },
+  { id: 'w02', date: '2027-02-19', type: 'swimming', distanceMeters: 590, durationMinutes: 21 },
+  { id: 'w03', date: '2027-02-24', type: 'swimming', distanceMeters: 470, durationMinutes: 15 },
+  { id: 'w04', date: '2027-02-26', type: 'walking', distanceMeters: 3200, durationMinutes: 41 },
+  { id: 'w05', date: '2027-02-27', type: 'cycling', distanceMeters: 11500, durationMinutes: 44 },
+  { id: 'w06', date: '2027-02-28', type: 'running', distanceMeters: 4800, durationMinutes: 29 },
+  { id: 'w07', date: '2027-03-01', type: 'elliptical', distanceMeters: null, durationMinutes: 24 },
+  { id: 'w08', date: '2027-03-02', type: 'rowing', distanceMeters: 2100, durationMinutes: 14 },
+  { id: 'w09', date: '2027-03-03', type: 'swimming', distanceMeters: 425, durationMinutes: 15 },
+  { id: 'w10', date: '2027-03-04', type: 'swimming', distanceMeters: 510, durationMinutes: 24 },
+  { id: 'w11', date: '2027-03-09', type: 'swimming', distanceMeters: 380, durationMinutes: 13 },
+  { id: 'w12', date: '2027-03-11', type: 'swimming', distanceMeters: 640, durationMinutes: 27 },
 ];
-const windowDates = ['2026-10-17', '2026-10-18', '2026-10-19', '2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23'];
+const windowDates = ['2027-03-05', '2027-03-06', '2027-03-07', '2027-03-08', '2027-03-09', '2027-03-10', '2027-03-11'];
 
 // -------------------------------------------- per-day reconciliation
 const byDate = swimInfoByDate(historyDaily, historyWorkouts);
-check('per-day: exactly the 4 verified swim dates are present',
-  [...byDate.keys()].sort().join(',') === '2026-10-15,2026-10-16,2026-10-21,2026-10-23',
+check('per-day: exactly the 4 synthetic swim dates are present',
+  [...byDate.keys()].sort().join(',') === '2027-03-03,2027-03-04,2027-03-09,2027-03-11',
   [...byDate.keys()].sort().join(','));
 const expected = {
-  '2026-10-15': { meters: 600, minutes: 19 },
-  '2026-10-16': { meters: 600, minutes: 22 },
-  '2026-10-21': { meters: 600, minutes: 20 },
-  '2026-10-23': { meters: 700, minutes: 23 },
+  '2027-03-03': { meters: 425, minutes: 15 },
+  '2027-03-04': { meters: 510, minutes: 24 },
+  '2027-03-09': { meters: 380, minutes: 13 },
+  '2027-03-11': { meters: 640, minutes: 27 },
 };
 for (const [date, exp] of Object.entries(expected)) {
   const info = byDate.get(date);
@@ -128,17 +128,17 @@ for (const [date, exp] of Object.entries(expected)) {
     info !== undefined && swimDayDetail(info) === `游泳 ${exp.meters} 米 · ${exp.minutes} 分`,
     info ? swimDayDetail(info) : 'missing');
 }
-check('per-day: swimMeters null day absent', !byDate.has('2026-10-20'));
-check('per-day: swimMeters 0 day absent', !byDate.has('2026-10-19'));
+check('per-day: swimMeters null day absent', !byDate.has('2027-03-08'));
+check('per-day: swimMeters 0 day absent', !byDate.has('2027-03-07'));
 
 // ------------------------------------------------- week summary (7d)
 const week = swimWeekSummary(historyWorkouts, windowDates);
 check('week: count is the 2 in-window swims', week.count === 2, `count=${week.count}`);
-check('week: meters sum to 1300', week.meters === 1300, `meters=${week.meters}`);
+check('week: meters sum to 1020', week.meters === 1020, `meters=${week.meters}`);
 check('week: metersKnown', week.metersKnown === true);
-check('week: label', week.label === '近7天游泳 2 次 · 共 1,300 米', week.label);
-// Subset consistency with the owner-verified workouts.count7d = 2: every
-// HK session inside the window is a swim, so swim count == total == 2.
+check('week: label', week.label === '近7天游泳 2 次 · 共 1,020 米', week.label);
+// Subset consistency: every session inside the window is a swim, so
+// swim count == total == 2.
 const totalInWindow = historyWorkouts.filter((w) => windowDates.includes(w.date)).length;
 check('week: swim count never exceeds total sessions in window (count7d basis)',
   week.count <= totalInWindow && totalInWindow === 2,
@@ -149,16 +149,16 @@ check('week: widened window counts all 7 swims', wide.count === 7, `count=${wide
 
 // ------------------------------------------------------------ edges
 const noDuration = swimInfoByDate(
-  [{ date: '2026-10-23', swimMeters: 700 }],
-  [{ id: 'x1', date: '2026-10-23', type: 'swimming', distanceMeters: 700, durationMinutes: null }],
+  [{ date: '2027-03-11', swimMeters: 640 }],
+  [{ id: 'x1', date: '2027-03-11', type: 'swimming', distanceMeters: 640, durationMinutes: null }],
 );
 check('edge: unknown duration -> minutes null',
-  noDuration.get('2026-10-23')?.minutes === null);
+  noDuration.get('2027-03-11')?.minutes === null);
 check('edge: unknown duration -> detail says 时长未知',
-  swimDayDetail(noDuration.get('2026-10-23')) === '游泳 700 米 · 时长未知',
-  swimDayDetail(noDuration.get('2026-10-23')));
+  swimDayDetail(noDuration.get('2027-03-11')) === '游泳 640 米 · 时长未知',
+  swimDayDetail(noDuration.get('2027-03-11')));
 const noDistanceWeek = swimWeekSummary(
-  [{ id: 'y1', date: '2026-10-21', type: 'swimming', distanceMeters: null, durationMinutes: 20 }],
+  [{ id: 'y1', date: '2027-03-09', type: 'swimming', distanceMeters: null, durationMinutes: 18 }],
   windowDates,
 );
 check('edge: no known distance -> label omits the meters segment',
@@ -184,7 +184,7 @@ check('source: SevenDayFacts still rendered exactly once',
 // ------------------------------------------- mutation sensitivity
 // Weakening the positive-meters gate inside swimInfoByDate (written as
 // `swimMeters <= 0) continue`) must change the outcome: the swimMeters
-// = 0 day (10/19) would appear.
+// = 0 day (2027-03-07) would appear.
 const fnSrc = extractFunction(clientSrc, 'swimInfoByDate');
 const mutatedSrc = clientSrc.replace(fnSrc, fnSrc.replace('swimMeters <= 0', 'swimMeters < 0'));
 check('mutation: gate pattern found in swimInfoByDate', mutatedSrc !== clientSrc);
@@ -192,7 +192,7 @@ if (mutatedSrc !== clientSrc) {
   const mutated = buildFns(mutatedSrc);
   const mutatedMap = mutated.swimInfoByDate(historyDaily, historyWorkouts);
   check('mutation: weakening the gate adds the 0-meter day',
-    mutatedMap.has('2026-10-19') && !byDate.has('2026-10-19'));
+    mutatedMap.has('2027-03-07') && !byDate.has('2027-03-07'));
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);
