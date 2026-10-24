@@ -1573,3 +1573,8 @@
 - 验证证据：新增 health-dashboard/validate-swim-stroke.mjs（fixture 全合成虚构、文件头注明 synthetic、与真实记录无关）**52/52**——阈值边界（38.0→自由泳、45.0→蛙泳、带内 41s+15 划→自由泳/41s+20 划→蛙泳、带内划数界 17/18、带内无划数 41s→自由泳/43s→蛙泳/41.5 恰界、用时缺失按划数、双缺失→未分类）、双峰合成 session 的分组计数与聚合（距离＝趟数×单趟长度、占比以已分类距离为分母、组配速换算、心率只计有值趟、未分类计数）、单趟长度缺失按 25 米、趟序打乱后计数不变、totals 跨 session 聚合、空输入诚实降级、源码检查（含「泳姿构成（推测）」「按本人数据定标的推测」「Apple Health 无原生泳姿标签」、逐趟表「泳姿」列、client 源码不含「快组」「慢组」）、变异敏感性（38 阈值改 30 后 33 秒/20 划合成趟由自由泳翻转为蛙泳）。全量回归（仓库 health-dashboard 直跑全部 validate-*.mjs，与改动前基线台账 /tmp/swimstroke/baseline_suites.txt 逐套比对）：计数逐套全等——all-workouts 14/6、design-b1b 40/0、game-settlement 150/0、hero-layers 24/0、hero-status 11/9、level-candidate 46/0、muscle-status 50/0、persist-race 42/0、rewards 41/1、season-swim 51/0、seven-day-facts 44/8、sleep-regularity 25/0、swim-partial 30/0、swim-vis 30/3、sync-readback 33/0、unified-hk 27/7、units 25/0、week-comparison 25/0、week-coverage 23/0、week-focus-feedback 195/1、week-load-coverage 19/2、week-review 93/10；steps-display 仍为 stepSummary 表达式缺失（改前同）；routine-archive / source / steps-contract / week-load / whoop-scores 五套仍以 Node.js 崩溃尾行结束、无计数摘要（改前同形态）。新增 validate-swim-stroke 52/0。结论：失败集零新增；validate-season-swim 计数未因新增函数变化（51/0 不变——其断言集不枚举泳姿函数，新增源码检查由 validate-swim-stroke 承担）。
 - 局限：所有者视角未验（构建/审计与本轮核查均为非所有者通道，泳姿区块的最终呈现以所有者本人打开季节专项 tab 确认为准）；泳姿为按本人数据定标的推断、非 Apple Health 原生标签，交叠带（39–44 秒）趟次存在不可消除的误判可能，页面口径句已如实标注；分类阈值为所有者本人数据的双峰谷值定标，数据分布漂移后需重新定标。
 - 回滚：git revert 本提交撤回回灌、验证脚本与登记；工件侧回退本次构建即恢复无泳姿呈现；无 server/schema/数据变更，回滚不丢数据。
+
+## 2026-10-24 15 时 PDT（协作状态登记：PM 侧暂停）
+
+- 所有者 2026-10-24 15:06 PT 在本 chat 指令：PM 那边先暂停，Life 这边继续开发、按 plans 继续。
+- 执行口径：实现方照常按 plans.md 队列与优先级推进（P0＞所有者直令＞存量队列＞证据尾巴），PM 评审缺席不构成阻塞、不得当作异常停摆；PM 恢复前，其评审记录与新需求单不再预期产生。所有者已拍板事项（设计稿裁定、F-ARCH 各分片、CWEB 待裁等）效力不变，待拍板项仍只挂起汇报、不自行推进。
