@@ -1957,6 +1957,124 @@ function seasonSwimDecay(segments: SeasonSwimSession["segments"]): SeasonSwimDec
   };
 }
 
+// H-SWIM-STROKE-001: per-lap stroke inference. Apple Health carries
+// NO native stroke label on any path available here (workout record,
+// per-lap segments, sample types — no swimmingStrokeStyle or
+// equivalent), so a lap's stroke can only be inferred. The owner
+// calibrated the two clusters against their own data on 2026-10-24:
+// the fast cluster is freestyle （自由泳）, the slow cluster is
+// breaststroke （蛙泳）. Every surface labels this 推测 (inferred),
+// never a recorded fact. Classification is duration-first,
+// strokes-second; the thresholds are integer modelling constants at
+// the valley between the two clusters of the owner's own laps:
+// - duration ≤ 38s → freestyle; ≥ 45s → breaststroke;
+// - the (38, 45)s overlap band falls back to strokes: ≤ 17 strokes
+//   freestyle, > 17 breaststroke; with no strokes in the band the
+//   split is 41.5s;
+// - duration missing → strokes only (≤ 17 freestyle, else
+//   breaststroke); both missing → null (unclassified).
+type SwimStrokeGroup = "freestyle" | "breaststroke";
+
+function classifySwimLap(durationSeconds: number | null, strokes: number | null): SwimStrokeGroup | null {
+  if (durationSeconds !== null) {
+    if (durationSeconds <= 38) return "freestyle";
+    if (durationSeconds >= 45) return "breaststroke";
+    if (strokes !== null) return strokes <= 17 ? "freestyle" : "breaststroke";
+    return durationSeconds <= 41.5 ? "freestyle" : "breaststroke";
+  }
+  if (strokes !== null) return strokes <= 17 ? "freestyle" : "breaststroke";
+  return null;
+}
+
+interface SeasonSwimStrokeGroupStats {
+  group: SwimStrokeGroup;
+  lapCount: number;
+  // lapCount × the session's lap length (25 m when the length is
+  // unknown — the stated pool caliber).
+  distanceMeters: number;
+  // Share of the CLASSIFIED distance only; null when nothing was
+  // classified.
+  distanceSharePercent: number | null;
+  // From the group's mean lap duration: mean seconds ÷ lap length
+  // × 100 ÷ 60. Null when no lap in the group carries a duration.
+  paceMinPer100m: number | null;
+  avgStrokesPerLap: number | null;
+  // Mean over laps that carry a heart rate only.
+  avgHr: number | null;
+}
+
+interface SeasonSwimStrokeBreakdown {
+  freestyle: SeasonSwimStrokeGroupStats;
+  breaststroke: SeasonSwimStrokeGroupStats;
+  unclassifiedCount: number;
+}
+
+function aggregateSwimStrokes(sessions: SeasonSwimSession[]): SeasonSwimStrokeBreakdown {
+  interface Acc {
+    lapCount: number;
+    distanceMeters: number;
+    durationSum: number;
+    durationCount: number;
+    strokesSum: number;
+    strokesCount: number;
+    hrSum: number;
+    hrCount: number;
+  }
+  const fresh = (): Acc => ({ lapCount: 0, distanceMeters: 0, durationSum: 0, durationCount: 0, strokesSum: 0, strokesCount: 0, hrSum: 0, hrCount: 0 });
+  const acc: Record<SwimStrokeGroup, Acc> = { freestyle: fresh(), breaststroke: fresh() };
+  let unclassifiedCount = 0;
+  for (const session of sessions) {
+    if (!session.segments) continue;
+    const lapLength = session.lapLengthMeters ?? 25;
+    for (const lap of session.segments) {
+      const group = classifySwimLap(lap.durationSeconds, lap.strokes);
+      if (group === null) { unclassifiedCount += 1; continue; }
+      const bucket = acc[group];
+      bucket.lapCount += 1;
+      bucket.distanceMeters += lapLength;
+      if (typeof lap.durationSeconds === "number") { bucket.durationSum += lap.durationSeconds; bucket.durationCount += 1; }
+      if (lap.strokes !== null) { bucket.strokesSum += lap.strokes; bucket.strokesCount += 1; }
+      if (lap.averageHr !== null) { bucket.hrSum += lap.averageHr; bucket.hrCount += 1; }
+    }
+  }
+  const classifiedDistance = acc.freestyle.distanceMeters + acc.breaststroke.distanceMeters;
+  const finish = (group: SwimStrokeGroup): SeasonSwimStrokeGroupStats => {
+    const bucket = acc[group];
+    const meanSeconds = bucket.durationCount ? bucket.durationSum / bucket.durationCount : null;
+    const effectiveLapLength = bucket.lapCount ? bucket.distanceMeters / bucket.lapCount : null;
+    return {
+      group,
+      lapCount: bucket.lapCount,
+      distanceMeters: bucket.distanceMeters,
+      distanceSharePercent: classifiedDistance > 0 ? bucket.distanceMeters / classifiedDistance * 100 : null,
+      paceMinPer100m: meanSeconds !== null && effectiveLapLength !== null && effectiveLapLength > 0
+        ? meanSeconds / effectiveLapLength * 100 / 60
+        : null,
+      avgStrokesPerLap: bucket.strokesCount ? bucket.strokesSum / bucket.strokesCount : null,
+      avgHr: bucket.hrCount ? bucket.hrSum / bucket.hrCount : null,
+    };
+  };
+  return { freestyle: finish("freestyle"), breaststroke: finish("breaststroke"), unclassifiedCount };
+}
+
+function swimStrokeBreakdown(session: SeasonSwimSession): SeasonSwimStrokeBreakdown {
+  return aggregateSwimStrokes([session]);
+}
+
+function swimStrokeTotals(sessions: SeasonSwimSession[]): SeasonSwimStrokeBreakdown {
+  return aggregateSwimStrokes(sessions);
+}
+
+const SWIM_STROKE_LABELS: Record<SwimStrokeGroup, string> = { freestyle: "自由泳", breaststroke: "蛙泳" };
+
+function swimStrokeGroupLine(stats: SeasonSwimStrokeGroupStats): string {
+  const share = stats.distanceSharePercent === null ? "—" : `${numberLabel(stats.distanceSharePercent, 1)}%`;
+  const pace = stats.paceMinPer100m === null ? "—" : `${numberLabel(stats.paceMinPer100m, 2)} 分/100米`;
+  const strokes = stats.avgStrokesPerLap === null ? "—" : `${numberLabel(stats.avgStrokesPerLap, 1)} 划/趟`;
+  const hr = stats.avgHr === null ? "—" : `${numberLabel(stats.avgHr)} bpm`;
+  return `${stats.lapCount} 趟 · ${numberLabel(stats.distanceMeters)} 米（占已分类距离 ${share}）· 配速 ${pace} · 单趟平均划数 ${strokes} · 心率均值 ${hr}`;
+}
+
 function seasonDeltaText(delta: number | null, kind: "pace" | "strokesPerLap" | "distance"): string {
   if (delta === null) return "— 数据不足，无法比较";
   const abs = Math.abs(delta);
@@ -4713,6 +4831,8 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
 function SeasonSwimView({ snapshot }: { snapshot: Snapshot }) {
   const summary = useMemo(() => seasonSwimSummary(snapshot.historyWorkouts), [snapshot.historyWorkouts]);
   const { sessions, comparison } = summary;
+  const strokeTotals = useMemo(() => swimStrokeTotals(sessions), [sessions]);
+  const hasStrokeData = sessions.some((session) => session.segments && session.segments.length);
   const chartRows = sessions.map((session) => ({
     label: dateLabel(session.date),
     pace: session.paceMinPer100m === null ? null : Math.round(session.paceMinPer100m * 100) / 100,
@@ -4732,7 +4852,7 @@ function SeasonSwimView({ snapshot }: { snapshot: Snapshot }) {
         <div className="history-intro">
           <p className="section-kicker">季节专项 · 当前：游泳</p>
           <h2 id="season-swim-title">游泳专项</h2>
-          <p className="season-caliber">数据来源：Apple Health 游泳 workout · 池长 25 米（每趟 25 米）· 配速 = 时长 ÷ 距离 × 100（分/100米）· 单趟平均划数 = 总划数 ÷ 趟数 · 逐趟用时只含游进时间，趟间靠墙休息不计入任何一趟。</p>
+          <p className="season-caliber">数据来源：Apple Health 游泳 workout · 池长 25 米（每趟 25 米）· 配速 = 时长 ÷ 距离 × 100（分/100米）· 单趟平均划数 = 总划数 ÷ 趟数 · 逐趟用时只含游进时间，趟间靠墙休息不计入任何一趟。泳姿为按本人数据定标的推测（用时为主、划数为辅）：游得快者判为自由泳、慢者判为蛙泳；Apple Health 无原生泳姿标签。</p>
         </div>
         {sessions.length ? (
           <>
@@ -4745,6 +4865,18 @@ function SeasonSwimView({ snapshot }: { snapshot: Snapshot }) {
                   <div><dt>单趟划数</dt><dd>{seasonDeltaText(comparison.strokesPerLapDelta, "strokesPerLap")}</dd></div>
                   <div><dt>距离</dt><dd>{seasonDeltaText(comparison.distanceDelta, "distance")}</dd></div>
                 </dl>
+              </div>
+            ) : null}
+            {hasStrokeData ? (
+              <div className="season-stroke" aria-label="泳姿构成（推测）">
+                <h3>泳姿构成（推测）</h3>
+                <p className="season-stroke-note">全部 {sessions.length} 次游泳合计；泳姿按本人数据定标推断，不是 Apple Health 的原生标签。</p>
+                <dl className="season-stroke-list">
+                  {[strokeTotals.freestyle, strokeTotals.breaststroke].map((stats) => (
+                    <div key={stats.group}><dt>{SWIM_STROKE_LABELS[stats.group]}</dt><dd>{swimStrokeGroupLine(stats)}</dd></div>
+                  ))}
+                </dl>
+                {strokeTotals.unclassifiedCount > 0 ? <p className="season-stroke-note">另有未分类 {strokeTotals.unclassifiedCount} 趟（用时与划数都缺失，无法推断）。</p> : null}
               </div>
             ) : null}
             <div className="chart-grid">
@@ -4762,6 +4894,8 @@ function SeasonSwimView({ snapshot }: { snapshot: Snapshot }) {
               {[...sessions].reverse().map((session) => {
                 const decay = seasonSwimDecay(session.segments);
                 const marks = bestLine(session);
+                const strokeBreakdown = swimStrokeBreakdown(session);
+                const strokeClassified = strokeBreakdown.freestyle.lapCount + strokeBreakdown.breaststroke.lapCount;
                 return (
                   <article className="season-card" key={session.id} aria-label={`${fullDateLabel(session.date)} 游泳记录`}>
                     <div className="season-card-head">
@@ -4779,16 +4913,29 @@ function SeasonSwimView({ snapshot }: { snapshot: Snapshot }) {
                       <div><dt>心率峰值</dt><dd>{session.maxHr === null ? "—" : `${numberLabel(session.maxHr)} bpm`}</dd></div>
                       <div><dt>热量</dt><dd>{session.energyKcal === null ? "—" : `${numberLabel(session.energyKcal)} kcal`}</dd></div>
                     </dl>
+                    {strokeClassified > 0 ? (
+                      <p className="season-card-stroke">
+                        自由泳 {strokeBreakdown.freestyle.lapCount} 趟 · 蛙泳 {strokeBreakdown.breaststroke.lapCount} 趟（泳姿为推测）
+                        {strokeBreakdown.freestyle.lapCount > 0 && strokeBreakdown.breaststroke.lapCount > 0 && strokeBreakdown.freestyle.paceMinPer100m !== null && strokeBreakdown.breaststroke.paceMinPer100m !== null
+                          ? ` · 自由泳配速 ${numberLabel(strokeBreakdown.freestyle.paceMinPer100m, 2)} 分/100米 · 蛙泳配速 ${numberLabel(strokeBreakdown.breaststroke.paceMinPer100m, 2)} 分/100米`
+                          : ""}
+                        {strokeBreakdown.unclassifiedCount > 0 ? ` · 未分类 ${strokeBreakdown.unclassifiedCount} 趟` : ""}
+                      </p>
+                    ) : null}
                     {session.segments && session.segments.length ? (
                       <details className="season-laps">
                         <summary aria-label={`展开 ${fullDateLabel(session.date)} 逐趟明细，共 ${session.segments.length} 趟`}>逐趟明细 · {session.segments.length} 趟</summary>
                         {decay ? <p className="season-decay">{decay.text}</p> : null}
+                        <p className="season-lap-note">「泳姿」列为推测：Apple Health 无原生泳姿标签，按本人数据定标推断（用时为主、划数为辅）。</p>
                         <table className="season-lap-table">
-                          <thead><tr><th scope="col">趟</th><th scope="col">用时（秒）</th><th scope="col">划数</th><th scope="col">心率均值</th></tr></thead>
+                          <thead><tr><th scope="col">趟</th><th scope="col">用时（秒）</th><th scope="col">划数</th><th scope="col">心率均值</th><th scope="col">泳姿</th></tr></thead>
                           <tbody>
-                            {session.segments.map((lap, index) => (
-                              <tr key={index}><th scope="row">{index + 1}</th><td>{numberLabel(lap.durationSeconds, 1)}</td><td>{lap.strokes === null ? "—" : lap.strokes}</td><td>{lap.averageHr === null ? "—" : numberLabel(lap.averageHr)}</td></tr>
-                            ))}
+                            {session.segments.map((lap, index) => {
+                              const stroke = classifySwimLap(lap.durationSeconds, lap.strokes);
+                              return (
+                                <tr key={index}><th scope="row">{index + 1}</th><td>{numberLabel(lap.durationSeconds, 1)}</td><td>{lap.strokes === null ? "—" : lap.strokes}</td><td>{lap.averageHr === null ? "—" : numberLabel(lap.averageHr)}</td><td>{stroke === null ? "—" : SWIM_STROKE_LABELS[stroke]}</td></tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       </details>

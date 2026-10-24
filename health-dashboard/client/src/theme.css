@@ -543,6 +543,15 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .season-lap-table th:first-child, .season-lap-table td:first-child { text-align: left; }
 .season-lap-table thead th { color: var(--dim); font-weight: 700; }
 .season-laps-missing { margin: 12px 0 0; border-top: 1px solid var(--border); padding-top: 10px; color: var(--dim); font-size: 12px; line-height: 1.6; }
+.season-stroke { margin-top: 16px; padding: 16px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.season-stroke h3 { margin: 0; font-size: 14px; }
+.season-stroke-note { margin: 8px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
+.season-stroke-list { display: grid; gap: 10px; margin: 12px 0 0; }
+.season-stroke-list > div { display: grid; grid-template-columns: 64px 1fr; gap: 4px 12px; align-items: baseline; }
+.season-stroke-list dt { font-size: 13px; font-weight: 750; }
+.season-stroke-list dd { margin: 0; font-size: 13px; line-height: 1.55; font-variant-numeric: tabular-nums; }
+.season-card-stroke { margin: 10px 0 0; font-size: 13px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.season-lap-note { margin: 8px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
 @media (max-width: 640px) {
   .season-compare-grid, .season-card-grid { grid-template-columns: repeat(2, 1fr); }
 }
