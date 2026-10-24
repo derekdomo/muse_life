@@ -267,8 +267,45 @@ const accountSchema = z.object({
   metadataConflict: z.boolean().default(false),
 });
 
+// F-ARCH-001: the stored new-architecture total-assets payload.
+// Written only by ingestArchNetWorth (server-recomputed, read-back
+// verified) and surfaced on the dashboard as an overlay read from
+// the arch_net_worth table — the legacy finance payload itself
+// never carries it, so buildDashboard always emits null and the
+// .default(null) keeps pre-existing stored payloads readable.
+const archNetWorthRangeSchema = z.object({
+  oldest: z.string(),
+  newest: z.string(),
+});
+
+const archNetWorthRowSchema = z.object({
+  id: z.string(),
+  included: z.boolean(),
+  signed: z.number().nullable(),
+  asOf: z.string().nullable(),
+  coverage: z.enum(["plaid", "snapshot", "missing"]),
+});
+
+const archNetWorthSchema = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  pulledAt: z.string(),
+  storedAt: z.string(),
+  total: z.number(),
+  partial: z.boolean(),
+  missing: z.array(z.string()),
+  plaidRange: archNetWorthRangeSchema.nullable(),
+  snapshotRange: archNetWorthRangeSchema.nullable(),
+  rows: z.array(archNetWorthRowSchema),
+});
+
+type ArchNetWorth = z.infer<typeof archNetWorthSchema>;
+
 const dashboardSchema = z.object({
   asOf: z.string(),
+  // F-ARCH-001 overlay: null unless getDashboard finds a stored
+  // new-architecture figure to overlay (see archNetWorthSchema).
+  archNetWorth: archNetWorthSchema.nullable().default(null),
   sourceMonth: z.string(),
   months: z.array(monthSchema),
   live: z.object({
@@ -385,6 +422,50 @@ const ingestResponse = z.object({
   savedMonths: z.number(),
   issue: z.string().nullable().default(null),
 });
+
+// F-ARCH-001 controlled write channel. The request carries raw
+// per-account balances; the server independently recomputes the
+// total under the same rules as finance-arch summarizeNetWorth
+// and only stores when the recomputation matches. Neither the
+// issue codes nor the response ever carry an amount or an
+// account value — counts and booleans only.
+const ingestArchNetWorthRequest = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  pulledAt: z.string().min(1).max(64),
+  accounts: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(200),
+        balance: z.number().nullable(),
+        kind: z.enum(["asset", "liability"]),
+        coverage: z.enum(["plaid", "snapshot", "missing"]),
+        asOf: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .nullable(),
+      }),
+    )
+    .min(1)
+    .max(120),
+  total: z.number(),
+});
+
+const ingestArchNetWorthResponse = z.object({
+  ok: z.boolean(),
+  issue: z.string().nullable(),
+  rows: z.number().int().nonnegative(),
+  included: z.number().int().nonnegative(),
+  missing: z.number().int().nonnegative(),
+  totalMatches: z.boolean(),
+  readBackVerified: z.boolean(),
+});
+
+type IngestArchNetWorthResult = z.infer<typeof ingestArchNetWorthResponse>;
+
+function archIngestFailure(issue: string): IngestArchNetWorthResult {
+  return { ok: false, issue, rows: 0, included: 0, missing: 0, totalMatches: false, readBackVerified: false };
+}
 
 // F0.7 read-only refresh observability. The diagnosis is a PURE
 // function of the current refresh state summary plus the recorded
@@ -663,6 +744,16 @@ const excludedLiveSources = new Set([
 
 function isOwner(ctx: Ctx): boolean {
   return ctx.viewer?.isOwner === true;
+}
+
+// F-ARCH-001 write gate (same semantics as the health dashboard's
+// sync channel): a call with NO viewer is an internal sync-channel
+// call and passes; a call carrying a viewer passes only when that
+// viewer is the owner. Any identified non-owner is rejected. This
+// gate serves ONLY the ingestArchNetWorth write path — every
+// human-facing read stays strictly owner-only via isOwner.
+function isOwnerOrSyncChannel(ctx: Ctx): boolean {
+  return ctx.viewer == null || ctx.viewer.isOwner === true;
 }
 
 function displayLabel(source: string): string {
@@ -2282,6 +2373,7 @@ function buildDashboard(
 
   return {
     asOf,
+    archNetWorth: null,
     sourceMonth: latestRaw.key,
     months,
     live: {
@@ -2654,6 +2746,27 @@ export const Actions = {
           data = ensureAvailableCash(normalizeFireMetrics(ensureSplitBalances(ensureHoldingsConsistency(parsed.data))));
         } else {
           payloadCorrupted = true;
+        }
+      }
+      // F-ARCH-001 overlay: when a new-architecture figure has
+      // been stored, surface it alongside (never inside) the
+      // legacy payload. An empty table or an unparsable stored
+      // row keeps archNetWorth null — the legacy view is
+      // completely unchanged.
+      if (data) {
+        const archRows = await ctx.db<typeof schema>()
+          .select()
+          .from(schema.archNetWorth)
+          .orderBy(desc(schema.archNetWorth.id))
+          .limit(1);
+        const archPayload = archRows[0]?.payload;
+        if (archPayload) {
+          try {
+            const parsedArch = archNetWorthSchema.safeParse(JSON.parse(archPayload));
+            if (parsedArch.success) data = { ...data, archNetWorth: parsedArch.data };
+          } catch {
+            // A corrupt overlay row never breaks the dashboard.
+          }
         }
       }
       const staleRunning = isStaleRunningState(state?.status, state?.updatedAt, new Date());
@@ -3276,6 +3389,119 @@ export const Actions = {
         currentAttempt,
         observations,
         diagnosis,
+      };
+    },
+  }),
+
+  // F-ARCH-001: the ONE controlled write entry for the new
+  // architecture's total-assets figure, approved by the owner as
+  // a scoped exception for this architecture only. The server
+  // recomputes the total from the submitted rows under the same
+  // rules as finance-arch summarizeNetWorth, rejects any mismatch
+  // or malformed row set without writing, appends the verified
+  // figure to arch_net_worth, and confirms it by reading the row
+  // back. The response carries counts and booleans only — never
+  // an amount.
+  ingestArchNetWorth: defineAction({
+    request: ingestArchNetWorthRequest,
+    response: ingestArchNetWorthResponse,
+    async handler(ctx, args): Promise<IngestArchNetWorthResult> {
+      if (!isOwnerOrSyncChannel(ctx)) return archIngestFailure("forbidden");
+      const pulledAtMs = Date.parse(args.pulledAt);
+      if (!Number.isFinite(pulledAtMs) || !/(?:Z|[+-]\d{2}:?\d{2})\s*$/i.test(args.pulledAt)) {
+        return archIngestFailure("invalid_pulled_at");
+      }
+      const seenIds = new Set<string>();
+      for (const account of args.accounts) {
+        if (seenIds.has(account.id)) return archIngestFailure("duplicate_id");
+        seenIds.add(account.id);
+        if (account.coverage === "missing") {
+          if (account.balance !== null) return archIngestFailure("unexpected_balance");
+        } else {
+          if (account.balance === null) return archIngestFailure("missing_balance");
+          if (account.asOf === null) return archIngestFailure("missing_as_of");
+        }
+      }
+      const rows: ArchNetWorth["rows"] = [];
+      const missing: string[] = [];
+      let total = 0;
+      for (const account of args.accounts) {
+        const balance = account.balance;
+        const included = account.coverage !== "missing" && balance !== null;
+        let signed: number | null = null;
+        if (included && balance !== null) {
+          signed = account.kind === "liability" ? -Math.abs(balance) : balance;
+          total += signed;
+        } else {
+          missing.push(account.id);
+        }
+        rows.push({ id: account.id, included, signed, asOf: account.asOf, coverage: account.coverage });
+      }
+      if (Math.abs(total - args.total) > 0.01) {
+        return {
+          ok: false,
+          issue: "total_mismatch",
+          rows: rows.length,
+          included: rows.length - missing.length,
+          missing: missing.length,
+          totalMatches: false,
+          readBackVerified: false,
+        };
+      }
+      const rangeFor = (coverage: "plaid" | "snapshot"): ArchNetWorth["plaidRange"] => {
+        const dates = rows.flatMap((row) =>
+          row.included && row.coverage === coverage && row.asOf !== null ? [row.asOf] : [],
+        );
+        if (dates.length === 0) return null;
+        return {
+          oldest: dates.reduce((a, b) => (a < b ? a : b)),
+          newest: dates.reduce((a, b) => (a > b ? a : b)),
+        };
+      };
+      const payload: ArchNetWorth = {
+        arch: "F-ARCH-001",
+        version: 1,
+        pulledAt: args.pulledAt,
+        storedAt: new Date().toISOString(),
+        total,
+        partial: missing.length > 0,
+        missing,
+        plaidRange: rangeFor("plaid"),
+        snapshotRange: rangeFor("snapshot"),
+        rows,
+      };
+      const db = ctx.db<typeof schema>();
+      await db.insert(schema.archNetWorth).values({
+        payload: JSON.stringify(payload),
+        pulledAt: new Date(pulledAtMs),
+      });
+      let readBackVerified = false;
+      const backRows = await db
+        .select()
+        .from(schema.archNetWorth)
+        .orderBy(desc(schema.archNetWorth.id))
+        .limit(1);
+      const backPayload = backRows[0]?.payload;
+      if (backPayload) {
+        try {
+          const parsed = archNetWorthSchema.safeParse(JSON.parse(backPayload));
+          readBackVerified =
+            parsed.success &&
+            parsed.data.pulledAt === payload.pulledAt &&
+            parsed.data.rows.length === payload.rows.length &&
+            parsed.data.total === payload.total;
+        } catch {
+          readBackVerified = false;
+        }
+      }
+      return {
+        ok: readBackVerified,
+        issue: readBackVerified ? null : "read_back_mismatch",
+        rows: rows.length,
+        included: rows.length - missing.length,
+        missing: missing.length,
+        totalMatches: true,
+        readBackVerified,
       };
     },
   }),

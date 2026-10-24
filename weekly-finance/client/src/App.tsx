@@ -1410,6 +1410,68 @@ function HoldingsSection({ data }: { data: Dashboard }) {
   );
 }
 
+type ArchNetWorthData = NonNullable<Dashboard["archNetWorth"]>;
+
+// Same display rule as the server's displayLabel: underscores
+// become spaces and each word is capitalized.
+function archDisplayLabel(id: string): string {
+  return id.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+// F-ARCH-001: the new-architecture total-assets figure, rendered
+// only when a stored figure exists (data.archNetWorth non-null).
+// Freshness is stated per layer in text + symbol, never by color
+// alone; every snapshot-layer row carries its own balance date.
+function ArchNetWorthCard({ arch }: { arch: ArchNetWorthData }) {
+  const pulled = new Date(arch.pulledAt);
+  const pulledText = Number.isNaN(pulled.getTime())
+    ? arch.pulledAt
+    : `${dateLabel.format(pulled)} ${pulled.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
+  return (
+    <section className="fact-card" aria-label="总资产 · 新架构（F-ARCH-001）">
+      <p className="eyebrow">总资产 · 新架构（F-ARCH-001）</p>
+      <div className="fact-card__value">
+        <strong>{currency.format(arch.total)}</strong>
+      </div>
+      {arch.partial ? (
+        <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见下。</p>
+      ) : null}
+      <p className="fact-card__note">Plaid 层拉取于 {pulledText}</p>
+      <p className="fact-card__note">
+        ● Plaid 同步层：
+        {arch.plaidRange
+          ? `余额日期 ${arch.plaidRange.oldest} 至 ${arch.plaidRange.newest}`
+          : "本层无账户"}
+      </p>
+      <p className="fact-card__note">
+        ● 快照层（Firance 月度快照沿用）：
+        {arch.snapshotRange
+          ? `余额日期 ${arch.snapshotRange.oldest} 至 ${arch.snapshotRange.newest}，逐户日期见明细`
+          : "本层无账户"}
+      </p>
+      <details className="fact-card__details">
+        <summary>账户明细（{arch.rows.length} 个账户）</summary>
+        <div className="arch-rows">
+          {arch.rows.map((row) => (
+            <div className="arch-row" key={row.id}>
+              <span className="arch-row__name">{archDisplayLabel(row.id)}</span>
+              <span className="arch-row__tag">
+                {row.coverage === "plaid"
+                  ? `Plaid 同步${row.asOf ? ` · ${row.asOf}` : ""}`
+                  : row.coverage === "snapshot"
+                    ? `快照 · ${row.asOf ?? "日期未提供"}`
+                    : "缺失未计入"}
+              </span>
+              <b>{row.included && row.signed != null ? signedCurrency(row.signed) : "—"}</b>
+            </div>
+          ))}
+        </div>
+      </details>
+      <p className="fact-card__source">旧月度快照仍保留在下方作对账存档。</p>
+    </section>
+  );
+}
+
 function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
   const [range, setRange] = useState<Range>("12m");
   // F1.1: the owner's available-cash trial selection. Page-local
@@ -1495,6 +1557,8 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
           <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`}</small>
         </div>
       </section>
+
+      {data.archNetWorth ? <ArchNetWorthCard arch={data.archNetWorth} /> : null}
 
       <section className="metric-grid" aria-label="本月关键指标">
         <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />

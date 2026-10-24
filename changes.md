@@ -1427,3 +1427,14 @@
 
 - 按所有者 2026-10-24 批准，对本仓 Git 历史做字符串级脱敏改写：早期 `plans.md` / `changes.md` 中的真实财务对账金额与收入来源组合已替换为「[已脱敏]」。旧提交哈希自此作废，后续 plans 同步以当前 `main` 为基线。
 - 改写未改变改写时 HEAD 的 `plans.md` / `changes.md` 内容（文件哈希改写前后一致），未改动源码逻辑、文件结构与业务数据。本条不含任何真实金额或来源组合。
+
+## 2026-10-24 09 时 PDT（F-ARCH-001 写回首片：新架构总资产首次写入生产，口径切换日期 2026-10-24）
+
+- 队列来源：所有者 2026-10-24 批准写回 space-3 入口例外（仅限本架构受控写入、不得扩到其他用途），本 chat 直接派 builder 执行写回首片，同步轮次未重复接单。
+- 改了什么：weekly-finance 服务端 schema.ts 新增 archNetWorth 表定义＋迁移 drizzle/0005_arch_net_worth.sql（纯加法）；actions.ts 新增 archNetWorthSchema、isOwnerOrSyncChannel 门禁（与健康看板 L0.1 同语义：无 viewer 的内部通道或所有者通过、带非所有者 viewer 拒绝）、ingestArchNetWorth（服务端同口径重算＋分类校验＋只追加写入＋立即读回核对，响应只回计数/布尔/类别化 issue、不含金额）、dashboardSchema 加 archNetWorth 字段、buildDashboard 置 null、getDashboard 所有者读取时附最新 arch 快照；客户端 App.tsx 在 hero 后新增 ArchNetWorthCard（archNetWorth 非空才渲染）＋theme.css 最小样式。ingestFinanceData 等既有 action、口径与公式未动；旧 payload 与月度快照未删未覆盖。源码已回灌本仓，与线上工件树逐文件一致（actions.ts/schema.ts/App.tsx/theme.css/journal/0005 六件）。
+- 计算与对账（A 类）：本运行在 Muse runtime 经 Plaid 连接器直拉 accounts（5 机构、23 账户，ok=true），账户全集取 mini 本地 Firance 最新文件 2026-10-01 的余额条目 23 条（account/investment 两类）；匹配沿用既有 findPlaidAccount/sourceCanUseLive 口径：Plaid 层 12 条（asOf=2026-10-24 拉取日）、快照层 11 条（asOf 2026-09-30 共 7 条、2026-10-04 共 4 条，逐条保留各自日期）；1 条 live-eligible 条目本轮 Plaid 无同 mask 账户、按既有回退沿用快照值并归快照层；Plaid 侧另有 11 个账户不在 Firance 账户全集内，按既有口径不纳入（与现行看板行为一致，不双计不新增）。净值口径 = 投资 + 存款 − 贷款（即全部带符号余额之和，负债按 -|余额|）。finance-arch.mjs summarizeNetWorth 与独立逐项求和双路结果一致——总额 = 分项之和在本运行内验毕；服务端 ingest 时以同规则再次重算比对（容差 0.01）通过。拉取时间戳 2026-10-24T08:38:37-07:00 已随 payload 写入。
+- 写入结果：ingestArchNetWorth 返回 ok=true、rows=23、included=23、missing=0、totalMatches=true、readBackVerified=true（服务端写入后读回最新行，核对 pulledAt/行数/总额一致）。**口径切换日期 = 2026-10-24**（新架构总资产首次成功写入生产之日）。真实金额只进入 space-3 自有库 arch_net_worth 表；本条、plans 登记与回条均无真实数值，未提交 app.db/.env/任何真实数据（计算中间文件仅存运行环境 /tmp）。
+- 验证证据：artifact 构建审计 pass、ingestarchnetworth 已上线且 schema 与登记契约一致（arch/version 常量、accounts 上限 120、响应无金额字段）；仓库实跑 validate-finance-arch 122/122、validate-color-vision 16/16；工件树同源代码实跑 validate-payload 50/50、validate-facts-card 147/147、validate-available-cash 101/101、validate-cashflow 90/90、validate-holdings 66/66、validate-investment-performance 106/106、validate-monthly-facts 73/73、validate-check-progress 68/68，零回归（仓库副本缺 typescript 依赖未能直跑后八套，故以同源工件树计数，finance-arch 与 color-vision 为仓库实跑）。
+- 呈现：总资产区 hero 后新增「总资产 · 新架构（F-ARCH-001）」卡——新架构总额、Plaid 层拉取时间、两层日期范围分行（文字＋●符号，不只靠颜色）、快照层逐行标注各自 asOf 日期、缺失分列（本轮 missing=0、partial=false），底部注记旧月度快照保留作对账存档；archNetWorth 为空时整卡不渲染、旧界面不变。
+- 局限：所有者视角页面渲染未验（审计/调用通道非所有者视角，最终以所有者打开确认为准）；快照层数值按 Firance 最新文件原文沿用，其中数条带所有者本人 TODO 批注（目标日期 9/30），未替所有者核实或改值；Plaid 余额为准实时（银行最近上报值），页面已标拉取时间、不称银行实时；本片仅总资产段——花销段写回与呈现、异常阈值定案、F0.6/F1.6 卡片迁移、按日自动拉取的调度，均为后续分片，F-ARCH-001 整条保持未勾选；F0.7 仍按丙(ii) 只读观察，未触发任何刷新。
+- 回滚：git revert 本提交撤回代码与登记；生产侧 arch_net_worth 为只追加表，停写即冻结在末次写入，页面读不到 arch 行时自动回旧呈现；删除已写 arch 行属数据删除，需所有者另行决定，本轮未删任何数据。

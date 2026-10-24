@@ -1,0 +1,6 @@
+CREATE TABLE arch_net_worth (
+  id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+  payload TEXT NOT NULL,
+  pulled_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);

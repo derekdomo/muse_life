@@ -37,6 +37,20 @@ export const financeState = sqliteTable("finance_state", {
 // an applied success); no financial values, payload fragments,
 // account data or raw error text ever land in this table. Rows are
 // diagnostics only: nothing in the refresh chain reads them back.
+// F-ARCH-001 (0005): append-only store for the new-architecture
+// total-assets figure, written solely through the controlled
+// ingestArchNetWorth action. Each row carries the full stored
+// payload (JSON) plus the Plaid-layer pull instant; rows are never
+// updated or deleted — the latest row by id is the current figure.
+export const archNetWorth = sqliteTable("arch_net_worth", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  payload: text("payload").notNull(),
+  pulledAt: integer("pulled_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const refreshObservations = sqliteTable("refresh_observations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   generation: text("generation"),
