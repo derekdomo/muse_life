@@ -21,13 +21,17 @@ const COV = (m) => ({ coverageByMonth: { [m]: true } });
 // of a constant, or zeros with spend placed on specific days.
 const constDaily = (month, perDay) => {
   const [y, m] = month.split("-").map(Number);
-  return { month, daily: Array(daysInMonth(y, m)).fill(perDay) };
+  return { month, daily: Array(daysInMonth(y, m)).fill(perDay), coverageStatus: "complete" };
 };
 const daysDaily = (month, byDay) => {
   const [y, m] = month.split("-").map(Number);
   const daily = Array(daysInMonth(y, m)).fill(0);
   for (const [d, amt] of Object.entries(byDay)) daily[Number(d) - 1] = amt;
-  return { month, daily };
+  return { month, daily, coverageStatus: "complete" };
+};
+const noSigDaily = (month, perDay) => {
+  const [y, m] = month.split("-").map(Number);
+  return { month, daily: Array(daysInMonth(y, m)).fill(perDay) };
 };
 const dailyRange = (total, days) => { const a = Array(days).fill(0); a[0] = total; return a; };
 
@@ -483,7 +487,7 @@ check("ANOM2 current and future months never serve as baseline", (() => {
 })());
 check("ANOM2 per-month coverageByMonth false for history -> insufficient despite current true", (() => {
   const r = anomalyV0({
-    baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15),
+    baselineDaily: [noSigDaily("2026-07", 100), noSigDaily("2026-08", 100), noSigDaily("2026-09", 100)], currentDaily: dailyRange(1500, 15),
     month: "2026-10", asOfDate: "2026-10-15",
     coverageByMonth: { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": false },
   });
@@ -491,7 +495,7 @@ check("ANOM2 per-month coverageByMonth false for history -> insufficient despite
 })());
 check("ANOM2 per-month coverageByMonth all history true -> verdict stands", (() => {
   const r = anomalyV0({
-    baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15),
+    baselineDaily: [noSigDaily("2026-07", 100), noSigDaily("2026-08", 100), noSigDaily("2026-09", 100)], currentDaily: dailyRange(1500, 15),
     month: "2026-10", asOfDate: "2026-10-15",
     coverageByMonth: { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": true },
   });
@@ -500,7 +504,7 @@ check("ANOM2 per-month coverageByMonth all history true -> verdict stands", (() 
 })());
 check("ANOM2 history month missing from coverageByMonth -> unknown, insufficient", (() => {
   const r = anomalyV0({
-    baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15),
+    baselineDaily: [noSigDaily("2026-07", 100), noSigDaily("2026-08", 100), noSigDaily("2026-09", 100)], currentDaily: dailyRange(1500, 15),
     month: "2026-10", asOfDate: "2026-10-15",
     coverageByMonth: { "2026-10": true, "2026-07": true, "2026-08": true },
   });
@@ -517,7 +521,7 @@ check("ANOM2 conflicting explicit coverage signals disqualify the month", (() =>
   return r.verdict === "insufficient" && r.rejectedMonths.some((x) => x.month === "2026-09");
 })());
 check("ANOM2 entry complete=false disqualifies its month", (() => {
-  const sepBad = { ...constDaily("2026-09", 100), complete: false };
+  const sepBad = { ...noSigDaily("2026-09", 100), complete: false };
   const r = anom2({ baselineDaily: [constDaily("2026-07", 100), constDaily("2026-08", 100), sepBad] });
   return r.verdict === "insufficient";
 })());
@@ -572,6 +576,111 @@ check("REPLAY anomaly insufficient shows adopted months, no verdict overclaim", 
   const p = buildArchPreview(replayInput("2026-10-15", { baselineDaily: baseDaily.slice(0, 2) }));
   return p.anomalyCard.verdict === "insufficient"
     && (p.anomalyCard.baselineMonths || []).length === 2;
+})());
+
+// =====================================================================
+// TXN-3 matrix (PM 2026-10-24 04:01): a future row's month in the
+// full-set index must not attribute an unrelated past conflict to
+// the cutoff month. Conflict scope = candidate months + in-cutoff
+// refund dependencies only.
+// =====================================================================
+check("TXN3 PM repro: future same-ID row does not pollute cutoff month, both orders", (() => {
+  const septConflict = [
+    { id: "SYN-b", date: "2026-09-01", amount: -10, status: "posted", kind: "spend" },
+    { id: "SYN-b", date: "2026-09-02", amount: -20, status: "posted", kind: "spend" },
+  ];
+  const before = summarizeSpendMonth(septConflict, "2026-10", { asOf: "2026-10-15", ...COV("2026-10") });
+  const withFuture = [...septConflict, { id: "SYN-b", date: "2026-10-28", amount: -30, status: "posted", kind: "spend" }];
+  const a = summarizeSpendMonth(withFuture, "2026-10", { asOf: "2026-10-15", ...COV("2026-10") });
+  const b = summarizeSpendMonth([...withFuture].reverse(), "2026-10", { asOf: "2026-10-15", ...COV("2026-10") });
+  return before.complete && before.conflicts.length === 0
+    && a.complete && a.conflicts.length === 0 && b.complete && b.conflicts.length === 0;
+})());
+check("TXN3 conflict still reported in its own month after future row added", (() => {
+  const rows = [
+    { id: "SYN-b", date: "2026-09-01", amount: -10, status: "posted", kind: "spend" },
+    { id: "SYN-b", date: "2026-09-02", amount: -20, status: "posted", kind: "spend" },
+    { id: "SYN-b", date: "2026-10-28", amount: -30, status: "posted", kind: "spend" },
+  ];
+  const sepS = summarizeSpendMonth(rows, "2026-09", { asOf: "2026-10-15", ...COV("2026-09") });
+  return sepS.conflicts.length === 1 && !sepS.complete;
+})());
+check("TXN3 genuine in-month conflict still reported at the cutoff", (() => {
+  const rows = [
+    { id: "g1", date: "2026-10-05", amount: -10, status: "posted", kind: "spend" },
+    { id: "g1", date: "2026-10-06", amount: -20, status: "posted", kind: "spend" },
+  ];
+  const s = S(rows, { asOf: "2026-10-15" });
+  return s.conflicts.length === 1 && !s.complete;
+})());
+
+// =====================================================================
+// ANOM-3 matrix (PM 2026-10-24 04:01): coverage end-to-end — the
+// normalization keeps `coverage`, the preview forwards the per-month
+// map, and no-signal history is unknown (never inherits the current
+// month). Direct function and buildArchPreview must agree.
+// =====================================================================
+const noSigBase = [noSigDaily("2026-07", 100), noSigDaily("2026-08", 100), noSigDaily("2026-09", 100)];
+check("ANOM3 no map + no entry signal -> insufficient, no fabricated complete", (() => {
+  const r = anomalyV0({
+    baselineDaily: noSigBase, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15", coverageStatus: "complete",
+  });
+  return r.verdict === "insufficient" && (r.baselineMonths || []).length === 0
+    && r.rejectedMonths.some((x) => x.month === "2026-09");
+})());
+check("ANOM3 entry coverage:false preserved by normalization -> insufficient", (() => {
+  const rows = noSigBase.map((e) => ({ ...e, coverage: false }));
+  const r = anomalyV0({
+    baselineDaily: rows, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15", coverageStatus: "complete",
+  });
+  return r.verdict === "insufficient";
+})());
+check("ANOM3 entry coverage:true alone is explicit evidence -> normal", (() => {
+  const rows = noSigBase.map((e) => ({ ...e, coverage: true }));
+  const r = anomalyV0({
+    baselineDaily: rows, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15", coverageStatus: "complete",
+  });
+  return r.verdict === "normal" && r.baselineMonths.every((b) => b.coverageStatus === "complete");
+})());
+const previewAnom = (over) => buildArchPreview({
+  accounts: [], txns: [], currentMonth: "2026-10", asOfDate: "2026-10-15",
+  monthSummaries: [], currentDaily: dailyRange(1500, 15), ...over,
+}).anomalyCard;
+check("ANOM3 preview with only current-month map agrees with direct (insufficient)", (() => {
+  const direct = anomalyV0({
+    baselineDaily: noSigBase, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15", coverageByMonth: { "2026-10": true },
+  });
+  const prev = previewAnom({ baselineDaily: noSigBase, coverageByMonth: { "2026-10": true } });
+  return direct.verdict === "insufficient" && prev.verdict === "insufficient";
+})());
+check("ANOM3 preview with Sept map false agrees with direct (insufficient)", (() => {
+  const map = { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": false };
+  const direct = anomalyV0({
+    baselineDaily: noSigBase, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15", coverageByMonth: map,
+  });
+  const prev = previewAnom({ baselineDaily: noSigBase, coverageByMonth: map });
+  return direct.verdict === "insufficient" && prev.verdict === "insufficient";
+})());
+check("ANOM3 preview catches entry complete:true vs map false conflict", (() => {
+  const rows = noSigBase.map((e) => ({ ...e, complete: true }));
+  const map = { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": false };
+  const prev = previewAnom({ baselineDaily: rows, coverageByMonth: map });
+  return prev.verdict === "insufficient" && prev.rejectedMonths.some((x) => x.month === "2026-09");
+})());
+check("ANOM3 preview full-history explicit true positive agrees with direct (normal)", (() => {
+  const map = { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": true };
+  const direct = anomalyV0({
+    baselineDaily: noSigBase, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15", coverageByMonth: map,
+  });
+  const prev = previewAnom({ baselineDaily: noSigBase, coverageByMonth: map });
+  return direct.verdict === "normal" && prev.verdict === "normal"
+    && prev.baselineMonths.map((b) => b.month).join() === direct.baselineMonths.map((b) => b.month).join();
 })());
 
 console.log(`validate-finance-arch: ${passed}/${passed + failed} passed`);
