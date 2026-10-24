@@ -3,7 +3,7 @@
 // refund offset, duplicate IDs, transfer/principal exclusions, mixed
 // loan payment unclassified, pending split, unknown account not zero,
 // two-layer freshness ranges, anomaly v0 fire/no-fire boundaries).
-import { summarizeNetWorth, summarizeSpendMonth, fireEligibleMonths, anomalyV0 } from "./finance-arch.mjs";
+import { summarizeNetWorth, summarizeSpendMonth, fireEligibleMonths, anomalyV0, buildArchPreview } from "./finance-arch.mjs";
 
 let passed = 0, failed = 0;
 const check = (name, cond) => { if (cond) { passed++; } else { failed++; console.log("FAIL:", name); } };
@@ -77,6 +77,34 @@ const noCov = anomalyV0({ baselineMonths: base, currentToDate: 9000, currentElap
 check("missing coverage -> insufficient", noCov.verdict === "insufficient");
 const calm = anomalyV0({ baselineMonths: base, currentToDate: 1580, currentElapsedDays: 15, coverageOk: true });
 check("in-band month -> normal", calm.verdict === "normal");
+
+// --- Anomaly comparison kind: mid-month progress vs month-end total
+check("mid-month comparison kind", fire1.comparisonKind === "mid-month-progress");
+const monthEnd = anomalyV0({ baselineMonths: base, currentToDate: 3100, currentElapsedDays: 30, coverageOk: true });
+check("month-end comparison kind", monthEnd.comparisonKind === "month-end" && monthEnd.verdict === "normal");
+check("insufficient keeps comparison kind", few.comparisonKind === "mid-month-progress");
+
+// --- Preview: the first-slice card model over one synthetic fixture
+const preview = buildArchPreview({
+  accounts: [
+    { id: "plaid_checking", balance: 10000, kind: "asset", coverage: "plaid", asOf: "2026-10-23", readAt: "2026-10-23T15:00:00Z" },
+    { id: "snap_broker", balance: 50000, kind: "asset", coverage: "snapshot", asOf: "2026-09-30", readAt: null },
+    { id: "snap_unknown", balance: null, kind: "asset", coverage: "missing", asOf: null, readAt: null },
+  ],
+  txns,
+  currentMonth: "2026-10",
+  asOfDate: "2026-10-23",
+  monthSummaries: months,
+  coverageByMonth: { "2026-06": true, "2026-07": true, "2026-08": true, "2026-09": true, "2026-10": true },
+  baselineMonths: base,
+  currentElapsedDays: 23,
+});
+check("preview net worth card keeps layers + missing", eq(preview.netWorthCard.total, 60000) && preview.netWorthCard.partial && preview.netWorthCard.snapshotRange.newest === "2026-09-30");
+check("preview spend card title carries as-of date", preview.spendCard.title.includes("2026-10-23"));
+check("preview spend three lines posted/pending/gap", preview.spendCard.lines.map((l) => l.key).join() === "posted,pending,gap" && eq(preview.spendCard.lines[0].amount, 155) && eq(preview.spendCard.lines[1].amount, 45.5) && preview.spendCard.lines[2].complete === true);
+check("preview has no fixed/flexible line", !JSON.stringify(preview.spendCard).includes("fixed") && !JSON.stringify(preview.spendCard).includes("flexible"));
+check("preview fire card lists missing month, no backfill", preview.fireCard.complete12 === false && preview.fireCard.missingMonths.join() === "2026-08");
+check("preview anomaly is mid-month progress", preview.anomalyCard.comparisonKind === "mid-month-progress");
 
 console.log(`validate-finance-arch: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

@@ -106,11 +106,16 @@ export function fireEligibleMonths(monthSummaries, coverageByMonth, throughMonth
 // deviation > 30% AND absolute deviation > medianDaily*7. Fewer than 3
 // comparable months, zero baseline, or missing coverage -> no verdict.
 export function anomalyV0({ baselineMonths, currentToDate, currentElapsedDays, coverageOk }) {
-  if (!coverageOk) return { verdict: "insufficient", reason: "coverage 缺失" };
-  if (!Array.isArray(baselineMonths) || baselineMonths.length < 3) return { verdict: "insufficient", reason: "可比完整月少于 3 个" };
+  // Mid-month progress and month-end totals are different comparisons
+  // and are never conflated: elapsedDays >= 30 is a month-end total,
+  // anything shorter is a progress reading against the same elapsed
+  // window of the baseline months.
+  const comparisonKind = currentElapsedDays >= 30 ? "month-end" : "mid-month-progress";
+  if (!coverageOk) return { verdict: "insufficient", reason: "coverage 缺失", comparisonKind };
+  if (!Array.isArray(baselineMonths) || baselineMonths.length < 3) return { verdict: "insufficient", reason: "可比完整月少于 3 个", comparisonKind };
   const sorted = [...baselineMonths].map((m) => m.spend).sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
-  if (median === 0) return { verdict: "insufficient", reason: "基准为 0" };
+  if (median === 0) return { verdict: "insufficient", reason: "基准为 0", comparisonKind };
   const dailyMedian = median / 30;
   // Same-elapsed-days baseline slice: scale each baseline month to the
   // elapsed window proportionally (synthetic simplification, stated).
@@ -120,10 +125,61 @@ export function anomalyV0({ baselineMonths, currentToDate, currentElapsedDays, c
   const fires = relDev > 0.30 && absDev > dailyMedian * 7;
   return {
     verdict: fires ? "anomaly" : "normal",
+    comparisonKind,
     median,
     baselineWindow,
     absDev,
     relDev,
     thresholds: { rel: 0.30, absFloor: dailyMedian * 7 },
+  };
+}
+
+// ---------- Synthetic preview: the first-slice card model ----------
+// Composes the three contracts above into exactly the card model the
+// 2026-10-25 calculation/presentation slice will render, over purely
+// synthetic input. This is a preview contract, not production data:
+// no account is read and nothing is written anywhere.
+// input: { accounts, txns, currentMonth, asOfDate, monthSummaries,
+//   coverageByMonth, baselineMonths, currentElapsedDays }
+export function buildArchPreview(input) {
+  const netWorth = summarizeNetWorth(input.accounts);
+  const spend = summarizeSpendMonth(input.txns, input.currentMonth);
+  const fire = fireEligibleMonths(input.monthSummaries, input.coverageByMonth, input.currentMonth);
+  const anomaly = anomalyV0({
+    baselineMonths: input.baselineMonths,
+    currentToDate: spend.postedSpend,
+    currentElapsedDays: input.currentElapsedDays,
+    coverageOk: spend.complete && input.coverageByMonth[input.currentMonth] !== false,
+  });
+  return {
+    // Main card: mixed-date latest-known total, two freshness layers
+    // and the missing list stay separate — never one "live" number.
+    netWorthCard: {
+      label: netWorth.label,
+      total: netWorth.total,
+      partial: netWorth.partial,
+      missing: netWorth.missing,
+      plaidRange: netWorth.plaidRange,
+      snapshotRange: netWorth.snapshotRange,
+      rows: netWorth.rows,
+    },
+    // Daily spend replaces any fixed/flexible pair with three lines:
+    // posted so far / pending not yet counted / coverage gaps.
+    spendCard: {
+      title: `本月花销（截至 ${input.asOfDate}）`,
+      lines: [
+        { key: "posted", label: "已发生 spend", amount: spend.postedSpend },
+        { key: "pending", label: "待入账交易（未计入已发生）", amount: spend.pendingSpend },
+        { key: "gap", label: "覆盖缺口", amount: null, unclassified: spend.unclassified, complete: spend.complete },
+      ],
+      offsets: spend.offsets,
+    },
+    fireCard: {
+      eligibleMonths: fire.eligible,
+      complete12: fire.complete12,
+      missingMonths: fire.missing,
+      note: fire.complete12 ? "近 12 个完整月同口径" : "完整月不足 12 个，缺月如实列出、不补数",
+    },
+    anomalyCard: anomaly,
   };
 }
