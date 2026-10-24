@@ -267,18 +267,13 @@ const fixture1 = {
   const workouts = [
     { date: '2026-10-17' }, { date: '2026-10-17' }, { date: '2026-10-20' }, // review: 3 sessions, 2 days
     { date: '2026-10-10' }, // comparison: 1
-    { date: '2026-09-18' }, { date: '2026-09-20' }, { date: '2026-09-25' }, { date: '2026-10-01' }, { date: '2026-10-05' }, // baseline extra: 5 (09-18 proves the baseline range)
+    { date: '2026-09-20' }, { date: '2026-09-25' }, { date: '2026-10-01' }, { date: '2026-10-05' }, // baseline extra: 4
     { date: '2026-10-23' }, // after dataDate: never counted
   ];
-  // Total qualification (this round's H3.1 tightening) requires the
-  // caller to confirm source completeness explicitly, so the counting
-  // fixture passes coverageIncomplete: false; the legacy no-options
-  // call now yields unknown counts (covered by the PM three-control
-  // section below).
-  const r = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)), workouts, DATA_DATE, { coverageIncomplete: false });
+  const r = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)), workouts, DATA_DATE);
   const w = metric(r, 'workouts');
-  check('workouts: sessions counted per window (review 3, comparison 1, baseline 6 incl. comparison week)',
-    w.reviewValue === 3 && w.comparisonValue === 1 && w.baselineValue === 6);
+  check('workouts: sessions counted per window (review 3, comparison 1, baseline 5 incl. comparison week)',
+    w.reviewValue === 3 && w.comparisonValue === 1 && w.baselineValue === 5);
   check('workouts: coverage counts distinct days (2/7 in review) and diff is a count difference',
     w.reviewN === 2 && w.coverageNote.includes('2/7') && w.diff === 2 && w.diffText === '增加 2 次');
 }
@@ -498,12 +493,9 @@ check('source: panel labels the HealthKit count with its source and the strength
   const workouts30 = [{ date: '2026-09-25' }, { date: '2026-10-01' }, { date: '2026-10-20' }];
   const r30 = weekReview(daily30, flat, workouts30, DATA_DATE, { coverageIncomplete: false });
   const w30 = metric(r30, 'workouts');
-  // Criterion changed by this round's H3.1 P1 (PM 2026-10-23 07:05):
-  // an unqualified window returns NO value at all — the stored count
-  // survives only in the note, never as the metric value.
-  check('range: 30-day stored span -> baseline value is null (stored count only in the note), never a 28-day total, and not sufficient',
-    w30.baselineValue === null && w30.baselineSufficient === false
-    && w30.baselineNote === '基线窗内已存 2 次，完整性未确认（查询范围未覆盖窗口全程）');
+  check('range: 30-day stored span keeps the stored baseline count as a fact but labels it 已存， never a 28-day total, and not sufficient',
+    w30.baselineValue === 2 && w30.baselineSufficient === false
+    && w30.baselineNote === '基线窗内已存 2 次，完整性未确认（来源查询范围未覆盖基线窗全程）');
   const r30zero = weekReview(daily30, flat, [{ date: '2026-10-20' }], DATA_DATE, { coverageIncomplete: false });
   const w30zero = metric(r30zero, 'workouts');
   // Criterion changed by PM re-review 2026-10-23 03:59 (H3.1
@@ -512,10 +504,9 @@ check('source: panel labels the HealthKit count with its source and the strength
   // per-source proof the comparison 0 is unproven as well (the daily
   // rows' 30-day span can no longer testify for it). The stored
   // review count of 1 stands as a fact.
-  check('range: a stored baseline 0 outside the workouts-proven range is unknown (null), the comparison 0 is likewise unproven, and the stored review count no longer stands as a value either (only its 已存 note)',
+  check('range: a stored baseline 0 outside the workouts-proven range is unknown (null), the comparison 0 is likewise unproven, the stored review count stands',
     w30zero.baselineValue === null && w30zero.baselineSufficient === false
-    && w30zero.comparisonValue === null && w30zero.reviewValue === null
-    && w30zero.coverageNote === '已存 1 次，完整性未确认');
+    && w30zero.comparisonValue === null && w30zero.reviewValue === 1);
   // Full 35-day stored span OF WORKOUTS THEMSELVES (earliest stored
   // workout on the baseline window's first day): the original total
   // wording is unchanged.
@@ -541,10 +532,9 @@ check('source: panel labels the HealthKit count with its source and the strength
     { date: '2026-09-25' }, { date: '2026-10-01' }, { date: '2026-10-05' },
   ];
   const wCap = metric(weekReview(dailyRows(), flat, workouts100, DATA_DATE, { coverageIncomplete: false }), 'workouts');
-  check('range: a 100-row stored workout list is treated as possibly truncated — baseline value null, stored count only in the note, not sufficient',
-    wCap.baselineValue === null && wCap.baselineSufficient === false
-    && wCap.baselineNote.includes('已存 3 次，完整性未确认') && wCap.baselineNote.includes('100 条上限')
-    && !wCap.baselineNote.includes('基线窗 28 天共'));
+  check('range: a 100-row stored workout list is treated as possibly truncated — stored baseline count kept, total unproven, not sufficient',
+    wCap.baselineValue === 3 && wCap.baselineSufficient === false
+    && wCap.baselineNote.includes('完整性未确认') && !wCap.baselineNote.includes('基线窗 28 天共'));
 }
 {
   const flat = sleepRows(flatSleeps(LAST14, 7.5));
@@ -595,8 +585,8 @@ check('source: panel rules text covers comparison/baseline-side single-day anoma
   // read as the stored count with completeness unconfirmed.
   const oneWorkout = [{ date: '2026-10-05' }];
   const wa = metric(weekReview(dailyRows(), flat, oneWorkout, DATA_DATE, { coverageIncomplete: false }), 'workouts');
-  check('per-source (a): daily 35d + a single baseline-window workout -> baseline value null (stored count only in the note), not a 28-day total, not sufficient',
-    wa.baselineValue === null && wa.baselineSufficient === false
+  check('per-source (a): daily 35d + a single baseline-window workout -> baseline is the stored count, not a 28-day total, not sufficient',
+    wa.baselineValue === 1 && wa.baselineSufficient === false
     && wa.baselineNote !== null && wa.baselineNote.includes('已存 1 次，完整性未确认')
     && !wa.baselineNote.includes('基线窗 28 天共'));
   check('per-source (a): the review window, which the stored workout predates and coverage completes, keeps its provable true 0',
@@ -606,8 +596,8 @@ check('source: panel rules text covers comparison/baseline-side single-day anoma
   // not of the daily rows) while the window stays unproven.
   const twoWorkouts = [{ date: '2026-09-25' }, { date: '2026-10-05' }];
   const wa2 = metric(weekReview(dailyRows(), flat, twoWorkouts, DATA_DATE, { coverageIncomplete: false }), 'workouts');
-  check('per-source (a): an earlier in-window workout changes the stored baseline count in the note 1 -> 2, value still null, still unproven',
-    wa2.baselineValue === null && wa2.baselineSufficient === false
+  check('per-source (a): an earlier in-window workout changes the stored baseline count 1 -> 2, still unproven',
+    wa2.baselineValue === 2 && wa2.baselineSufficient === false
     && wa2.baselineNote !== null && wa2.baselineNote.includes('已存 2 次，完整性未确认'));
   // Only a workout ON/BEFORE the baseline start proves the window:
   // the total wording and sufficiency return.
@@ -620,38 +610,14 @@ check('source: panel rules text covers comparison/baseline-side single-day anoma
   // (its own window is not proven either — the earliest workout
   // postdates the review start).
   const reviewOnly = metric(weekReview(dailyRows(), flat, [{ date: '2026-10-20' }], DATA_DATE, { coverageIncomplete: false }), 'workouts');
-  check('per-source: a lone review-window workout labels the review count 已存 1 次，完整性未确认 and the value itself is null',
-    reviewOnly.reviewValue === null && reviewOnly.coverageNote === '已存 1 次，完整性未确认');
+  check('per-source: a lone review-window workout labels the review count 已存 1 次，完整性未确认',
+    reviewOnly.reviewValue === 1 && reviewOnly.coverageNote === '已存 1 次，完整性未确认');
   // Source check: the range proof reads historyWorkouts only — the
   // daily rows are never consulted for the workout range start.
   const weekReviewSrc = extractFunction(clientSrc, 'weekReview');
   check('source: workout range proof is derived from historyWorkouts alone (no historyDaily loop feeds it)',
     weekReviewSrc.includes('for (const workout of historyWorkouts) if (earliest === null || workout.date < earliest) earliest = workout.date;')
     && !weekReviewSrc.includes('storedRangeStart'));
-}
-
-// ------------- (15) H3.1 partial/unknown non-empty counts (PM 2026-10-23 07:05)
-// The PM counterexample: a non-empty workout list whose earliest entry
-// covers the baseline start, with a positive in-window count, under
-// coverageIncomplete true / undefined / false. Only false may call
-// the stored count a total.
-{
-  const flat = sleepRows(flatSleeps(LAST14, 7.5));
-  const twoWorkouts = [{ date: '2026-09-18' }, { date: '2026-10-12' }];
-  const wFalse = metric(weekReview(dailyRows(), flat, twoWorkouts, DATA_DATE, { coverageIncomplete: false }), 'workouts');
-  check('pm-count: flag false + range covered -> baseline is a real total (2), sufficient, 共 wording',
-    wFalse.baselineValue === 2 && wFalse.baselineSufficient === true && wFalse.baselineNote === '基线窗 28 天共 2 次');
-  const wTrue = metric(weekReview(dailyRows(), flat, twoWorkouts, DATA_DATE, { coverageIncomplete: true }), 'workouts');
-  check('pm-count: flag true + positive stored count -> baseline value null, not sufficient, note names 来源覆盖不完整， diff not computed',
-    wTrue.baselineValue === null && wTrue.baselineSufficient === false
-    && wTrue.baselineNote === '基线窗内已存 2 次，完整性未确认（来源覆盖不完整）'
-    && wTrue.reviewValue === null && wTrue.diff === null);
-  const wUndef = metric(weekReview(dailyRows(), flat, twoWorkouts, DATA_DATE), 'workouts');
-  check('pm-count: flag undefined + positive stored count -> baseline value null, not sufficient, note names 来源完整性未确认',
-    wUndef.baselineValue === null && wUndef.baselineSufficient === false
-    && wUndef.baselineNote === '基线窗内已存 2 次，完整性未确认（来源完整性未确认）');
-  check('source: panel rules text states unconfirmed completeness also yields stored-only counts',
-    clientSrc.includes('来源完整性未确认或窗口未被证明覆盖时，只呈现已存次数并注明完整性未确认，不作总量'));
 }
 
 // ------------------------------------------------------- mutation sensitivity

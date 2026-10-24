@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import {
@@ -176,12 +176,15 @@ function actualSleepHours(sleep: Pick<Snapshot["sleep"], "coreHours" | "deepHour
   return stageTotal > 0 ? stageTotal : sleep.inBedHours;
 }
 
-function Kpi({ label, value, unit, detail, status }: { label: string; value: string; unit?: string; detail: string; status: Status }) {
+function Kpi({ label, value, unit, detail, status, anchorLabel, anchorTargetId }: { label: string; value: string; unit?: string; detail: string; status: Status; anchorLabel?: string; anchorTargetId?: string }) {
   return (
     <div className="kpi">
       <div className="kpi-topline"><span>{label}</span><span className={`status-chip ${statusClass(status)}`}><span aria-hidden="true">{statusSymbol(status)}</span> {status}</span></div>
       <div className="kpi-value">{value}{unit ? <span>{unit}</span> : null}</div>
       <p>{detail}</p>
+      {anchorLabel && anchorTargetId ? (
+        <button type="button" className="kpi-anchor" aria-label={anchorLabel} onClick={() => document.getElementById(anchorTargetId)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{anchorLabel}</button>
+      ) : null}
     </div>
   );
 }
@@ -217,7 +220,7 @@ function SleepPanel({ sleep }: { sleep: Snapshot["sleep"] }) {
   const timelineHours = actualHours + (sleep.awakeMinutes ?? 0) / 60;
   const pct = (value: number) => `${Math.max(0, (value / Math.max(timelineHours, 0.01)) * 100)}%`;
   return (
-    <section className="sleep-panel" aria-labelledby="sleep-title">
+    <section className="sleep-panel" id="sleep-records" aria-labelledby="sleep-title">
       <div className="section-heading">
         <div><p className="section-kicker">昨晚睡眠</p><h2 id="sleep-title">{actualHours.toFixed(1)} 小时</h2></div>
         <span className={`status-chip ${statusClass(sleep.status)}`}><span aria-hidden="true">{statusSymbol(sleep.status)}</span> {sleep.status}</span>
@@ -302,8 +305,9 @@ export interface SyncAttemptSourceState {
   confirmedUpdatedAt: string | null;
   // The dashboard read stamp (dataStatus.generatedAt) current when
   // this source's task ended. A read-back counts only when its stamp
-  // differs — a read generated before the task ended proves nothing
-  // about the save.
+  // is STRICTLY LATER than this one — a read generated before (or at)
+  // the task's end proves nothing about the save (H-FRESH-001
+  // PHASE-1 strict ordering; mere difference is not evidence).
   taskEndStamp: string | null;
 }
 
@@ -379,14 +383,29 @@ export function applySyncTaskEnd(
 }
 
 // The read-back adjudication, driven by dashboard data arriving
-// after the task ended. Only an "unconfirmed" source is judged, and
-// only by a read whose stamp is newer than the task-end stamp: a
-// failed read (ok=false) or a same-stamp read leaves the source
-// unconfirmed. A fresh read whose updatedAt strictly exceeds the
-// attempt baseline confirms a new version — carrying that source's
-// OWN new timestamp; a fresh read with the version unmoved is the
-// neutral no-new-version outcome (duplicate / ignored saves land
-// here): neither a failure nor a saved new version.
+// after the task ended. Only an "unconfirmed" source is judged.
+//
+// H-FRESH-001 · PHASE-1 (strict ordering): "confirmed-new" requires
+// STRICT temporal evidence on BOTH stamps —
+//   (a) the read-back's own stamp (dataStatus.generatedAt) must
+//       parse and be STRICTLY later than this source's taskEndStamp
+//       (the read must have been generated after the task ended);
+//   (b) the source's read-back updatedAt must parse and be STRICTLY
+//       later than the attempt baseline (when a baseline exists; a
+//       non-null but unparseable baseline can never be strictly
+//       exceeded, so it blocks confirmation too).
+// Anything weaker keeps the source "unconfirmed" — the page goes on
+// showing the last successful data with its own timestamp and never
+// dresses it up as a new save: a missing / unparseable / older /
+// equal read stamp, a missing / unparseable / not-advanced
+// updatedAt, a failed read (ok=false), and a same-version read-back
+// ALL stay unconfirmed. (The earlier rule confirmed on mere stamp
+// difference, so an older, null or garbage stamp could pose as a
+// fresh save.) Each source is judged independently against its own
+// baseline and its own task-end stamp, and the attemptId guard
+// above means a late read-back offered under an older attempt can
+// never confirm a newer one. Self-contained (no outside helper) so
+// a repo-side validator can extract it by name and run it standalone.
 export function applySyncReadback(
   state: SyncAttemptState | null,
   attemptId: string,
@@ -397,14 +416,20 @@ export function applySyncReadback(
   const entry = state.sources[source];
   if (!entry || entry.stage !== "unconfirmed") return state;
   if (!readback.ok) return state;
-  if (entry.taskEndStamp !== null && readback.stamp === entry.taskEndStamp) return state;
-  const baselineTime = entry.baselineUpdatedAt ? new Date(entry.baselineUpdatedAt).getTime() : null;
-  const updatedTime = readback.updatedAt ? new Date(readback.updatedAt).getTime() : null;
-  const advanced = updatedTime !== null && !Number.isNaN(updatedTime)
-    && (baselineTime === null || Number.isNaN(baselineTime) || updatedTime > baselineTime);
-  const nextEntry: SyncAttemptSourceState = advanced
-    ? { ...entry, stage: "confirmed-new", confirmedUpdatedAt: readback.updatedAt }
-    : { ...entry, stage: "no-new-version" };
+  const parseStamp = (value: string | null): number | null => {
+    if (value === null) return null;
+    const time = new Date(value).getTime();
+    return Number.isNaN(time) ? null : time;
+  };
+  const readTime = parseStamp(readback.stamp);
+  const taskEndTime = parseStamp(entry.taskEndStamp);
+  const updatedTime = parseStamp(readback.updatedAt);
+  const baselineTime = parseStamp(entry.baselineUpdatedAt);
+  const readAfterTaskEnd = readTime !== null && taskEndTime !== null && readTime > taskEndTime;
+  const versionAdvanced = updatedTime !== null
+    && (entry.baselineUpdatedAt === null || (baselineTime !== null && updatedTime > baselineTime));
+  if (!readAfterTaskEnd || !versionAdvanced) return state;
+  const nextEntry: SyncAttemptSourceState = { ...entry, stage: "confirmed-new", confirmedUpdatedAt: readback.updatedAt };
   return { ...state, sources: { ...state.sources, [source]: nextEntry } };
 }
 
@@ -1578,54 +1603,100 @@ function sevenDayFacts(
 
 // H-SWIM-VIS-001: per-day swim presentation derived from the already-
 // stored snapshot rows only — no new data path, no formula change.
-// A date enters the map only when its historyDaily row carries a real
-// swim distance (swimMeters non-null and > 0); meters come from that
-// row. minutes is the summed known durationMinutes of that date's swim
-// workouts, rounded to an integer; when no swim workout that day has a
-// known duration, minutes stays null (时长未知) — an unknown duration is
-// never presented as 0.
+//
+// Partial semantics (A 部分语义）: a day's known subset is NEVER
+// presented as the complete total. The info record keeps the known
+// and unknown components apart:
+// - meters: the day's historyDaily swimMeters when it is a real
+//   value (> 0); otherwise null — including the case where swim
+//   sessions exist but the daily distance is null (the day still
+//   gets a visible count entry; no distance is fabricated, and no
+//   session-distance sum is dressed up as the day total).
+// - minutes: the summed KNOWN durationMinutes of that date's swim
+//   workouts, rounded to an integer; null when no swim that day has
+//   a known duration （时长未知） — an unknown duration is never 0.
+// - sessionCount / unknownDurationCount / unknownDistanceCount:
+//   how many swim sessions the date carries and how many of them
+//   lack a duration / a distance, so the labels can mark partial
+//   （已知 + 另有未知） instead of silently totalling the known part.
+// A date enters the map when its daily row carries a real swim
+// distance OR it has swim sessions; a true daily 0 (and no sessions)
+// never enters. Non-swim workouts never contribute.
+export interface SwimDayInfo {
+  meters: number | null;
+  minutes: number | null;
+  sessionCount: number;
+  unknownDurationCount: number;
+  unknownDistanceCount: number;
+}
+
 function swimInfoByDate(
   historyDaily: Array<Pick<Daily, "date" | "swimMeters">>,
   historyWorkouts: HistoryWorkout[],
-): Map<string, { meters: number; minutes: number | null }> {
-  const minutesByDate = new Map<string, number>();
+): Map<string, SwimDayInfo> {
+  const sessionsByDate = new Map<string, HistoryWorkout[]>();
   for (const workout of historyWorkouts) {
     if (!isSwimWorkout(workout.type)) continue;
-    if (workout.durationMinutes === null) continue;
-    minutesByDate.set(workout.date, (minutesByDate.get(workout.date) ?? 0) + workout.durationMinutes);
+    const list = sessionsByDate.get(workout.date) ?? [];
+    list.push(workout);
+    sessionsByDate.set(workout.date, list);
   }
-  const result = new Map<string, { meters: number; minutes: number | null }>();
+  const dailyMeters = new Map<string, number>();
   for (const row of historyDaily) {
     if (row.swimMeters === null || row.swimMeters <= 0) continue;
-    const knownMinutes = minutesByDate.get(row.date);
-    result.set(row.date, {
-      meters: row.swimMeters,
-      minutes: knownMinutes === undefined ? null : Math.round(knownMinutes),
+    dailyMeters.set(row.date, row.swimMeters);
+  }
+  const result = new Map<string, SwimDayInfo>();
+  const dates = new Set<string>([...dailyMeters.keys(), ...sessionsByDate.keys()]);
+  for (const date of dates) {
+    const sessions = sessionsByDate.get(date) ?? [];
+    const knownDurations = sessions
+      .map((workout) => workout.durationMinutes)
+      .filter((value): value is number => value !== null);
+    result.set(date, {
+      meters: dailyMeters.get(date) ?? null,
+      minutes: knownDurations.length ? Math.round(knownDurations.reduce((sum, value) => sum + value, 0)) : null,
+      sessionCount: sessions.length,
+      unknownDurationCount: sessions.length - knownDurations.length,
+      unknownDistanceCount: sessions.filter((workout) => workout.distanceMeters === null).length,
     });
   }
   return result;
 }
 
-function swimDayLabel(info: { meters: number; minutes: number | null }): string {
-  return `游泳 ${numberLabel(info.meters)} 米`;
+function swimDayLabel(info: SwimDayInfo): string {
+  if (info.meters !== null) return `游泳 ${numberLabel(info.meters)} 米`;
+  return `游泳 ${info.sessionCount} 次`;
 }
 
-function swimDayDetail(info: { meters: number; minutes: number | null }): string {
-  return info.minutes === null
-    ? `游泳 ${numberLabel(info.meters)} 米 · 时长未知`
-    : `游泳 ${numberLabel(info.meters)} 米 · ${info.minutes} 分`;
+function swimDayDetail(info: SwimDayInfo): string {
+  const distancePart = info.meters !== null
+    ? info.unknownDistanceCount > 0
+      ? `游泳 ${numberLabel(info.meters)} 米（已知，另有记录距离未知）`
+      : `游泳 ${numberLabel(info.meters)} 米`
+    : `游泳 ${info.sessionCount} 次 · 距离 —`;
+  if (info.sessionCount === 0) return `${distancePart} · 时长未知`;
+  if (info.minutes === null) return `${distancePart} · 时长未知（共 ${info.sessionCount} 次）`;
+  if (info.unknownDurationCount > 0) {
+    return `${distancePart} · 时长已知 ${info.minutes} 分（共 ${info.sessionCount} 次，${info.unknownDurationCount} 次时长未知）`;
+  }
+  return `${distancePart} · ${info.minutes} 分`;
 }
 
 // H-SWIM-VIS-001: the 近7天 swim subtotal for the today page workout
-// line. Only swim workouts whose date falls inside the given window
-// dates count. meters sums the known distanceMeters values only;
-// metersKnown records whether at least one swim in the window carried
-// a known distance, so a window of distance-less swims still shows its
-// count without inventing a 0 米 total. label is empty when count is 0.
+// line, over the CALLER's window dates — a 7-CALENDAR-day window
+// anchored on dataDate, shared with the seven-day facts strip (never
+// "the last 7 daily rows": on sparse weeks those are not 7 calendar
+// days). meters sums the known distanceMeters values only, and when
+// some swims in the window have no distance the label marks the sum
+// as the known part （已知 X 米，另有 M 次距离未知） instead of calling
+// it the total; a window of distance-less swims still shows its
+// count without inventing a 0 米 total. label is empty when count
+// is 0.
 function swimWeekSummary(
   historyWorkouts: HistoryWorkout[],
   dates: string[],
-): { count: number; meters: number; metersKnown: boolean; label: string } {
+): { count: number; meters: number; metersKnown: boolean; unknownDistanceCount: number; label: string } {
   const dateSet = new Set(dates);
   const swims = historyWorkouts.filter((workout) => dateSet.has(workout.date) && isSwimWorkout(workout.type));
   const count = swims.length;
@@ -1634,17 +1705,31 @@ function swimWeekSummary(
     .filter((value): value is number => value !== null);
   const meters = knownDistances.reduce((sum, value) => sum + value, 0);
   const metersKnown = knownDistances.length > 0;
+  const unknownDistanceCount = count - knownDistances.length;
   const label = count === 0
     ? ""
-    : metersKnown
-      ? `近7天游泳 ${count} 次 · 共 ${numberLabel(meters)} 米`
-      : `近7天游泳 ${count} 次`;
-  return { count, meters, metersKnown, label };
+    : !metersKnown
+      ? `近7天游泳 ${count} 次 · 距离未知`
+      : unknownDistanceCount > 0
+        ? `近7天游泳 ${count} 次 · 已知 ${numberLabel(meters)} 米（另有 ${unknownDistanceCount} 次距离未知）`
+        : `近7天游泳 ${count} 次 · 共 ${numberLabel(meters)} 米`;
+  return { count, meters, metersKnown, unknownDistanceCount, label };
 }
 
 interface SleepRegularityResult {
+  // Usable nights in the window: calendar dates (wake dates) whose
+  // main sleep could be determined. This is the "n" of 有效 n/14 晚.
   sampleCount: number;
-  consideredCount: number;
+  windowDays: number;
+  // The 14-calendar-day window, anchored on the latest record's
+  // wake date (dataDate): windowEnd is that anchor, windowStart is
+  // anchor − 13 days. Both null when no record carries a usable date.
+  windowStart: string | null;
+  windowEnd: string | null;
+  // 7 ≤ n < 14: SDs are computed but the window is not full — the
+  // panel must say so (partial) with the reason.
+  partial: boolean;
+  partialReason: string | null;
   requiredSamples: number;
   sufficient: boolean;
   status: "ok" | "insufficient" | "empty";
@@ -1653,36 +1738,65 @@ interface SleepRegularityResult {
   midpointSdMinutes: number | null;
   onsetMeanClockMinutes: number | null;
   midpointMeanClockMinutes: number | null;
+  // A metric whose resultant length R is ~0 has its times spread
+  // around the whole clock: no mean direction and no finite circular
+  // SD exist, so both stay null and the panel says why.
+  onsetSpreadUndefined: boolean;
+  midpointSpreadUndefined: boolean;
 }
 
 // H-SLEEP-REG-001: sleep regularity as a DESCRIPTIVE reference statistic
-// only. Pure derivation over the stored snapshot's latest 14 sleep
-// sessions (historySleeps start/end clock times, "HH:mm") — no new data
-// path, no server or schema change, and the result NEVER feeds
-// readiness or any score: it describes how spread out the recent
-// nights' clock times are, nothing more. Two cross-night sample
-// standard deviations (n-1): (1) the sleep midpoint (halfway between
-// falling asleep and waking), and (2) the sleep onset time. Clock
-// times live on a circle, so a raw linear SD would read 23:50 and
-// 00:10 as ~24 hours apart; both quantities are therefore mapped onto
-// a continuous axis unfolded at noon — minutes since 12:00, i.e.
-// (clock - 720) mod 1440 — before any mean or SD is taken, which puts
-// 23:50 at 710 and 00:10 at 730 (20 minutes apart, as they are). The
-// midpoint clock is start + duration/2 where duration wraps past
-// midnight ((end - start) mod 1440); a zero-duration or unparseable
-// row is not a usable night and is excluded, never counted as a value.
-// Fewer than 7 usable nights is 样本不足: the SD fields stay null so no
-// surface can present a number the sample cannot support. With no
-// usable night at all, missingLabel follows the dashboard's existing
-// missing-data caliber — 还没同步完 when the source coverage is
-// incomplete, 当天没戴表 otherwise. Self-contained (no outside helper
-// is referenced) so a repo-side validator can extract it by name and
+// only — no new data path, no server or schema change, and the result
+// NEVER feeds readiness or any score: it describes how spread out the
+// recent nights' clock times are, nothing more.
+//
+// Window (A 公式/窗口）: a 14-CALENDAR-day grid over wake dates (each
+// record's dataDate, already an America/Los_Angeles calendar date),
+// anchored on the LATEST record's date — the window is anchor−13 ..
+// anchor. A missing night is simply absent: it is never filled with
+// 0 and never back-filled from older records outside the window (the
+// previous rule took the last 14 SESSIONS, so several sessions of one
+// night could crowd out real nights and stale sessions could pose as
+// recent ones). Within one wake date, only the MAIN sleep counts,
+// chosen by the same deterministic rule the server uses
+// (selectMainSleep): the session with the longest time in bed
+// (end − start, wrapping past midnight); ties go to the earlier
+// start, with evening starts (12:00–23:59) ordering before
+// after-midnight starts of the same night. Naps and short rests on a
+// date that has a main sleep therefore never count, and each wake
+// date contributes at most one night.
+//
+// Statistics: clock times live on a circle, so both quantities — the
+// sleep midpoint (start + duration/2, duration wrapping past
+// midnight) and the start time — are summarised with CIRCULAR
+// statistics: each clock minute m becomes the angle θ = m/1440·2π,
+// R is the length of the mean unit vector, the mean is the vector's
+// direction converted back to a clock time, and the circular SD is
+// √(−2·ln R) converted back to minutes (×1440/2π). This handles the
+// midnight AND noon cut correctly by construction: alternating
+// 23:50 / 00:10 starts sit 20 minutes apart on the circle (small SD),
+// where the old noon-unfolded linear SD read them as ~12 hours apart
+// (>700 min). When R ≈ 0 the times are spread around the whole
+// clock — no mean or finite SD exists, so that metric stays null
+// (spreadUndefined) instead of printing a huge fake number. The
+// start time is only a PROXY for sleep onset （开始时刻（代理）): the
+// record's start, not a measured falling-asleep moment. A row with an
+// unparseable start/end or a zero duration is not a usable night and
+// is excluded, never counted as a value. Fewer than 7 usable nights
+// is 样本不足： the SD fields stay null so no surface can present a
+// number the sample cannot support; 7–13 usable nights still compute
+// but are flagged partial with the reason. With no usable night at
+// all, missingLabel follows the dashboard's existing missing-data
+// caliber — 还没同步完 when the source coverage is incomplete,
+// 当天没戴表 otherwise. Self-contained (no outside helper is
+// referenced) so a repo-side validator can extract it by name and
 // recompute it standalone over synthetic fixtures.
 function sleepRegularity(
   historySleeps: Array<Pick<Snapshot["historySleeps"][number], "date" | "start" | "end">>,
   coverageIncomplete?: boolean,
 ): SleepRegularityResult {
   const REQUIRED = 7;
+  const WINDOW_DAYS = 14;
   const DAY = 1440;
   const parseClockMinutes = (value: unknown): number | null => {
     if (typeof value !== "string") return null;
@@ -1695,47 +1809,113 @@ function sleepRegularity(
     if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
     return hours * 60 + minutes;
   };
+  const isRealDate = (value: unknown): value is string => {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const candidate = new Date(`${value}T12:00:00Z`);
+    return !Number.isNaN(candidate.getTime()) && candidate.toISOString().slice(0, 10) === value;
+  };
+  const shiftDate = (date: string, days: number): string => {
+    const shifted = new Date(`${date}T12:00:00Z`);
+    shifted.setUTCDate(shifted.getUTCDate() + days);
+    return shifted.toISOString().slice(0, 10);
+  };
   const rows = Array.isArray(historySleeps) ? historySleeps : [];
-  const indexed = rows.map((row, index) => ({ row, index }));
-  const allDated = indexed.length > 0 && indexed.every((entry) => typeof entry.row?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(entry.row.date));
-  const ordered = allDated
-    ? [...indexed].sort((a, b) => (a.row.date < b.row.date ? -1 : a.row.date > b.row.date ? 1 : a.index - b.index))
-    : indexed;
-  const windowed = ordered.slice(-14);
-  const unfold = (clockMinutes: number): number => (((clockMinutes - 720) % DAY) + DAY) % DAY;
-  const onsetValues: number[] = [];
-  const midpointValues: number[] = [];
-  for (const entry of windowed) {
-    const start = parseClockMinutes(entry.row?.start);
-    const end = parseClockMinutes(entry.row?.end);
+  // Anchor: the latest record's wake date. Records without a usable
+  // date can neither anchor nor enter the window.
+  let anchor: string | null = null;
+  for (const row of rows) {
+    if (isRealDate(row?.date) && (anchor === null || row.date > anchor)) anchor = row.date;
+  }
+  const emptyResult = (windowStart: string | null, windowEnd: string | null): SleepRegularityResult => ({
+    sampleCount: 0,
+    windowDays: WINDOW_DAYS,
+    windowStart,
+    windowEnd,
+    partial: false,
+    partialReason: null,
+    requiredSamples: REQUIRED,
+    sufficient: false,
+    status: "empty",
+    missingLabel: coverageIncomplete ? "还没同步完" : "当天没戴表",
+    onsetSdMinutes: null,
+    midpointSdMinutes: null,
+    onsetMeanClockMinutes: null,
+    midpointMeanClockMinutes: null,
+    onsetSpreadUndefined: false,
+    midpointSpreadUndefined: false,
+  });
+  if (anchor === null) return emptyResult(null, null);
+  const windowStart = shiftDate(anchor, -(WINDOW_DAYS - 1));
+  const windowEnd = anchor;
+  // One main sleep per wake date (selectMainSleep caliber): longest
+  // time in bed wins; ties go to the earlier start under the
+  // evening-first ordering key.
+  const startOrderKey = (startMinutes: number): number => (startMinutes >= 720 ? startMinutes : startMinutes + DAY);
+  const mainByDate = new Map<string, { start: number; duration: number }>();
+  for (const row of rows) {
+    if (!isRealDate(row?.date) || row.date < windowStart || row.date > windowEnd) continue;
+    const start = parseClockMinutes(row.start);
+    const end = parseClockMinutes(row.end);
     if (start === null || end === null) continue;
     const duration = (((end - start) % DAY) + DAY) % DAY;
     if (duration <= 0) continue;
-    const midpointClock = (start + duration / 2) % DAY;
-    onsetValues.push(unfold(start));
-    midpointValues.push(unfold(midpointClock));
+    const current = mainByDate.get(row.date);
+    if (
+      current === undefined
+      || duration > current.duration
+      || (duration === current.duration && startOrderKey(start) < startOrderKey(current.start))
+    ) {
+      mainByDate.set(row.date, { start, duration });
+    }
+  }
+  const onsetValues: number[] = [];
+  const midpointValues: number[] = [];
+  for (const date of [...mainByDate.keys()].sort()) {
+    const main = mainByDate.get(date);
+    if (!main) continue;
+    onsetValues.push(main.start);
+    midpointValues.push((main.start + main.duration / 2) % DAY);
   }
   const sampleCount = onsetValues.length;
+  if (sampleCount === 0) return emptyResult(windowStart, windowEnd);
   const sufficient = sampleCount >= REQUIRED;
-  const meanOf = (values: number[]): number => values.reduce((sum, value) => sum + value, 0) / values.length;
-  const sampleSd = (values: number[]): number | null => {
-    if (values.length < 2) return null;
-    const mean = meanOf(values);
-    const squared = values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0);
-    return Math.sqrt(squared / (values.length - 1));
+  const partial = sufficient && sampleCount < WINDOW_DAYS;
+  const circular = (values: number[]): { meanClock: number | null; sdMinutes: number | null; spreadUndefined: boolean } => {
+    let cosSum = 0;
+    let sinSum = 0;
+    for (const minutes of values) {
+      const angle = (minutes / DAY) * Math.PI * 2;
+      cosSum += Math.cos(angle);
+      sinSum += Math.sin(angle);
+    }
+    const r = Math.min(1, Math.hypot(cosSum / values.length, sinSum / values.length));
+    if (r < 1e-9) return { meanClock: null, sdMinutes: null, spreadUndefined: true };
+    const meanAngle = Math.atan2(sinSum / values.length, cosSum / values.length);
+    const meanClock = (((meanAngle / (Math.PI * 2)) * DAY) % DAY + DAY) % DAY;
+    const sdMinutes = Math.sqrt(-2 * Math.log(r)) * (DAY / (Math.PI * 2));
+    return { meanClock, sdMinutes, spreadUndefined: false };
   };
-  const toClock = (continuousMean: number): number => (((continuousMean + 720) % DAY) + DAY) % DAY;
+  const onset = sufficient ? circular(onsetValues) : { meanClock: null, sdMinutes: null, spreadUndefined: false };
+  const midpoint = sufficient ? circular(midpointValues) : { meanClock: null, sdMinutes: null, spreadUndefined: false };
   return {
     sampleCount,
-    consideredCount: windowed.length,
+    windowDays: WINDOW_DAYS,
+    windowStart,
+    windowEnd,
+    partial,
+    partialReason: partial
+      ? `窗口内 ${WINDOW_DAYS - sampleCount} 晚没有可用的主睡眠记录，未向窗口外更早的日期借数，只按有效 ${sampleCount} 晚计算。`
+      : null,
     requiredSamples: REQUIRED,
     sufficient,
-    status: sampleCount === 0 ? "empty" : sufficient ? "ok" : "insufficient",
-    missingLabel: sampleCount === 0 ? (coverageIncomplete ? "还没同步完" : "当天没戴表") : null,
-    onsetSdMinutes: sufficient ? sampleSd(onsetValues) : null,
-    midpointSdMinutes: sufficient ? sampleSd(midpointValues) : null,
-    onsetMeanClockMinutes: sufficient ? toClock(meanOf(onsetValues)) : null,
-    midpointMeanClockMinutes: sufficient ? toClock(meanOf(midpointValues)) : null,
+    status: sufficient ? "ok" : "insufficient",
+    missingLabel: null,
+    onsetSdMinutes: onset.sdMinutes,
+    midpointSdMinutes: midpoint.sdMinutes,
+    onsetMeanClockMinutes: onset.meanClock,
+    midpointMeanClockMinutes: midpoint.meanClock,
+    onsetSpreadUndefined: onset.spreadUndefined,
+    midpointSpreadUndefined: midpoint.spreadUndefined,
   };
 }
 
@@ -2464,10 +2644,13 @@ function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: W
 // to live here (driver tiles, the week load verdict, the readiness
 // trend, the 7-day facts, the week review) moved below the hero in
 // TodayView; nothing was deleted, only relocated.
-function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing, syncAttempt }: {
+function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing, syncAttempt, onViewReadiness, onViewWeekReview, onViewDataStatus }: {
   snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null;
   onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean;
   syncAttempt?: SyncAttemptState | null;
+  onViewReadiness?: () => void;
+  onViewWeekReview?: () => void;
+  onViewDataStatus?: () => void;
 }) {
   const recovery = recoveryScore(readiness);
   const sleep = sleepScore(snapshot, readiness);
@@ -2487,6 +2670,7 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
   const handleSourceAction = () => {
     if (source.action.kind === "sync-health") onSyncHealth();
     else if (source.action.kind === "sync-strength") onSyncStrength();
+    else if (onViewDataStatus) onViewDataStatus();
     else scrollToId("data-status-panel");
   };
   return (
@@ -2551,9 +2735,9 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
       </div>
       <div className="whoop-anchors">
         {readiness ? (
-          <button type="button" className="whoop-anchor-btn" aria-label="查看依据" onClick={() => scrollToId("readiness-basis")}>查看依据</button>
+          <button type="button" className="whoop-anchor-btn" aria-label="查看依据" onClick={() => { if (onViewReadiness) onViewReadiness(); else scrollToId("readiness-basis"); }}>查看依据</button>
         ) : null}
-        <button type="button" className="whoop-anchor-btn" aria-label="查看周复盘依据/反馈" onClick={() => scrollToId("week-review-panel")}>查看周复盘依据/反馈</button>
+        <button type="button" className="whoop-anchor-btn" aria-label="查看周复盘依据/反馈" onClick={() => { if (onViewWeekReview) onViewWeekReview(); else scrollToId("week-review-panel"); }}>查看周复盘依据/反馈</button>
       </div>
     </section>
   );
@@ -2663,18 +2847,28 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
 // ---------------------------------------------------------------------------
 // H-SLEEP-REG-001: the sleep-regularity reference panel, rendered on the
 // today page directly after the seven-day facts strip. It presents ONLY
-// the descriptive output of sleepRegularity above — sample standard
-// deviations of the sleep midpoint and the onset time over the latest
-// 14 nights — labelled 参考指标， with the fixed note that it is a
-// descriptive statistic, not a medical conclusion, and never counts
-// toward the recovery (readiness) score or any other score. Meaning is
+// the descriptive output of sleepRegularity above — circular standard
+// deviations of the sleep midpoint and the start time over the latest
+// 14 calendar days by wake date — labelled 参考指标， with the fixed
+// note that it is a descriptive statistic, not a medical conclusion,
+// and never counts toward the recovery (readiness) score or any other
+// score. No 好坏等级 and no health score is attached. Meaning is
 // carried by symbol + text label + number together, never by color
 // alone (owner is color-vision deficient): ◑ marks the midpoint row,
-// ◐ the onset row, ○ the insufficient-sample state, and — the
-// no-record state. Under 7 usable nights no SD number is shown at all;
-// with no usable night the panel follows the existing missing-data
-// caliber （还没同步完 / 当天没戴表） from the derivation itself.
+// ◐ the start-time row, ○ the insufficient-sample state, and — the
+// no-record state.
+//
+// Presentation (PM): the card defaults to ONE line — 有效 n/14 晚 plus
+// the two usable SDs, or the 样本不足 state. Tapping the card expands
+// it in place to the two metrics, the formula, the window, the
+// partial reason and the records entry. The start time is labelled
+// 开始时刻（代理） everywhere: it is the record's start time standing
+// in for sleep onset, not a measured falling-asleep moment. Under 7
+// usable nights no SD number is shown at all; with no usable night
+// the panel follows the existing missing-data caliber （还没同步完 /
+// 当天没戴表） from the derivation itself.
 function SleepRegularityPanel({ snapshot }: { snapshot: Snapshot }) {
+  const [expanded, setExpanded] = useState(false);
   const result = sleepRegularity(snapshot.historySleeps, snapshot.coverageIncomplete);
   const clockLabel = (clockMinutes: number | null): string => {
     if (clockMinutes === null) return "—";
@@ -2684,32 +2878,66 @@ function SleepRegularityPanel({ snapshot }: { snapshot: Snapshot }) {
     return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
   };
   const sdLabel = (sd: number | null): string => (sd === null ? "—" : `${Math.round(sd)} 分钟`);
+  const summaryLine = result.status === "ok"
+    ? `中点 SD ${sdLabel(result.midpointSdMinutes)} · 开始 SD ${sdLabel(result.onsetSdMinutes)}${result.partial ? " · partial" : ""}`
+    : result.status === "insufficient"
+      ? "样本不足，暂不显示标准差"
+      : result.missingLabel ?? "当天没戴表";
   return (
     <div className="sleep-reg" aria-label="睡眠规律性参考指标">
-      <div className="sleep-reg-head">
-        <span className="sleep-reg-title">睡眠规律性</span>
-        <span className="sleep-reg-tag">参考指标</span>
-        <span className="sleep-reg-sample">样本 {result.sampleCount} 晚</span>
-      </div>
-      <p className="sleep-reg-note">仅为描述统计：用近 14 晚睡眠记录算时刻的离散程度，不是医学结论，也不计入恢复分数或任何评分。标准差越小，近 14 晚的时刻越集中；越大，分布越分散。</p>
-      {result.status === "ok" ? (
-        <div className="sleep-reg-rows">
-          <div className="sleep-reg-row">
-            <span className="sleep-reg-metric"><span aria-hidden="true">◑</span> 睡眠中点</span>
-            <strong>标准差 {sdLabel(result.midpointSdMinutes)}</strong>
-            <small>平均中点 {clockLabel(result.midpointMeanClockMinutes)} · 样本 {result.sampleCount} 晚</small>
-          </div>
-          <div className="sleep-reg-row">
-            <span className="sleep-reg-metric"><span aria-hidden="true">◐</span> 入睡时间</span>
-            <strong>标准差 {sdLabel(result.onsetSdMinutes)}</strong>
-            <small>平均入睡 {clockLabel(result.onsetMeanClockMinutes)} · 样本 {result.sampleCount} 晚</small>
-          </div>
+      <button
+        type="button"
+        className="sleep-reg-toggle"
+        aria-expanded={expanded}
+        aria-label={expanded ? "收起睡眠规律性详情" : "展开睡眠规律性详情"}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="sleep-reg-head">
+          <span className="sleep-reg-title">睡眠规律性</span>
+          <span className="sleep-reg-tag">参考指标</span>
+          <span className="sleep-reg-sample">有效 {result.sampleCount}/{result.windowDays} 晚</span>
+        </span>
+        <span className="sleep-reg-summary">
+          <span>{summaryLine}</span>
+          <span className="sleep-reg-chevron" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+        </span>
+      </button>
+      {expanded ? (
+        <div className="sleep-reg-detail">
+          <p className="sleep-reg-note">仅为描述统计：按醒来日期取近 14 个日历日的主睡眠，算时刻的离散程度，不是医学结论，也不计入恢复分数或任何评分，没有好坏等级。标准差越小，时刻越集中；越大，分布越分散。</p>
+          {result.status === "ok" ? (
+            <div className="sleep-reg-rows">
+              <div className="sleep-reg-row">
+                <span className="sleep-reg-metric"><span aria-hidden="true">◑</span> 睡眠中点</span>
+                <strong>标准差 {sdLabel(result.midpointSdMinutes)}</strong>
+                <small>{result.midpointSpreadUndefined ? "时刻分散在整个时钟上（圆周 R 近 0），平均时刻与标准差无法计算" : `平均中点 ${clockLabel(result.midpointMeanClockMinutes)}`} · 有效 {result.sampleCount}/{result.windowDays} 晚</small>
+              </div>
+              <div className="sleep-reg-row">
+                <span className="sleep-reg-metric"><span aria-hidden="true">◐</span> 开始时刻（代理）</span>
+                <strong>标准差 {sdLabel(result.onsetSdMinutes)}</strong>
+                <small>{result.onsetSpreadUndefined ? "时刻分散在整个时钟上（圆周 R 近 0），平均时刻与标准差无法计算" : `平均开始 ${clockLabel(result.onsetMeanClockMinutes)}`} · 有效 {result.sampleCount}/{result.windowDays} 晚</small>
+              </div>
+            </div>
+          ) : result.status === "insufficient" ? (
+            <p className="sleep-reg-warn"><span aria-hidden="true">○</span> 样本不足：目前可用 {result.sampleCount} 晚（至少需要 {result.requiredSamples} 晚才计算标准差），暂不显示标准差数值。</p>
+          ) : (
+            <p className="sleep-reg-warn"><span aria-hidden="true">—</span> 暂无可用睡眠记录 · {result.missingLabel ?? "当天没戴表"}，同步到睡眠记录后自动计算。</p>
+          )}
+          <p className="sleep-reg-note">公式：每晚时刻换成圆周角度 θ = 时刻（分钟）÷ 1440 × 360°；R = 各晚单位向量的平均长度；圆周标准差 = √(−2 ln R) × (1440 ÷ 2π)，单位：分钟。平均时刻为平均向量的方向换回的时钟时刻。睡眠中点 = 开始时刻 + 时长 ÷ 2（跨午夜按圆周处理）。开始时刻（代理）是睡眠记录的开始时刻，不是测得的确切入睡时刻。</p>
+          {result.windowStart && result.windowEnd ? (
+            <p className="sleep-reg-note">窗口：{result.windowStart} – {result.windowEnd}（按醒来日期的近 {result.windowDays} 个日历日）· 有效 {result.sampleCount}/{result.windowDays} 晚 · 来源：Apple 健康睡眠记录；同一晚多条记录只取主睡眠（在床最长的一条），午睡/小憩不另计，缺晚不补、不向窗口外借数。</p>
+          ) : null}
+          {result.partial && result.partialReason ? (
+            <p className="sleep-reg-warn">partial（有效 {result.sampleCount}/{result.windowDays} 晚）：{result.partialReason}</p>
+          ) : null}
+          <button
+            type="button"
+            className="sleep-reg-records-link"
+            aria-label="查看睡眠记录"
+            onClick={() => document.getElementById("sleep-records")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          >查看睡眠记录</button>
         </div>
-      ) : result.status === "insufficient" ? (
-        <p className="sleep-reg-warn"><span aria-hidden="true">○</span> 样本不足：目前可用 {result.sampleCount} 晚（至少需要 {result.requiredSamples} 晚才计算标准差），暂不显示标准差数值。</p>
-      ) : (
-        <p className="sleep-reg-warn"><span aria-hidden="true">—</span> 暂无可用睡眠记录 · {result.missingLabel ?? "当天没戴表"}，同步到睡眠记录后自动计算。</p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -2758,6 +2986,16 @@ export interface FocusFeedbackState {
   // current intent's own late callback after that intent was already
   // confirmed (see settleFocusSaveOutcome).
   lastIntentOperationId: string | null;
+  // RT-2 follow-up (readback-confirmation evidence): when an
+  // authoritative re-read confirms the current intent landed
+  // (syncFocusFeedbackState's RT-1 exit), the intent's identity AND
+  // the revision the re-read confirmed it at are recorded here.
+  // This is the ONLY proof that may protect the saved state from
+  // that same intent's own late transport failure — value equality
+  // alone (same choice / same revision from another intent) never
+  // counts as confirmation. Cleared when a new intent begins.
+  readbackConfirmedOperationId: string | null;
+  readbackConfirmedRevision: number;
   pendingExpectedRevision: number;
   // On conflict: the server's currently saved choice + revision, kept
   // so the card can name exactly what stands and what was refused.
@@ -2774,6 +3012,7 @@ export function createFocusFeedbackState(): FocusFeedbackState {
     boundKey: null, confirmed: null, confirmedRevision: 0, selection: null,
     status: "idle", readFailed: false,
     pendingOperationId: null, lastIntentOperationId: null, pendingExpectedRevision: 0,
+    readbackConfirmedOperationId: null, readbackConfirmedRevision: 0,
     conflictFeedback: null, conflictRevision: null,
   };
 }
@@ -2811,6 +3050,7 @@ export function syncFocusFeedbackState(
       status: serverConfirmed ? "saved" : "idle",
       readFailed,
       pendingOperationId: null, lastIntentOperationId: null, pendingExpectedRevision: 0,
+      readbackConfirmedOperationId: null, readbackConfirmedRevision: 0,
       conflictFeedback: null, conflictRevision: null,
     };
   }
@@ -2845,6 +3085,13 @@ export function syncFocusFeedbackState(
       status: "saved",
       readFailed: false,
       pendingOperationId: null, lastIntentOperationId: state.lastIntentOperationId, pendingExpectedRevision: 0,
+      // RT-2 follow-up: this re-read IS the authoritative proof that
+      // the current intent landed — record its identity + the
+      // revision it was confirmed at, so the intent's own late
+      // transport failure can be recognised and refused (see
+      // settleFocusSaveOutcome).
+      readbackConfirmedOperationId: state.lastIntentOperationId,
+      readbackConfirmedRevision: incomingRevision,
       conflictFeedback: null, conflictRevision: null,
     };
   }
@@ -2866,6 +3113,10 @@ export function syncFocusFeedbackState(
     status: serverConfirmed ? "saved" : "idle",
     readFailed: false,
     pendingOperationId: null, lastIntentOperationId: state.lastIntentOperationId, pendingExpectedRevision: 0,
+    // An ordinary re-read neither creates nor erases readback-
+    // confirmation evidence for the current intent.
+    readbackConfirmedOperationId: state.readbackConfirmedOperationId,
+    readbackConfirmedRevision: state.readbackConfirmedRevision,
     conflictFeedback: null, conflictRevision: null,
   };
 }
@@ -2887,6 +3138,17 @@ export function beginFocusFeedbackSave(state: FocusFeedbackState, choice: FocusF
     // directly) the existing identity stands — the pending operation
     // if there is one, else the last intent — and is never cleared.
     lastIntentOperationId: operationId ?? state.pendingOperationId ?? state.lastIntentOperationId,
+    // A genuinely new intent supersedes any earlier intent's
+    // readback-confirmation evidence: that evidence names the OLD
+    // operation and must never protect (or be confused with) this
+    // one. The no-operationId re-entry keeps it — it is the same
+    // intent continuing.
+    readbackConfirmedOperationId: operationId !== undefined && operationId !== state.readbackConfirmedOperationId
+      ? null
+      : state.readbackConfirmedOperationId,
+    readbackConfirmedRevision: operationId !== undefined && operationId !== state.readbackConfirmedOperationId
+      ? 0
+      : state.readbackConfirmedRevision,
     pendingExpectedRevision: state.confirmedRevision,
     conflictFeedback: null,
     conflictRevision: null,
@@ -3003,10 +3265,16 @@ export type FocusSaveOutcome =
 //   RT-1 exit cleared pendingOperationId): it settles idempotently
 //   through the same three transitions, whose own monotonic guards
 //   (complete drops a lower revision, a stale conflict degrades to
-//   error) keep it from rewinding the confirmed value. When no
-//   intent identity is recorded at all (pending and lastIntent both
-//   null) there is nothing newer to protect, so legacy settlement
-//   stands as before.
+//   error) keep it from rewinding the confirmed value. ONE exception,
+//   the readback-confirmation guard in the body: a late FAILURE from
+//   an intent an authoritative re-read already confirmed (identity +
+//   revision recorded in readbackConfirmedOperationId /
+//   readbackConfirmedRevision) leaves the confirmed saved state
+//   untouched — the re-read is the stronger fact, and showing 未保存
+//   would contradict it. A failure with no such proof still errors.
+//   When no intent identity is recorded at all (pending and
+//   lastIntent both null) there is nothing newer to protect, so
+//   legacy settlement stands as before.
 // - EVERY other outcome is a STALE operation's late callback: an
 //   older operation reporting after a newer intent was begun (a
 //   non-null pendingOperationId differs) or after a newer intent was
@@ -3034,6 +3302,25 @@ export function settleFocusSaveOutcome(
     && state.lastIntentOperationId !== null
     && operationId === state.lastIntentOperationId;
   const unattributed = state.pendingOperationId === null && state.lastIntentOperationId === null;
+  // RT-2 readback-confirmation guard: this intent was ALREADY
+  // confirmed by an authoritative re-read (syncFocusFeedbackState's
+  // RT-1 exit recorded the intent's identity + the confirmed
+  // revision, cleared the pending identity and set status "saved").
+  // A transport failure from that same request arriving only now is
+  // contradicted by the confirmed fact: it must NOT flip the card to
+  // error / 未保存. The guard is identity + version evidence, never
+  // value equality — a failure carrying a DIFFERENT operationId (or
+  // one whose intent has no readback confirmation) falls through to
+  // the ordinary settlement below and still errors when it holds no
+  // proof of saving.
+  if (
+    outcome.kind === "failure"
+    && state.status === "saved"
+    && state.readbackConfirmedOperationId !== null
+    && operationId === state.readbackConfirmedOperationId
+  ) {
+    return state;
+  }
   if (isPendingOperation || isCurrentIntentEcho || unattributed) {
     return outcome.kind === "success"
       ? completeFocusFeedbackSave(state, boundKey, outcome.choice, outcome.revision)
@@ -3711,8 +3998,15 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
   );
 }
 
-function ReadinessPanel({ readiness, compact = false }: { readiness: Readiness; compact?: boolean }) {
+function ReadinessPanel({ readiness, compact = false, open: openProp, onOpenChange }: { readiness: Readiness; compact?: boolean; open?: boolean; onOpenChange?: (open: boolean) => void }) {
   const queryClient = useQueryClient();
+  const [internalOpen, setInternalOpen] = useState(!compact);
+  const foldOpen = openProp ?? internalOpen;
+  const handleFoldToggle = (event: SyntheticEvent<HTMLDetailsElement>) => {
+    const next = event.currentTarget.open;
+    setInternalOpen(next);
+    onOpenChange?.(next);
+  };
   const [feeling, setFeeling] = useState(readiness.morningFeeling ?? 5);
   useEffect(() => setFeeling(readiness.morningFeeling ?? 5), [readiness.morningFeeling]);
   const saveFeeling = useMutation({
@@ -3720,8 +4014,13 @@ function ReadinessPanel({ readiness, compact = false }: { readiness: Readiness; 
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
   });
   const scoreStyle = { "--readiness-score": (readiness.score ?? 0) * 10 } as CSSProperties;
+  const foldSummaryText = `${readiness.status} · ${readiness.score ?? "—"}/10 · 置信度${readiness.confidence}${readiness.sleepDebtHours !== null ? ` · 睡眠债 ${readiness.sleepDebtHours.toFixed(1)} 小时` : ""}`;
   return (
-    <section className="readiness-panel" id="readiness-basis">
+    <details className="readiness-panel readiness-fold" id="readiness-basis" open={foldOpen} onToggle={handleFoldToggle}>
+      <summary className="readiness-fold-summary" aria-label={foldOpen ? "收起恢复详情" : "展开恢复详情"}>
+        <span className="readiness-fold-summary-text">恢复详情 · {foldSummaryText}</span>
+        <span className="readiness-fold-action">{foldOpen ? "收起" : "展开"}</span>
+      </summary>
       {compact ? (
         <div className="readiness-compact-head">
           <p className="section-kicker">恢复详情</p>
@@ -3779,7 +4078,7 @@ function ReadinessPanel({ readiness, compact = false }: { readiness: Readiness; 
         <p>总分 = 5 + 2.0 × 加权平均 z，钳制到 0–10。HRV 32.5%（先取 ln）、静息心率 25%、昨晚睡眠 10%、7 天睡眠银行 10%、训练负荷 15%、呼吸频率 5%；呼吸只在升高时扣分。每项至少有 8 个历史读数才纳入；缺项权重按可用信号重新归一化。睡眠按时长 50 / 就寝规律 30 / 中断 20 评分。</p>
         <p>HRV 被压制且静息心率升高，或睡眠债超过 3 小时，都会直接降一档。腕温不纳入。分数看趋势不看单日；静息心率是跨设备最准的指标。这只是健康参考，不做诊断，身体不适请及时看医生。</p>
       </details>
-    </section>
+    </details>
   );
 }
 
@@ -3875,24 +4174,51 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline, focusFeedback, focusReadFailed, onViewTraining, syncAttempt }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; focusFeedback: FocusFeedbackData; focusReadFailed: boolean; onViewTraining?: (range: { start: string; end: string }) => void; syncAttempt: SyncAttemptState | null }) {
+function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, syncAttempt, onGoToWeekReview, onGoToDataStatus }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; syncAttempt: SyncAttemptState | null; onGoToWeekReview?: () => void; onGoToDataStatus?: () => void }) {
+  const [readinessOpen, setReadinessOpen] = useState(false);
+  const openReadinessBasis = () => {
+    setReadinessOpen(true);
+    window.setTimeout(() => document.getElementById("readiness-basis")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+  };
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
   const stepStatus: Status = snapshot.steps.value === null ? "数据缺失" : stepsBaselineIncomplete ? "基线不足" : snapshot.steps.status;
   const sleepHours = actualSleepHours(snapshot.sleep);
-  const swimWindowDates = [...snapshot.historyDaily].sort((a, b) => a.date.localeCompare(b.date)).slice(-7).map((row) => row.date);
+  // H-SWIM-VIS-001: the swim week window is the 7 CALENDAR days
+  // ending at dataDate — the same dataDate-anchored window the
+  // seven-day facts strip uses. Taking the last 7 historyDaily rows
+  // instead would silently stretch the "近7天" across more than 7
+  // calendar days on sparse weeks with missing days.
+  const swimWindowDates = /^\d{4}-\d{2}-\d{2}$/.test(snapshot.dataDate)
+    ? Array.from({ length: 7 }, (_, index) => shiftDateStr(snapshot.dataDate, index - 6))
+    : [];
   const swimSummary = swimWeekSummary(snapshot.historyWorkouts, swimWindowDates);
+  // LIFE-DESIGN-001-B1B follow-up (P1): the 30-day swim count that
+  // used to sit beside the 最近运动记录 heading was dropped when the
+  // recent list moved into the workout fold. It is restored here as
+  // an always-visible line in the workout block — a different window
+  // from the 7-day swim summary above it, not a replacement for it.
+  const swimCount30d = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).length;
+  const recentWorkoutCount = [...snapshot.historyWorkouts]
+    .sort((a, b) => (a.date !== b.date ? b.date.localeCompare(a.date) : a.id.localeCompare(b.id)))
+    .slice(0, 5).length;
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} syncAttempt={syncAttempt} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} syncAttempt={syncAttempt} onViewReadiness={openReadinessBasis} onViewWeekReview={onGoToWeekReview} onViewDataStatus={onGoToDataStatus} />
       {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
       <WeekLoadBlock snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} />
-      {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
+      {readiness ? <ReadinessPanel readiness={readiness} compact open={readinessOpen} onOpenChange={setReadinessOpen} /> : null}
       <section className="kpi-board" aria-label="关键健康指标">
         <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={stepStatus} />
         <Kpi label="静息心率" value={numberLabel(snapshot.restingHr.value, 1)} unit="bpm" detail={`基线约 ${snapshot.restingHr.baseline} · 常见 ${snapshot.restingHr.usualMin}–${snapshot.restingHr.usualMax}`} status={snapshot.restingHr.status} />
         <Kpi label="HRV" value={numberLabel(snapshot.hrv.value, 1)} unit="ms" detail={`基线约 ${snapshot.hrv.baseline} · 常见 ${snapshot.hrv.usualMin}–${snapshot.hrv.usualMax}`} status={snapshot.hrv.status} />
-        <Kpi label="睡眠" value={sleepHours.toFixed(1)} unit="h" detail={`质量 ${numberLabel(snapshot.sleep.quality)} · 效率 ${snapshot.sleep.efficiency?.toFixed(1) ?? "—"}%`} status={snapshot.sleep.status} />
+        <Kpi label="睡眠" value={sleepHours.toFixed(1)} unit="h" detail={`时长 ${sleepHours.toFixed(1)} 小时`} status={snapshot.sleep.status} anchorLabel="查看昨晚睡眠" anchorTargetId="sleep-records" />
+        {snapshot.morningReference ? (
+          <div className="morning-strip kpi-morning-row" aria-label="今晨参考">
+            <div><span>今晨参考 · {dateLabel(snapshot.morningReference.date)}</span><strong>HRV {numberLabel(snapshot.morningReference.hrvMs, 1)} ms</strong></div>
+            <div><span>平均心率</span><strong>{numberLabel(snapshot.morningReference.avgHrBpm, 1)} bpm</strong></div>
+          </div>
+        ) : null}
       </section>
       <StrengthPanel strength={snapshot.strengthTraining} onSync={onSyncStrength} syncing={strengthSyncing} />
       <div className="dark-panel">
@@ -3901,19 +4227,18 @@ function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSync
       <div className="dark-panel">
         <SleepRegularityPanel snapshot={snapshot} />
       </div>
-      <div className="dark-panel">
-        <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />
-      </div>
-      <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={snapshot.strengthTraining.displayUnit} />
-      {snapshot.morningReference ? (
-        <section className="morning-strip" aria-label="今晨参考">
-          <div><span>今晨参考 · {dateLabel(snapshot.morningReference.date)}</span><strong>HRV {numberLabel(snapshot.morningReference.hrvMs, 1)} ms</strong></div>
-          <div><span>平均心率</span><strong>{numberLabel(snapshot.morningReference.avgHrBpm, 1)} bpm</strong></div>
-        </section>
-      ) : null}
+      <section className="data-status-anchor" aria-label="数据状态总览">
+        <span>数据状态 · {dataStatus ? dataStatus.overallLabel : "暂无数据状态"}</span>
+        <button type="button" className="sync-button" aria-label="查看数据状态" onClick={onGoToDataStatus}>查看数据状态</button>
+      </section>
       <SleepPanel sleep={snapshot.sleep} />
-      <section className="workout-line" aria-label="运动记录"><div><span>近7天运动</span><strong>{snapshot.workouts.count7d} 次</strong></div><p>{snapshot.workouts.note}</p>{swimSummary.count > 0 ? <p className="workout-swim-line">{swimSummary.label}</p> : null}</section>
-      <RecentWorkouts snapshot={snapshot} />
+      <section className="workout-block" aria-label="运动记录">
+        <div className="workout-line"><div><span>近7天运动</span><strong>{snapshot.workouts.count7d} 次</strong></div><p>{snapshot.workouts.note}</p>{swimSummary.count > 0 ? <p className="workout-swim-line">{swimSummary.label}</p> : null}<p className="workout-swim-line">近30天游泳 {swimCount30d} 次</p></div>
+        <details className="workout-recent-fold">
+          <summary aria-label={`展开最近 ${recentWorkoutCount} 次运动记录`}>最近 {recentWorkoutCount} 次运动记录</summary>
+          <RecentWorkouts snapshot={snapshot} />
+        </details>
+      </section>
     </div>
   );
 }
@@ -3928,13 +4253,8 @@ function RecentWorkouts({ snapshot }: { snapshot: Snapshot }) {
   const recent = [...snapshot.historyWorkouts]
     .sort((a, b) => (a.date !== b.date ? b.date.localeCompare(a.date) : a.id.localeCompare(b.id)))
     .slice(0, 5);
-  const swimCount = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).length;
   return (
-    <section className="history-section recent-workouts-section" aria-labelledby="recent-workouts-title">
-      <div className="section-heading">
-        <div><p className="section-kicker">HealthKit workout</p><h2 id="recent-workouts-title">最近运动记录</h2></div>
-        <span className="record-count">近30天游泳 {swimCount} 次</span>
-      </div>
+    <div className="recent-workouts-list">
       {recent.length ? (
         <div className="record-list">
           {recent.map((workout) => (
@@ -3952,7 +4272,7 @@ function RecentWorkouts({ snapshot }: { snapshot: Snapshot }) {
           ))}
         </div>
       ) : <p className="empty-inline">近30天没有 HealthKit 运动记录。</p>}
-    </section>
+    </div>
   );
 }
 
@@ -3983,7 +4303,12 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
       </section>
 
       {history.length ? (
-        <section className="history-charts" aria-labelledby="history-charts-title">
+        <details className="history-charts trends-daily-fold">
+          <summary className="trends-daily-summary" aria-label={`展开每日明细，近30天，共 ${history.length} 天数据`}>
+            <span>每日明细（近30天）</span>
+            <span>近30天 · {history.length} 天数据</span>
+            <span>展开</span>
+          </summary>
           <div className="history-intro"><p className="section-kicker">近30天</p><h2 id="history-charts-title">每日明细</h2><p>缺失值保留为空白，不按 0 计算。</p></div>
           <div className="chart-grid">
             <ChartPanel eyebrow="步数 · 左轴（步）" title="日活动量">
@@ -4002,7 +4327,7 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
               <ResponsiveContainer width="100%" height="100%"><LineChart data={history} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis domain={["dataMin - 0.5", "dataMax + 0.5"]} width={42} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Line type="linear" dataKey="weightKg" name="体重" unit=" kg" stroke="var(--blue)" strokeWidth={2.25} dot={{ r: 3 }} connectNulls={false} /></LineChart></ResponsiveContainer>
             </ChartPanel>
           </div>
-        </section>
+        </details>
       ) : <p className="empty-inline">完成一次同步后，这里会显示近30天每日趋势。</p>}
     </div>
   );
@@ -4017,7 +4342,7 @@ function allWorkoutsList(historyWorkouts: HistoryWorkout[]): HistoryWorkout[] {
   });
 }
 
-function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, currentFocusKey, onReturnToFocus, onClearFocusRange }: {
+function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, currentFocusKey, onReturnToFocus, onClearFocusRange, dataStatus, focusFeedback, focusReadFailed, onViewTraining }: {
   snapshot: Snapshot;
   unifiedTimeline?: UnifiedDay[];
   focusRange?: { start: string; end: string } | null;
@@ -4025,10 +4350,18 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
   currentFocusKey?: string | null;
   onReturnToFocus?: () => void;
   onClearFocusRange?: () => void;
+  dataStatus?: DataStatus | null;
+  focusFeedback?: FocusFeedbackData;
+  focusReadFailed?: boolean;
+  onViewTraining?: (range: { start: string; end: string }) => void;
 }) {
+  const [showAllUnified, setShowAllUnified] = useState(false);
+  const [workoutFilter, setWorkoutFilter] = useState<"all" | "swim">("all");
   const strengths = [...snapshot.strengthTraining.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const allWorkouts = allWorkoutsList(snapshot.historyWorkouts);
-  const swims = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).slice().reverse();
+  const swimWorkoutCount = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).length;
+  const filteredWorkouts = workoutFilter === "swim" ? allWorkouts.filter((workout) => isSwimWorkout(workout.type)) : allWorkouts;
+  const muscleSummary = muscleStatus(snapshot.strengthTraining.workouts, laTodayDateString());
   const weights = snapshot.historyDaily.filter((row): row is Daily & { weightKg: number } => row.weightKg !== null).slice().reverse();
   const sleeps = snapshot.historySleeps.slice().reverse();
   // H3.5 training entry landing: the stored sessions inside the
@@ -4189,12 +4522,24 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
         </section>
       ) : null}
       {fullHistoryVisible ? (<>
+      {focusFeedback ? (
+        <div className="dark-panel history-week-review-panel">
+          <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed ?? false} onViewTraining={onViewTraining} />
+        </div>
+      ) : null}
+      <DataStatusPanel dataStatus={dataStatus ?? null} unifiedTimeline={unifiedTimeline ?? []} displayUnit={snapshot.strengthTraining.displayUnit} />
       {unifiedTimeline && unifiedTimeline.length ? (
-        <section className="history-section" aria-labelledby="unified-history-title">
+        <details className="history-section history-fold">
+          <summary className="history-fold-summary" aria-label={`展开一体时间线，共 ${unifiedTimeline.length} 天`}>
+            <span>一体时间线 · 每天合在一起看</span>
+            <span>{unifiedTimeline.length} 天</span>
+            <span>展开</span>
+          </summary>
+        <section aria-labelledby="unified-history-title">
           <div className="section-heading"><div><p className="section-kicker">一体时间线</p><h2 id="unified-history-title">每天合在一起看</h2></div><span className="record-count">{unifiedTimeline.length} 天</span></div>
           <p className="unified-note">仅汇总有记录的时长，缺失不按0</p>
           <div className="unified-list">
-            {unifiedTimeline.map((day) => (
+            {(showAllUnified ? unifiedTimeline : unifiedTimeline.slice(0, 7)).map((day) => (
               <div className="unified-row" key={day.date}>
                 <span className="unified-date">{dateLabel(day.date)}</span>
                 <div className="unified-main"><strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong><small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${snapshot.strengthTraining.displayUnit}` : "没有力量训练"}{unifiedWorkoutText(day) ? ` · ${unifiedWorkoutText(day)}` : ""}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}</small></div>
@@ -4202,9 +4547,19 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
               </div>
             ))}
           </div>
+          {!showAllUnified && unifiedTimeline.length > 7 ? (
+            <button type="button" className="history-show-all-btn" aria-label="查看全部时间线" onClick={() => setShowAllUnified(true)}>查看全部（共 {unifiedTimeline.length} 天）</button>
+          ) : null}
         </section>
+        </details>
       ) : null}
-      <section className="history-section" aria-labelledby="strength-history-title">
+      <details className="history-section history-fold">
+        <summary className="history-fold-summary" aria-label={`展开力量训练历史，共 ${strengths.length} 次`}>
+          <span>力量训练历史</span>
+          <span>{strengths.length} 次</span>
+          <span>展开</span>
+        </summary>
+      <section aria-labelledby="strength-history-title">
         <div className="section-heading"><div><p className="section-kicker">训练记录</p><h2 id="strength-history-title">力量训练历史</h2></div><span className="record-count">{strengths.length} 次</span></div>
         {strengths.length ? <div className="strength-history-list">{strengths.map((workout) => (
           <details className="strength-history-row" key={workout.id}>
@@ -4220,28 +4575,56 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
           </details>
         ))}</div> : <p className="empty-inline">{snapshot.strengthTraining.note}</p>}
       </section>
+      </details>
 
-      <MuscleStatusPanel strength={snapshot.strengthTraining} />
+      <details className="history-section history-fold">
+        <summary className="history-fold-summary" aria-label={`展开肌群状态，共 ${muscleSummary.groups.length} 个肌群`}>
+          <span>肌群状态</span>
+          <span>{muscleSummary.groups.length} 个肌群 · 近7天有记录 {muscleSummary.sections.recent.length} 个</span>
+          <span>展开</span>
+        </summary>
+        <MuscleStatusPanel strength={snapshot.strengthTraining} />
+      </details>
 
-      <section className="history-section" aria-labelledby="swim-history-title">
-        <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="swim-history-title">游泳记录</h2></div><span className="record-count">{swims.length} 次</span></div>
-        {swims.length ? <div className="record-list">{swims.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)} · 游泳</strong><span>{numberLabel(workout.distanceMeters)} 米</span></div><dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有游泳 workout 记录。</p>}
+      <details className="history-section history-fold all-workouts-fold">
+        <summary className="history-fold-summary" aria-label={`展开全部运动记录，共 ${allWorkouts.length} 次`}>
+          <span>全部运动记录</span>
+          <span>{allWorkouts.length} 次 · 其中游泳 {swimWorkoutCount} 次</span>
+          <span>展开</span>
+        </summary>
+      <section className="all-workouts-section" aria-labelledby="all-workouts-title">
+        <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="all-workouts-title">全部运动记录</h2></div><span className="record-count">{filteredWorkouts.length} 次</span></div>
+        <div className="workout-filter" role="group" aria-label="运动记录筛选">
+          <button type="button" aria-pressed={workoutFilter === "all"} aria-label="显示全部运动记录" className={workoutFilter === "all" ? "selected" : ""} onClick={() => setWorkoutFilter("all")}>全部</button>
+          <button type="button" aria-pressed={workoutFilter === "swim"} aria-label="只看游泳记录" className={workoutFilter === "swim" ? "selected" : ""} onClick={() => setWorkoutFilter("swim")}>只看游泳</button>
+        </div>
+        {filteredWorkouts.length ? <div className="record-list">{filteredWorkouts.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)} · {workoutTypeLabel(workout.type)}</strong><span>{workout.distanceMeters === null ? "—" : workout.distanceMeters === 0 ? "0 米" : `${numberLabel(workout.distanceMeters)} 米`}</span></div><dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">{workoutFilter === "swim" ? "近30天没有游泳 workout 记录。" : "近30天没有 HealthKit 运动记录。"}</p>}
       </section>
+      </details>
 
-      <section className="history-section all-workouts-section" aria-labelledby="all-workouts-title">
-        <div className="section-heading"><div><p className="section-kicker">HealthKit workout</p><h2 id="all-workouts-title">全部运动记录</h2></div><span className="record-count">{allWorkouts.length} 次</span></div>
-        {allWorkouts.length ? <div className="record-list">{allWorkouts.map((workout) => <article className="record-row" key={workout.id}><div><strong>{dateLabel(workout.date)} · {workoutTypeLabel(workout.type)}</strong><span>{workout.distanceMeters === null ? "—" : workout.distanceMeters === 0 ? "0 米" : `${numberLabel(workout.distanceMeters)} 米`}</span></div><dl><div><dt>时长</dt><dd>{workout.durationMinutes === null ? "—" : `${workout.durationMinutes.toFixed(1)} 分`}</dd></div><div><dt>平均心率</dt><dd>{workout.averageHr === null ? "—" : `${workout.averageHr.toFixed(0)} bpm`}</dd></div><div><dt>消耗</dt><dd>{workout.energyKcal === null ? "—" : `${workout.energyKcal.toFixed(0)} kcal`}</dd></div></dl></article>)}</div> : <p className="empty-inline">近30天没有 HealthKit 运动记录。</p>}
-      </section>
-
-      <section className="history-section" aria-labelledby="weight-history-title">
+      <details className="history-section history-fold">
+        <summary className="history-fold-summary" aria-label={`展开体重记录，共 ${weights.length} 次`}>
+          <span>体重记录</span>
+          <span>{weights.length} 次</span>
+          <span>展开</span>
+        </summary>
+      <section aria-labelledby="weight-history-title">
         <div className="section-heading"><div><p className="section-kicker">近30天</p><h2 id="weight-history-title">体重记录</h2></div><span className="record-count">{weights.length} 次</span></div>
         {weights.length ? <div className="weight-list">{weights.map((row) => <div key={row.date}><span>{dateLabel(row.date)}</span><strong>{row.weightKg.toFixed(2)} kg</strong></div>)}</div> : <p className="empty-inline">近30天没有体重记录。</p>}
       </section>
+      </details>
 
-      <section className="history-section" aria-labelledby="sleep-history-title">
+      <details className="history-section history-fold">
+        <summary className="history-fold-summary" aria-label={`展开睡眠历史，共 ${sleeps.length} 晚`}>
+          <span>睡眠历史</span>
+          <span>{sleeps.length} 晚</span>
+          <span>展开</span>
+        </summary>
+      <section aria-labelledby="sleep-history-title">
         <div className="section-heading"><div><p className="section-kicker">最近记录</p><h2 id="sleep-history-title">睡眠历史</h2></div><span className="record-count">{sleeps.length} 晚</span></div>
         {sleeps.length ? <div className="sleep-list">{sleeps.map((sleep) => <article key={`${sleep.date}-${sleep.start}`}><div><strong>{dateLabel(sleep.date)}</strong><span>{sleep.start}–{sleep.end}</span></div><div><strong>{sleep.totalHours.toFixed(1)} 小时</strong><span>质量 {numberLabel(sleep.quality)}</span></div></article>)}</div> : <p className="empty-inline">暂无睡眠历史记录。</p>}
       </section>
+      </details>
       </>) : null}
     </div>
   );
@@ -4413,6 +4796,9 @@ function storePendingRedemption(draft: RedeemDraft | null) {
 }
 
 function scrollToRewardsPanel() {
+  const panel = document.getElementById("game-rewards-panel");
+  const fold = panel?.closest("details");
+  if (fold) fold.open = true;
   document.getElementById("game-rewards-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -5055,13 +5441,22 @@ function GameView() {
         <p className="game-progress-text">本级 {data.xpIntoLevel} / {data.xpPerLevel} XP · 距 Lv {data.level + 1} 还差 {data.xpToNextLevel} XP{data.settledThroughDate ? ` · 已结算至 ${fullDateLabel(data.settledThroughDate)}` : " · 尚无结算记录"}</p>
         {data.unspentPoints > 0 ? <p className="game-points-note"><span aria-hidden="true">✚</span> 有 {data.unspentPoints} 点未分配属性点，去下方属性区加点。</p> : null}
         <NextRewardGoal />
-        <p className="game-rules">经验规则 v{data.ruleVersion}：步数每 1000 步 1 XP（单日封顶 20）；主睡眠满 7 小时 10 XP，不足按比例向下取整；力量训练每完成一场 10 XP；主任务达标另 +10 XP。等级每 100 XP 一级，每升一级得 3 点属性点。属性每点使对应领域结算经验 +2%（属性部分单领域封顶 +50%），装备效果叠加在属性之上；加成只对分配 / 装备之后的新结算生效，旧账本不重算（v1 账本保持原样）。金币：余额最初按累计 XP 一次性 1:1 折算，此后每次经验结算按实得 XP 1:1 增发（装备金币加成会放大增发）。每日任务奖励固定 XP 与金币，不吃领域加成，每任务每日限领一次。打开页面时按洛杉矶本地日结算，只结算数据完整的日期；缺失数据如实显示、不发经验；同一天同一类别只结算一次。</p>
-        <p className="game-rules">数据完整后才结算；来源修订会自动按差额修正账本。</p>
+        <details className="game-rules-fold">
+          <summary aria-label="展开经验规则说明">经验规则说明</summary>
+          <p className="game-rules">经验规则 v{data.ruleVersion}：步数每 1000 步 1 XP（单日封顶 20）；主睡眠满 7 小时 10 XP，不足按比例向下取整；力量训练每完成一场 10 XP；主任务达标另 +10 XP。等级每 100 XP 一级，每升一级得 3 点属性点。属性每点使对应领域结算经验 +2%（属性部分单领域封顶 +50%），装备效果叠加在属性之上；加成只对分配 / 装备之后的新结算生效，旧账本不重算（v1 账本保持原样）。金币：余额最初按累计 XP 一次性 1:1 折算，此后每次经验结算按实得 XP 1:1 增发（装备金币加成会放大增发）。每日任务奖励固定 XP 与金币，不吃领域加成，每任务每日限领一次。打开页面时按洛杉矶本地日结算，只结算数据完整的日期；缺失数据如实显示、不发经验；同一天同一类别只结算一次。</p>
+          <p className="game-rules">数据完整后才结算；来源修订会自动按差额修正账本。</p>
+        </details>
         {data.healthState !== "ok" ? <p className="game-note">健康数据{data.healthState === "corrupt" ? "快照损坏" : "尚未同步"}：步行与睡眠经验暂时无法结算，已入账的经验与金币不受影响。</p> : null}
         {actionNote ? <p className="game-action-note" role="status">{actionNote}</p> : null}
       </section>
 
-      <section className="game-panel" aria-labelledby="game-attrs-title">
+      <details className="game-panel game-fold">
+        <summary className="game-fold-summary" aria-label={`展开属性，未分配 ${data.unspentPoints} 点`}>
+          <span>属性</span>
+          <span>未分配 {data.unspentPoints} 点</span>
+          <span>展开</span>
+        </summary>
+      <section aria-labelledby="game-attrs-title">
         <div className="section-line"><h3 id="game-attrs-title">属性</h3><span>未分配 {data.unspentPoints} 点 · 每级 +3 点</span></div>
         <div className="game-attrs">
           {GAME_ATTRIBUTE_META.map((meta) => {
@@ -5082,8 +5477,15 @@ function GameView() {
         </div>
         <p className="game-note">每点 +2% 对应领域经验，属性部分单领域封顶 +50%（25 点）；分配后不可撤销（v1 无洗点），只影响之后的新结算。</p>
       </section>
+      </details>
 
-      <section className="game-panel" aria-labelledby="game-equip-title">
+      <details className="game-panel game-fold">
+        <summary className="game-fold-summary" aria-label={`展开装备与商店，金币余额 ${data.gold}`}>
+          <span>装备与商店</span>
+          <span>金币 {numberLabel(data.gold)}</span>
+          <span>展开</span>
+        </summary>
+      <section aria-labelledby="game-equip-title">
         <div className="section-line"><h3 id="game-equip-title">装备与商店</h3><span>金币 {numberLabel(data.gold)}{data.goldBonusPct > 0 ? ` · 金币加成 +${data.goldBonusPct}%` : ""}</span></div>
         <div className="game-slots">
           {GAME_SLOT_META.map((slotMeta) => {
@@ -5129,8 +5531,16 @@ function GameView() {
         </div>
         <p className="game-note">每槽位只能装备一件，换装直接替换；装备效果与属性加成叠加，只对之后的新结算生效。无抽卡、无随机词缀、无真实付费。</p>
       </section>
+      </details>
 
-      <RewardsPanel />
+      <details className="game-fold game-rewards-fold">
+        <summary className="game-fold-summary game-panel-summary" aria-label={`展开奖励，金币余额 ${data.gold}`}>
+          <span>奖励</span>
+          <span>金币 {numberLabel(data.gold)}</span>
+          <span>展开</span>
+        </summary>
+        <RewardsPanel />
+      </details>
 
       <section className="game-panel" aria-labelledby="game-daily-title">
         <div className="section-line"><h3 id="game-daily-title">每日额外任务</h3><span>每日 3 个 · 达标自动入账</span></div>
@@ -5203,7 +5613,13 @@ function GameView() {
         </section>
       ) : null}
 
-      <section className="game-panel" aria-labelledby="game-ledger-title">
+      <details className="game-panel game-fold">
+        <summary className="game-fold-summary" aria-label={`展开经验账本，共 ${data.settlements.length} 条`}>
+          <span>经验账本</span>
+          <span>{data.settlements.length} 条</span>
+          <span>展开</span>
+        </summary>
+      <section aria-labelledby="game-ledger-title">
         <div className="section-line"><h3 id="game-ledger-title">经验账本</h3><span>逐日逐类 · 规则 v{data.ruleVersion}</span></div>
         {data.settlements.length ? (
           <div className="game-ledger">
@@ -5226,6 +5642,7 @@ function GameView() {
           <p className="game-note">暂无结算记录。步行、主睡眠或力量训练的数据完整入账后，打开这一页就会自动结算到这里。</p>
         )}
       </section>
+      </details>
     </div>
   );
 }
@@ -5256,6 +5673,25 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
     setHistoryFocusRange(null);
     setHistoryFocusContext(null);
   };
+  // LIFE-DESIGN-001-B1B (R8): jumps from today's hero / data-status
+  // anchor land on the history tab with the target panel visible —
+  // the range landing is cleared so the full history (which contains
+  // the week review and the data status area) is presented, and the
+  // scroll happens once that tab has mounted.
+  const [historyScrollTarget, setHistoryScrollTarget] = useState<string | null>(null);
+  const goToHistoryPanel = (targetId: string) => {
+    clearHistoryFocusRange();
+    setHistoryScrollTarget(targetId);
+    setTab("history");
+  };
+  useEffect(() => {
+    if (tab !== "history" || !historyScrollTarget) return;
+    const timer = window.setTimeout(() => {
+      document.getElementById(historyScrollTarget)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setHistoryScrollTarget(null);
+    }, 90);
+    return () => window.clearTimeout(timer);
+  }, [tab, historyScrollTarget]);
   // The focus key the today card would bind RIGHT NOW (same
   // derivation the panel uses): the range page compares it against
   // the key its basis card was opened with, so a snapshot/window
@@ -5387,7 +5823,7 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} syncAttempt={syncAttempt} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );

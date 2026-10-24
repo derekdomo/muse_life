@@ -1043,6 +1043,80 @@ check('dual: source — the basis card renders the live line while heading/basis
     stored2.status === 'saved' && stored2.confirmed === '不适用' && stored2.confirmedRevision === 2);
 }
 
+// ----------------- (30) RT-2 follow-up: an intent ALREADY confirmed
+// by an authoritative re-read must survive its own late transport
+// failure (PM item H3.5·RT-2). Walk: op-B saves; before its callback
+// returns, a dashboard re-read confirms B's choice at rev1 (the RT-1
+// saving exit — pendingOperationId cleared, lastIntentOperationId
+// still B); THEN B's request fails at the transport level. The card
+// must stay saved — showing 未保存 would contradict the confirmed
+// fact. Protection is identity + version evidence, never value
+// equality.
+{
+  let s = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  s = beginFocusFeedbackSave(s, '不适用', 'op-rb-1');
+  // The re-read confirms op-B landed at rev1 while it is still saving.
+  s = syncFocusFeedbackState(s, KEY_A, '不适用', false, 1);
+  check('rt2b: fixture — re-read confirms intent B (saved, pending cleared, lastIntent still B)',
+    s.status === 'saved' && s.confirmed === '不适用' && s.confirmedRevision === 1
+    && s.pendingOperationId === null && s.lastIntentOperationId === 'op-rb-1');
+  check('rt2b: the confirmation evidence records B identity + revision',
+    s.readbackConfirmedOperationId === 'op-rb-1' && s.readbackConfirmedRevision === 1);
+  // B's OWN late transport failure: must keep the confirmed saved state.
+  const lateFail = settleFocusSaveOutcome(s, KEY_A, 'op-rb-1', { kind: 'failure' });
+  check('rt2b: B late failure after readback confirmation keeps saved (never 未保存/error)',
+    lateFail === s && lateFail.status === 'saved' && lateFail.confirmed === '不适用' && lateFail.confirmedRevision === 1);
+  // The same walk WITHOUT the readback confirmation: the failure has
+  // no proof of saving and still errors with the retry identity kept.
+  let u = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  u = beginFocusFeedbackSave(u, '不适用', 'op-rb-2');
+  const unproven = settleFocusSaveOutcome(u, KEY_A, 'op-rb-2', { kind: 'failure' });
+  check('rt2b: failure with NO readback confirmation still errors (retry identity kept)',
+    unproven.status === 'error' && unproven.selection === '不适用' && unproven.pendingOperationId === 'op-rb-2');
+  // Removing the evidence from the confirmed state (a hand-built
+  // state that merely LOOKS equal in value) restores the error: the
+  // guard is the recorded identity + version, not value equality.
+  const noEvidence = { ...s, readbackConfirmedOperationId: null, readbackConfirmedRevision: 0 };
+  const valueOnly = settleFocusSaveOutcome(noEvidence, KEY_A, 'op-rb-1', { kind: 'failure' });
+  check('rt2b: same values without the confirmation evidence -> late failure errors (no value-equality generalisation)',
+    valueOnly.status === 'error');
+  // A failure naming a DIFFERENT operation (same choice value) is a
+  // stale callback: it merges nothing and cannot unsettle B either.
+  const otherOp = settleFocusSaveOutcome(s, KEY_A, 'op-rb-other', { kind: 'failure' });
+  check('rt2b: failure from another operation id leaves the confirmed state untouched',
+    otherOp === s);
+  // A new intent with the SAME choice supersedes the evidence: its
+  // own failure is unproven and errors.
+  let v = beginFocusFeedbackSave(s, '不适用', 'op-rb-3');
+  check('rt2b: a new intent (same choice) clears the previous confirmation evidence',
+    v.status === 'saving' && v.readbackConfirmedOperationId === null && v.readbackConfirmedRevision === 0);
+  const newIntentFail = settleFocusSaveOutcome(v, KEY_A, 'op-rb-3', { kind: 'failure' });
+  check('rt2b: the new intent own failure errors (not protected by B evidence)',
+    newIntentFail.status === 'error' && newIntentFail.pendingOperationId === 'op-rb-3');
+  // Higher-revision server truth still merges monotonically while a
+  // newer intent is in flight, without clobbering its selection.
+  let w = beginFocusFeedbackSave(s, '有帮助', 'op-rb-4'); // gated on rev1
+  w = syncFocusFeedbackState(w, KEY_A, '不适用', false, 2);
+  check('rt2b: re-read at rev2 during a newer save merges confirmed forward only (selection + saving kept)',
+    w.status === 'saving' && w.selection === '有帮助' && w.confirmed === '不适用' && w.confirmedRevision === 2
+    && w.pendingOperationId === 'op-rb-4');
+  const wDone = settleFocusSaveOutcome(w, KEY_A, 'op-rb-4', { kind: 'success', choice: '有帮助', revision: 3 });
+  check('rt2b: the newer intent then settles at rev3',
+    wDone.status === 'saved' && wDone.confirmed === '有帮助' && wDone.confirmedRevision === 3);
+  // The draft-store route adjudicates identically: a stored
+  // readback-confirmed draft survives B's late failure record.
+  const store = createFocusDraftStore();
+  saveFocusDraft(store, KEY_A, s);
+  recordFocusSaveOutcome(store, KEY_A, { kind: 'failure', operationId: 'op-rb-1' });
+  const stored = loadFocusDraft(store, KEY_A);
+  check('rt2b: draft-store route — late failure of the readback-confirmed intent keeps the stored draft saved',
+    stored.status === 'saved' && stored.confirmed === '不适用' && stored.confirmedRevision === 1);
+  // Source: the evidence fields are part of the production state.
+  check('rt2b: source — readback confirmation evidence is recorded by the RT-1 exit and consulted by settleFocusSaveOutcome',
+    clientSrc.includes('readbackConfirmedOperationId: state.lastIntentOperationId')
+    && clientSrc.includes('operationId === state.readbackConfirmedOperationId'));
+}
+
 // ----------------- (29) H-FRESH-001: refreshPhaseLabel five-phase
 // wording is deterministic; timestamps are the sources' own update
 // times (the newer of the two), never an invented duration.

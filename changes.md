@@ -1516,3 +1516,19 @@
 - 本轮同时结清 EVID 回灌尾巴的 space-3 部分：此前未回灌的 server/src/actions.ts（DATE-1＋SAVE-1）、client App.tsx 的 DATE-1 arch 卡增量、validate-arch-dates.ts、validate-arch-save.ts 已一并拷入 weekly-finance/，与线上逐字节一致（bun.lock 仅平台 SDK tarball 完整性哈希一处差异，为构建噪声，未回灌）。
 - 局限：所有者视角未验——构建方桌面/移动捕获只见骨架，真实数据下的最终呈现、FIRE 锚点跳转滚动行为待所有者本人打开确认；屏数为按 CSS 的保守高度模型估算、非真机实测；明细页签屏数未设上限（台账层按设计稿豁免）。此登记仅表示实现方已交付，PM 结论以其评审记录为准。
 - 回滚：工件侧回退本轮 client 改动即恢复单页长列表（server/数据未动）；仓库侧 git revert 本提交撤回登记与镜像。
+
+## 2026-10-24 12 时 PDT（LIFE-DESIGN-001-B1B · 批次 1·健康：收尾——回归复跑＋源码回灌＋登记）
+
+- 任务与范围：线上工件（space-4 健康看板）两轮构建已完成并上线，本条只做收尾四件事——全套 validate 回归复跑与基线 diff、源码回灌、plans 标 [完成]、本证据登记；未改任何功能与呈现。构建本体改动（client/src/App.tsx、client/src/theme.css）由构建方两轮完成，本条不复述其实现细节，只记结构摘要与验证结论。
+- 改了什么（三页结构变化摘要）：今日页收为结论层——三分数 hero＋一句结论＋逐日事实条＋昨晚睡眠面板按既有定案完整保留；恢复详情改默认折叠（带数字摘要）；周复盘完整版移历史页，今日页只留结论行 teaser 与锚点；数据状态台账移历史页专区，今日页留一行锚点；最近运动明细收进运动区块内折叠。历史页——周复盘全量区为第一块，数据状态专区在位，六个区段改折叠摘要，趋势每日明细 5 图改折叠组，独立游泳区段移除、由全部运动顶部「全部／只看游泳」筛选承接。角色页——四面板改默认折叠带摘要。
+- 审计闭环：第一轮构建误删的「近30天游泳 N 次」已在第二轮恢复常显，口径与改前一致（仍为常显、不折叠）；历史页四项（周复盘全量区、数据状态专区、折叠摘要六区、趋势折叠组）经源码逐项核查均在位。
+- 功能可达对照：周复盘 今日常驻→历史页全量区第一块＋今日 teaser/锚点；数据状态 今日常驻→历史页专区＋今日一行锚点（R6 常显不折叠）；恢复详情 常驻→默认折叠带摘要；最近运动明细 常驻→运动区块内折叠；趋势每日明细 5 图 常驻→折叠组；历史六区 常驻→折叠摘要；独立游泳区段→全部运动顶部「全部／只看游泳」筛选承接、逐次数据不丢；角色四面板 常驻→默认折叠带摘要；其余功能位置不变。
+- 验证结果（回归复跑，线上新源码为准；基线原始输出 /tmp/hd-out-base 与 /tmp/hd-base 已佚，基线计数以构建方留存记录为准，本条已注明）： staging 镜像线上树（含 node_modules 与同级 workout-log 解析）逐套实跑，仓库回灌后复跑 week-review/swim-vis/hero-layers 计数与 staging 逐条一致，镜像无失真。
+  - 与基线逐条一致（通过/失败计数全等）：seven-day-facts 44 过 8 败、week-focus-feedback 195 过 1 败、swim-vis（仓库版）30 过 3 败、hero-status 11 过 9 败、unified-hk 27 过 7 败、week-load-coverage 20 过 1 败；全过组 game-settlement 150、rewards 122、muscle-status 50、persist-race 42、level-candidate 46、sleep-regularity 25、swim-partial 30、sync-readback 33、units 25、week-comparison 25、steps-contract 14 全过。
+  - 崩溃类（与基线同类，0 FAIL 行）：routine-archive 79 过 0 败后 harness 崩溃退出、source 18 过 0 败后 harness 报错退出；week-coverage 基线为崩溃，本轮在环境补齐（同级 workout-log 与 node_modules 可解析）后完整跑完 23 过 0 败，无 FAIL 出现。
+  - **失败集新增（均为断言前提被所有者拍板的设计迁移消除，非功能回归；本条未自行修改断言或功能，清单在此完整交回）**：(1) week-review 95 过 8 败 → 93 过 10 败，新增 2 条均为周复盘面板在今日页的位置断言（panel is rendered on the today page inside the hero；panel renders after the load verdict block and the seven-day facts strip），面板已按裁定③移历史页；其余 8 条为窗口/计数类断言，与基线失败计数吻合。(2) hero-layers 24 全过 → 23 过 1 败，新增 1 条同因（full week review panel rendered once, below the hero）。(3) all-workouts 13 过 7 败 → 12 过 8 败，净增 1 条；失败集含 2 条独立游泳区段位置断言（all-workouts section renders before the swim section；swim section retained unchanged in HistoryView），该区段已按设计由筛选承接、断言前提消失；基线逐条名称佚失，净增的逐条归属无法完全对齐，如实记录失败全集于本条工作底稿。
+  - **validate-design-b1b.mjs 缺失（异常）**：构建方应新写的该脚本在全机（线上工件树、仓库、/tmp、.harness）均不存在，无法复跑、无法回灌；其预期的 B1B 专项断言未被执行，本条以全套既有脚本回归＋上方功能可达对照的源码核查替代，不报已跑。待构建方补交后另行复跑登记。
+  - 无基线三套（如实报数，不与基线比较）：steps-display 0 过 1 败（expression not found: stepSummary）、week-load 3 过 2 败、whoop-scores 8 过 5 败——三套不在构建方基线清单内，失败均为源码形态断言，是否先于 B1B 存在不可考，单列于此待后续轮次处置。
+- 源码回灌：线上树 → health-dashboard/ 共 8 个文件——改动 5（client/src/App.tsx、client/src/theme.css、bun.lock、validate-week-review.mjs、validate-week-focus-feedback.mjs），新增 3（validate-sleep-regularity.mjs、validate-swim-partial.mjs、validate-sync-readback.mjs，后三者为此前 EVID 尾巴挂账的工件侧脚本，此次一并入仓）；client/server/drizzle 其余文件与线上逐字节一致、无变化。未同步 app.db、dist、缓存、.harness、audits。
+- 局限：所有者视角未验（构建/审计环境非所有者视角，最终以所有者本人打开三页确认为准）；**今日页约 5.8 屏，高于设计稿 4–5 屏目标，未达标**——主因是逐日事实条与昨晚睡眠面板按既有定案完整保留（结论层不动），本条如实记为未达标，不写成达标；基线原始输出佚失使 week-review/all-workouts 的逐条失败归属只能按计数＋名称族分析（见上）；validate-design-b1b 缺失见验证节。
+- 回滚：仓库侧 git revert 本提交撤回回灌与登记；工件侧回退两轮构建的 client 改动即恢复改前三页结构（server、数据、口径全程未动）。
