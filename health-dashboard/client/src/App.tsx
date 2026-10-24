@@ -239,6 +239,40 @@ function SleepPanel({ sleep }: { sleep: Snapshot["sleep"] }) {
   );
 }
 
+export type RefreshPhase = "idle" | "requested" | "waiting" | "saved" | "failed";
+
+// H-FRESH-001 (first slice): the page-side refresh phase line shown
+// next to the manual sync control. It names only the segments this
+// page can actually observe — the request was dispatched, the poll
+// is waiting, a new snapshot version was saved, or the sync did not
+// complete and the last successful data still stands. The upstream
+// segment (watch / phone HealthKit export) has no clock available to
+// this page, so no duration is ever claimed here; the timestamps
+// attached are the sources' own snapshot update times, formatted
+// with the page's existing updatedLabel. idle renders nothing.
+export function refreshPhaseLabel(input: {
+  phase: RefreshPhase;
+  healthUpdatedAt: string | null;
+  strengthUpdatedAt: string | null;
+}): string {
+  if (input.phase === "idle") return "";
+  if (input.phase === "requested") return "已请求同步，正在派发…";
+  if (input.phase === "waiting") return "等待同步结果…（保留当前数据）";
+  const stamps = [input.healthUpdatedAt, input.strengthUpdatedAt]
+    .filter((value): value is string => value !== null)
+    .map((value) => ({ value, time: new Date(value).getTime() }))
+    .filter((entry) => !Number.isNaN(entry.time));
+  const latest = stamps.length
+    ? stamps.reduce((a, b) => (b.time > a.time ? b : a)).value
+    : null;
+  if (input.phase === "saved") {
+    return latest ? `已保存新版本 · 更新于 ${updatedLabel(latest)}` : "已保存新版本";
+  }
+  return latest
+    ? `同步未完成，仍显示上次成功的数据 · 上次成功更新于 ${updatedLabel(latest)}`
+    : "同步未完成，仍显示上次成功的数据";
+}
+
 // Polls background sync tasks by their real lifecycle status instead of
 // guessing with a fixed timer: agent sync tasks routinely take longer than
 // the old 60-second blind poll, which is why finished syncs looked lost.
@@ -2469,6 +2503,69 @@ export function conflictFocusFeedbackSave(
   };
 }
 
+// The outcome of one save attempt, as reported by the mutation
+// callbacks — the same shape recordFocusSaveOutcome has always taken.
+export type FocusSaveOutcome =
+  | { kind: "success"; choice: FocusFeedbackChoice; revision?: number }
+  | { kind: "conflict"; feedback: FocusFeedbackChoice | null; revision: number | null }
+  | { kind: "failure" };
+
+// RT-2 (H3.5 re-review): the ONE adjudication point for a save
+// outcome. Every terminal callback (the panel's local state and the
+// draft-store record alike) is attributed to the operation that
+// produced it via operationId before it may settle anything:
+//
+// - a different boundKey drops the outcome whole (unchanged);
+// - the outcome OF the currently pending operation (operationId ===
+//   pendingOperationId), or any outcome when no newer operation is
+//   in flight (pendingOperationId null), settles through the exact
+//   legacy transitions — complete / fail / conflict verbatim,
+//   including conflict adoption, the stale-conflict-to-error rule
+//   and the same-operation retry identity;
+// - a STALE operation's late callback (operationId differs from a
+//   non-null pendingOperationId) must never settle the operation now
+//   in flight: selection, status, pendingOperationId,
+//   pendingExpectedRevision and the conflict fields stay exactly as
+//   they are. Only the server-confirmed value may merge into
+//   confirmed / confirmedRevision, and only monotonically — a
+//   success whose revision exceeds the confirmed one, or a conflict
+//   whose revision is at or beyond it. Failures and lower revisions
+//   merge nothing. The card therefore stays in the current
+//   operation's "saving" presentation until that operation's own
+//   outcome arrives and settles it.
+export function settleFocusSaveOutcome(
+  state: FocusFeedbackState,
+  boundKey: string,
+  operationId: string,
+  outcome: FocusSaveOutcome,
+): FocusFeedbackState {
+  if (state.boundKey !== boundKey) return state;
+  if (state.pendingOperationId === null || state.pendingOperationId === operationId) {
+    return outcome.kind === "success"
+      ? completeFocusFeedbackSave(state, boundKey, outcome.choice, outcome.revision)
+      : outcome.kind === "conflict"
+        ? conflictFocusFeedbackSave(state, boundKey, outcome.feedback, outcome.revision)
+        : failFocusFeedbackSave(state, boundKey);
+  }
+  if (outcome.kind === "success") {
+    if (outcome.revision !== undefined && outcome.revision > state.confirmedRevision) {
+      return { ...state, confirmed: outcome.choice, confirmedRevision: outcome.revision };
+    }
+    return state;
+  }
+  if (outcome.kind === "conflict") {
+    if (outcome.revision !== null && outcome.revision >= state.confirmedRevision) {
+      return {
+        ...state,
+        confirmed: outcome.feedback ?? state.confirmed,
+        confirmedRevision: Math.max(outcome.revision, state.confirmedRevision),
+      };
+    }
+    return state;
+  }
+  return state;
+}
+
 // H3.5 look-back preservation: the previous window's feedback row the
 // panel shows. On a successful read the incoming row (possibly null —
 // genuinely no earlier feedback) replaces what was known; on a FAILED
@@ -2759,17 +2856,14 @@ export function loadFocusDraft(store: FocusDraftStore, focusKey: string): FocusF
 export function recordFocusSaveOutcome(
   store: FocusDraftStore,
   boundKey: string,
-  outcome:
-    | { kind: "success"; choice: FocusFeedbackChoice; revision?: number }
-    | { kind: "conflict"; feedback: FocusFeedbackChoice | null; revision: number | null }
-    | { kind: "failure" },
+  outcome: FocusSaveOutcome & { operationId: string },
 ): FocusDraftStore {
   const draft = loadFocusDraft(store, boundKey) ?? { ...createFocusFeedbackState(), boundKey };
-  const next = outcome.kind === "success"
-    ? completeFocusFeedbackSave(draft, boundKey, outcome.choice, outcome.revision)
-    : outcome.kind === "conflict"
-      ? conflictFocusFeedbackSave(draft, boundKey, outcome.feedback, outcome.revision)
-      : failFocusFeedbackSave(draft, boundKey);
+  // RT-2: the outcome is attributed to its operation before it may
+  // settle anything — a stale operation's late callback recorded
+  // here can only merge its server-confirmed value monotonically,
+  // never settle the draft's newer in-flight operation.
+  const next = settleFocusSaveOutcome(draft, boundKey, outcome.operationId, outcome);
   return saveFocusDraft(store, boundKey, next);
 }
 
@@ -2895,24 +2989,28 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
       // is unmounted and setFeedbackState is a no-op — the store is
       // what the restored panel reads on return, so the return shows
       // this save's actual result for its key.
+      // RT-2: both routes (the live state and the draft-store
+      // record) are adjudicated by settleFocusSaveOutcome under
+      // vars.operationId — a late callback from an older operation
+      // can no longer settle the operation now in flight.
       if (result.ok) {
-        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "success", choice: vars.choice, revision: result.revision ?? undefined });
-        setFeedbackState((prev) => completeFocusFeedbackSave(prev, vars.key, vars.choice, result.revision ?? undefined));
+        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "success", operationId: vars.operationId, choice: vars.choice, revision: result.revision ?? undefined });
+        setFeedbackState((prev) => settleFocusSaveOutcome(prev, vars.key, vars.operationId, { kind: "success", choice: vars.choice, revision: result.revision ?? undefined }));
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       } else if (result.conflict) {
         // Arbitration refused the write: the server's saved value
         // stands. Adopt it as confirmed and keep the attempted choice
         // as the selection — the owner decides whether to insist.
-        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "conflict", feedback: result.feedback, revision: result.revision });
-        setFeedbackState((prev) => conflictFocusFeedbackSave(prev, vars.key, result.feedback, result.revision));
+        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "conflict", operationId: vars.operationId, feedback: result.feedback, revision: result.revision });
+        setFeedbackState((prev) => settleFocusSaveOutcome(prev, vars.key, vars.operationId, { kind: "conflict", feedback: result.feedback, revision: result.revision }));
       } else {
-        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure" });
-        setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key));
+        recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure", operationId: vars.operationId });
+        setFeedbackState((prev) => settleFocusSaveOutcome(prev, vars.key, vars.operationId, { kind: "failure" }));
       }
     },
     onError: (_error, vars) => {
-      recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure" });
-      setFeedbackState((prev) => failFocusFeedbackSave(prev, vars.key));
+      recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure", operationId: vars.operationId });
+      setFeedbackState((prev) => settleFocusSaveOutcome(prev, vars.key, vars.operationId, { kind: "failure" }));
     },
   });
   // A fresh user intent: mint a new operationId, gated on the
@@ -4696,12 +4794,42 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
   // (previously that note only rendered in the empty state, so a failed
   // auto-sync with existing data disappeared silently).
   const syncMessage = polling.failureNote ?? autoSyncFailureNote ?? (polling.syncing ? "同步进行中，完成后会自动更新" : lastSyncMessage);
+  // H-FRESH-001: the refresh phase line next to the sync control.
+  // requested/waiting derive from the live mutation + polling state;
+  // the terminal phase (saved / failed) is remembered when the poll
+  // settles so the line stays readable after the spinners stop. A
+  // failure note appearing at any point marks the phase failed, so a
+  // sync error is visible without expanding anything.
+  const [settledPhase, setSettledPhase] = useState<"saved" | "failed" | null>(null);
+  const wasSyncingRef = useRef(false);
+  useEffect(() => {
+    if (polling.syncing) {
+      wasSyncingRef.current = true;
+      return;
+    }
+    if (wasSyncingRef.current) {
+      wasSyncingRef.current = false;
+      setSettledPhase(polling.failureNote ? "failed" : "saved");
+    }
+  }, [polling.syncing, polling.failureNote]);
+  useEffect(() => {
+    if (polling.failureNote) setSettledPhase("failed");
+  }, [polling.failureNote]);
+  const refreshPhase: RefreshPhase = isSyncing
+    ? (polling.syncing ? "waiting" : "requested")
+    : (settledPhase ?? "idle");
+  const phaseLabel = refreshPhaseLabel({
+    phase: refreshPhase,
+    healthUpdatedAt: dataStatus?.health.updatedAt ?? null,
+    strengthUpdatedAt: dataStatus?.strength.updatedAt ?? null,
+  });
   return (
     <>
       <header className="page-meta">
         <div><p>{fullDateLabel(snapshot.dataDate)} · 最近完整日</p><span>更新于 {updatedLabel(snapshot.updatedAt)} · Apple 健康</span></div>
         <button className="sync-button" type="button" aria-label="同步 Apple 健康和训练记录" onClick={() => refresh.mutate()} disabled={isSyncing}>{isSyncing ? "同步中…" : snapshot.coverageIncomplete ? "待补全 · 全部同步" : "全部同步"}</button>
       </header>
+      {phaseLabel ? <p className="refresh-phase" role="status">{phaseLabel}</p> : null}
       <nav className="view-tabs" aria-label="健康看板视图">
         <button type="button" className={tab === "today" ? "selected" : ""} aria-current={tab === "today" ? "page" : undefined} onClick={() => setTab("today")}>今日</button>
         <button type="button" className={tab === "trends" ? "selected" : ""} aria-current={tab === "trends" ? "page" : undefined} onClick={() => setTab("trends")}>趋势</button>

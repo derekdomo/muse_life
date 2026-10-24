@@ -59,6 +59,7 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .page-meta p, .page-meta span, .section-kicker, .section-line span, .trend-range { margin: 0; font-size: 12px; line-height: 1.45; }
 .page-meta p { color: var(--text); font-weight: 750; }
 .page-meta div > span { display: block; margin-top: 3px; color: var(--dim); }
+.refresh-phase { margin: 10px 0 0; font-size: 12px; line-height: 1.45; color: var(--dim); }
 .sync-button { flex: 0 0 auto; border: 0; border-bottom: 1px solid currentColor; padding: 4px 0; background: transparent; color: var(--accent); font-size: 12px; font-weight: 750; cursor: pointer; }
 .sync-button:disabled { opacity: .55; }
 
