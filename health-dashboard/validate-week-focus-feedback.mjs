@@ -109,10 +109,10 @@ function extractFunction(source, name) {
   return source.slice(idx, bodyEnd + 1);
 }
 
-const NAMES = ['focusFeedbackKey', 'createFocusFeedbackState', 'syncFocusFeedbackState', 'beginFocusFeedbackSave', 'completeFocusFeedbackSave', 'failFocusFeedbackSave', 'conflictFocusFeedbackSave', 'resolvePreviousLookback', 'previousFocusWindows', 'fullDateLabel', 'buildCurrentFocusContext', 'buildPreviousFocusContext', 'focusBasisLines', 'focusContextUpdateNotice', 'focusVisitUpdateNotice', 'naturalWeekSampleCompleted', 'naturalWeekGap', 'focusBasisFeedbackLine', 'focusSampleEmptyKind', 'createFocusDraftStore', 'saveFocusDraft', 'loadFocusDraft', 'subscribeFocusDraft', 'recordFocusSaveOutcome', 'createFocusRangeContextStore', 'saveFocusRangeContext', 'takeFocusRangeContext'];
+const NAMES = ['focusFeedbackKey', 'createFocusFeedbackState', 'syncFocusFeedbackState', 'beginFocusFeedbackSave', 'completeFocusFeedbackSave', 'failFocusFeedbackSave', 'conflictFocusFeedbackSave', 'settleFocusSaveOutcome', 'resolvePreviousLookback', 'previousFocusWindows', 'fullDateLabel', 'updatedLabel', 'refreshPhaseLabel', 'buildCurrentFocusContext', 'buildPreviousFocusContext', 'focusBasisLines', 'focusContextUpdateNotice', 'focusVisitUpdateNotice', 'naturalWeekSampleCompleted', 'naturalWeekGap', 'focusBasisFeedbackLine', 'focusSampleEmptyKind', 'createFocusDraftStore', 'saveFocusDraft', 'loadFocusDraft', 'subscribeFocusDraft', 'recordFocusSaveOutcome', 'createFocusRangeContextStore', 'saveFocusRangeContext', 'takeFocusRangeContext'];
 const code = NAMES.map((name) => stripTypeScriptTypes(extractFunction(clientSrc, name).replace(/^export /, ''))).join('\n');
 const machine = new Function(`${code}\nreturn { ${NAMES.join(', ')} };`)();
-const { focusFeedbackKey, createFocusFeedbackState, syncFocusFeedbackState, beginFocusFeedbackSave, completeFocusFeedbackSave, failFocusFeedbackSave, conflictFocusFeedbackSave, resolvePreviousLookback, previousFocusWindows, buildCurrentFocusContext, buildPreviousFocusContext, focusBasisLines, focusContextUpdateNotice, focusVisitUpdateNotice, naturalWeekSampleCompleted, naturalWeekGap, focusBasisFeedbackLine, focusSampleEmptyKind, createFocusDraftStore, saveFocusDraft, loadFocusDraft, subscribeFocusDraft, recordFocusSaveOutcome, createFocusRangeContextStore, saveFocusRangeContext, takeFocusRangeContext } = machine;
+const { focusFeedbackKey, createFocusFeedbackState, syncFocusFeedbackState, beginFocusFeedbackSave, completeFocusFeedbackSave, failFocusFeedbackSave, conflictFocusFeedbackSave, settleFocusSaveOutcome, resolvePreviousLookback, previousFocusWindows, updatedLabel, refreshPhaseLabel, buildCurrentFocusContext, buildPreviousFocusContext, focusBasisLines, focusContextUpdateNotice, focusVisitUpdateNotice, naturalWeekSampleCompleted, naturalWeekGap, focusBasisFeedbackLine, focusSampleEmptyKind, createFocusDraftStore, saveFocusDraft, loadFocusDraft, subscribeFocusDraft, recordFocusSaveOutcome, createFocusRangeContextStore, saveFocusRangeContext, takeFocusRangeContext } = machine;
 
 const serverCode = stripTypeScriptTypes(extractFunction(serverSrc, 'decideFocusSaveOutcome').replace(/^export /, ''));
 const { decideFocusSaveOutcome } = new Function(`${serverCode}\nreturn { decideFocusSaveOutcome };`)();
@@ -574,7 +574,7 @@ check('scope: natural-week totals come only from coverage-complete weeklyTrend b
   saveFocusDraft(store, KEY_A, st);
   // The callback lands during the range page: the mutation records
   // the outcome into the store.
-  recordFocusSaveOutcome(store, KEY_A, { kind: 'success', choice: '有帮助', revision: 1 });
+  recordFocusSaveOutcome(store, KEY_A, { kind: 'success', operationId: 'op-600', choice: '有帮助', revision: 1 });
   const back = loadFocusDraft(store, KEY_A);
   check('landing: a success landing during the range visit restores as saved + confirmed + revision (not stuck at saving)',
     back.status === 'saved' && back.confirmed === '有帮助' && back.selection === '有帮助' && back.confirmedRevision === 1);
@@ -583,7 +583,7 @@ check('scope: natural-week totals come only from coverage-complete weeklyTrend b
   let c = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
   c = beginFocusFeedbackSave(c, '有帮助', 'op-601');
   saveFocusDraft(store2, KEY_A, c);
-  recordFocusSaveOutcome(store2, KEY_A, { kind: 'conflict', feedback: '不适用', revision: 1 });
+  recordFocusSaveOutcome(store2, KEY_A, { kind: 'conflict', operationId: 'op-601', feedback: '不适用', revision: 1 });
   const backC = loadFocusDraft(store2, KEY_A);
   check('landing: a conflict landing during the range visit restores as conflict (server value confirmed, attempted choice kept)',
     backC.status === 'conflict' && backC.confirmed === '不适用' && backC.conflictRevision === 1 && backC.selection === '有帮助');
@@ -592,14 +592,14 @@ check('scope: natural-week totals come only from coverage-complete weeklyTrend b
   let f = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
   f = beginFocusFeedbackSave(f, '不适用', 'op-602');
   saveFocusDraft(store3, KEY_A, f);
-  recordFocusSaveOutcome(store3, KEY_A, { kind: 'failure' });
+  recordFocusSaveOutcome(store3, KEY_A, { kind: 'failure', operationId: 'op-602' });
   const backF = loadFocusDraft(store3, KEY_A);
   check('landing: a failure landing during the range visit restores as error with the retry identity preserved',
     backF.status === 'error' && backF.selection === '不适用' && backF.pendingOperationId === 'op-602');
   // An outcome for a key with no draft yet applies to a fresh bound
   // state and the transitions key guards still hold.
   const store4 = createFocusDraftStore();
-  recordFocusSaveOutcome(store4, KEY_B, { kind: 'success', choice: '不适用', revision: 3 });
+  recordFocusSaveOutcome(store4, KEY_B, { kind: 'success', operationId: 'op-603', choice: '不适用', revision: 3 });
   const fresh = loadFocusDraft(store4, KEY_B);
   check('landing: an outcome with no prior draft binds fresh to its own key only',
     fresh !== null && fresh.boundKey === KEY_B && fresh.status === 'saved' && fresh.confirmedRevision === 3
@@ -755,7 +755,14 @@ check('round-trip: the panel seeds from and persists to the draft store under th
 check('round-trip: every save outcome is recorded into the draft store (success / conflict / failure)',
   clientSrc.includes('recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "success"')
   && clientSrc.includes('recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "conflict"')
-  && clientSrc.includes('recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure" })'));
+  && clientSrc.includes('recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure"'));
+check('rt2: every outcome carries its operationId into BOTH adjudication routes (draft record + live state via settleFocusSaveOutcome)',
+  clientSrc.includes('recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "success", operationId: vars.operationId')
+  && clientSrc.includes('recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "conflict", operationId: vars.operationId')
+  && clientSrc.includes('recordFocusSaveOutcome(focusDraftStore, vars.key, { kind: "failure", operationId: vars.operationId })')
+  && clientSrc.includes('settleFocusSaveOutcome(prev, vars.key, vars.operationId, { kind: "success"')
+  && clientSrc.includes('settleFocusSaveOutcome(prev, vars.key, vars.operationId, { kind: "conflict"')
+  && clientSrc.includes('settleFocusSaveOutcome(prev, vars.key, vars.operationId, { kind: "failure" })'));
 check('round-trip: the dashboard takes the pending context on navigation and clears it with the range',
   clientSrc.includes('takeFocusRangeContext(focusRangeContextStore)')
   && clientSrc.includes('setHistoryFocusContext(null)'));
@@ -789,7 +796,7 @@ check('round-trip: rolled-out detail reads 当时明细未保留 for both source
   let st = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
   st = beginFocusFeedbackSave(st, '有帮助', 'op-700');
   saveFocusDraft(store, KEY_A, st);
-  recordFocusSaveOutcome(store, KEY_A, { kind: 'success', choice: '有帮助', revision: 1 });
+  recordFocusSaveOutcome(store, KEY_A, { kind: 'success', operationId: 'op-700', choice: '有帮助', revision: 1 });
   check('rt1: success outcome is published to subscribers (key + saved state, same object the store holds)',
     events.length === 2 && events[1].key === KEY_A && events[1].state.status === 'saved'
     && events[1].state.confirmedRevision === 1 && events[1].state === loadFocusDraft(store, KEY_A));
@@ -800,7 +807,7 @@ check('round-trip: rolled-out detail reads 当时明细未保留 for both source
   let sf = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
   sf = beginFocusFeedbackSave(sf, '不适用', 'op-701');
   saveFocusDraft(storeF, KEY_A, sf);
-  recordFocusSaveOutcome(storeF, KEY_A, { kind: 'failure' });
+  recordFocusSaveOutcome(storeF, KEY_A, { kind: 'failure', operationId: 'op-701' });
   check('rt1: failure outcome is published (error state, selection + operationId preserved for the retry)',
     eventsF.length === 2 && eventsF[1].state.status === 'error' && eventsF[1].state.selection === '不适用'
     && eventsF[1].state.pendingOperationId === 'op-701');
@@ -811,7 +818,7 @@ check('round-trip: rolled-out detail reads 当时明细未保留 for both source
   let sc = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
   sc = beginFocusFeedbackSave(sc, '有帮助', 'op-702');
   saveFocusDraft(storeC, KEY_A, sc);
-  recordFocusSaveOutcome(storeC, KEY_A, { kind: 'conflict', feedback: '不适用', revision: 1 });
+  recordFocusSaveOutcome(storeC, KEY_A, { kind: 'conflict', operationId: 'op-702', feedback: '不适用', revision: 1 });
   check('rt1: conflict outcome is published (conflict state naming the server value)',
     eventsC.length === 2 && eventsC[1].state.status === 'conflict' && eventsC[1].state.conflictFeedback === '不适用');
   // Notifications for a different key are distinguishable by key.
@@ -953,6 +960,113 @@ check('ctx1: source — HistoryView captures the entry baseline at mount and no 
 check('dual: source — the basis card renders the live line while heading/basis stay on the frozen context',
   clientSrc.includes('{focusBasisFeedbackLine(focusContext, liveBasisState)}')
   && clientSrc.includes('loadFocusDraft(focusDraftStore, focusContextKey)'));
+
+// ----------------- (28) RT-2: a stale operation's terminal
+// callback must never settle the operation now in flight (PM
+// 2026-10-23). Reviewer's reproduction: op1 （有帮助） in flight; a
+// successful re-read confirms op1 saved at rev1; the owner changes
+// to 不适用 (op2, in flight); THEN op1's late callbacks arrive.
+{
+  let s = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  s = beginFocusFeedbackSave(s, '有帮助', 'op-rt2-1');
+  // The re-read confirms op1 landed at rev1 (RT-1 saving exit).
+  s = syncFocusFeedbackState(s, KEY_A, '有帮助', false, 1);
+  check('rt2: fixture — re-read confirms op1 (saved, rev1) before op2 starts',
+    s.status === 'saved' && s.confirmed === '有帮助' && s.confirmedRevision === 1);
+  s = beginFocusFeedbackSave(s, '不适用', 'op-rt2-2');
+  check('rt2: fixture — op2 in flight （不适用， gated on rev1)',
+    s.status === 'saving' && s.selection === '不适用' && s.pendingOperationId === 'op-rt2-2' && s.pendingExpectedRevision === 1);
+  // (a) op1's late success/rev1 must not rewind the card to saved/有帮助.
+  const a = settleFocusSaveOutcome(s, KEY_A, 'op-rt2-1', { kind: 'success', choice: '有帮助', revision: 1 });
+  check('rt2: stale success does NOT settle op2 (still saving 不适用， pending identity untouched, no rewind)',
+    a.status === 'saving' && a.selection === '不适用' && a.pendingOperationId === 'op-rt2-2'
+    && a.pendingExpectedRevision === 1 && a.confirmed === '有帮助' && a.confirmedRevision === 1);
+  // (b) op1's late transport failure must not mark op2 error/unsaved.
+  const b = settleFocusSaveOutcome(s, KEY_A, 'op-rt2-1', { kind: 'failure' });
+  check('rt2: stale failure does NOT settle op2 (state returned untouched)',
+    b === s);
+  // (c) op1's late conflict/rev1 must not mark op2 conflict.
+  const c = settleFocusSaveOutcome(s, KEY_A, 'op-rt2-1', { kind: 'conflict', feedback: '有帮助', revision: 1 });
+  check('rt2: stale conflict does NOT settle op2 (still saving, no conflict fields adopted; its rev1 report merges monotonically into confirmed only)',
+    c.status === 'saving' && c.selection === '不适用' && c.pendingOperationId === 'op-rt2-2'
+    && c.conflictFeedback === null && c.conflictRevision === null
+    && c.confirmed === '有帮助' && c.confirmedRevision === 1);
+  // The stale merge DOES advance confirmed when the stale report is
+  // newer than what the card has confirmed — without touching the
+  // in-flight operation in any way.
+  let m = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  m = beginFocusFeedbackSave(m, '有帮助', 'op-rt2-3');
+  m = beginFocusFeedbackSave(m, '不适用', 'op-rt2-4'); // superseded before op1 returned
+  const merged = settleFocusSaveOutcome(m, KEY_A, 'op-rt2-3', { kind: 'success', choice: '有帮助', revision: 2 });
+  check('rt2: stale success with a HIGHER revision merges confirmed/confirmedRevision only (op2 still saving, selection kept)',
+    merged.status === 'saving' && merged.selection === '不适用' && merged.pendingOperationId === 'op-rt2-4'
+    && merged.confirmed === '有帮助' && merged.confirmedRevision === 2);
+  const lowMerge = settleFocusSaveOutcome(merged, KEY_A, 'op-rt2-3', { kind: 'conflict', feedback: '不适用', revision: 1 });
+  check('rt2: stale conflict BELOW the confirmed revision merges nothing',
+    lowMerge === merged);
+  // op2's OWN outcomes settle exactly as before, all three routes.
+  const ownOk = settleFocusSaveOutcome(s, KEY_A, 'op-rt2-2', { kind: 'success', choice: '不适用', revision: 2 });
+  check('rt2: op2 own success settles (saved 不适用 rev2)',
+    ownOk.status === 'saved' && ownOk.confirmed === '不适用' && ownOk.selection === '不适用' && ownOk.confirmedRevision === 2);
+  const ownFail = settleFocusSaveOutcome(s, KEY_A, 'op-rt2-2', { kind: 'failure' });
+  check('rt2: op2 own failure settles (error, selection + retry identity kept)',
+    ownFail.status === 'error' && ownFail.selection === '不适用' && ownFail.pendingOperationId === 'op-rt2-2');
+  const ownConflict = settleFocusSaveOutcome(s, KEY_A, 'op-rt2-2', { kind: 'conflict', feedback: '有帮助', revision: 2 });
+  check('rt2: op2 own conflict settles (conflict, server value adopted as confirmed, attempted choice kept)',
+    ownConflict.status === 'conflict' && ownConflict.confirmed === '有帮助' && ownConflict.conflictRevision === 2 && ownConflict.selection === '不适用');
+  // A different boundKey drops the outcome whole, whichever op it names.
+  check('rt2: outcome for another key is dropped whole (same reference)',
+    settleFocusSaveOutcome(s, KEY_B, 'op-rt2-2', { kind: 'success', choice: '不适用', revision: 2 }) === s);
+  // No operation in flight (pendingOperationId null): the outcome
+  // settles through the legacy transitions — the draft-store landing
+  // path for a key with no pending intent depends on this.
+  let n = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 1);
+  const landed = settleFocusSaveOutcome(n, KEY_A, 'op-rt2-9', { kind: 'success', choice: '不适用', revision: 2 });
+  check('rt2: with no operation in flight the outcome settles via the legacy transition',
+    landed.status === 'saved' && landed.confirmed === '不适用' && landed.confirmedRevision === 2);
+  // The draft-store route applies the same attribution: a stale
+  // outcome recorded while op2 is the stored pending intent cannot
+  // settle the stored draft either.
+  const store = createFocusDraftStore();
+  let d = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  d = beginFocusFeedbackSave(d, '有帮助', 'op-rt2-5');
+  d = syncFocusFeedbackState(d, KEY_A, '有帮助', false, 1);
+  d = beginFocusFeedbackSave(d, '不适用', 'op-rt2-6');
+  saveFocusDraft(store, KEY_A, d);
+  recordFocusSaveOutcome(store, KEY_A, { kind: 'failure', operationId: 'op-rt2-5' });
+  const stored = loadFocusDraft(store, KEY_A);
+  check('rt2: draft-store route — stale failure leaves the stored op2 draft saving (not error)',
+    stored.status === 'saving' && stored.selection === '不适用' && stored.pendingOperationId === 'op-rt2-6');
+  recordFocusSaveOutcome(store, KEY_A, { kind: 'success', operationId: 'op-rt2-6', choice: '不适用', revision: 2 });
+  const stored2 = loadFocusDraft(store, KEY_A);
+  check('rt2: draft-store route — op2 own success settles the stored draft (saved 不适用 rev2)',
+    stored2.status === 'saved' && stored2.confirmed === '不适用' && stored2.confirmedRevision === 2);
+}
+
+// ----------------- (29) H-FRESH-001: refreshPhaseLabel five-phase
+// wording is deterministic; timestamps are the sources' own update
+// times (the newer of the two), never an invented duration.
+{
+  const H = '2026-10-23T08:00:00.000Z';
+  const S = '2026-10-23T09:30:00.000Z';
+  check('fresh: idle renders nothing',
+    refreshPhaseLabel({ phase: 'idle', healthUpdatedAt: H, strengthUpdatedAt: S }) === '');
+  check('fresh: requested wording',
+    refreshPhaseLabel({ phase: 'requested', healthUpdatedAt: H, strengthUpdatedAt: S }) === '已请求同步，正在派发…');
+  check('fresh: waiting wording (current data kept)',
+    refreshPhaseLabel({ phase: 'waiting', healthUpdatedAt: H, strengthUpdatedAt: S }) === '等待同步结果…（保留当前数据）');
+  check('fresh: saved wording carries the NEWER source update time',
+    refreshPhaseLabel({ phase: 'saved', healthUpdatedAt: H, strengthUpdatedAt: S }) === `已保存新版本 · 更新于 ${updatedLabel(S)}`
+    && refreshPhaseLabel({ phase: 'saved', healthUpdatedAt: S, strengthUpdatedAt: H }) === `已保存新版本 · 更新于 ${updatedLabel(S)}`);
+  check('fresh: failed wording names the last successful data and its update time',
+    refreshPhaseLabel({ phase: 'failed', healthUpdatedAt: H, strengthUpdatedAt: S }) === `同步未完成，仍显示上次成功的数据 · 上次成功更新于 ${updatedLabel(S)}`);
+  check('fresh: saved/failed without any source timestamp stay honest (no fabricated time)',
+    refreshPhaseLabel({ phase: 'saved', healthUpdatedAt: null, strengthUpdatedAt: null }) === '已保存新版本'
+    && refreshPhaseLabel({ phase: 'failed', healthUpdatedAt: null, strengthUpdatedAt: null }) === '同步未完成，仍显示上次成功的数据');
+  check('fresh: source — the phase line renders beside the dashboard sync control, outside any fold',
+    clientSrc.includes('className="refresh-phase"') && clientSrc.includes('refreshPhaseLabel({')
+    && clientSrc.indexOf('className="refresh-phase"') > clientSrc.indexOf('aria-label="同步 Apple 健康和训练记录"'));
+}
 
 console.log(`\n${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
