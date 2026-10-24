@@ -391,5 +391,142 @@ check("ANOM legacy monthly totals carry no daily evidence -> insufficient", (() 
   return r.verdict === "insufficient";
 })());
 
+// =====================================================================
+// TXN-2 matrix (PM 2026-10-24 01:07): asOf-first arbitration, scoped
+// conflicts. The candidate set is fixed by the cutoff BEFORE the
+// lifecycle is arbitrated; conflicts only count where they belong.
+// =====================================================================
+check("TXN2 pending->posted across asOf: before cutoff pending stands, both orders", (() => {
+  const rows = [
+    { id: "SYN-p", date: "2026-10-01", amount: -40, status: "pending", kind: "spend" },
+    { id: "SYN-p", date: "2026-10-20", amount: -40, status: "posted", kind: "spend" },
+  ];
+  const a = S(rows, { asOf: "2026-10-15" });
+  const b = S([...rows].reverse(), { asOf: "2026-10-15" });
+  return eq(a.pendingSpend, 40) && a.postedSpend === 0 && a.complete
+    && eq(b.pendingSpend, 40) && b.postedSpend === 0;
+})());
+check("TXN2 pending->posted at same-day cutoff: posted wins", (() => {
+  const rows = [
+    { id: "SYN-p", date: "2026-10-01", amount: -40, status: "pending", kind: "spend" },
+    { id: "SYN-p", date: "2026-10-20", amount: -40, status: "posted", kind: "spend" },
+  ];
+  const s = S(rows, { asOf: "2026-10-20" });
+  return eq(s.postedSpend, 40) && s.pendingSpend === 0 && s.complete;
+})());
+check("TXN2 cutoff before both rows: nothing counted", (() => {
+  const rows = [
+    { id: "SYN-p", date: "2026-10-01", amount: -40, status: "pending", kind: "spend" },
+    { id: "SYN-p", date: "2026-10-20", amount: -40, status: "posted", kind: "spend" },
+  ];
+  const s = S(rows, { asOf: "2026-09-30" });
+  return s.postedSpend === 0 && s.pendingSpend === 0 && s.conflicts.length === 0;
+})());
+check("TXN2 future same-status twin does not conflict the past view", (() => {
+  const rows = [
+    { id: "q1", date: "2026-10-05", amount: -40, status: "posted", kind: "spend" },
+    { id: "q1", date: "2026-10-28", amount: -50, status: "posted", kind: "spend" },
+  ];
+  const past = S(rows, { asOf: "2026-10-15" });
+  const full = S(rows);
+  return eq(past.postedSpend, 40) && past.conflicts.length === 0 && past.complete
+    && full.conflicts.length === 1 && !full.complete;
+})());
+check("TXN2 unrelated-month conflict does not pollute this month", (() => {
+  const rows = [
+    spendRow("ok1", -40),
+    { id: "s1", date: "2026-09-05", amount: -10, status: "posted", kind: "spend" },
+    { id: "s1", date: "2026-09-06", amount: -12, status: "posted", kind: "spend" },
+  ];
+  const octS = S(rows);
+  const sepS = summarizeSpendMonth(rows, "2026-09", COV("2026-09"));
+  return eq(octS.postedSpend, 40) && octS.conflicts.length === 0 && octS.complete
+    && sepS.conflicts.length === 1 && !sepS.complete;
+})());
+check("TXN2 cross-month refund dependency keeps the conflict visible", (() => {
+  const rows = [
+    { id: "o1", date: "2026-09-05", amount: -80, status: "posted", kind: "spend" },
+    { id: "o1", date: "2026-09-06", amount: -90, status: "posted", kind: "spend" },
+    { id: "r1", date: "2026-10-04", amount: 30, status: "posted", kind: "refund", refundOf: "o1" },
+  ];
+  const sepS = summarizeSpendMonth(rows, "2026-09", COV("2026-09"));
+  const octS = S(rows);
+  return sepS.unappliedRefunds.length === 1 && sepS.unappliedRefunds[0].reason === "original-conflicted" && !sepS.complete
+    && octS.conflicts.length === 1 && !octS.complete;
+})());
+
+// =====================================================================
+// ANOM-2 matrix (PM 2026-10-24 01:07): baseline month identity,
+// per-month explicit coverage, past-only eligibility.
+// =====================================================================
+const anom2 = (over) => anomalyV0({
+  baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15),
+  month: "2026-10", asOfDate: "2026-10-15", coverageStatus: "complete", ...over,
+});
+check("ANOM2 same month repeated 3x is ONE month -> insufficient", (() => {
+  const r = anom2({ baselineDaily: [constDaily("2026-09", 100), constDaily("2026-09", 100), constDaily("2026-09", 100)] });
+  return r.verdict === "insufficient" && r.baselineMonths.length === 1 && r.baselineMonths[0].month === "2026-09";
+})());
+check("ANOM2 identical duplicates dedupe beside 2 other months -> normal", (() => {
+  const r = anom2({ baselineDaily: [constDaily("2026-09", 100), constDaily("2026-09", 100), constDaily("2026-07", 100), constDaily("2026-08", 100)] });
+  return r.verdict === "normal" && r.comparableMonths.join() === "2026-09,2026-08,2026-07";
+})());
+check("ANOM2 conflicting versions of one month disqualify it", (() => {
+  const r = anom2({ baselineDaily: [constDaily("2026-09", 100), constDaily("2026-09", 200), constDaily("2026-07", 100), constDaily("2026-08", 100)] });
+  return r.verdict === "insufficient" && r.rejectedMonths.some((x) => x.month === "2026-09");
+})());
+check("ANOM2 current and future months never serve as baseline", (() => {
+  const onlyFuture = anom2({ baselineDaily: [constDaily("2026-09", 100), constDaily("2026-10", 100), constDaily("2026-11", 100), constDaily("2026-12", 100)] });
+  const withExtra = anom2({ baselineDaily: [...baseDaily, constDaily("2026-11", 999)] });
+  return onlyFuture.verdict === "insufficient" && withExtra.verdict === "normal"
+    && withExtra.comparableMonths.join() === "2026-09,2026-08,2026-07";
+})());
+check("ANOM2 per-month coverageByMonth false for history -> insufficient despite current true", (() => {
+  const r = anomalyV0({
+    baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15",
+    coverageByMonth: { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": false },
+  });
+  return r.verdict === "insufficient" && r.rejectedMonths.some((x) => x.month === "2026-09");
+})());
+check("ANOM2 per-month coverageByMonth all history true -> verdict stands", (() => {
+  const r = anomalyV0({
+    baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15",
+    coverageByMonth: { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": true },
+  });
+  return r.verdict === "normal" && r.baselineMonths.map((b) => b.month).join() === "2026-09,2026-08,2026-07"
+    && r.baselineMonths.every((b) => b.coverageStatus === "complete");
+})());
+check("ANOM2 history month missing from coverageByMonth -> unknown, insufficient", (() => {
+  const r = anomalyV0({
+    baselineDaily: baseDaily, currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15",
+    coverageByMonth: { "2026-10": true, "2026-07": true, "2026-08": true },
+  });
+  return r.verdict === "insufficient";
+})());
+check("ANOM2 conflicting explicit coverage signals disqualify the month", (() => {
+  const sepConflict = { ...constDaily("2026-09", 100), coverageStatus: "complete" };
+  const r = anomalyV0({
+    baselineDaily: [constDaily("2026-07", 100), constDaily("2026-08", 100), sepConflict],
+    currentDaily: dailyRange(1500, 15),
+    month: "2026-10", asOfDate: "2026-10-15",
+    coverageByMonth: { "2026-10": true, "2026-07": true, "2026-08": true, "2026-09": false },
+  });
+  return r.verdict === "insufficient" && r.rejectedMonths.some((x) => x.month === "2026-09");
+})());
+check("ANOM2 entry complete=false disqualifies its month", (() => {
+  const sepBad = { ...constDaily("2026-09", 100), complete: false };
+  const r = anom2({ baselineDaily: [constDaily("2026-07", 100), constDaily("2026-08", 100), sepBad] });
+  return r.verdict === "insufficient";
+})());
+check("ANOM2 most recent 3 of 5 eligible months win, unsorted", (() => {
+  const r = anom2({
+    baselineDaily: [constDaily("2026-05", 500), constDaily("2026-09", 100), constDaily("2026-06", 500), constDaily("2026-08", 100), constDaily("2026-07", 100)],
+  });
+  return r.verdict === "normal" && r.comparableMonths.join() === "2026-09,2026-08,2026-07";
+})());
+
 console.log(`validate-finance-arch: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
