@@ -53,9 +53,9 @@ const sevenDayFacts = (rows, dataDate, coverageIncomplete, metricKey, todayLa = 
   rawSevenDayFacts(rows, dataDate, coverageIncomplete, metricKey, todayLa);
 
 // ---------------------------------------------------------- source wiring
-check('source: strip renders inside WhoopHero after the load verdict block',
-  clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') > clientSrc.indexOf('whoop-load-note')
-  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') < clientSrc.indexOf('function ReadinessPanel'));
+check('source: strip renders once in TodayView below the hero (H-UI-002 sunk layout)',
+  clientSrc.split('<SevenDayFacts snapshot={snapshot} />').length - 1 === 1
+  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') > clientSrc.indexOf('<WhoopHero'));
 check('source: default metric is exerciseMinutes',
   clientSrc.includes('useState<SevenDayMetricKey>("exerciseMinutes")'));
 check('source: copy states raw facts, not a readiness/recovery score',
