@@ -49,6 +49,23 @@
 //   never substitutes for a baseline month's. The result names the
 //   adopted baseline months with their coverage, and an
 //   "insufficient" verdict names why months were rejected.
+//
+// PM 2026-10-24 04:01 fixes (TXN-1 future-metadata scope, ANOM-1
+// coverage transmission):
+// - Conflict attribution uses ONLY the asOf candidate set's months
+//   (plus real in-cutoff refund dependencies). The full-set index
+//   survives solely as a diagnosis aid for refunds whose original
+//   row has no candidate; a future row's month in that index can
+//   no longer pull an unrelated past conflict into this month.
+// - Anomaly coverage is end-to-end: normalization preserves the
+//   entry `coverage` field, buildArchPreview forwards the per-month
+//   coverage map into anomalyV0, and a baseline month with NO
+//   coverage signal of its own is "unknown" — the call-level /
+//   current month's complete status is never inherited. An entry's
+//   own explicit signal is sufficient evidence on its own (a map
+//   key that is merely absent/null adds no signal and does not
+//   contradict it); an explicit map `false` does contradict an
+//   entry `complete: true` and disqualifies the month.
 
 // ---------- Small date helpers (string months, no Date mutation) ----
 function parseMonth(month) {
@@ -186,10 +203,16 @@ export function summarizeSpendMonth(txns, month, options = {}) {
     if (!groups.has(t.id)) groups.set(t.id, []);
     groups.get(t.id).push(t);
   }
-  const allMonthsById = new Map(); // id -> Set of row months (all rows)
+  const allMonthsById = new Map(); // id -> Set of row months (all rows; diagnosis only)
   for (const t of txns) {
     if (!allMonthsById.has(t.id)) allMonthsById.set(t.id, new Set());
     allMonthsById.get(t.id).add(t.date.slice(0, 7));
+  }
+  const candidateMonthsById = new Map(); // id -> Set of row months (asOf candidates only)
+  for (const t of txns) {
+    if (afterAsOf(t)) continue;
+    if (!candidateMonthsById.has(t.id)) candidateMonthsById.set(t.id, new Set());
+    candidateMonthsById.get(t.id).add(t.date.slice(0, 7));
   }
   const refundMonthsByOriginal = new Map(); // original id -> Set of refund months (candidate refunds)
   for (const t of txns) {
@@ -220,7 +243,7 @@ export function summarizeSpendMonth(txns, month, options = {}) {
     canonical.set(id, byStatus.get("posted")?.[0] ?? byStatus.get("pending")?.[0] ?? uniq[0]);
   }
   const conflicts = allConflicts.filter((c) =>
-    (allMonthsById.get(c.id)?.has(month) ?? false) ||
+    (candidateMonthsById.get(c.id)?.has(month) ?? false) ||
     (refundMonthsByOriginal.get(c.id)?.has(month) ?? false));
   const conflictIds = new Set(allConflicts.map((c) => c.id));
 
@@ -426,14 +449,18 @@ function normalizeBaselineDaily(input) {
       daily: normalizeDaily(e.daily ?? e.days ?? e.values),
       complete: e.complete,
       coverageStatus: e.coverageStatus,
+      coverage: e.coverage,
+      coverageOk: e.coverageOk,
     }));
   }
   if (raw && typeof raw === "object") {
     return Object.entries(raw).map(([month, daily]) => ({
       month,
       daily: normalizeDaily(Array.isArray(daily) ? daily : daily?.daily),
-      complete: undefined,
-      coverageStatus: undefined,
+      complete: Array.isArray(daily) ? undefined : daily?.complete,
+      coverageStatus: Array.isArray(daily) ? undefined : daily?.coverageStatus,
+      coverage: Array.isArray(daily) ? undefined : daily?.coverage,
+      coverageOk: Array.isArray(daily) ? undefined : daily?.coverageOk,
     }));
   }
   if (Array.isArray(input.baselineMonths)) {
@@ -446,6 +473,8 @@ function normalizeBaselineDaily(input) {
         daily: normalizeDaily(e.daily ?? e.days ?? e.values),
         complete: e.complete,
         coverageStatus: e.coverageStatus,
+        coverage: e.coverage,
+        coverageOk: e.coverageOk,
       }));
   }
   return [];
@@ -506,24 +535,31 @@ export function anomalyV0(input) {
   if (!currentWindow) return insufficient("当前月同日窗内有缺日");
   const currentToDate = currentWindow.sum;
 
-  // Baseline (ANOM-1 01:07): normalize by month identity first.
-  // Only months strictly before the asOf month are eligible; rows
-  // for the same month must agree (identical duplicates dedupe,
-  // conflicting versions disqualify the month); each month needs
-  // its OWN explicit complete coverage — an entry's coverageStatus /
-  // coverage / complete fields or that month's coverageByMonth
-  // entry, with conflicting signals disqualifying the month. Only
-  // when a month carries no coverage signal of its own at all does
-  // the call-level coverageStatus (already required "complete"
-  // above) stand in for it; the current month's coverageByMonth
-  // entry never substitutes for a baseline month's missing one.
+  // Baseline (ANOM-1 01:07, tightened 04:01): normalize by month
+  // identity first. Only months strictly before the asOf month are
+  // eligible; rows for the same month must agree (identical
+  // duplicates dedupe, conflicting versions disqualify the month);
+  // each month needs its OWN explicit complete coverage — an
+  // entry's coverageStatus / coverage / coverageOk / complete
+  // fields or that month's explicit coverageByMonth entry, with
+  // conflicting signals disqualifying the month. A month with NO
+  // signal of its own is "unknown": the call-level / current
+  // month's coverageStatus is never inherited. A coverageByMonth
+  // key that is absent or null adds no signal (it does not
+  // contradict an entry's own explicit signal); an explicit
+  // `false` in the map does contradict it.
   const coverageSignal = (e) => {
     const signals = [];
     if (typeof e.coverageStatus === "string") signals.push(e.coverageStatus);
     if (e.coverage !== undefined) signals.push(e.coverage === true ? "complete" : e.coverage === false ? "incomplete" : "unknown");
+    if (e.coverageOk !== undefined) signals.push(e.coverageOk === true ? "complete" : e.coverageOk === false ? "incomplete" : "unknown");
     if (e.complete !== undefined) signals.push(e.complete === true ? "complete" : "incomplete");
-    if (input.coverageByMonth !== undefined && e.month) signals.push(monthCoverage(input.coverageByMonth, e.month));
-    if (signals.length === 0) return coverageStatus;
+    if (input.coverageByMonth !== undefined && e.month) {
+      const mv = input.coverageByMonth[e.month];
+      if (mv === true) signals.push("complete");
+      else if (mv === false) signals.push("incomplete");
+    }
+    if (signals.length === 0) return "unknown";
     const uniq = [...new Set(signals)];
     return uniq.length > 1 ? "conflict" : uniq[0];
   };
@@ -617,6 +653,7 @@ export function buildArchPreview(input) {
     currentDaily: input.currentDaily,
     month: input.currentMonth,
     asOfDate: input.asOfDate,
+    coverageByMonth: input.coverageByMonth,
     // The anomaly verdict needs source coverage AND a fully
     // classified spend stream; a classification gap downgrades the
     // shared coverage status to incomplete for this card.

@@ -1403,3 +1403,13 @@
 - `F0.7` 只读续查（2026-10-24 03:13 PDT，遵丙(ii)，未触发 run/reset/clear）：space-3 `getRefreshObservations`——access=owner、currentAttempt=2、status=running、diagnosis=awaiting_callback，观测行仅 refresh_started(claimed)＋spawn_attached（2026-10-24T00:55:24Z），state.updatedAt 冻结于启动时刻，距启动约 9.3 小时无本代回调/终态行、新快照未核实，断点未变（平台任务执行/回调段）；触发来源仍未知。脱敏：只记状态/事件类型/时刻。
 - 队列核对：仍（需用户确认）：`F-ARCH-001` 生产写回通道、`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T，不执行；`F-ARCH-001` 计算/呈现首片沿 10-25 18:00；`CWEB-MVP-001` 完整养成原目标 10-26 18:00 未到期；`H-SLEEP-REG-001` 沿原 builder 与 10-24 18:00 目标。本轮用户可见增量：0 组（财务合成预览契约推进，不计产品增量）。
 - 回滚：`git revert` 本提交即可（验证脚本＋SPEC 文档，无生产函数改动、无迁移、无生产写入）。
+
+## 2026-10-24 05 时（repo-plans-sync：F-ARCH-001 TXN-1/ANOM-1 04:01 余项 + SPEC 尾巴）
+
+- `F-ARCH-001·TXN-1`（P1 / A 合成口径，PM 2026-10-24 04:01 bug 单）：未来元数据污染作用域已修——`summarizeSpendMonth` 新增截点候选月份索引 `candidateMonthsById`，`conflicts` 作用域只认候选月份＋截点内退款依赖；全集 `allMonthsById` 降为退款原交易诊断专用，其未来行月份不再把无关过去冲突拉进本月。PM 复现（SYN-b 9 月同状态冲突＋未来 10-28 同 ID 行、查 10 月 asOf 10-15）修复后 complete=true/conflicts=0（两输入顺序），冲突仍在 9 月本月报告、本月真实冲突仍报告。
+- `F-ARCH-001·ANOM-1`（含 COV-1 覆盖传递/归一余项）：覆盖端到端打通——`normalizeBaselineDaily` 三个分支均保留条目 `coverage`/`coverageOk` 字段（此前丢弃导致 coverage:false 被无视）；`buildArchPreview` 把 `coverageByMonth` 透传进 `anomalyV0`（此前预览与直调结论不一致）；`coverageSignal` 改为无自身信号即 unknown、不再继承调用级/当月 complete，map 缺键/null 不作信号不构成矛盾、map 显式 false 与条目 complete:true 冲突出局，条目自身显式信号可独立作证。
+- EVID 尾巴：`F-ARCH-001-SPEC.md` 第 2 节生命周期文字修正——posted 优先取代 pending 不以「同额同类同日」为条件（与实际实现一致），并补 04:01 冲突作用域与第 5 节覆盖传递口径。
+- 验证证据：仓库实跑 `node weekly-finance/validate-finance-arch.mjs` **118/118**（原 108 全保留全过＋TXN-3 3 项＋ANOM-3 7 项；既有 ANOM 夹具按新契约显式化——正对照条目自带 coverageStatus=complete、map-only 场景改用无信号条目，覆盖面不变）。未提交 app.db/.env/任何真实数据；零生产写入，生产写回通道仍（需用户确认）；计算/呈现首片沿 10-25 18:00。
+- `F0.7` 只读续查（2026-10-24 05:13 PDT，遵丙(ii)，未触发 run/reset/clear）：space-3 `getRefreshObservations`——attempt=2 仍 running/awaiting_callback，started 2026-10-24T00:55:24Z、距启动约 11.3 小时，观测仍仅 refresh_started(claimed)＋spawn_attached，无本代回调/终态、新快照未核实，触发来源仍未知，断点未变。
+- 队列核对：仍（需用户确认）：`F-ARCH-001` 生产写回通道、`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T；`H-SLEEP-REG-001` 沿原 builder 与 10-24 18:00 目标、本轮未重复接单；`H3.5·RT-2`/`H-FRESH-001·PHASE-1` 仓库回灌仍 EVID 尾巴。本轮用户可见增量：0 组（财务合成契约余项关闭，不计产品增量）。
+- 回滚：`git revert` 本提交即可（纯合成计算模块＋验证脚本＋SPEC 文档，无迁移、无生产写入）。
