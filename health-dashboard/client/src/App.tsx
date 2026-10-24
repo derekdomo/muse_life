@@ -37,7 +37,7 @@ type GameCategory = GameState["settlements"][number]["category"];
 type RewardsState = ApiResponse<typeof api, "getRewards">;
 type RewardItem = RewardsState["rewards"][number];
 type RewardReceipt = RewardsState["receipts"][number];
-type Tab = "today" | "trends" | "history" | "game";
+type Tab = "today" | "trends" | "history" | "game" | "season";
 type Status = "正常" | "偏低" | "偏高" | "数据缺失" | "基线不足";
 
 // Routine labels (L1-ROUTINE-001): all five source values, with the two
@@ -1771,6 +1771,211 @@ function swimWeekSummary(
         ? `近7天游泳 ${count} 次 · 已知 ${numberLabel(meters)} 米（另有 ${unknownDistanceCount} 次距离未知）`
         : `近7天游泳 ${count} 次 · 共 ${numberLabel(meters)} 米`;
   return { count, meters, metersKnown, unknownDistanceCount, label };
+}
+
+// ---------------------------------------------------------------------------
+// H-SEASON-TAB-001 （季节专项 · 游泳版）: everything in this block is a
+// pure derivation over the stored snapshot — the swimDetail the refresh
+// pipeline now carries on each swimming workout row (session totals +
+// per-lap segments). No score, formula, or readiness input changes;
+// the today page renders nothing from this block.
+//
+// Calibers (single definitions, shared by cards, trends, and the
+// recent-vs-average row):
+// - pace (配速） = durationMinutes ÷ distanceMeters × 100, in
+//   min/100m, from the SESSION totals (active duration and recorded
+//   distance) — the same basis the owner's health-cli checks use.
+//   Per-lap times never feed the pace: wall-rest time belongs to no
+//   lap, so lap durations sum to less than the session duration.
+// - strokes per lap （单趟平均划数） = totalStrokes ÷ lapCount, using
+//   the record's own lap count; when lapCount is absent it falls back
+//   to the stored segment count; with neither, it stays unknown.
+// - lapCount / lapLengthMeters fall back the same way: the record's
+//   own values first, then the segments (count, and the session
+//   distance ÷ count for the length); still unknown → null, shown
+//   as —, never guessed.
+// - personal bests: fastest pace (minimum), longest distance
+//   (maximum), lowest strokes per lap (minimum); ties keep the
+//   earliest session.
+// - recent vs trailing-30-day mean: the window is the 30 calendar
+//   days ending at the latest swim's own date (anchored on the data,
+//   not on today), the latest swim included; deltas are latest minus
+//   mean. Direction words are fixed text （更快/更慢， 更少/更多，
+//   更长/更短） paired with ▲▼ symbols and signed numbers — meaning
+//   never rides on color alone.
+interface SeasonSwimSession {
+  id: string;
+  date: string;
+  distanceMeters: number | null;
+  durationMinutes: number | null;
+  energyKcal: number | null;
+  averageHr: number | null;
+  maxHr: number | null;
+  totalStrokes: number | null;
+  lapCount: number | null;
+  lapLengthMeters: number | null;
+  paceMinPer100m: number | null;
+  strokesPerLap: number | null;
+  segments: Array<{ durationSeconds: number; strokes: number | null; averageHr: number | null }> | null;
+}
+
+interface SeasonSwimDecay {
+  lapCount: number;
+  fastest: { index: number; seconds: number };
+  slowest: { index: number; seconds: number };
+  firstHalfAvgSeconds: number;
+  secondHalfAvgSeconds: number;
+  decayPercent: number;
+  midNote: string;
+  text: string;
+}
+
+interface SeasonSwimSummary {
+  sessions: SeasonSwimSession[];
+  bestPaceId: string | null;
+  bestDistanceId: string | null;
+  bestStrokesPerLapId: string | null;
+  comparison: {
+    anchorDate: string;
+    windowCount: number;
+    paceDelta: number | null;
+    strokesPerLapDelta: number | null;
+    distanceDelta: number | null;
+  } | null;
+}
+
+function seasonSwimSessions(historyWorkouts: HistoryWorkout[]): SeasonSwimSession[] {
+  const sessions: SeasonSwimSession[] = [];
+  for (const workout of historyWorkouts) {
+    if (!isSwimWorkout(workout.type)) continue;
+    const detail = workout.swimDetail ?? null;
+    const segments = detail?.segments ?? null;
+    const lapCount = detail?.lapCount ?? (segments ? segments.length : null);
+    const lapLengthMeters = detail?.lapLengthMeters
+      ?? (segments && segments.length && workout.distanceMeters !== null ? workout.distanceMeters / segments.length : null);
+    const totalStrokes = detail?.totalStrokes ?? null;
+    const paceMinPer100m = workout.durationMinutes !== null && workout.distanceMeters !== null && workout.distanceMeters > 0
+      ? workout.durationMinutes / workout.distanceMeters * 100
+      : null;
+    const strokesPerLap = totalStrokes !== null && lapCount !== null && lapCount > 0 ? totalStrokes / lapCount : null;
+    sessions.push({
+      id: workout.id,
+      date: workout.date,
+      distanceMeters: workout.distanceMeters,
+      durationMinutes: workout.durationMinutes,
+      energyKcal: workout.energyKcal,
+      averageHr: workout.averageHr,
+      maxHr: workout.maxHr ?? null,
+      totalStrokes,
+      lapCount,
+      lapLengthMeters,
+      paceMinPer100m,
+      strokesPerLap,
+      segments,
+    });
+  }
+  return sessions.sort((a, b) => (a.date === b.date ? a.id.localeCompare(b.id) : a.date.localeCompare(b.date)));
+}
+
+function seasonSwimSummary(historyWorkouts: HistoryWorkout[]): SeasonSwimSummary {
+  const sessions = seasonSwimSessions(historyWorkouts);
+  let bestPaceId: string | null = null;
+  let bestPace = Number.POSITIVE_INFINITY;
+  let bestDistanceId: string | null = null;
+  let bestDistance = Number.NEGATIVE_INFINITY;
+  let bestStrokesPerLapId: string | null = null;
+  let bestStrokesPerLap = Number.POSITIVE_INFINITY;
+  for (const session of sessions) {
+    if (session.paceMinPer100m !== null && session.paceMinPer100m < bestPace) { bestPace = session.paceMinPer100m; bestPaceId = session.id; }
+    if (session.distanceMeters !== null && session.distanceMeters > bestDistance) { bestDistance = session.distanceMeters; bestDistanceId = session.id; }
+    if (session.strokesPerLap !== null && session.strokesPerLap < bestStrokesPerLap) { bestStrokesPerLap = session.strokesPerLap; bestStrokesPerLapId = session.id; }
+  }
+  let comparison: SeasonSwimSummary["comparison"] = null;
+  const latest = sessions[sessions.length - 1];
+  if (latest) {
+    // 30 calendar days ending at the latest swim's date, the latest
+    // swim itself included (string dates compare lexicographically).
+    const windowStart = shiftDateStr(latest.date, -29);
+    const windowSessions = sessions.filter((session) => session.date >= windowStart && session.date <= latest.date);
+    const mean = (pick: (session: SeasonSwimSession) => number | null): number | null => {
+      const values = windowSessions.map(pick).filter((value): value is number => value !== null);
+      return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    };
+    const delta = (value: number | null, average: number | null): number | null =>
+      value !== null && average !== null ? value - average : null;
+    comparison = {
+      anchorDate: latest.date,
+      windowCount: windowSessions.length,
+      paceDelta: delta(latest.paceMinPer100m, mean((session) => session.paceMinPer100m)),
+      strokesPerLapDelta: delta(latest.strokesPerLap, mean((session) => session.strokesPerLap)),
+      distanceDelta: delta(latest.distanceMeters, mean((session) => session.distanceMeters)),
+    };
+  }
+  return { sessions, bestPaceId, bestDistanceId, bestStrokesPerLapId, comparison };
+}
+
+// Decay conclusion for one swim's laps. Halves by lap count: the
+// FIRST half takes the first floor(n/2) laps and the second half the
+// remaining ceil(n/2); with an odd lap count the middle lap belongs
+// to the SECOND half — the same rule is stated on the page next to
+// the conclusion, so the number never needs a footnote chase.
+// decayPercent = (second-half mean − first-half mean) ÷ first-half
+// mean × 100; positive means the second half was slower per lap.
+// Returns null when fewer than 2 laps carry durations.
+function seasonSwimDecay(segments: SeasonSwimSession["segments"]): SeasonSwimDecay | null {
+  if (!segments || segments.length < 2) return null;
+  const durations = segments.map((lap) => lap.durationSeconds);
+  const n = durations.length;
+  const firstCount = Math.floor(n / 2);
+  const first = durations.slice(0, firstCount);
+  const second = durations.slice(firstCount);
+  const mean = (values: number[]): number => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const firstAvg = mean(first);
+  const secondAvg = mean(second);
+  if (!(firstAvg > 0)) return null;
+  const decayPercent = (secondAvg - firstAvg) / firstAvg * 100;
+  let fastest = 0;
+  let slowest = 0;
+  durations.forEach((seconds, index) => {
+    if (seconds < (durations[fastest] ?? 0)) fastest = index;
+    if (seconds > (durations[slowest] ?? 0)) slowest = index;
+  });
+  const midNote = n % 2 === 1 ? "趟数为奇数，中间趟计入后半程" : "前后半程趟数相同";
+  const direction = decayPercent > 0.05 ? "后半程变慢" : decayPercent < -0.05 ? "后半程变快" : "前后半程基本持平";
+  const fastestSeconds = durations[fastest] ?? 0;
+  const slowestSeconds = durations[slowest] ?? 0;
+  const text = `最快第 ${fastest + 1} 趟 ${numberLabel(fastestSeconds, 1)} 秒 · 最慢第 ${slowest + 1} 趟 ${numberLabel(slowestSeconds, 1)} 秒 · 前半程平均 ${numberLabel(firstAvg, 1)} 秒/趟，后半程 ${numberLabel(secondAvg, 1)} 秒/趟，后半程${decayPercent >= 0 ? "+" : ""}${numberLabel(decayPercent, 1)}%，${direction}（${midNote}）`;
+  return {
+    lapCount: n,
+    fastest: { index: fastest + 1, seconds: fastestSeconds },
+    slowest: { index: slowest + 1, seconds: slowestSeconds },
+    firstHalfAvgSeconds: firstAvg,
+    secondHalfAvgSeconds: secondAvg,
+    decayPercent,
+    midNote,
+    text,
+  };
+}
+
+function seasonDeltaText(delta: number | null, kind: "pace" | "strokesPerLap" | "distance"): string {
+  if (delta === null) return "— 数据不足，无法比较";
+  const abs = Math.abs(delta);
+  if (kind === "pace") {
+    if (abs < 0.005) return "→ 与均值持平（±0.00 分/100米）";
+    return delta < 0
+      ? `▼ 快 ${numberLabel(abs, 2)} 分/100米（配速更低 = 更快）`
+      : `▲ 慢 ${numberLabel(abs, 2)} 分/100米（配速更高 = 更慢）`;
+  }
+  if (kind === "strokesPerLap") {
+    if (abs < 0.05) return "→ 与均值持平（±0.0 划/趟）";
+    return delta < 0
+      ? `▼ 少 ${numberLabel(abs, 1)} 划/趟（单趟划数更少）`
+      : `▲ 多 ${numberLabel(abs, 1)} 划/趟（单趟划数更多）`;
+  }
+  if (abs < 0.5) return "→ 与均值持平（±0 米）";
+  return delta > 0
+    ? `▲ 多 ${numberLabel(abs)} 米（距离更长）`
+    : `▼ 少 ${numberLabel(abs)} 米（距离更短）`;
 }
 
 interface SleepRegularityResult {
@@ -4493,6 +4698,114 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
+// H-SEASON-TAB-001: the 季节专项 tab. This first version carries
+// swimming only (the winter ski version is a separate, later design
+// line; the swimming history is never deleted when seasons switch).
+// Everything renders from seasonSwimSummary over the stored snapshot:
+// per-swim cards with all recorded facts, per-session trend charts
+// for pace / strokes-per-lap / distance (the compounding view: the
+// progression is visible session over session), personal-best marks,
+// the latest-vs-trailing-30-day comparison, and expandable per-lap
+// detail with the decay conclusion. Sessions saved before the
+// pipeline carried swimDetail degrade honestly: known facts show,
+// unknown ones read —, and the lap expansion explains why it is
+// empty instead of inventing laps.
+function SeasonSwimView({ snapshot }: { snapshot: Snapshot }) {
+  const summary = useMemo(() => seasonSwimSummary(snapshot.historyWorkouts), [snapshot.historyWorkouts]);
+  const { sessions, comparison } = summary;
+  const chartRows = sessions.map((session) => ({
+    label: dateLabel(session.date),
+    pace: session.paceMinPer100m === null ? null : Math.round(session.paceMinPer100m * 100) / 100,
+    strokesPerLap: session.strokesPerLap === null ? null : Math.round(session.strokesPerLap * 10) / 10,
+    distance: session.distanceMeters,
+  }));
+  const bestLine = (session: SeasonSwimSession): string[] => {
+    const marks: string[] = [];
+    if (summary.bestPaceId === session.id) marks.push("★ 个人最佳 · 最快配速");
+    if (summary.bestDistanceId === session.id) marks.push("★ 个人最佳 · 最长距离");
+    if (summary.bestStrokesPerLapId === session.id) marks.push("★ 个人最佳 · 最低单趟划数");
+    return marks;
+  };
+  return (
+    <div className="season-view">
+      <section className="season-panel" aria-labelledby="season-swim-title">
+        <div className="history-intro">
+          <p className="section-kicker">季节专项 · 当前：游泳</p>
+          <h2 id="season-swim-title">游泳专项</h2>
+          <p className="season-caliber">数据来源：Apple Health 游泳 workout · 池长 25 米（每趟 25 米）· 配速 = 时长 ÷ 距离 × 100（分/100米）· 单趟平均划数 = 总划数 ÷ 趟数 · 逐趟用时只含游进时间，趟间靠墙休息不计入任何一趟。</p>
+        </div>
+        {sessions.length ? (
+          <>
+            {comparison ? (
+              <div className="season-compare" aria-label="最近一次与近 30 天均值比较">
+                <h3>最近一次 vs 近 30 天均值</h3>
+                <p className="season-compare-note">窗口：截至最近一次游泳（{fullDateLabel(comparison.anchorDate)}）的 30 天内共 {comparison.windowCount} 次，最近一次计入均值。差值 = 最近一次 − 均值。</p>
+                <dl className="season-compare-grid">
+                  <div><dt>配速</dt><dd>{seasonDeltaText(comparison.paceDelta, "pace")}</dd></div>
+                  <div><dt>单趟划数</dt><dd>{seasonDeltaText(comparison.strokesPerLapDelta, "strokesPerLap")}</dd></div>
+                  <div><dt>距离</dt><dd>{seasonDeltaText(comparison.distanceDelta, "distance")}</dd></div>
+                </dl>
+              </div>
+            ) : null}
+            <div className="chart-grid">
+              <ChartPanel eyebrow="逐次趋势 · 分/100米" title="配速趋势（越低越快）">
+                <ResponsiveContainer width="100%" height="100%"><LineChart data={chartRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis domain={["dataMin - 0.1", "dataMax + 0.1"]} width={42} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Line type="linear" dataKey="pace" name="配速" unit=" 分/100米" stroke="var(--blue)" strokeWidth={2.25} dot={{ r: 3 }} connectNulls={false} /></LineChart></ResponsiveContainer>
+              </ChartPanel>
+              <ChartPanel eyebrow="逐次趋势 · 划/趟" title="单趟划数趋势（越低越省）">
+                <ResponsiveContainer width="100%" height="100%"><LineChart data={chartRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis domain={["dataMin - 0.5", "dataMax + 0.5"]} width={42} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Line type="linear" dataKey="strokesPerLap" name="单趟划数" unit=" 划/趟" stroke="var(--accent)" strokeWidth={2.25} dot={{ r: 3 }} connectNulls={false} /></LineChart></ResponsiveContainer>
+              </ChartPanel>
+              <ChartPanel eyebrow="逐次趋势 · 米" title="距离趋势">
+                <ResponsiveContainer width="100%" height="100%"><BarChart data={chartRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}><CartesianGrid stroke="var(--grid)" vertical={false} /><XAxis dataKey="label" interval="preserveStartEnd" tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><YAxis domain={[0, "auto"]} width={42} tickLine={false} axisLine={false} tick={{ fill: "var(--dim)", fontSize: 10 }} /><Tooltip contentStyle={tooltipStyle} /><Bar dataKey="distance" name="距离" unit=" 米" fill="var(--blue)" radius={[3, 3, 0, 0]} /></BarChart></ResponsiveContainer>
+              </ChartPanel>
+            </div>
+            <div className="season-cards">
+              {[...sessions].reverse().map((session) => {
+                const decay = seasonSwimDecay(session.segments);
+                const marks = bestLine(session);
+                return (
+                  <article className="season-card" key={session.id} aria-label={`${fullDateLabel(session.date)} 游泳记录`}>
+                    <div className="season-card-head">
+                      <strong>{fullDateLabel(session.date)}</strong>
+                      {marks.length ? <span className="season-best">{marks.join(" · ")}</span> : null}
+                    </div>
+                    <dl className="season-card-grid">
+                      <div><dt>距离</dt><dd>{session.distanceMeters === null ? "—" : `${numberLabel(session.distanceMeters)} 米`}</dd></div>
+                      <div><dt>时长</dt><dd>{session.durationMinutes === null ? "—" : `${numberLabel(session.durationMinutes, 1)} 分`}</dd></div>
+                      <div><dt>配速</dt><dd>{session.paceMinPer100m === null ? "—" : `${numberLabel(session.paceMinPer100m, 2)} 分/100米`}</dd></div>
+                      <div><dt>趟数</dt><dd>{session.lapCount === null ? "—" : `${session.lapCount} 趟`}</dd></div>
+                      <div><dt>总划数</dt><dd>{session.totalStrokes === null ? "—" : `${numberLabel(session.totalStrokes)} 划`}</dd></div>
+                      <div><dt>单趟平均划数</dt><dd>{session.strokesPerLap === null ? "—" : `${numberLabel(session.strokesPerLap, 1)} 划/趟`}</dd></div>
+                      <div><dt>心率均值</dt><dd>{session.averageHr === null ? "—" : `${numberLabel(session.averageHr)} bpm`}</dd></div>
+                      <div><dt>心率峰值</dt><dd>{session.maxHr === null ? "—" : `${numberLabel(session.maxHr)} bpm`}</dd></div>
+                      <div><dt>热量</dt><dd>{session.energyKcal === null ? "—" : `${numberLabel(session.energyKcal)} kcal`}</dd></div>
+                    </dl>
+                    {session.segments && session.segments.length ? (
+                      <details className="season-laps">
+                        <summary aria-label={`展开 ${fullDateLabel(session.date)} 逐趟明细，共 ${session.segments.length} 趟`}>逐趟明细 · {session.segments.length} 趟</summary>
+                        {decay ? <p className="season-decay">{decay.text}</p> : null}
+                        <table className="season-lap-table">
+                          <thead><tr><th scope="col">趟</th><th scope="col">用时（秒）</th><th scope="col">划数</th><th scope="col">心率均值</th></tr></thead>
+                          <tbody>
+                            {session.segments.map((lap, index) => (
+                              <tr key={index}><th scope="row">{index + 1}</th><td>{numberLabel(lap.durationSeconds, 1)}</td><td>{lap.strokes === null ? "—" : lap.strokes}</td><td>{lap.averageHr === null ? "—" : numberLabel(lap.averageHr)}</td></tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </details>
+                    ) : (
+                      <p className="season-laps-missing">逐趟明细未同步：这一次的快照还没有逐趟数据，下次同步后补齐（不会用总数推算）。</p>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </>
+        ) : <p className="empty-inline">完成一次游泳并同步 Apple 健康后，这里会按次显示游泳卡、趋势与逐趟明细。</p>}
+      </section>
+    </div>
+  );
+}
+
 type HistoryWorkout = Snapshot["historyWorkouts"][number];
 
 function allWorkoutsList(historyWorkouts: HistoryWorkout[]): HistoryWorkout[] {
@@ -6032,8 +6345,9 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "trends" ? "selected" : ""} aria-current={tab === "trends" ? "page" : undefined} onClick={() => setTab("trends")}>趋势</button>
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
+        <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
