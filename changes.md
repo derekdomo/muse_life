@@ -1422,3 +1422,8 @@
 - `F0.7` 只读续查（2026-10-24 07:13 PDT，遵丙(ii)，未触发 run/reset/clear）：space-3 `getrefreshobservations`——attempt=2 仍 running/awaiting_callback，started 2026-10-24T00:55:24Z、距启动约 13.3 小时，观测仍仅 refresh_started(claimed)＋spawn_attached，无本代回调/终态、新快照未核实，触发来源仍未知，断点未变。
 - 队列核对：仍（需用户确认）：`F-ARCH-001` 生产写回通道、`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T；`H-SLEEP-REG-001` 沿原 builder 与 10-24 18:00 目标、本轮未重复接单；`H3.5·RT-2`/`H-FRESH-001·PHASE-1` 仓库回灌仍 EVID 尾巴。本轮用户可见增量：0 组（财务合成契约余项关闭，不计产品增量）。
 - 回滚：`git revert` 本提交即可（纯合成计算模块＋验证脚本＋SPEC 文档，无迁移、无生产写入）。
+
+## 2026-10-24 08:43 PDT（历史脱敏改写登记）
+
+- 按所有者 2026-10-24 批准，对本仓 Git 历史做字符串级脱敏改写：早期 `plans.md` / `changes.md` 中的真实财务对账金额与收入来源组合已替换为「[已脱敏]」。旧提交哈希自此作废，后续 plans 同步以当前 `main` 为基线。
+- 改写未改变改写时 HEAD 的 `plans.md` / `changes.md` 内容（文件哈希改写前后一致），未改动源码逻辑、文件结构与业务数据。本条不含任何真实金额或来源组合。
