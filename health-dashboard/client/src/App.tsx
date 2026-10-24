@@ -273,20 +273,189 @@ export function refreshPhaseLabel(input: {
     : "同步未完成，仍显示上次成功的数据";
 }
 
+// ---------------------------------------------------------------------------
+// H-FRESH-001 · PHASE-1: per-attempt × per-source sync stage machine.
+// The legacy refreshPhaseLabel above could claim "已保存新版本" from a
+// task's completion alone, shared one line across both sources, and
+// let the newer source's timestamp speak for both. This machine is
+// the honest replacement for the first-screen stage rows: every
+// manual sync is an attempt (attemptId) with an independent stage per
+// source, and a source may only reach "confirmed-new" when a real
+// dashboard read-back — a getDashboard response generated AFTER that
+// source's task ended — shows the source's own updatedAt strictly
+// beyond the baseline captured when the attempt began. A task ending
+// is never itself proof of a save: it lands in "unconfirmed" (or
+// "failed") and waits for the read-back. All transitions are pure;
+// events carrying a different attemptId are ignored whole, so a late
+// event from an older attempt (or the background auto-sync) can
+// never clear or overwrite this attempt's presentation.
+
+export type SyncAttemptSource = "health" | "strength";
+export type SyncAttemptSourceStage = "requested" | "waiting" | "unconfirmed" | "confirmed-new" | "no-new-version" | "failed";
+
+export interface SyncAttemptSourceState {
+  stage: SyncAttemptSourceStage;
+  // The source's updatedAt when the attempt began — the baseline a
+  // read-back must strictly exceed to count as a new version.
+  baselineUpdatedAt: string | null;
+  // The source's own new updatedAt, set only on confirmed-new.
+  confirmedUpdatedAt: string | null;
+  // The dashboard read stamp (dataStatus.generatedAt) current when
+  // this source's task ended. A read-back counts only when its stamp
+  // differs — a read generated before the task ended proves nothing
+  // about the save.
+  taskEndStamp: string | null;
+}
+
+export interface SyncAttemptState {
+  attemptId: string;
+  sources: Partial<Record<SyncAttemptSource, SyncAttemptSourceState>>;
+}
+
+// Begin an attempt: record each covered source's baseline updatedAt
+// and clear that source's previous terminal state back to
+// "requested". Sources the attempt does not cover keep their prior
+// presentation untouched.
+export function beginSyncAttempt(
+  state: SyncAttemptState | null,
+  attemptId: string,
+  baselines: Record<SyncAttemptSource, string | null>,
+  sources: SyncAttemptSource[] = ["health", "strength"],
+): SyncAttemptState {
+  const next: SyncAttemptState = { attemptId, sources: { ...(state?.sources ?? {}) } };
+  for (const source of sources) {
+    next.sources[source] = {
+      stage: "requested",
+      baselineUpdatedAt: baselines[source],
+      confirmedUpdatedAt: null,
+      taskEndStamp: null,
+    };
+  }
+  return next;
+}
+
+// The dispatch result for one source: accepted moves it to
+// "waiting"; a refusal (accepted=false, including forbidden) or a
+// thrown request fails it immediately — the source keeps showing its
+// last successful data, and no stale earlier stage survives.
+export function applySyncDispatchResult(
+  state: SyncAttemptState | null,
+  attemptId: string,
+  source: SyncAttemptSource,
+  result: { accepted: boolean } | { threw: true },
+): SyncAttemptState | null {
+  if (!state || state.attemptId !== attemptId) return state;
+  const entry = state.sources[source];
+  if (!entry) return state;
+  if (entry.stage !== "requested" && entry.stage !== "waiting") return state;
+  const failed = "threw" in result ? true : !result.accepted;
+  const nextEntry: SyncAttemptSourceState = failed ? { ...entry, stage: "failed" } : { ...entry, stage: "waiting" };
+  return { ...state, sources: { ...state.sources, [source]: nextEntry } };
+}
+
+// A source's task reached its end (or the poll gave up on it). A
+// failed task, or a completed one whose save contract was not
+// satisfied, fails the source. Anything else — including a clean
+// completion — only proves the task ended: the source becomes
+// "unconfirmed" and the end stamp is recorded, so the following
+// read-back can be told apart from reads that predate the end. A
+// task end NEVER produces confirmed-new directly.
+export function applySyncTaskEnd(
+  state: SyncAttemptState | null,
+  attemptId: string,
+  source: SyncAttemptSource,
+  result: { status: string; contractSatisfied: boolean },
+  stamp: string | null,
+): SyncAttemptState | null {
+  if (!state || state.attemptId !== attemptId) return state;
+  const entry = state.sources[source];
+  if (!entry) return state;
+  if (entry.stage !== "requested" && entry.stage !== "waiting") return state;
+  const failed = result.status === "failed" || (result.status === "completed" && !result.contractSatisfied);
+  const nextEntry: SyncAttemptSourceState = failed
+    ? { ...entry, stage: "failed" }
+    : { ...entry, stage: "unconfirmed", taskEndStamp: stamp };
+  return { ...state, sources: { ...state.sources, [source]: nextEntry } };
+}
+
+// The read-back adjudication, driven by dashboard data arriving
+// after the task ended. Only an "unconfirmed" source is judged, and
+// only by a read whose stamp is newer than the task-end stamp: a
+// failed read (ok=false) or a same-stamp read leaves the source
+// unconfirmed. A fresh read whose updatedAt strictly exceeds the
+// attempt baseline confirms a new version — carrying that source's
+// OWN new timestamp; a fresh read with the version unmoved is the
+// neutral no-new-version outcome (duplicate / ignored saves land
+// here): neither a failure nor a saved new version.
+export function applySyncReadback(
+  state: SyncAttemptState | null,
+  attemptId: string,
+  source: SyncAttemptSource,
+  readback: { ok: boolean; updatedAt: string | null; stamp: string | null },
+): SyncAttemptState | null {
+  if (!state || state.attemptId !== attemptId) return state;
+  const entry = state.sources[source];
+  if (!entry || entry.stage !== "unconfirmed") return state;
+  if (!readback.ok) return state;
+  if (entry.taskEndStamp !== null && readback.stamp === entry.taskEndStamp) return state;
+  const baselineTime = entry.baselineUpdatedAt ? new Date(entry.baselineUpdatedAt).getTime() : null;
+  const updatedTime = readback.updatedAt ? new Date(readback.updatedAt).getTime() : null;
+  const advanced = updatedTime !== null && !Number.isNaN(updatedTime)
+    && (baselineTime === null || Number.isNaN(baselineTime) || updatedTime > baselineTime);
+  const nextEntry: SyncAttemptSourceState = advanced
+    ? { ...entry, stage: "confirmed-new", confirmedUpdatedAt: readback.updatedAt }
+    : { ...entry, stage: "no-new-version" };
+  return { ...state, sources: { ...state.sources, [source]: nextEntry } };
+}
+
+// The one honest line per source for the current attempt. Without
+// authoritative read-back evidence the only wording allowed is
+// "任务已结束，保存结果待确认"; "已保存新版本" appears exclusively
+// for confirmed-new and carries that source's own new timestamp.
+export function syncAttemptSourceLabel(entry: SyncAttemptSourceState | undefined): string {
+  if (!entry) return "";
+  switch (entry.stage) {
+    case "requested": return "已请求同步，正在派发…";
+    case "waiting": return "等待同步结果…（保留当前数据）";
+    case "unconfirmed": return "任务已结束，保存结果待确认";
+    case "confirmed-new": return entry.confirmedUpdatedAt ? `已保存新版本 · 更新于 ${updatedLabel(entry.confirmedUpdatedAt)}` : "已保存新版本";
+    case "no-new-version": return "本次没有新版本，仍显示上次成功数据";
+    case "failed": return "同步未完成，仍显示上次成功的数据";
+  }
+}
+
+// One polled task's terminal (or poll-timeout) result, as fed to the
+// sync attempt machine by the polling hook's settle callback.
+export interface RefreshTaskSettleResult {
+  taskId: string;
+  status: string;
+  contractSatisfied: boolean;
+}
+
+// Which attempt + source each polled task belongs to. Supplied by
+// the caller that dispatched the tasks; tasks polled without meta
+// (the App shell's background auto-sync) settle exactly as before
+// and feed no attempt.
+export type RefreshTaskMeta = Record<string, { attemptId: string; source: SyncAttemptSource }>;
+
 // Polls background sync tasks by their real lifecycle status instead of
 // guessing with a fixed timer: agent sync tasks routinely take longer than
 // the old 60-second blind poll, which is why finished syncs looked lost.
 // Stops when every task reaches a terminal state (or after 5 minutes) and
 // reports when a task ended without saving its snapshot.
-function useTaskPolling() {
+function useTaskPolling(onTasksSettled?: (results: RefreshTaskSettleResult[], taskMeta: RefreshTaskMeta) => void) {
   const queryClient = useQueryClient();
   const [taskIds, setTaskIds] = useState<string[]>([]);
   const [failureNote, setFailureNote] = useState<string | null>(null);
+  const taskMetaRef = useRef<RefreshTaskMeta>({});
+  const settledCallbackRef = useRef(onTasksSettled);
+  settledCallbackRef.current = onTasksSettled;
   const syncing = taskIds.length > 0;
 
   useEffect(() => {
     if (taskIds.length === 0) return;
     let cancelled = false;
+    let lastResults: RefreshTaskSettleResult[] = taskIds.map((taskId) => ({ taskId, status: "unknown", contractSatisfied: false }));
     const startedAt = Date.now();
     const timer = window.setInterval(() => {
       void (async () => {
@@ -298,6 +467,10 @@ function useTaskPolling() {
           }
         }));
         if (cancelled) return;
+        lastResults = taskIds.map((taskId, index) => {
+          const result = results[index] ?? null;
+          return { taskId, status: result ? result.status : "unknown", contractSatisfied: result ? result.contractSatisfied : false };
+        });
         void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
         // Only completed/failed settle the poll. unknown/not_found mean the
         // status endpoint cannot see the task yet — treating them as done
@@ -306,9 +479,11 @@ function useTaskPolling() {
         if (settled) {
           const failed = results.some((result) => result === null || result.status === "failed" || (result.status === "completed" && !result.contractSatisfied));
           setFailureNote(failed ? "同步未完成，请再点一次同步" : null);
+          settledCallbackRef.current?.(lastResults, taskMetaRef.current);
           setTaskIds([]);
         } else if (Date.now() - startedAt > 5 * 60_000) {
           setFailureNote("同步超时，请再点一次同步");
+          settledCallbackRef.current?.(lastResults, taskMetaRef.current);
           setTaskIds([]);
         }
       })();
@@ -319,9 +494,10 @@ function useTaskPolling() {
     };
   }, [queryClient, taskIds]);
 
-  const startPolling = (ids: Array<string | null>) => {
+  const startPolling = (ids: Array<string | null>, taskMeta?: RefreshTaskMeta) => {
     const next = ids.filter((id): id is string => id !== null);
     if (next.length === 0) return;
+    taskMetaRef.current = taskMeta ?? {};
     setFailureNote(null);
     setTaskIds(next);
   };
@@ -1400,6 +1576,169 @@ function sevenDayFacts(
   };
 }
 
+// H-SWIM-VIS-001: per-day swim presentation derived from the already-
+// stored snapshot rows only — no new data path, no formula change.
+// A date enters the map only when its historyDaily row carries a real
+// swim distance (swimMeters non-null and > 0); meters come from that
+// row. minutes is the summed known durationMinutes of that date's swim
+// workouts, rounded to an integer; when no swim workout that day has a
+// known duration, minutes stays null (时长未知) — an unknown duration is
+// never presented as 0.
+function swimInfoByDate(
+  historyDaily: Array<Pick<Daily, "date" | "swimMeters">>,
+  historyWorkouts: HistoryWorkout[],
+): Map<string, { meters: number; minutes: number | null }> {
+  const minutesByDate = new Map<string, number>();
+  for (const workout of historyWorkouts) {
+    if (!isSwimWorkout(workout.type)) continue;
+    if (workout.durationMinutes === null) continue;
+    minutesByDate.set(workout.date, (minutesByDate.get(workout.date) ?? 0) + workout.durationMinutes);
+  }
+  const result = new Map<string, { meters: number; minutes: number | null }>();
+  for (const row of historyDaily) {
+    if (row.swimMeters === null || row.swimMeters <= 0) continue;
+    const knownMinutes = minutesByDate.get(row.date);
+    result.set(row.date, {
+      meters: row.swimMeters,
+      minutes: knownMinutes === undefined ? null : Math.round(knownMinutes),
+    });
+  }
+  return result;
+}
+
+function swimDayLabel(info: { meters: number; minutes: number | null }): string {
+  return `游泳 ${numberLabel(info.meters)} 米`;
+}
+
+function swimDayDetail(info: { meters: number; minutes: number | null }): string {
+  return info.minutes === null
+    ? `游泳 ${numberLabel(info.meters)} 米 · 时长未知`
+    : `游泳 ${numberLabel(info.meters)} 米 · ${info.minutes} 分`;
+}
+
+// H-SWIM-VIS-001: the 近7天 swim subtotal for the today page workout
+// line. Only swim workouts whose date falls inside the given window
+// dates count. meters sums the known distanceMeters values only;
+// metersKnown records whether at least one swim in the window carried
+// a known distance, so a window of distance-less swims still shows its
+// count without inventing a 0 米 total. label is empty when count is 0.
+function swimWeekSummary(
+  historyWorkouts: HistoryWorkout[],
+  dates: string[],
+): { count: number; meters: number; metersKnown: boolean; label: string } {
+  const dateSet = new Set(dates);
+  const swims = historyWorkouts.filter((workout) => dateSet.has(workout.date) && isSwimWorkout(workout.type));
+  const count = swims.length;
+  const knownDistances = swims
+    .map((workout) => workout.distanceMeters)
+    .filter((value): value is number => value !== null);
+  const meters = knownDistances.reduce((sum, value) => sum + value, 0);
+  const metersKnown = knownDistances.length > 0;
+  const label = count === 0
+    ? ""
+    : metersKnown
+      ? `近7天游泳 ${count} 次 · 共 ${numberLabel(meters)} 米`
+      : `近7天游泳 ${count} 次`;
+  return { count, meters, metersKnown, label };
+}
+
+interface SleepRegularityResult {
+  sampleCount: number;
+  consideredCount: number;
+  requiredSamples: number;
+  sufficient: boolean;
+  status: "ok" | "insufficient" | "empty";
+  missingLabel: "还没同步完" | "当天没戴表" | null;
+  onsetSdMinutes: number | null;
+  midpointSdMinutes: number | null;
+  onsetMeanClockMinutes: number | null;
+  midpointMeanClockMinutes: number | null;
+}
+
+// H-SLEEP-REG-001: sleep regularity as a DESCRIPTIVE reference statistic
+// only. Pure derivation over the stored snapshot's latest 14 sleep
+// sessions (historySleeps start/end clock times, "HH:mm") — no new data
+// path, no server or schema change, and the result NEVER feeds
+// readiness or any score: it describes how spread out the recent
+// nights' clock times are, nothing more. Two cross-night sample
+// standard deviations (n-1): (1) the sleep midpoint (halfway between
+// falling asleep and waking), and (2) the sleep onset time. Clock
+// times live on a circle, so a raw linear SD would read 23:50 and
+// 00:10 as ~24 hours apart; both quantities are therefore mapped onto
+// a continuous axis unfolded at noon — minutes since 12:00, i.e.
+// (clock - 720) mod 1440 — before any mean or SD is taken, which puts
+// 23:50 at 710 and 00:10 at 730 (20 minutes apart, as they are). The
+// midpoint clock is start + duration/2 where duration wraps past
+// midnight ((end - start) mod 1440); a zero-duration or unparseable
+// row is not a usable night and is excluded, never counted as a value.
+// Fewer than 7 usable nights is 样本不足: the SD fields stay null so no
+// surface can present a number the sample cannot support. With no
+// usable night at all, missingLabel follows the dashboard's existing
+// missing-data caliber — 还没同步完 when the source coverage is
+// incomplete, 当天没戴表 otherwise. Self-contained (no outside helper
+// is referenced) so a repo-side validator can extract it by name and
+// recompute it standalone over synthetic fixtures.
+function sleepRegularity(
+  historySleeps: Array<Pick<Snapshot["historySleeps"][number], "date" | "start" | "end">>,
+  coverageIncomplete?: boolean,
+): SleepRegularityResult {
+  const REQUIRED = 7;
+  const DAY = 1440;
+  const parseClockMinutes = (value: unknown): number | null => {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    const timePart = trimmed.includes("T") ? trimmed.slice(trimmed.indexOf("T") + 1) : trimmed;
+    const match = timePart.match(/^(\d{1,2}):(\d{2})/);
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return hours * 60 + minutes;
+  };
+  const rows = Array.isArray(historySleeps) ? historySleeps : [];
+  const indexed = rows.map((row, index) => ({ row, index }));
+  const allDated = indexed.length > 0 && indexed.every((entry) => typeof entry.row?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(entry.row.date));
+  const ordered = allDated
+    ? [...indexed].sort((a, b) => (a.row.date < b.row.date ? -1 : a.row.date > b.row.date ? 1 : a.index - b.index))
+    : indexed;
+  const windowed = ordered.slice(-14);
+  const unfold = (clockMinutes: number): number => (((clockMinutes - 720) % DAY) + DAY) % DAY;
+  const onsetValues: number[] = [];
+  const midpointValues: number[] = [];
+  for (const entry of windowed) {
+    const start = parseClockMinutes(entry.row?.start);
+    const end = parseClockMinutes(entry.row?.end);
+    if (start === null || end === null) continue;
+    const duration = (((end - start) % DAY) + DAY) % DAY;
+    if (duration <= 0) continue;
+    const midpointClock = (start + duration / 2) % DAY;
+    onsetValues.push(unfold(start));
+    midpointValues.push(unfold(midpointClock));
+  }
+  const sampleCount = onsetValues.length;
+  const sufficient = sampleCount >= REQUIRED;
+  const meanOf = (values: number[]): number => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const sampleSd = (values: number[]): number | null => {
+    if (values.length < 2) return null;
+    const mean = meanOf(values);
+    const squared = values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0);
+    return Math.sqrt(squared / (values.length - 1));
+  };
+  const toClock = (continuousMean: number): number => (((continuousMean + 720) % DAY) + DAY) % DAY;
+  return {
+    sampleCount,
+    consideredCount: windowed.length,
+    requiredSamples: REQUIRED,
+    sufficient,
+    status: sampleCount === 0 ? "empty" : sufficient ? "ok" : "insufficient",
+    missingLabel: sampleCount === 0 ? (coverageIncomplete ? "还没同步完" : "当天没戴表") : null,
+    onsetSdMinutes: sufficient ? sampleSd(onsetValues) : null,
+    midpointSdMinutes: sufficient ? sampleSd(midpointValues) : null,
+    onsetMeanClockMinutes: sufficient ? toClock(meanOf(onsetValues)) : null,
+    midpointMeanClockMinutes: sufficient ? toClock(meanOf(midpointValues)) : null,
+  };
+}
+
 // H3.1/H3.2/H3.3 weekly health review (first slice): a pure client-side
 // derivation over the already-stored snapshot history — no server,
 // schema, sync, readiness-formula, or permission change, and nothing is
@@ -2125,9 +2464,10 @@ function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: W
 // to live here (driver tiles, the week load verdict, the readiness
 // trend, the 7-day facts, the week review) moved below the hero in
 // TodayView; nothing was deleted, only relocated.
-function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing }: {
+function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing, syncAttempt }: {
   snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null;
   onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean;
+  syncAttempt?: SyncAttemptState | null;
 }) {
   const recovery = recoveryScore(readiness);
   const sleep = sleepScore(snapshot, readiness);
@@ -2159,11 +2499,13 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
             <span aria-hidden="true">{freshnessSymbol(dataStatus?.health.freshness ?? "missing")}</span>
             <span>{source.healthLine}</span>
             {source.coverageLine ? <span className="whoop-source-coverage">{source.coverageLine}</span> : null}
+            {syncAttempt?.sources.health ? <span className="whoop-source-attempt" role="status">{syncAttemptSourceLabel(syncAttempt.sources.health)}</span> : null}
           </p>
           <p className="whoop-source-line">
             <span className="whoop-source-name">训练</span>
             <span aria-hidden="true">{freshnessSymbol(dataStatus?.strength.freshness ?? "missing")}</span>
             <span>{source.strengthLine}</span>
+            {syncAttempt?.sources.strength ? <span className="whoop-source-attempt" role="status">{syncAttemptSourceLabel(syncAttempt.sources.strength)}</span> : null}
           </p>
         </div>
         <button className="whoop-source-action" type="button" aria-label={source.action.label} onClick={handleSourceAction} disabled={syncing}>{syncing ? "同步中…" : source.action.label}</button>
@@ -2260,7 +2602,9 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
   const [metricKey, setMetricKey] = useState<SevenDayMetricKey>("exerciseMinutes");
   const [openDate, setOpenDate] = useState<string | null>(null);
   const facts = sevenDayFacts(snapshot.historyDaily, snapshot.dataDate, snapshot.coverageIncomplete, metricKey, laTodayDateString());
+  const swimByDate = swimInfoByDate(snapshot.historyDaily, snapshot.historyWorkouts);
   const openCell = openDate === null ? undefined : facts.days.find((day) => day.date === openDate);
+  const openSwim = openCell ? swimByDate.get(openCell.date) : undefined;
   const cellText = (day: SevenDayCell): string => day.conflict ? "冲突/不可用" : day.value === null ? "无记录" : `${numberLabel(day.value, facts.metric.digits)} ${facts.metric.unit}`;
   return (
     <div className="seven-facts" aria-label="近 7 天事实">
@@ -2284,29 +2628,88 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
       {facts.coverageIncomplete ? <p className="seven-facts-warn">来源覆盖不完整，缺口如实标注。</p> : null}
       {facts.days.length ? (
         <div className="seven-facts-grid">
-          {facts.days.map((day) => (
+          {facts.days.map((day) => {
+            const swim = swimByDate.get(day.date);
+            return (
             <button
               key={day.date}
               type="button"
               className={`seven-facts-day${day.conflict ? " conflict" : ""}${!day.conflict && day.value === null ? " gap" : ""}`}
               aria-expanded={openDate === day.date}
-              aria-label={`${fullDateLabel(day.date)} ${facts.metric.label} ${cellText(day)}`}
+              aria-label={`${fullDateLabel(day.date)} ${facts.metric.label} ${cellText(day)}${swim ? ` ${swimDayDetail(swim)}` : ""}`}
               onClick={() => setOpenDate(openDate === day.date ? null : day.date)}
             >
               <span>{dateLabel(day.date)}</span>
               <strong>{day.conflict ? "冲突" : day.value === null ? "缺口" : numberLabel(day.value, facts.metric.digits)}</strong>
               <small>{day.conflict ? "不可用" : day.value === null ? "无记录" : facts.metric.unit}</small>
+              {swim ? <small className="seven-facts-swim">{swimDayLabel(swim)}</small> : null}
             </button>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       {openCell ? (
         <dl className="seven-facts-detail">
           <div><dt>日期</dt><dd>{fullDateLabel(openCell.date)}</dd></div>
           <div><dt>{facts.metric.label}原值</dt><dd>{openCell.conflict ? "冲突/不可用（同日记录不一致，未合并）" : cellText(openCell)}</dd></div>
+          {openSwim ? <div><dt>游泳</dt><dd>{swimDayDetail(openSwim)}</dd></div> : null}
           <div><dt>来源 · 更新</dt><dd>Apple 健康 · 快照更新于 {updatedLabel(snapshot.updatedAt)}</dd></div>
         </dl>
       ) : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// H-SLEEP-REG-001: the sleep-regularity reference panel, rendered on the
+// today page directly after the seven-day facts strip. It presents ONLY
+// the descriptive output of sleepRegularity above — sample standard
+// deviations of the sleep midpoint and the onset time over the latest
+// 14 nights — labelled 参考指标， with the fixed note that it is a
+// descriptive statistic, not a medical conclusion, and never counts
+// toward the recovery (readiness) score or any other score. Meaning is
+// carried by symbol + text label + number together, never by color
+// alone (owner is color-vision deficient): ◑ marks the midpoint row,
+// ◐ the onset row, ○ the insufficient-sample state, and — the
+// no-record state. Under 7 usable nights no SD number is shown at all;
+// with no usable night the panel follows the existing missing-data
+// caliber （还没同步完 / 当天没戴表） from the derivation itself.
+function SleepRegularityPanel({ snapshot }: { snapshot: Snapshot }) {
+  const result = sleepRegularity(snapshot.historySleeps, snapshot.coverageIncomplete);
+  const clockLabel = (clockMinutes: number | null): string => {
+    if (clockMinutes === null) return "—";
+    const rounded = ((Math.round(clockMinutes) % 1440) + 1440) % 1440;
+    const hh = Math.floor(rounded / 60);
+    const mm = rounded % 60;
+    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  };
+  const sdLabel = (sd: number | null): string => (sd === null ? "—" : `${Math.round(sd)} 分钟`);
+  return (
+    <div className="sleep-reg" aria-label="睡眠规律性参考指标">
+      <div className="sleep-reg-head">
+        <span className="sleep-reg-title">睡眠规律性</span>
+        <span className="sleep-reg-tag">参考指标</span>
+        <span className="sleep-reg-sample">样本 {result.sampleCount} 晚</span>
+      </div>
+      <p className="sleep-reg-note">仅为描述统计：用近 14 晚睡眠记录算时刻的离散程度，不是医学结论，也不计入恢复分数或任何评分。标准差越小，近 14 晚的时刻越集中；越大，分布越分散。</p>
+      {result.status === "ok" ? (
+        <div className="sleep-reg-rows">
+          <div className="sleep-reg-row">
+            <span className="sleep-reg-metric"><span aria-hidden="true">◑</span> 睡眠中点</span>
+            <strong>标准差 {sdLabel(result.midpointSdMinutes)}</strong>
+            <small>平均中点 {clockLabel(result.midpointMeanClockMinutes)} · 样本 {result.sampleCount} 晚</small>
+          </div>
+          <div className="sleep-reg-row">
+            <span className="sleep-reg-metric"><span aria-hidden="true">◐</span> 入睡时间</span>
+            <strong>标准差 {sdLabel(result.onsetSdMinutes)}</strong>
+            <small>平均入睡 {clockLabel(result.onsetMeanClockMinutes)} · 样本 {result.sampleCount} 晚</small>
+          </div>
+        </div>
+      ) : result.status === "insufficient" ? (
+        <p className="sleep-reg-warn"><span aria-hidden="true">○</span> 样本不足：目前可用 {result.sampleCount} 晚（至少需要 {result.requiredSamples} 晚才计算标准差），暂不显示标准差数值。</p>
+      ) : (
+        <p className="sleep-reg-warn"><span aria-hidden="true">—</span> 暂无可用睡眠记录 · {result.missingLabel ?? "当天没戴表"}，同步到睡眠记录后自动计算。</p>
+      )}
     </div>
   );
 }
@@ -2347,6 +2750,14 @@ export interface FocusFeedbackState {
   // conflict) mints a new one. pendingExpectedRevision is the revision
   // that attempt was gated on.
   pendingOperationId: string | null;
+  // RT-2 follow-up (intent generation): the operationId of the most
+  // recent intent begun on this card. Unlike pendingOperationId it
+  // is NOT cleared when the intent settles or is confirmed by a
+  // re-read — it names the current intent generation, so a late
+  // callback from an OLDER operation can be told apart from the
+  // current intent's own late callback after that intent was already
+  // confirmed (see settleFocusSaveOutcome).
+  lastIntentOperationId: string | null;
   pendingExpectedRevision: number;
   // On conflict: the server's currently saved choice + revision, kept
   // so the card can name exactly what stands and what was refused.
@@ -2362,7 +2773,7 @@ export function createFocusFeedbackState(): FocusFeedbackState {
   return {
     boundKey: null, confirmed: null, confirmedRevision: 0, selection: null,
     status: "idle", readFailed: false,
-    pendingOperationId: null, pendingExpectedRevision: 0,
+    pendingOperationId: null, lastIntentOperationId: null, pendingExpectedRevision: 0,
     conflictFeedback: null, conflictRevision: null,
   };
 }
@@ -2399,7 +2810,7 @@ export function syncFocusFeedbackState(
       selection: serverConfirmed,
       status: serverConfirmed ? "saved" : "idle",
       readFailed,
-      pendingOperationId: null, pendingExpectedRevision: 0,
+      pendingOperationId: null, lastIntentOperationId: null, pendingExpectedRevision: 0,
       conflictFeedback: null, conflictRevision: null,
     };
   }
@@ -2433,7 +2844,7 @@ export function syncFocusFeedbackState(
       selection: serverConfirmed,
       status: "saved",
       readFailed: false,
-      pendingOperationId: null, pendingExpectedRevision: 0,
+      pendingOperationId: null, lastIntentOperationId: state.lastIntentOperationId, pendingExpectedRevision: 0,
       conflictFeedback: null, conflictRevision: null,
     };
   }
@@ -2454,7 +2865,7 @@ export function syncFocusFeedbackState(
     selection: serverConfirmed,
     status: serverConfirmed ? "saved" : "idle",
     readFailed: false,
-    pendingOperationId: null, pendingExpectedRevision: 0,
+    pendingOperationId: null, lastIntentOperationId: state.lastIntentOperationId, pendingExpectedRevision: 0,
     conflictFeedback: null, conflictRevision: null,
   };
 }
@@ -2471,6 +2882,11 @@ export function beginFocusFeedbackSave(state: FocusFeedbackState, choice: FocusF
     selection: choice,
     status: "saving",
     pendingOperationId: operationId ?? state.pendingOperationId,
+    // A caller-minted operationId becomes the card's current intent
+    // generation. Without one (the retry path re-enters saving
+    // directly) the existing identity stands — the pending operation
+    // if there is one, else the last intent — and is never cleared.
+    lastIntentOperationId: operationId ?? state.pendingOperationId ?? state.lastIntentOperationId,
     pendingExpectedRevision: state.confirmedRevision,
     conflictFeedback: null,
     conflictRevision: null,
@@ -2575,22 +2991,37 @@ export type FocusSaveOutcome =
 //
 // - a different boundKey drops the outcome whole (unchanged);
 // - the outcome OF the currently pending operation (operationId ===
-//   pendingOperationId), or any outcome when no newer operation is
-//   in flight (pendingOperationId null), settles through the exact
-//   legacy transitions — complete / fail / conflict verbatim,
-//   including conflict adoption, the stale-conflict-to-error rule
-//   and the same-operation retry identity;
-// - a STALE operation's late callback (operationId differs from a
-//   non-null pendingOperationId) must never settle the operation now
-//   in flight: selection, status, pendingOperationId,
+//   pendingOperationId, non-null) settles through the exact legacy
+//   transitions — complete / fail / conflict verbatim, including
+//   conflict adoption, the stale-conflict-to-error rule and the
+//   same-operation retry identity;
+// - RT-2 follow-up (intent generation): the same legacy settlement
+//   applies when no operation is pending and the outcome belongs to
+//   the card's current intent generation (operationId ===
+//   lastIntentOperationId) — that is the current intent's OWN late
+//   callback arriving after a re-read already confirmed it (the
+//   RT-1 exit cleared pendingOperationId): it settles idempotently
+//   through the same three transitions, whose own monotonic guards
+//   (complete drops a lower revision, a stale conflict degrades to
+//   error) keep it from rewinding the confirmed value. When no
+//   intent identity is recorded at all (pending and lastIntent both
+//   null) there is nothing newer to protect, so legacy settlement
+//   stands as before.
+// - EVERY other outcome is a STALE operation's late callback: an
+//   older operation reporting after a newer intent was begun (a
+//   non-null pendingOperationId differs) or after a newer intent was
+//   already confirmed (pendingOperationId null and the outcome's
+//   operationId differs from lastIntentOperationId). It must never
+//   settle anything: selection, status, pendingOperationId,
 //   pendingExpectedRevision and the conflict fields stay exactly as
-//   they are. Only the server-confirmed value may merge into
+//   they are — in particular it never reaches fail / conflict
+//   settlement, so an old operation's failure or stale conflict
+//   cannot flip an already-confirmed newer intent to error /
+//   unsaved. Only the server-confirmed value may merge into
 //   confirmed / confirmedRevision, and only monotonically — a
 //   success whose revision exceeds the confirmed one, or a conflict
 //   whose revision is at or beyond it. Failures and lower revisions
-//   merge nothing. The card therefore stays in the current
-//   operation's "saving" presentation until that operation's own
-//   outcome arrives and settles it.
+//   merge nothing.
 export function settleFocusSaveOutcome(
   state: FocusFeedbackState,
   boundKey: string,
@@ -2598,7 +3029,12 @@ export function settleFocusSaveOutcome(
   outcome: FocusSaveOutcome,
 ): FocusFeedbackState {
   if (state.boundKey !== boundKey) return state;
-  if (state.pendingOperationId === null || state.pendingOperationId === operationId) {
+  const isPendingOperation = state.pendingOperationId !== null && state.pendingOperationId === operationId;
+  const isCurrentIntentEcho = state.pendingOperationId === null
+    && state.lastIntentOperationId !== null
+    && operationId === state.lastIntentOperationId;
+  const unattributed = state.pendingOperationId === null && state.lastIntentOperationId === null;
+  if (isPendingOperation || isCurrentIntentEcho || unattributed) {
     return outcome.kind === "success"
       ? completeFocusFeedbackSave(state, boundKey, outcome.choice, outcome.revision)
       : outcome.kind === "conflict"
@@ -3439,14 +3875,16 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline, focusFeedback, focusReadFailed, onViewTraining }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; focusFeedback: FocusFeedbackData; focusReadFailed: boolean; onViewTraining?: (range: { start: string; end: string }) => void }) {
+function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline, focusFeedback, focusReadFailed, onViewTraining, syncAttempt }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; focusFeedback: FocusFeedbackData; focusReadFailed: boolean; onViewTraining?: (range: { start: string; end: string }) => void; syncAttempt: SyncAttemptState | null }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
   const stepStatus: Status = snapshot.steps.value === null ? "数据缺失" : stepsBaselineIncomplete ? "基线不足" : snapshot.steps.status;
   const sleepHours = actualSleepHours(snapshot.sleep);
+  const swimWindowDates = [...snapshot.historyDaily].sort((a, b) => a.date.localeCompare(b.date)).slice(-7).map((row) => row.date);
+  const swimSummary = swimWeekSummary(snapshot.historyWorkouts, swimWindowDates);
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} syncAttempt={syncAttempt} />
       {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
       <WeekLoadBlock snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} />
       {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
@@ -3461,6 +3899,9 @@ function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSync
         <SevenDayFacts snapshot={snapshot} />
       </div>
       <div className="dark-panel">
+        <SleepRegularityPanel snapshot={snapshot} />
+      </div>
+      <div className="dark-panel">
         <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />
       </div>
       <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={snapshot.strengthTraining.displayUnit} />
@@ -3471,7 +3912,7 @@ function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSync
         </section>
       ) : null}
       <SleepPanel sleep={snapshot.sleep} />
-      <section className="workout-line" aria-label="运动记录"><div><span>近7天运动</span><strong>{snapshot.workouts.count7d} 次</strong></div><p>{snapshot.workouts.note}</p></section>
+      <section className="workout-line" aria-label="运动记录"><div><span>近7天运动</span><strong>{snapshot.workouts.count7d} 次</strong></div><p>{snapshot.workouts.note}</p>{swimSummary.count > 0 ? <p className="workout-swim-line">{swimSummary.label}</p> : null}</section>
       <RecentWorkouts snapshot={snapshot} />
     </div>
   );
@@ -4829,23 +5270,103 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
   }, [snapshot]);
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
-  const polling = useTaskPolling();
+  // H-FRESH-001 · PHASE-1: the manual-sync attempt machine. Each
+  // manual sync opens a new attempt whose baselines are the two
+  // sources' updatedAt values as this dashboard currently shows
+  // them; dispatch results, per-task endings and the dashboard
+  // read-back then advance each source independently (see the
+  // machine above). The App shell's background auto-sync runs on its
+  // own polling instance with no attempt, so its outcomes can never
+  // clear or overwrite a manual attempt's presentation — and vice
+  // versa, its failure note still arrives via autoSyncFailureNote.
+  const [syncAttempt, setSyncAttempt] = useState<SyncAttemptState | null>(null);
+  const dataStatusRef = useRef(dataStatus);
+  useEffect(() => { dataStatusRef.current = dataStatus; }, [dataStatus]);
+  const polling = useTaskPolling((results, taskMeta) => {
+    setSyncAttempt((prev) => {
+      let next = prev;
+      for (const result of results) {
+        const meta = taskMeta[result.taskId];
+        if (!meta) continue;
+        next = applySyncTaskEnd(next, meta.attemptId, meta.source, { status: result.status, contractSatisfied: result.contractSatisfied }, dataStatusRef.current?.generatedAt ?? null);
+      }
+      return next;
+    });
+  });
+  // Read-back confirmation: every dashboard data arrival is offered
+  // to the machine; it only adjudicates sources sitting in
+  // "unconfirmed", and only against a read generated after that
+  // source's task ended (the stamp guard inside applySyncReadback).
+  useEffect(() => {
+    if (!dataStatus) return;
+    setSyncAttempt((prev) => {
+      if (!prev) return prev;
+      let next = prev;
+      for (const source of ["health", "strength"] as const) {
+        const applied = applySyncReadback(next, prev.attemptId, source, { ok: true, updatedAt: dataStatus[source].updatedAt, stamp: dataStatus.generatedAt });
+        if (applied) next = applied;
+      }
+      return next;
+    });
+  }, [dataStatus]);
   const refresh = useMutation({
-    mutationFn: () => api.refreshHealthData({}),
-    onSuccess: (result) => {
+    mutationFn: (_attemptId: string) => api.refreshHealthData({}),
+    onSuccess: (result, attemptId) => {
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       setLastSyncMessage(result.message);
-      if (result.accepted) polling.startPolling([result.taskId, result.strengthTaskId]);
+      // Per-source dispatch honesty: refreshHealthData reports one
+      // accepted flag for the pair, but the task ids tell the truth
+      // per source — taskId is the health task unless health failed
+      // to spawn (then it aliases the strength task), and a null
+      // strengthTaskId means the strength spawn failed outright.
+      const healthDispatched = result.accepted && result.taskId !== null && result.taskId !== result.strengthTaskId;
+      const strengthDispatched = result.accepted && result.strengthTaskId !== null;
+      setSyncAttempt((prev) => {
+        let next = applySyncDispatchResult(prev, attemptId, "health", { accepted: healthDispatched });
+        next = applySyncDispatchResult(next, attemptId, "strength", { accepted: strengthDispatched });
+        return next;
+      });
+      if (result.accepted) polling.startPolling([result.taskId, result.strengthTaskId], {
+        ...(result.taskId ? { [result.taskId]: { attemptId, source: "health" as const } } : {}),
+        ...(result.strengthTaskId ? { [result.strengthTaskId]: { attemptId, source: "strength" as const } } : {}),
+      });
+    },
+    onError: (_error, attemptId) => {
+      setSyncAttempt((prev) => {
+        let next = applySyncDispatchResult(prev, attemptId, "health", { threw: true });
+        next = applySyncDispatchResult(next, attemptId, "strength", { threw: true });
+        return next;
+      });
     },
   });
   const strengthRefresh = useMutation({
-    mutationFn: () => api.refreshStrengthTraining({}),
-    onSuccess: (result) => {
+    mutationFn: (_attemptId: string) => api.refreshStrengthTraining({}),
+    onSuccess: (result, attemptId) => {
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       setLastSyncMessage(result.message);
-      if (result.accepted) polling.startPolling([result.strengthTaskId]);
+      setSyncAttempt((prev) => applySyncDispatchResult(prev, attemptId, "strength", { accepted: result.accepted }));
+      if (result.accepted) polling.startPolling([result.strengthTaskId], result.strengthTaskId ? { [result.strengthTaskId]: { attemptId, source: "strength" as const } } : undefined);
+    },
+    onError: (_error, attemptId) => {
+      setSyncAttempt((prev) => applySyncDispatchResult(prev, attemptId, "strength", { threw: true }));
     },
   });
+  const startFullSync = () => {
+    const attemptId = newRewardRequestId();
+    setSyncAttempt((prev) => beginSyncAttempt(prev, attemptId, {
+      health: dataStatus?.health.updatedAt ?? null,
+      strength: dataStatus?.strength.updatedAt ?? null,
+    }, ["health", "strength"]));
+    refresh.mutate(attemptId);
+  };
+  const startStrengthSync = () => {
+    const attemptId = newRewardRequestId();
+    setSyncAttempt((prev) => beginSyncAttempt(prev, attemptId, {
+      health: dataStatus?.health.updatedAt ?? null,
+      strength: dataStatus?.strength.updatedAt ?? null,
+    }, ["strength"]));
+    strengthRefresh.mutate(attemptId);
+  };
 
   const isSyncing = refresh.isPending || strengthRefresh.isPending || polling.syncing;
   // The open-triggered background strength sync is polled by the App shell,
@@ -4854,49 +5375,19 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
   // (previously that note only rendered in the empty state, so a failed
   // auto-sync with existing data disappeared silently).
   const syncMessage = polling.failureNote ?? autoSyncFailureNote ?? (polling.syncing ? "同步进行中，完成后会自动更新" : lastSyncMessage);
-  // H-FRESH-001: the refresh phase line next to the sync control.
-  // requested/waiting derive from the live mutation + polling state;
-  // the terminal phase (saved / failed) is remembered when the poll
-  // settles so the line stays readable after the spinners stop. A
-  // failure note appearing at any point marks the phase failed, so a
-  // sync error is visible without expanding anything.
-  const [settledPhase, setSettledPhase] = useState<"saved" | "failed" | null>(null);
-  const wasSyncingRef = useRef(false);
-  useEffect(() => {
-    if (polling.syncing) {
-      wasSyncingRef.current = true;
-      return;
-    }
-    if (wasSyncingRef.current) {
-      wasSyncingRef.current = false;
-      setSettledPhase(polling.failureNote ? "failed" : "saved");
-    }
-  }, [polling.syncing, polling.failureNote]);
-  useEffect(() => {
-    if (polling.failureNote) setSettledPhase("failed");
-  }, [polling.failureNote]);
-  const refreshPhase: RefreshPhase = isSyncing
-    ? (polling.syncing ? "waiting" : "requested")
-    : (settledPhase ?? "idle");
-  const phaseLabel = refreshPhaseLabel({
-    phase: refreshPhase,
-    healthUpdatedAt: dataStatus?.health.updatedAt ?? null,
-    strengthUpdatedAt: dataStatus?.strength.updatedAt ?? null,
-  });
   return (
     <>
       <header className="page-meta">
         <div><p>{fullDateLabel(snapshot.dataDate)} · 最近完整日</p><span>更新于 {updatedLabel(snapshot.updatedAt)} · Apple 健康</span></div>
-        <button className="sync-button" type="button" aria-label="同步 Apple 健康和训练记录" onClick={() => refresh.mutate()} disabled={isSyncing}>{isSyncing ? "同步中…" : snapshot.coverageIncomplete ? "待补全 · 全部同步" : "全部同步"}</button>
+        <button className="sync-button" type="button" aria-label="同步 Apple 健康和训练记录" onClick={startFullSync} disabled={isSyncing}>{isSyncing ? "同步中…" : snapshot.coverageIncomplete ? "待补全 · 全部同步" : "全部同步"}</button>
       </header>
-      {phaseLabel ? <p className="refresh-phase" role="status">{phaseLabel}</p> : null}
       <nav className="view-tabs" aria-label="健康看板视图">
         <button type="button" className={tab === "today" ? "selected" : ""} aria-current={tab === "today" ? "page" : undefined} onClick={() => setTab("today")}>今日</button>
         <button type="button" className={tab === "trends" ? "selected" : ""} aria-current={tab === "trends" ? "page" : undefined} onClick={() => setTab("trends")}>趋势</button>
         <button type="button" className={tab === "history" ? "selected" : ""} aria-current={tab === "history" ? "page" : undefined} onClick={() => setTab("history")}>历史</button>
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={() => refresh.mutate()} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} syncAttempt={syncAttempt} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onClearFocusRange={clearHistoryFocusRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );

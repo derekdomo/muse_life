@@ -1455,3 +1455,12 @@
 - 每日刷新生效日期 = 2026-10-24（验活即首跑）；定常节奏自 2026-10-25 起每日约 07:39 PT。
 - 旧 space-3-weekly-refresh（周日 08:39，驱动挂起的 F0.7 链）已停用退役（enabled=false，定义保留备查），避免双写与口径混杂；F0.7 本身仍按丙(ii) 只读观察，未被触发。
 - 页面新鲜度呈现沿用写回首片的两层标注：Plaid 层标拉取时间、快照层逐账户标各自日期。
+
+## 2026-10-24 09 时 PDT（H-SWIM-VIS-001：健康看板游泳呈现层修复交付）
+
+- 需求来源：所有者亲测发现（2026-10-24 09:40 PT）健康看板看不到游泳数据，经「Fun token burning ideas」chat 三层定位后以 P0 bug 单转交本 chat，登记见 plans.md H-SWIM-VIS-001。
+- 定位结论（实现方查实）：断点在今日页呈现层，与数据无关。服务端 getDashboard 数据层完整（historyDaily.swimMeters 在 10/15/16/21/23 均有值、historyWorkouts 12 条中 swimming 7 条、unifiedTimeline 含 hkWorkouts swimming 条目，均为所有者侧已核实事实）；但今日页的 ① SevenDayFacts 逐日事实条指标集只有运动分钟/步数/HRV/静息心率，泳日单元格与展开详情无任何游泳条目；② workout-line 运动记录行只有「近7天运动 N 次」总数、无游泳分项。游泳明细此前只渲染在历史页「游泳记录」专区、趋势页游泳距离柱状图与数据状态面板统一时间线小字里——H-UI-002 首屏做减法后，今日页上半部（hero→事实条→本周回顾→运动行）无一处游泳呈现，所有者扫首屏与事实条自然找不到。
+- 改了什么（仅 client 呈现层，server/schema/数据管道/公式/口径未动）：health-dashboard/client/src/App.tsx 在 sevenDayFacts 附近新增四个纯函数——swimInfoByDate（只收 swimMeters 非 null 且 >0 的日期，meters 取 historyDaily 行，minutes 为当日游泳条目已知 durationMinutes 之和取整、无已知时长为 null）、swimDayLabel（「游泳 N 米」）、swimDayDetail（「游泳 N 米 · M 分」，时长未知时标「时长未知」）、swimWeekSummary（窗口日期内游泳条数＋已知距离合计，label 三态）；接线两处——SevenDayFacts 泳日单元格在单位 small 后追加 `<small className="seven-facts-swim">` 游泳米数行、aria-label 追加完整文案、展开详情 dl 新增「游泳」行；TodayView 的 workout-line 在窗口（historyDaily 升序末 7 日）内有游泳时于 note 后追加 `<p className="workout-swim-line">` 整行小结。theme.css 新增 .seven-facts-swim（正文亮色 #f2f5f0、9px、700 字重——文字＋数字＋字重传义，不只靠颜色）与 .workout-swim-line（沿用现有段落字号颜色，grid-column: 1 / -1 整行）。
+- 验证证据：构建审计 pass（构建方源码级核对四函数与三处接线、两条 CSS 规则齐备）。新增 health-dashboard/validate-swim-vis.mjs 逐字提取生产函数实跑 33/33：以所有者已核实的数据层值逐日对账——10/15 600 米·19 分、10/16 600 米·22 分、10/21 600 米·20 分、10/23 700 米·23 分，四天米数与时长全一致；周小结 count=2、meters=1300、label「近7天游泳 2 次 · 共 1,300 米」，与所有者核实的 workouts.count7d=2 子集口径一致（窗口内 HK 记录共 2 条且均为游泳）；边界含 swimMeters null/0 不入条、时长未知文案、无已知距离时小结只报次数、空窗口空 label、窗口加宽计数变 7、门变异（<= 0 弱化为 < 0）翻转结果、接线源串 6 项。回归：validate-week-review 107/107、validate-hero-layers 24/24；validate-seven-day-facts 44 过 8 败，失败集与回灌前 HEAD 源码基线（临时目录复跑）逐条相同——既有基线，非本条引入。
+- 局限：所有者视角渲染未验（构建/审计环境非所有者视角），最终验收以所有者本人打开今日页为准（应看到：事实条 10/21、10/23 两格带游泳行、展开有「游泳」详情行；运动记录行下方有近 7 天游泳小结行）。本轮源码回灌为整文件同步（App.tsx、theme.css 与线上工件逐字一致），diff 同时带入此前未回灌的 H-FRESH-001 同步阶段机与 H-SLEEP-REG-001 面板工件源码尾巴——该部分非本条新增改动，系挂账回灌随本轮一并落地。未碰 app.db 与任何真实数据文件；验证夹具为与所有者核实值同形的合成数据。
+- 回滚：git revert 本提交即撤回仓库侧源码与登记；工件侧如需回退，经 artifact 编辑还原 App.tsx/theme.css 两文件即可，服务端与数据未动、无迁移需回滚。

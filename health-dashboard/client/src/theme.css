@@ -123,6 +123,7 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .whoop-source-line strong { color: #e6ede7; font-size: 12px; font-weight: 800; }
 .whoop-source-name { color: #e6ede7; font-weight: 800; }
 .whoop-source-line .whoop-source-coverage { color: #f2c66d; font-weight: 700; }
+.whoop-source-line .whoop-source-attempt { color: #f2f5f0; font-weight: 750; }
 .whoop-source-action { flex: 0 0 auto; min-height: 44px; border: 1px solid rgba(255, 255, 255, .28); border-radius: 999px; padding: 10px 14px; background: transparent; color: #f2f5f0; font-size: 12px; font-weight: 750; cursor: pointer; }
 .whoop-source-action:disabled { opacity: .55; }
 .whoop-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 20px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, .1); }
@@ -163,7 +164,7 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
    (week load verdict, 7-day facts, week review) — they keep the
    hero's dark styling and --whoop-dim token wherever they now sit. */
 .dark-panel { --whoop-dim: #9aa79d; margin-top: 16px; padding: 16px 20px 18px; background: #101410; border: 1px solid #2a332c; border-radius: var(--radius); color: #f2f5f0; }
-.dark-panel .whoop-load, .dark-panel .seven-facts, .dark-panel .week-review { margin-top: 0; }
+.dark-panel .whoop-load, .dark-panel .seven-facts, .dark-panel .sleep-reg, .dark-panel .week-review { margin-top: 0; }
 .today-view > .missing-note { margin-top: 14px; }
 .whoop-load { margin-top: 16px; padding: 13px 14px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
 .whoop-load-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
@@ -196,12 +197,31 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .seven-facts-day span { color: var(--whoop-dim); font-size: 9px; font-weight: 700; }
 .seven-facts-day strong { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .seven-facts-day small { color: var(--whoop-dim); font-size: 9px; }
+.seven-facts-day small.seven-facts-swim { color: #f2f5f0; font-size: 9px; font-weight: 700; }
 .seven-facts-day.gap strong { color: var(--whoop-dim); }
 .seven-facts-day.conflict strong, .seven-facts-day.conflict small { color: #f2c66d; }
 .seven-facts-day[aria-expanded="true"] { border-color: rgba(255, 255, 255, .45); }
 .seven-facts-detail { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; margin: 10px 0 0; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, .1); }
 .seven-facts-detail dt { color: var(--whoop-dim); font-size: 9px; font-weight: 700; }
 .seven-facts-detail dd { margin: 2px 0 0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+
+/* H-SLEEP-REG-001 睡眠规律性 (reference statistic only): sits in its own
+   dark panel directly after the seven-day facts strip, styled like its
+   neighbours. Meaning rides on symbol (◑/◐/○/—), text labels and the
+   SD numbers together; color is never the only channel. */
+.sleep-reg { margin-top: 14px; padding: 13px 14px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
+.sleep-reg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.sleep-reg-title { color: #f2f5f0; font-size: 13px; font-weight: 800; }
+.sleep-reg-tag { padding: 2px 7px; border: 1px solid rgba(255, 255, 255, .28); border-radius: 999px; color: #cfe3d2; font-size: 10px; font-weight: 800; white-space: nowrap; }
+.sleep-reg-sample { margin-left: auto; color: #e6ede7; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sleep-reg-note { margin: 8px 0 0; color: var(--whoop-dim); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.sleep-reg-rows { margin-top: 10px; border-top: 1px solid rgba(255, 255, 255, .1); }
+.sleep-reg-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: baseline; padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, .08); }
+.sleep-reg-row:last-child { border-bottom: 0; padding-bottom: 2px; }
+.sleep-reg-metric { font-size: 12px; font-weight: 800; }
+.sleep-reg-row strong { font-size: 15px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sleep-reg-row small { grid-column: 1 / -1; color: var(--whoop-dim); font-size: 10px; line-height: 1.45; }
+.sleep-reg-warn { margin: 10px 0 0; color: #f2c66d; font-size: 11px; font-weight: 700; line-height: 1.55; overflow-wrap: anywhere; }
 
 /* H3.1/H3.2/H3.3 上周复盘： since H-UI-002 it renders in a dark panel
    below the hero (it used to live inside the hero itself). Meaning rides on text, symbols (▲/▼/—) and numbers; color is
@@ -391,6 +411,7 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .workout-line span { color: var(--dim); font-size: 11px; }
 .workout-line strong { font-size: 23px; }
 .workout-line p { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.5; }
+.workout-swim-line { grid-column: 1 / -1; margin: 0; color: var(--dim); font-size: 12px; line-height: 1.5; }
 
 .strength-trend-section { margin-top: 38px; }
 .strength-trend-section > .chart-panel { margin-top: 18px; }
