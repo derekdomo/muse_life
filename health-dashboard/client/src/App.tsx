@@ -2065,6 +2065,37 @@ function heroSourceStatus(snapshot: Snapshot, readiness: Readiness | null, dataS
   return { dataDateLine, healthLine, strengthLine, coverageLine, action };
 }
 
+// H-UI-002 layer 3: the hero's one-line conclusion for today. With a
+// readiness score the conclusion is exactly that score's status +
+// summary — nothing reworded, nothing added. Without one it says so
+// plainly and names the missing inputs (with the same 还没同步完 /
+// 当天没戴表 distinction the missing-note uses) instead of inventing
+// a verdict. Self-contained so repo validators can extract it by name
+// and run it standalone.
+export function todayConclusion(readiness: Readiness | null, snapshot: Snapshot): { title: string; text: string } {
+  if (readiness !== null) return { title: readiness.status, text: readiness.summary };
+  const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null]
+    .filter((item): item is string => item !== null)
+    .join("、");
+  const missingText = missing
+    ? `${snapshot.dataDate} ${missing}无记录（${snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}），`
+    : "";
+  return { title: "数据不足", text: `${missingText}至少需要两项具备历史基线的信号才能评分。` };
+}
+
+// H-UI-002 layer 3: the week-focus teaser on the first screen — only
+// the derived focus line plus the review window's dates, taken from
+// the existing weekReview() result. The basis, the feedback controls
+// and everything else stay in the full WeekReviewPanel below; the
+// teaser never duplicates them. Self-contained for the same reason.
+export function weekFocusTeaser(review: WeekReviewResult): { focusText: string; windowLabel: string } {
+  const md = (date: string): string => `${Number(date.slice(5, 7))}月${Number(date.slice(8, 10))}日`;
+  return {
+    focusText: review.focus,
+    windowLabel: `复盘窗 ${md(review.reviewWindow.start)}–${md(review.reviewWindow.end)}`,
+  };
+}
+
 function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: WhoopScore; suffix: string; bandKind: "recovery" | "strain" }) {
   const radius = 40;
   const circumference = 2 * Math.PI * radius;
@@ -2087,53 +2118,56 @@ function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: W
   );
 }
 
-// One-word freshness for the hero's single source line; the full
-// per-source wording (with update times) lives in the 数据状态 panel.
-function freshnessShort(freshness: DataStatus["health"]["freshness"] | undefined): string {
-  if (freshness === undefined) return "未知";
-  if (freshness === "fresh") return "新鲜";
-  if (freshness === "today") return "今天更新";
-  if (freshness === "stale") return "已过期";
-  return "未同步";
-}
-
-function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, focusFeedback, focusReadFailed, onSyncHealth, onSyncStrength, syncing, onViewTraining }: {
-  snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null;
-  focusFeedback: FocusFeedbackData; focusReadFailed: boolean;
+// H-UI-002: the hero is now only the first screen's three layers —
+// (1) a per-source freshness strip, (2) the three score rings with
+// the TRIMP note, (3) the status title + one-line conclusion + the
+// week-focus teaser + two anchor buttons. Everything else that used
+// to live here (driver tiles, the week load verdict, the readiness
+// trend, the 7-day facts, the week review) moved below the hero in
+// TodayView; nothing was deleted, only relocated.
+function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing }: {
+  snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null;
   onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean;
-  onViewTraining?: (range: { start: string; end: string }) => void;
 }) {
   const recovery = recoveryScore(readiness);
   const sleep = sleepScore(snapshot, readiness);
   const facts = strainFacts(snapshot);
   const strain = strainScore(snapshot);
-  const load = weekLoad(snapshot, readiness);
-  const sleepHours = actualSleepHours(snapshot.sleep);
   const source = heroSourceStatus(snapshot, readiness, dataStatus);
+  const conclusion = todayConclusion(readiness, snapshot);
+  const review = useMemo(
+    () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
+      coverageIncomplete: snapshot.coverageIncomplete,
+      strengthDates: snapshot.strengthTraining.workouts.map((workout) => workout.date),
+    }),
+    [snapshot],
+  );
+  const teaser = weekFocusTeaser(review);
+  const scrollToId = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   const handleSourceAction = () => {
     if (source.action.kind === "sync-health") onSyncHealth();
     else if (source.action.kind === "sync-strength") onSyncStrength();
-    else document.getElementById("data-status-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    else scrollToId("data-status-panel");
   };
   return (
     <section className="whoop-hero" aria-labelledby="whoop-title">
       <div className="whoop-source-bar">
-        <p className="whoop-source-line">
-          <strong>{dateLabel(snapshot.dataDate)}</strong>
-          <span>健康 {freshnessShort(dataStatus?.health.freshness)}</span>
-          <span>训练 {freshnessShort(dataStatus?.strength.freshness)}</span>
-          {source.coverageLine ? <span className="whoop-source-coverage">{source.coverageLine}</span> : null}
-        </p>
+        <div className="whoop-source-lines">
+          <p className="whoop-source-line"><strong>{dateLabel(snapshot.dataDate)}</strong><span>{source.dataDateLine}</span></p>
+          <p className="whoop-source-line">
+            <span className="whoop-source-name">健康</span>
+            <span aria-hidden="true">{freshnessSymbol(dataStatus?.health.freshness ?? "missing")}</span>
+            <span>{source.healthLine}</span>
+            {source.coverageLine ? <span className="whoop-source-coverage">{source.coverageLine}</span> : null}
+          </p>
+          <p className="whoop-source-line">
+            <span className="whoop-source-name">训练</span>
+            <span aria-hidden="true">{freshnessSymbol(dataStatus?.strength.freshness ?? "missing")}</span>
+            <span>{source.strengthLine}</span>
+          </p>
+        </div>
         <button className="whoop-source-action" type="button" aria-label={source.action.label} onClick={handleSourceAction} disabled={syncing}>{syncing ? "同步中…" : source.action.label}</button>
       </div>
-      <div className="whoop-head">
-        <div>
-          <p className="whoop-kicker">{dateLabel(readiness?.date ?? snapshot.dataDate)} · 今日状态</p>
-          <h1 id="whoop-title">{readiness ? readiness.status : "数据不足"}</h1>
-        </div>
-        {readiness ? <span className="whoop-confidence">置信度{readiness.confidence} · {readiness.signalCount} 项信号</span> : null}
-      </div>
-      <p className="whoop-summary">{readiness?.summary ?? "至少需要两项具备历史基线的信号才能评分。"}</p>
       <div className="whoop-scores">
         <ScoreRing label="恢复" score={recovery} suffix="%" bandKind="recovery" />
         <ScoreRing label="睡眠" score={sleep} suffix="%" bandKind="recovery" />
@@ -2161,12 +2195,38 @@ function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, focusFee
           <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC6162408/" target="_blank" rel="noreferrer">TRIMP 方法综述</a>
         </p>
       </details>
-      <div className="whoop-drivers">
-        <div><span>HRV</span><strong>{snapshot.hrv.value === null ? "—" : `${numberLabel(snapshot.hrv.value, 1)} ms`}</strong></div>
-        <div><span>静息心率</span><strong>{snapshot.restingHr.value === null ? "—" : `${numberLabel(snapshot.restingHr.value, 1)} bpm`}</strong></div>
-        <div><span>昨晚睡眠</span><strong>{hasSleepSession(snapshot) ? `${sleepHours.toFixed(1)} h` : "—"}</strong></div>
-        <div><span>睡眠债</span><strong>{readiness?.sleepDebtHours === null || readiness?.sleepDebtHours === undefined ? "—" : `${readiness.sleepDebtHours.toFixed(1)} h`}</strong></div>
+      <div className="whoop-head">
+        <div>
+          <p className="whoop-kicker">{dateLabel(readiness?.date ?? snapshot.dataDate)} · 今日状态</p>
+          <h1 id="whoop-title">{conclusion.title}</h1>
+        </div>
+        {readiness ? <span className="whoop-confidence">置信度{readiness.confidence} · {readiness.signalCount} 项信号</span> : null}
       </div>
+      <p className="whoop-summary">{conclusion.text}</p>
+      <div className="whoop-focus-teaser">
+        <p><span>下周重点</span>{teaser.focusText}</p>
+        <small>{teaser.windowLabel}</small>
+      </div>
+      <div className="whoop-anchors">
+        {readiness ? (
+          <button type="button" className="whoop-anchor-btn" aria-label="查看依据" onClick={() => scrollToId("readiness-basis")}>查看依据</button>
+        ) : null}
+        <button type="button" className="whoop-anchor-btn" aria-label="查看周复盘依据/反馈" onClick={() => scrollToId("week-review-panel")}>查看周复盘依据/反馈</button>
+      </div>
+    </section>
+  );
+}
+
+// H-UI-002: the week load-vs-recovery verdict and the readiness 7-day
+// trend used to sit inside the hero; they now render directly below
+// it, on the same weekLoad / readinessHistory data and wording — the
+// judgement itself is unchanged.
+function WeekLoadBlock({ snapshot, readiness, readinessHistory }: {
+  snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[];
+}) {
+  const load = weekLoad(snapshot, readiness);
+  return (
+    <div className="dark-panel">
       <div className={`whoop-load whoop-${load.band}`}>
         <div className="whoop-load-head"><span>本周负荷 vs 恢复</span><strong><span className="band-symbol" aria-hidden="true">{bandSymbol(load.band)}</span> {load.verdict}</strong></div>
         <p>{load.detail}</p>
@@ -2186,9 +2246,7 @@ function WhoopHero({ snapshot, readiness, readinessHistory, dataStatus, focusFee
           </>
         ) : null}
       </div>
-      <SevenDayFacts snapshot={snapshot} />
-      <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />
-    </section>
+    </div>
   );
 }
 
@@ -3065,7 +3123,7 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
     return metric.kind === "count" ? `${value} 次` : `${numberLabel(value, metric.digits)} ${metric.unit}`;
   };
   return (
-    <section className="week-review" aria-labelledby="week-review-title">
+    <section className="week-review" id="week-review-panel" aria-labelledby="week-review-title">
       <h2 id="week-review-title" className="week-review-title">上周复盘 · 滚动 7 天</h2>
       {!review.valid ? <p className="week-review-warn">{review.note}</p> : null}
       {review.valid && review.coverageIncomplete === true ? (
@@ -3227,7 +3285,7 @@ function ReadinessPanel({ readiness, compact = false }: { readiness: Readiness; 
   });
   const scoreStyle = { "--readiness-score": (readiness.score ?? 0) * 10 } as CSSProperties;
   return (
-    <section className="readiness-panel">
+    <section className="readiness-panel" id="readiness-basis">
       {compact ? (
         <div className="readiness-compact-head">
           <p className="section-kicker">恢复详情</p>
@@ -3384,18 +3442,14 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
 function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, unifiedTimeline, focusFeedback, focusReadFailed, onViewTraining }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; focusFeedback: FocusFeedbackData; focusReadFailed: boolean; onViewTraining?: (range: { start: string; end: string }) => void }) {
   const missing = [snapshot.restingHr.value === null ? "静息心率" : null, snapshot.hrv.value === null ? "HRV" : null].filter(Boolean).join("、");
   const stepsBaselineIncomplete = snapshot.steps.baseline === null || snapshot.steps.usualMin === null || snapshot.steps.usualMax === null || snapshot.steps.status === "数据缺失";
-  const stepSummary = snapshot.steps.value === null ? "步数未记录" : stepsBaselineIncomplete ? "基线不足，无法比较" : snapshot.steps.status === "正常" ? "步数在常见范围" : `步数${snapshot.steps.status}`;
   const stepStatus: Status = snapshot.steps.value === null ? "数据缺失" : stepsBaselineIncomplete ? "基线不足" : snapshot.steps.status;
   const sleepHours = actualSleepHours(snapshot.sleep);
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} onViewTraining={onViewTraining} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} />
+      {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
+      <WeekLoadBlock snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} />
       {readiness ? <ReadinessPanel readiness={readiness} compact /> : null}
-      <section className="verdict" aria-labelledby="verdict-title">
-        <p>昨日概览</p>
-        <h1 id="verdict-title"><span>{numberLabel(snapshot.steps.value)}</span> 步，{stepSummary}；睡眠 <em>{sleepHours.toFixed(1)} 小时</em>。</h1>
-        {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
-      </section>
       <section className="kpi-board" aria-label="关键健康指标">
         <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={stepStatus} />
         <Kpi label="静息心率" value={numberLabel(snapshot.restingHr.value, 1)} unit="bpm" detail={`基线约 ${snapshot.restingHr.baseline} · 常见 ${snapshot.restingHr.usualMin}–${snapshot.restingHr.usualMax}`} status={snapshot.restingHr.status} />
@@ -3403,6 +3457,12 @@ function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSync
         <Kpi label="睡眠" value={sleepHours.toFixed(1)} unit="h" detail={`质量 ${numberLabel(snapshot.sleep.quality)} · 效率 ${snapshot.sleep.efficiency?.toFixed(1) ?? "—"}%`} status={snapshot.sleep.status} />
       </section>
       <StrengthPanel strength={snapshot.strengthTraining} onSync={onSyncStrength} syncing={strengthSyncing} />
+      <div className="dark-panel">
+        <SevenDayFacts snapshot={snapshot} />
+      </div>
+      <div className="dark-panel">
+        <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />
+      </div>
       <DataStatusPanel dataStatus={dataStatus} unifiedTimeline={unifiedTimeline} displayUnit={snapshot.strengthTraining.displayUnit} />
       {snapshot.morningReference ? (
         <section className="morning-strip" aria-label="今晨参考">

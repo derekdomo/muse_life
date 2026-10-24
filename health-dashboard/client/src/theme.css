@@ -117,13 +117,15 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .readiness-compact-head span { color: var(--dim); font-size: 11px; font-weight: 700; }
 
 .whoop-hero { --whoop-dim: #9aa79d; margin-top: 16px; padding: 22px 20px 18px; background: #101410; border: 1px solid #2a332c; border-radius: var(--radius); color: #f2f5f0; }
-.whoop-source-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid rgba(255, 255, 255, .1); }
-.whoop-source-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0; color: var(--whoop-dim); font-size: 11px; font-weight: 600; }
+.whoop-source-bar { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 14px; margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid rgba(255, 255, 255, .1); }
+.whoop-source-lines { display: grid; gap: 3px; min-width: 0; }
+.whoop-source-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0; color: var(--whoop-dim); font-size: 11px; font-weight: 600; }
 .whoop-source-line strong { color: #e6ede7; font-size: 12px; font-weight: 800; }
+.whoop-source-name { color: #e6ede7; font-weight: 800; }
 .whoop-source-line .whoop-source-coverage { color: #f2c66d; font-weight: 700; }
-.whoop-source-action { flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, .28); border-radius: 999px; padding: 6px 12px; background: transparent; color: #f2f5f0; font-size: 12px; font-weight: 750; cursor: pointer; }
+.whoop-source-action { flex: 0 0 auto; min-height: 44px; border: 1px solid rgba(255, 255, 255, .28); border-radius: 999px; padding: 10px 14px; background: transparent; color: #f2f5f0; font-size: 12px; font-weight: 750; cursor: pointer; }
 .whoop-source-action:disabled { opacity: .55; }
-.whoop-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.whoop-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 20px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, .1); }
 .whoop-kicker { margin: 0; color: var(--whoop-dim); font-size: 11px; font-weight: 700; }
 .whoop-head h1 { margin: 5px 0 0; font-size: clamp(27px, 7.4vw, 38px); line-height: 1.12; letter-spacing: -.03em; }
 .whoop-confidence { flex: 0 0 auto; padding: 4px 8px; border: 1px solid rgba(255, 255, 255, .18); border-radius: 999px; color: #cfe3d2; font-size: 10px; font-weight: 700; white-space: nowrap; }
@@ -151,10 +153,18 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .whoop-band-zones { display: flex; width: 100%; max-width: 96px; justify-content: space-between; margin-top: 3px; color: var(--whoop-dim); font-size: 8px; font-weight: 700; }
 .whoop-band i { position: absolute; top: 50%; width: 11px; height: 11px; border: 2px solid #101410; border-radius: 50%; background: #fff; transform: translate(-50%, -50%); }
 .whoop-score > p { margin: 7px 0 0; color: var(--whoop-dim); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
-.whoop-drivers { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 20px; padding-top: 15px; border-top: 1px solid rgba(255, 255, 255, .1); }
-.whoop-drivers div { min-width: 0; }
-.whoop-drivers span { display: block; color: var(--whoop-dim); font-size: 9px; font-weight: 700; }
-.whoop-drivers strong { display: block; margin-top: 3px; font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.whoop-focus-teaser { margin-top: 14px; padding: 11px 13px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
+.whoop-focus-teaser p { display: flex; gap: 10px; margin: 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.whoop-focus-teaser p span { flex: 0 0 auto; color: var(--accent); font-weight: 800; }
+.whoop-focus-teaser small { display: block; margin-top: 4px; color: var(--whoop-dim); font-size: 10px; font-weight: 700; }
+.whoop-anchors { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.whoop-anchor-btn { min-height: 44px; padding: 10px 16px; border: 1px solid rgba(255, 255, 255, .28); border-radius: 999px; background: transparent; color: #f2f5f0; font-size: 12px; font-weight: 750; cursor: pointer; }
+/* H-UI-002: dark container for the blocks that moved out of the hero
+   (week load verdict, 7-day facts, week review) — they keep the
+   hero's dark styling and --whoop-dim token wherever they now sit. */
+.dark-panel { --whoop-dim: #9aa79d; margin-top: 16px; padding: 16px 20px 18px; background: #101410; border: 1px solid #2a332c; border-radius: var(--radius); color: #f2f5f0; }
+.dark-panel .whoop-load, .dark-panel .seven-facts, .dark-panel .week-review { margin-top: 0; }
+.today-view > .missing-note { margin-top: 14px; }
 .whoop-load { margin-top: 16px; padding: 13px 14px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
 .whoop-load-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
 .whoop-load-head span { color: var(--whoop-dim); font-size: 11px; font-weight: 800; }
@@ -193,8 +203,8 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .seven-facts-detail dt { color: var(--whoop-dim); font-size: 9px; font-weight: 700; }
 .seven-facts-detail dd { margin: 2px 0 0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 
-/* H3.1/H3.2/H3.3 上周复盘： lives inside the dark hero, after the load
-   verdict. Meaning rides on text, symbols (▲/▼/—) and numbers; color is
+/* H3.1/H3.2/H3.3 上周复盘： since H-UI-002 it renders in a dark panel
+   below the hero (it used to live inside the hero itself). Meaning rides on text, symbols (▲/▼/—) and numbers; color is
    never the only channel, per the owner's color-vision rule. */
 .week-review { margin-top: 14px; padding: 13px 14px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
 .week-review-title { margin: 0; font-size: 14px; font-weight: 800; letter-spacing: -.01em; }
@@ -252,11 +262,6 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .history-focus-weeks { margin-top: 6px; }
 .history-focus-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
 
-.verdict { padding: 28px 0 22px; }
-.verdict > p { margin: 0 0 8px; color: var(--dim); font-size: 13px; font-weight: 700; }
-.verdict h1 { max-width: 840px; margin: 0; font-size: clamp(24px, 6.8vw, 42px); line-height: 1.28; letter-spacing: -.035em; font-weight: 650; }
-.verdict h1 span { display: inline-block; color: var(--amber); font-size: 1.17em; font-variant-numeric: tabular-nums; }
-.verdict h1 em { color: var(--accent); font-style: normal; }
 .missing-note { display: flex; align-items: flex-start; gap: 9px; margin-top: 17px; color: var(--dim); font-size: 13px; line-height: 1.55; }
 .missing-note > span { width: 8px; height: 8px; flex: 0 0 auto; margin-top: 6px; border-radius: 50%; background: var(--slate); }
 
