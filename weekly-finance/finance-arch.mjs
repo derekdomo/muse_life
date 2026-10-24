@@ -50,6 +50,15 @@
 //   adopted baseline months with their coverage, and an
 //   "insufficient" verdict names why months were rejected.
 //
+// PM 2026-10-24 07:05 fix (TXN-1 refund-diagnosis scope remainder):
+// - The unapplied-refund diagnosis follows the same candidate scope:
+//   when the original has ANY asOf candidate rows, the refund is
+//   judged in the CANDIDATE month(s) only — a future row's month in
+//   the full-set index can no longer pull a past month's refund
+//   diagnosis into the cutoff month. The full-set index is used only
+//   when the original has no candidate at all (truly absent, or
+//   dated entirely after asOf) for that honest diagnosis.
+//
 // PM 2026-10-24 04:01 fixes (TXN-1 future-metadata scope, ANOM-1
 // coverage transmission):
 // - Conflict attribution uses ONLY the asOf candidate set's months
@@ -292,12 +301,21 @@ export function summarizeSpendMonth(txns, month, options = {}) {
       // conflicted, dated entirely after asOf, or truly absent. The
       // refund is judged in the ORIGINAL's month(s); a refund whose
       // original belongs to another month is not this month's gap.
+      // Scope (TXN-1 07:05): when the original has candidate rows,
+      // ONLY their months judge the refund — the full-set index
+      // (which includes future rows) must not attribute this refund
+      // to a future row's month. The full-set index is consulted
+      // only when there is no candidate at all.
+      const candidateMonths = r.refundOf != null ? candidateMonthsById.get(r.refundOf) : undefined;
+      if (candidateMonths && candidateMonths.size > 0) {
+        if (!candidateMonths.has(month)) continue;
+        unappliedRefunds.push({ refundId: r.id, of: r.refundOf ?? null, amount: amt, reason: "original-conflicted" });
+        continue;
+      }
       const origMonths = r.refundOf != null ? allMonthsById.get(r.refundOf) : undefined;
       if (origMonths && !origMonths.has(month)) continue;
       if (!origMonths && r.date.slice(0, 7) !== month) continue;
-      const reason = r.refundOf != null && conflictIds.has(r.refundOf)
-        ? "original-conflicted"
-        : origMonths ? "original-after-asof" : "original-missing";
+      const reason = origMonths ? "original-after-asof" : "original-missing";
       unappliedRefunds.push({ refundId: r.id, of: r.refundOf ?? null, amount: amt, reason });
       continue;
     }

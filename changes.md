@@ -1413,3 +1413,12 @@
 - `F0.7` 只读续查（2026-10-24 05:13 PDT，遵丙(ii)，未触发 run/reset/clear）：space-3 `getRefreshObservations`——attempt=2 仍 running/awaiting_callback，started 2026-10-24T00:55:24Z、距启动约 11.3 小时，观测仍仅 refresh_started(claimed)＋spawn_attached，无本代回调/终态、新快照未核实，触发来源仍未知，断点未变。
 - 队列核对：仍（需用户确认）：`F-ARCH-001` 生产写回通道、`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T；`H-SLEEP-REG-001` 沿原 builder 与 10-24 18:00 目标、本轮未重复接单；`H3.5·RT-2`/`H-FRESH-001·PHASE-1` 仓库回灌仍 EVID 尾巴。本轮用户可见增量：0 组（财务合成契约余项关闭，不计产品增量）。
 - 回滚：`git revert` 本提交即可（纯合成计算模块＋验证脚本＋SPEC 文档，无迁移、无生产写入）。
+
+## 2026-10-24 07 时（repo-plans-sync：F-ARCH-001 TXN-1 07:05 退款诊断余项）
+
+- `F-ARCH-001·TXN-1`（P1 / A 合成口径，PM 2026-10-24 07:05 bug 单）：退款诊断未来月份污染已修——`summarizeSpendMonth` 的 `!orig` 分支改为候选优先作用域：原交易在截点内有候选行时，退款归属只认候选月份（`candidateMonthsById`），命中候选月才列 `original-conflicted`；全集 `allMonthsById` 仅在原交易明确无候选时作诚实诊断（真缺失 `original-missing`／全部在截点之后 `original-after-asof`），其未来行月份不再把别月旧退款挂入本月。PM 复现（SYN-conflict 9 月同状态冲突两行＋SYN-refund-past 9-10 退款、查 10 月 asOf 10-15、coverage complete）修复前 complete=false/unapplied=1/conflicts=0，修复后 complete=true/unapplied=0/conflicts=0（双序一致）；9 月本月仍 conflicts=1＋unapplied=1（original-conflicted）；跨月退款依赖冲突仍双月可见（TXN-2/TXN-4）；无候选的 after-asof/missing 诊断保留。
+- SPEC 同步：`F-ARCH-001-SPEC.md` 第 2 节补 07:05 退款诊断作用域细化（候选优先、全集仅无候选时诊断）。
+- 验证证据：仓库实跑 `node weekly-finance/validate-finance-arch.mjs` **122/122**（原 118 全保留全过＋TXN-4 矩阵 4 项：PM 复现双序、本月诊断保留、跨月依赖＋未来行、no-candidate 诚实诊断两态）；实现方另以独立 node 片段复跑 PM 原反例确认修复后 10 月 complete=true。未提交 app.db/.env/任何真实数据；零生产写入，生产写回通道仍（需用户确认）；计算/呈现首片（含 PM 07:05 三场景/双日期演示设计）沿 10-25 18:00。
+- `F0.7` 只读续查（2026-10-24 07:13 PDT，遵丙(ii)，未触发 run/reset/clear）：space-3 `getrefreshobservations`——attempt=2 仍 running/awaiting_callback，started 2026-10-24T00:55:24Z、距启动约 13.3 小时，观测仍仅 refresh_started(claimed)＋spawn_attached，无本代回调/终态、新快照未核实，触发来源仍未知，断点未变。
+- 队列核对：仍（需用户确认）：`F-ARCH-001` 生产写回通道、`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T；`H-SLEEP-REG-001` 沿原 builder 与 10-24 18:00 目标、本轮未重复接单；`H3.5·RT-2`/`H-FRESH-001·PHASE-1` 仓库回灌仍 EVID 尾巴。本轮用户可见增量：0 组（财务合成契约余项关闭，不计产品增量）。
+- 回滚：`git revert` 本提交即可（纯合成计算模块＋验证脚本＋SPEC 文档，无迁移、无生产写入）。

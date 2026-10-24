@@ -615,6 +615,65 @@ check("TXN3 genuine in-month conflict still reported at the cutoff", (() => {
 })());
 
 // =====================================================================
+// TXN-4 matrix (PM 2026-10-24 07:05): the unapplied-refund diagnosis
+// follows candidate scope — a future row's month in the full-set
+// index must not pull a past refund diagnosis into the cutoff month.
+// The full-set index only diagnoses originals with NO candidate.
+// =====================================================================
+check("TXN4 PM repro: future same-ID row does not pollute refund diagnosis, both orders", (() => {
+  const base = [
+    { id: "SYN-conflict", date: "2026-09-01", amount: -10, status: "posted", kind: "spend" },
+    { id: "SYN-conflict", date: "2026-09-02", amount: -20, status: "posted", kind: "spend" },
+    { id: "SYN-refund-past", date: "2026-09-10", amount: 5, status: "posted", kind: "refund", refundOf: "SYN-conflict" },
+  ];
+  const before = summarizeSpendMonth(base, "2026-10", { asOf: "2026-10-15", ...COV("2026-10") });
+  const withFuture = [...base, { id: "SYN-conflict", date: "2026-10-28", amount: -30, status: "posted", kind: "spend" }];
+  const a = summarizeSpendMonth(withFuture, "2026-10", { asOf: "2026-10-15", ...COV("2026-10") });
+  const b = summarizeSpendMonth([...withFuture].reverse(), "2026-10", { asOf: "2026-10-15", ...COV("2026-10") });
+  return before.complete && before.unappliedRefunds.length === 0
+    && a.complete && a.conflicts.length === 0 && a.unappliedRefunds.length === 0
+    && b.complete && b.conflicts.length === 0 && b.unappliedRefunds.length === 0;
+})());
+check("TXN4 refund diagnosis still reported in the candidate (original) month", (() => {
+  const rows = [
+    { id: "SYN-conflict", date: "2026-09-01", amount: -10, status: "posted", kind: "spend" },
+    { id: "SYN-conflict", date: "2026-09-02", amount: -20, status: "posted", kind: "spend" },
+    { id: "SYN-refund-past", date: "2026-09-10", amount: 5, status: "posted", kind: "refund", refundOf: "SYN-conflict" },
+    { id: "SYN-conflict", date: "2026-10-28", amount: -30, status: "posted", kind: "spend" },
+  ];
+  const sepS = summarizeSpendMonth(rows, "2026-09", { asOf: "2026-10-15", ...COV("2026-09") });
+  return sepS.conflicts.length === 1 && sepS.unappliedRefunds.length === 1
+    && sepS.unappliedRefunds[0].reason === "original-conflicted" && !sepS.complete;
+})());
+check("TXN4 cross-month refund dependency on a conflicted original still visible", (() => {
+  const rows = [
+    { id: "o1", date: "2026-09-05", amount: -80, status: "posted", kind: "spend" },
+    { id: "o1", date: "2026-09-06", amount: -90, status: "posted", kind: "spend" },
+    { id: "r1", date: "2026-10-04", amount: 30, status: "posted", kind: "refund", refundOf: "o1" },
+    { id: "o1", date: "2026-10-28", amount: -70, status: "posted", kind: "spend" },
+  ];
+  const sepS = summarizeSpendMonth(rows, "2026-09", { asOf: "2026-10-15", ...COV("2026-09") });
+  const octS = summarizeSpendMonth(rows, "2026-10", { asOf: "2026-10-15", ...COV("2026-10") });
+  return sepS.unappliedRefunds.length === 1 && sepS.unappliedRefunds[0].reason === "original-conflicted"
+    && octS.conflicts.length === 1 && !octS.complete;
+})());
+check("TXN4 no-candidate originals keep honest diagnosis (after-asof / missing)", (() => {
+  const afterRows = [
+    { id: "fut1", date: "2026-10-28", amount: -50, status: "posted", kind: "spend" },
+    { id: "rf1", date: "2026-10-04", amount: 20, status: "posted", kind: "refund", refundOf: "fut1" },
+  ];
+  const after = S(afterRows, { asOf: "2026-10-15" });
+  const missingRows = [
+    { id: "rm1", date: "2026-10-04", amount: 20, status: "posted", kind: "refund", refundOf: "ghost" },
+  ];
+  const missingOct = S(missingRows);
+  const missingSep = summarizeSpendMonth(missingRows, "2026-09", COV("2026-09"));
+  return after.unappliedRefunds.length === 1 && after.unappliedRefunds[0].reason === "original-after-asof" && !after.complete
+    && missingOct.unappliedRefunds.length === 1 && missingOct.unappliedRefunds[0].reason === "original-missing"
+    && missingSep.unappliedRefunds.length === 0;
+})());
+
+// =====================================================================
 // ANOM-3 matrix (PM 2026-10-24 04:01): coverage end-to-end — the
 // normalization keeps `coverage`, the preview forwards the per-month
 // map, and no-signal history is unknown (never inherits the current
