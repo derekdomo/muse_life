@@ -39,13 +39,12 @@ check("theme: old red/green pair is gone",
   !css.includes("--positive: #147457;") && !css.includes("--negative: #c84c54;"));
 
 // --- redundant channels at every color-carried delta ---
-check("hero delta carries glyph + direction word",
-  app.includes("{trendIndicator(data.live.weeklyDelta)} {signedCurrency(data.live.weeklyDelta)}")
-  && app.includes("deltaView.direction ? <span>{deltaView.direction}</span> : null"));
+check("conclusion card delta carries glyph (B1A: hero + balance card merged, one delta home)",
+  app.includes("<strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>"));
+check("conclusion card delta carries direction word next to the glyph",
+  app.includes("{view.direction ? <span>{view.direction}</span> : null}"));
 check("snapshot compare delta carries glyph",
   app.includes("`${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`"));
-check("balance fact card carries glyph (direction word already present)",
-  app.includes("<strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>"));
 check("savings rate carries glyph",
   app.includes("<>{trendIndicator(savingsRate)} {percent.format(savingsRate)}</>"));
 

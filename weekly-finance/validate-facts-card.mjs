@@ -109,14 +109,18 @@ check("server: prior read through parseDashboardPayload (corrupt prior -> null d
   serverSrc.includes("latestPayloadAsOf = prior.data.asOf") && serverSrc.includes("previousLiveNetWorth = prior.data.live.netWorth"));
 check("server: two consecutive legal syncs chain the prior", (serverSrc.match(/previousLiveNetWorth/g) ?? []).length >= 4);
 
-// --- F2.1-D1 wiring: card and hero share the same view of the same field ---
-check("fact card component exists", appSrc.includes("function BalanceDeltaCard"));
+// --- F2.1-D1 wiring, as migrated by LIFE-DESIGN-001-B1A: the
+// balance fact card and the hero merged into ONE conclusion
+// card, which is now the delta's single rendering home; the
+// same field, the same view helper and the same wording are
+// asserted at their new location. ---
+check("conclusion card component exists", appSrc.includes("function TotalAssetsConclusionCard"));
 check("card reads live.weeklyDelta via weeklyDeltaView", appSrc.includes("weeklyDeltaView(delta, data.live.netWorth)"));
-check("hero reads the same field via weeklyDeltaView", appSrc.includes("weeklyDeltaView(data.live.weeklyDelta, data.live.netWorth)"));
-const cardStart = appSrc.indexOf("function BalanceDeltaCard");
+check("delta view computed exactly once (def + conclusion card call)", (appSrc.match(/weeklyDeltaView\(/g) ?? []).length === 2);
+const cardStart = appSrc.indexOf("function TotalAssetsConclusionCard");
 const cardEnd = appSrc.indexOf("\n}\n", cardStart) + 3;
 const cardSrc = appSrc.slice(cardStart, cardEnd);
-check("card title is 本次余额差", cardSrc.includes("本次余额差"));
+check("card headline is 总资产 (F-ARCH figure when present)", cardSrc.includes("总资产 · 新架构（F-ARCH-001）"));
 check("card subtitle: 较上次成功快照（日期未留存）", cardSrc.includes("较上次成功快照（日期未留存）"));
 check("card null state: 暂无可比快照", cardSrc.includes("暂无可比快照"));
 check("card stale marker: 本次未更新", cardSrc.includes("本次未更新"));

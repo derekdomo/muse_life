@@ -297,9 +297,60 @@ const archNetWorthSchema = z.object({
   plaidRange: archNetWorthRangeSchema.nullable(),
   snapshotRange: archNetWorthRangeSchema.nullable(),
   rows: z.array(archNetWorthRowSchema),
+  // F-ARCH-001·DATE-1 (P1) coverage counts. The denominator is
+  // ALWAYS rows.length — it never shrinks when a date is bad or
+  // an amount is missing. amountIncluded counts rows whose
+  // balance is in the total; validDateCount counts the included
+  // rows whose asOf is a real calendar date. Defaults keep
+  // payloads stored before these fields existed parseable; the
+  // read path (sanitizeArchNetWorthDates) recomputes them from
+  // the rows on every read, so a stored 0 default is never
+  // presented as a measured count.
+  amountIncluded: z.number().int().nonnegative().default(0),
+  amountTotal: z.number().int().nonnegative().default(0),
+  validDateCount: z.number().int().nonnegative().default(0),
+  dateTotal: z.number().int().nonnegative().default(0),
 });
 
 type ArchNetWorth = z.infer<typeof archNetWorthSchema>;
+
+// F-ARCH-001·DATE-1 read-path date eligibility (pure). Stored
+// rows are NEVER rewritten: a legacy row whose asOf is not a
+// real calendar date (2026-02-30 and friends, persisted before
+// the write gate existed) keeps its raw value, its included flag
+// and its signed amount — the account denominator and the money
+// facts do not move, and a real 0 stays a real 0. What changes
+// is only presentation eligibility: a bad or missing date is
+// not date evidence, so the plaid / snapshot ranges are
+// recomputed from valid calendar dates alone (null when a layer
+// has no valid date at all), and the coverage counts are
+// re-derived from the rows. isRealDateKey is the one strict
+// rule (real calendar day, leap years included).
+export function sanitizeArchNetWorthDates(arch: ArchNetWorth): ArchNetWorth {
+  const rangeFor = (coverage: "plaid" | "snapshot"): ArchNetWorth["plaidRange"] => {
+    const dates = arch.rows.flatMap((row) =>
+      row.included && row.coverage === coverage && row.asOf !== null && isRealDateKey(row.asOf)
+        ? [row.asOf]
+        : [],
+    );
+    if (dates.length === 0) return null;
+    return {
+      oldest: dates.reduce((a, b) => (a < b ? a : b)),
+      newest: dates.reduce((a, b) => (a > b ? a : b)),
+    };
+  };
+  return {
+    ...arch,
+    plaidRange: rangeFor("plaid"),
+    snapshotRange: rangeFor("snapshot"),
+    amountIncluded: arch.rows.filter((row) => row.included).length,
+    amountTotal: arch.rows.length,
+    validDateCount: arch.rows.filter(
+      (row) => row.included && row.asOf !== null && isRealDateKey(row.asOf),
+    ).length,
+    dateTotal: arch.rows.length,
+  };
+}
 
 const dashboardSchema = z.object({
   asOf: z.string(),
@@ -440,10 +491,13 @@ const ingestArchNetWorthRequest = z.object({
         balance: z.number().nullable(),
         kind: z.enum(["asset", "liability"]),
         coverage: z.enum(["plaid", "snapshot", "missing"]),
-        asOf: z
-          .string()
-          .regex(/^\d{4}-\d{2}-\d{2}$/)
-          .nullable(),
+        // DATE-1: format alone is NOT validated here on purpose.
+        // A shape-valid but nonexistent calendar day (2026-02-30)
+        // and a malformed string must both reach the handler so
+        // the rejection is the categorized invalid_as_of failure
+        // (counts/booleans only) instead of an opaque schema
+        // error; the handler applies isRealDateKey strictly.
+        asOf: z.string().min(1).max(64).nullable(),
       }),
     )
     .min(1)
@@ -465,6 +519,89 @@ type IngestArchNetWorthResult = z.infer<typeof ingestArchNetWorthResponse>;
 
 function archIngestFailure(issue: string): IngestArchNetWorthResult {
   return { ok: false, issue, rows: 0, included: 0, missing: 0, totalMatches: false, readBackVerified: false };
+}
+
+// F-ARCH-001·SAVE-1 version arbitration. The CURRENT version of
+// the stored figure is the one with the greatest source pulledAt
+// — never merely the most recently inserted row: a late-arriving
+// older write must not roll the page back. Ties on pulledAt go
+// to the greatest row id. A stored row whose payload fails to
+// parse is skipped as a candidate; it never shadows a valid
+// version and never breaks the read.
+type ArchStoredRow = { id: number; payload: string; pulledAt: Date };
+
+function parseArchStoredRow(row: ArchStoredRow): ArchNetWorth | null {
+  try {
+    const parsed = archNetWorthSchema.safeParse(JSON.parse(row.payload));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function archVersionKey(row: ArchStoredRow, parsed: ArchNetWorth): number {
+  // The payload's own pulledAt is the source version; fall back
+  // to the row's pulledAt column when it does not parse.
+  const ms = Date.parse(parsed.pulledAt);
+  return Number.isFinite(ms) ? ms : row.pulledAt.getTime();
+}
+
+export function pickCurrentArchVersion(
+  rows: ArchStoredRow[],
+): { row: ArchStoredRow; parsed: ArchNetWorth } | null {
+  let best: { row: ArchStoredRow; parsed: ArchNetWorth; key: number } | null = null;
+  for (const row of rows) {
+    const parsed = parseArchStoredRow(row);
+    if (!parsed) continue;
+    const key = archVersionKey(row, parsed);
+    if (!best || key > best.key || (key === best.key && row.id > best.row.id)) {
+      best = { row, parsed, key };
+    }
+  }
+  return best ? { row: best.row, parsed: best.parsed } : null;
+}
+
+// SAVE-1 deep payload equivalence: every field of the normalized
+// payload except storedAt (a write instant, not version
+// content). Ranges and coverage counts are re-derived through
+// sanitizeArchNetWorthDates on both sides so a stored legacy
+// payload and a freshly built one compare on content alone.
+export function archPayloadsEquivalent(a: ArchNetWorth, b: ArchNetWorth): boolean {
+  const na = sanitizeArchNetWorthDates(a);
+  const nb = sanitizeArchNetWorthDates(b);
+  if (
+    na.arch !== nb.arch ||
+    na.version !== nb.version ||
+    na.pulledAt !== nb.pulledAt ||
+    na.total !== nb.total ||
+    na.partial !== nb.partial ||
+    na.amountIncluded !== nb.amountIncluded ||
+    na.amountTotal !== nb.amountTotal ||
+    na.validDateCount !== nb.validDateCount ||
+    na.dateTotal !== nb.dateTotal
+  ) {
+    return false;
+  }
+  if (na.missing.length !== nb.missing.length || na.missing.some((id, i) => id !== nb.missing[i])) return false;
+  const rangeEq = (
+    x: ArchNetWorth["plaidRange"],
+    y: ArchNetWorth["plaidRange"],
+  ): boolean =>
+    (x === null && y === null) ||
+    (x !== null && y !== null && x.oldest === y.oldest && x.newest === y.newest);
+  if (!rangeEq(na.plaidRange, nb.plaidRange) || !rangeEq(na.snapshotRange, nb.snapshotRange)) return false;
+  if (na.rows.length !== nb.rows.length) return false;
+  return na.rows.every((row, i) => {
+    const other = nb.rows[i];
+    return (
+      other !== undefined &&
+      row.id === other.id &&
+      row.included === other.included &&
+      row.signed === other.signed &&
+      row.asOf === other.asOf &&
+      row.coverage === other.coverage
+    );
+  });
 }
 
 // F0.7 read-only refresh observability. The diagnosis is a PURE
@@ -2754,19 +2891,22 @@ export const Actions = {
       // row keeps archNetWorth null — the legacy view is
       // completely unchanged.
       if (data) {
+        // SAVE-1: the overlay is the version with the greatest
+        // source pulledAt (ties: greatest id), NOT the latest
+        // inserted row — a late older write already in the table
+        // must not roll the figure back. Unparsable rows are
+        // skipped as candidates; a corrupt row never breaks the
+        // dashboard and never shadows a valid version.
         const archRows = await ctx.db<typeof schema>()
           .select()
-          .from(schema.archNetWorth)
-          .orderBy(desc(schema.archNetWorth.id))
-          .limit(1);
-        const archPayload = archRows[0]?.payload;
-        if (archPayload) {
-          try {
-            const parsedArch = archNetWorthSchema.safeParse(JSON.parse(archPayload));
-            if (parsedArch.success) data = { ...data, archNetWorth: parsedArch.data };
-          } catch {
-            // A corrupt overlay row never breaks the dashboard.
-          }
+          .from(schema.archNetWorth);
+        const currentArch = pickCurrentArchVersion(archRows);
+        if (currentArch) {
+          // DATE-1: the stored row itself is never rewritten;
+          // sanitizeArchNetWorthDates only re-derives the
+          // presentation (ranges from valid calendar dates
+          // alone + coverage counts) on this in-memory copy.
+          data = { ...data, archNetWorth: sanitizeArchNetWorthDates(currentArch.parsed) };
         }
       }
       const staleRunning = isStaleRunningState(state?.status, state?.updatedAt, new Date());
@@ -3420,6 +3560,14 @@ export const Actions = {
         } else {
           if (account.balance === null) return archIngestFailure("missing_balance");
           if (account.asOf === null) return archIngestFailure("missing_as_of");
+          // DATE-1 write gate: a non-missing row's asOf must be a
+          // REAL calendar date (isRealDateKey — leap years
+          // included), not merely YYYY-MM-DD-shaped. 2026-02-30,
+          // 2026-13-01, 2026-04-31 and malformed strings are all
+          // rejected here, before any insert; nothing backfills
+          // the date from pulledAt / storedAt / today. Missing
+          // rows above keep asOf=null untouched.
+          if (!isRealDateKey(account.asOf)) return archIngestFailure("invalid_as_of");
         }
       }
       const rows: ArchNetWorth["rows"] = [];
@@ -3448,17 +3596,13 @@ export const Actions = {
           readBackVerified: false,
         };
       }
-      const rangeFor = (coverage: "plaid" | "snapshot"): ArchNetWorth["plaidRange"] => {
-        const dates = rows.flatMap((row) =>
-          row.included && row.coverage === coverage && row.asOf !== null ? [row.asOf] : [],
-        );
-        if (dates.length === 0) return null;
-        return {
-          oldest: dates.reduce((a, b) => (a < b ? a : b)),
-          newest: dates.reduce((a, b) => (a > b ? a : b)),
-        };
-      };
-      const payload: ArchNetWorth = {
+      // Ranges and coverage counts come from the same pure
+      // derivation the read path applies (sanitizeArchNetWorthDates),
+      // so a freshly written figure and a legacy figure are
+      // presented under identical date-eligibility rules. Every
+      // non-missing asOf here already passed isRealDateKey at the
+      // gate above, so the stored ranges are the valid-date ones.
+      const payload: ArchNetWorth = sanitizeArchNetWorthDates({
         arch: "F-ARCH-001",
         version: 1,
         pulledAt: args.pulledAt,
@@ -3466,32 +3610,71 @@ export const Actions = {
         total,
         partial: missing.length > 0,
         missing,
-        plaidRange: rangeFor("plaid"),
-        snapshotRange: rangeFor("snapshot"),
+        plaidRange: null,
+        snapshotRange: null,
         rows,
-      };
-      const db = ctx.db<typeof schema>();
-      await db.insert(schema.archNetWorth).values({
-        payload: JSON.stringify(payload),
-        pulledAt: new Date(pulledAtMs),
+        amountIncluded: 0,
+        amountTotal: 0,
+        validDateCount: 0,
+        dateTotal: 0,
       });
+      const db = ctx.db<typeof schema>();
+      // SAVE-1 arbitration BEFORE any write, over the stored
+      // candidates (unparsable rows are skipped, exactly as on
+      // the read path):
+      // - args.pulledAt earlier than the greatest stored
+      //   pulledAt -> stale_version, zero writes: a late older
+      //   version never becomes current.
+      // - a stored row with the same pulledAt and equivalent
+      //   normalized content -> logical idempotency: no append;
+      //   that row becomes the read-back target and the call
+      //   succeeds (a retry after a lost response is safe).
+      // - same pulledAt but different content -> version_conflict,
+      //   zero writes.
+      const existingRows = await db.select().from(schema.archNetWorth);
+      let maxStoredMs = Number.NEGATIVE_INFINITY;
+      const sameVersion: { row: ArchStoredRow; parsed: ArchNetWorth }[] = [];
+      for (const row of existingRows) {
+        const parsed = parseArchStoredRow(row);
+        if (!parsed) continue;
+        const key = archVersionKey(row, parsed);
+        if (key > maxStoredMs) maxStoredMs = key;
+        if (key === pulledAtMs) sameVersion.push({ row, parsed });
+      }
+      if (pulledAtMs < maxStoredMs) return archIngestFailure("stale_version");
+      let targetRowId: number | null = null;
+      if (sameVersion.length > 0) {
+        const hit = sameVersion.find((candidate) => archPayloadsEquivalent(candidate.parsed, payload));
+        if (!hit) return archIngestFailure("version_conflict");
+        targetRowId = hit.row.id;
+      }
+      if (targetRowId === null) {
+        const inserted = await db
+          .insert(schema.archNetWorth)
+          .values({
+            payload: JSON.stringify(payload),
+            pulledAt: new Date(pulledAtMs),
+          })
+          .returning({ id: schema.archNetWorth.id });
+        targetRowId = inserted[0]?.id ?? null;
+      }
+      // SAVE-1 exact read-back: re-read THIS write's own row by
+      // id (the inserted row, or the idempotency-hit row) and
+      // deep-compare the full normalized payload — every field
+      // except storedAt. Matching pulledAt / row count / total
+      // alone is NOT verification: a stand-in row whose account
+      // ids, coverage or asOf differ fails here.
       let readBackVerified = false;
-      const backRows = await db
-        .select()
-        .from(schema.archNetWorth)
-        .orderBy(desc(schema.archNetWorth.id))
-        .limit(1);
-      const backPayload = backRows[0]?.payload;
-      if (backPayload) {
-        try {
-          const parsed = archNetWorthSchema.safeParse(JSON.parse(backPayload));
-          readBackVerified =
-            parsed.success &&
-            parsed.data.pulledAt === payload.pulledAt &&
-            parsed.data.rows.length === payload.rows.length &&
-            parsed.data.total === payload.total;
-        } catch {
-          readBackVerified = false;
+      if (targetRowId !== null) {
+        const backRows = await db
+          .select()
+          .from(schema.archNetWorth)
+          .where(eq(schema.archNetWorth.id, targetRowId))
+          .limit(1);
+        const backRow = backRows[0];
+        if (backRow) {
+          const parsedBack = parseArchStoredRow(backRow);
+          readBackVerified = parsedBack !== null && archPayloadsEquivalent(parsedBack, payload);
         }
       }
       return {

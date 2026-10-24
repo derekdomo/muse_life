@@ -243,6 +243,103 @@ main {
 .cash-scope-toggle input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
 .cash-scope-excluded { color: var(--dim); font-size: 10px; font-weight: 720; white-space: nowrap; }
 
+/* LIFE-DESIGN-001-B1A: overview/detail tabs, merged conclusion
+   card, FIRE teaser row and the folded evidence layer. */
+.view-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 12px;
+  background: var(--surface-tint);
+  border-radius: 999px;
+}
+.view-tabs button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 13px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.view-tabs button.active { background: var(--surface); color: var(--text); box-shadow: 0 2px 9px rgba(25,48,39,.12); }
+.view-tabs button:focus-visible, .fire-teaser button:focus-visible, .evidence-fold > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.conclusion-card__value {
+  margin-top: 4px;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.conclusion-card__value strong {
+  font-size: clamp(38px, 11vw, 58px);
+  line-height: 1;
+  letter-spacing: -.06em;
+  font-weight: 760;
+  overflow-wrap: anywhere;
+}
+.conclusion-card .delta { margin-top: 14px; }
+.conclusion-card .snapshot-compare { margin-top: 14px; }
+.fire-teaser {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 10px;
+  padding: 13px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.fire-teaser p { margin: 0; font-size: 12px; font-weight: 650; line-height: 1.55; }
+.fire-teaser button {
+  min-height: 36px;
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.evidence-layer { display: grid; gap: 10px; margin-top: 10px; }
+.evidence-fold {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 0 16px 6px;
+}
+.evidence-fold > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;
+  padding: 6px 0;
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+  list-style: none;
+}
+.evidence-fold > summary::-webkit-details-marker { display: none; }
+.fold-hint { flex: none; color: var(--accent); font-size: 11px; font-weight: 720; }
+.fold-hint--close { display: none; }
+.evidence-fold[open ] .fold-hint--open { display: none; }
+.evidence-fold[open ] .fold-hint--close { display: inline; }
+.evidence-fold .fact-card { margin: 4px 0 10px; box-shadow: none; }
+.evidence-fold .section-block { padding: 14px 0 8px; border-bottom: 0; }
+.evidence-fold .chart-panel { margin-bottom: 10px; box-shadow: none; }
+.holdings-toggle--top { margin-top: 12px; }
+.arch-rows--detail { margin-top: 4px; }
+.arch-rows--detail .arch-row:first-child { border-top: 0; }
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -333,6 +430,7 @@ main {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+  margin-top: 10px;
   padding: 11px 12px;
   border-radius: 12px;
   background: color-mix(in srgb, var(--negative) 8%, var(--surface));

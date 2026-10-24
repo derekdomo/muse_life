@@ -1,0 +1,199 @@
+// LIFE-DESIGN-001-B1A validation: the space-3 two-tab
+// restructure (owner ruling 2026-10-24, design draft
+// DESIGN-DRAFT-2026-10-24.md, options 1A + 2A).
+//
+// Behaviour runs against the REAL summary helpers extracted
+// from client/src/App.tsx (type annotations stripped
+// mechanically, formatters sliced verbatim from the same
+// file); structure assertions run against the real client +
+// theme sources; the screen estimate is a documented height
+// model over the overview tab's default block inventory.
+// All fixtures are synthetic; no real amount is read.
+import { readFileSync } from "node:fs";
+
+const appSrc = readFileSync(new URL("./client/src/App.tsx", import.meta.url), "utf8");
+const css = readFileSync(new URL("./client/src/theme.css", import.meta.url), "utf8");
+let passed = 0, failed = 0;
+function check(name, cond) {
+  if (cond) { passed++; } else { failed++; console.log("FAIL:", name); }
+}
+
+// --- extract the real helpers (same pattern as validate-facts-card) ---
+function extractFn(src, name, specific = []) {
+  let start = src.indexOf(`export function ${name}`);
+  if (start < 0) start = src.indexOf(`function ${name}`);
+  if (start < 0) throw new Error(`helper not found: ${name}`);
+  const end = src.indexOf("\n}\n", start) + 3;
+  let text = src.slice(start, end).replace("export function", "function");
+  for (const [from, to] of specific) text = text.replace(from, to);
+  return text
+    .replaceAll(": string | null", "")
+    .replaceAll(": number | null", "")
+    .replaceAll(": boolean", "")
+    .replaceAll(": string", "")
+    .replaceAll(": number", "");
+}
+// The module-level Intl formatters, sliced verbatim so the
+// helpers format exactly as production does.
+const fmtStart = appSrc.indexOf("const currency = new Intl.NumberFormat");
+const fmtEnd = appSrc.indexOf("function monthDate");
+if (fmtStart < 0 || fmtEnd < 0) throw new Error("formatter block not found");
+const formatters = appSrc.slice(fmtStart, fmtEnd);
+function loadHelpers() {
+  const parts = [
+    formatters,
+    extractFn(appSrc, "trendIndicator"),
+    extractFn(appSrc, "signedCurrency"),
+    extractFn(appSrc, "fireYearsEstimate", [["fire: Dashboard[\"fire\"]", "fire"]]),
+    extractFn(appSrc, "fireSummaryLine", [["fire: Dashboard[\"fire\"]", "fire"]]),
+    extractFn(appSrc, "distributionSummaryLine", [["live: Dashboard[\"live\"]", "live"]]),
+    extractFn(appSrc, "cashScopeSummaryLine"),
+    extractFn(appSrc, "investmentSummaryLine", [["perf: Dashboard[\"investmentPerformance\"]", "perf"]]),
+    extractFn(appSrc, "holdingsSummaryLine", [["data: Dashboard", "data"]]),
+  ];
+  return new Function(`${parts.join("\n")}; return { fireYearsEstimate, fireSummaryLine, distributionSummaryLine, cashScopeSummaryLine, investmentSummaryLine, holdingsSummaryLine };`)();
+}
+const H = loadHelpers();
+
+// --- fireYearsEstimate / fireSummaryLine ---
+check("years: gap already covered -> 0", H.fireYearsEstimate({ gap: 0, annualContribution: 5000 }) === 0);
+check("years: negative gap -> 0", H.fireYearsEstimate({ gap: -100, annualContribution: 5000 }) === 0);
+check("years: ceil of gap / pace", H.fireYearsEstimate({ gap: 100001, annualContribution: 10000 }) === 11);
+check("years: exact division", H.fireYearsEstimate({ gap: 100000, annualContribution: 10000 }) === 10);
+check("years: no pace -> null (never a fabricated 0)", H.fireYearsEstimate({ gap: 100, annualContribution: 0 }) === null);
+// mutation sensitivity: floor instead of ceil understates the wait
+check("mutation: floor would understate, real helper ceils",
+  Math.floor(100001 / 10000) !== H.fireYearsEstimate({ gap: 100001, annualContribution: 10000 }));
+const fireOk = { completeMonthsUsed: 12, progress: 0.25, gap: 750000, annualContribution: 75000, target: 1000000, annualSpend: 40000 };
+check("fire line: progress + gap + years in one line",
+  H.fireSummaryLine(fireOk) === "FIRE 进度 25% · 缺口 $750,000 · 预计还需 10 年");
+check("fire line: reached target", H.fireSummaryLine({ ...fireOk, progress: 1, gap: 0 }).includes("已达到目标"));
+check("fire line: no pace stated honestly", H.fireSummaryLine({ ...fireOk, annualContribution: 0 }).includes("不足以估算达标时间"));
+check("fire line: insufficient months gated", H.fireSummaryLine({ ...fireOk, completeMonthsUsed: 0 }) === "FIRE 进度：完整月份不足，暂不估算");
+
+// --- distributionSummaryLine ---
+const dist = H.distributionSummaryLine({ investment: 600000, deposits: 300000, loans: 100000, availableCash: 120000 });
+check("distribution line: four shares in one line", dist === "投资 60% · 存款 30% · 存款中现金 12% · 贷款 10%");
+check("distribution line: cash labelled as a subset of deposits", dist.includes("存款中现金"));
+check("distribution line: no cash figure -> no cash segment",
+  H.distributionSummaryLine({ investment: 500, deposits: 500, loans: 0, availableCash: null }) === "投资 50% · 存款 50% · 贷款 0%");
+check("distribution line: zero total -> honest empty, no NaN",
+  H.distributionSummaryLine({ investment: 0, deposits: 0, loans: 0, availableCash: null }) === "暂无可计算的余额");
+
+// --- cashScopeSummaryLine ---
+check("cash line: amount + counted accounts",
+  H.cashScopeSummaryLine(42000, 3, null) === "可动用现金账户范围 — $42,000 · 计入 3 个账户");
+check("cash line: missing amount is 未提供, never 0-filled",
+  H.cashScopeSummaryLine(null, 0, null).includes("未提供"));
+check("cash line: blocked coverage flagged in the folded state (R6)",
+  H.cashScopeSummaryLine(null, 2, "现金余额陈旧").includes("覆盖未输出，展开查看原因"));
+check("cash line: no block flag when coverage exists",
+  !H.cashScopeSummaryLine(1000, 1, null).includes("覆盖未输出"));
+
+// --- investmentSummaryLine ---
+check("investment line: reconciled gain carries glyph + 已核对",
+  H.investmentSummaryLine({ returnAmount: 12500 }) === "投资收益核对 — 全期间收益 ▲ +$12,500 · 已核对");
+check("investment line: loss carries 亏损 + ▼",
+  H.investmentSummaryLine({ returnAmount: -3000 }) === "投资收益核对 — 全期间亏损 ▼ -$3,000 · 已核对");
+check("investment line: unreconciled stays 待核对",
+  H.investmentSummaryLine({ returnAmount: null }) === "投资收益核对 — 全期间待核对");
+
+// --- holdingsSummaryLine ---
+check("holdings line: concentration + full-set count",
+  H.holdingsSummaryLine({ concentrationTop3: 0.432, holdingsAll: [1, 2, 3] }) === "持仓 — 前三集中度 43.2% · 全部持仓 3 只");
+check("holdings line: legacy cache without full set omits the count",
+  H.holdingsSummaryLine({ concentrationTop3: 0.5, holdingsAll: [] }) === "持仓 — 前三集中度 50%");
+
+// --- structure: tabs, single homes, fold defaults ---
+function componentSlice(name) {
+  const start = appSrc.indexOf(`function ${name}`);
+  if (start < 0) throw new Error(`component not found: ${name}`);
+  const end = appSrc.indexOf("\n}\n", start) + 3;
+  return appSrc.slice(start, end);
+}
+check("tab bar exists with text-labelled tabs", appSrc.includes('role="tablist"') && appSrc.includes(">总览</button>") && appSrc.includes(">明细</button>"));
+check("default tab is the overview", appSrc.includes('useState<"overview" | "detail">("overview")'));
+check("no fold/tab state is persisted (ruling: reset on every open)",
+  !appSrc.includes("localStorage") && !appSrc.includes("sessionStorage"));
+check("no <details> renders open by default", !/<details[^>]*\sopen[\s=>]/.test(appSrc));
+check("four evidence folds, all default-closed", (appSrc.match(/<details className="evidence-fold">/g) ?? []).length === 4);
+check("fold controls carry text hints （展开/收起）, not colour or icon alone",
+  appSrc.includes("fold-hint--open") && css.includes(".evidence-fold[open ] .fold-hint--close"));
+
+const overview = componentSlice("OverviewTab");
+check("overview: conclusion card first", overview.includes("<TotalAssetsConclusionCard"));
+check("overview: 7 key metrics kept", overview.includes('aria-label="本月关键指标"'));
+check("overview: anomaly strip stays visible (R6)", overview.includes('aria-label="数据异常月份"'));
+check("overview: FIRE is one summary line + anchor button", overview.includes("fireSummaryLine(data.fire)") && overview.includes("查看完整 FIRE 面板"));
+check("overview: four fold summaries wired to their helpers",
+  overview.includes("cashScopeSummaryLine(") && overview.includes("distributionSummaryLine(")
+  && overview.includes("investmentSummaryLine(") && overview.includes("holdingsSummaryLine("));
+check("overview: no ledger block leaks in",
+  !overview.includes("<TrendCharts") && !overview.includes("<FireProgress")
+  && !overview.includes("<MonthlyRecords") && !overview.includes("accounts-section")
+  && !overview.includes("<ArchAccountsDetail"));
+
+const detail = componentSlice("DetailTab");
+check("detail: trend charts live here", detail.includes("<TrendCharts"));
+check("detail: monthly records live here", detail.includes("<MonthlyRecords months={data.months} />"));
+check("detail: full FIRE panel lives here with the anchor id", detail.includes("<FireProgress") && detail.includes('id="fire-panel"'));
+check("detail: F-ARCH account rows live here", detail.includes("<ArchAccountsDetail"));
+check("detail: snapshot account detail lives here", detail.includes("accounts-section") && detail.includes('title="账户明细"'));
+check("FIRE anchor jump: overview button targets the detail panel (R8)",
+  overview.includes('onGoDetail("fire-panel")') && appSrc.includes("scrollIntoView"));
+
+for (const [name, marker] of [
+  ["trend charts", "<TrendCharts"], ["full FIRE panel", "<FireProgress"],
+  ["monthly records", "<MonthlyRecords"], ["cash scope panel", "<AvailableCashPanel"],
+  ["distribution panel", "<DistributionPanel"], ["investment card", "<InvestmentPerformanceCard"],
+  ["holdings section", "<HoldingsSection"], ["conclusion card", "<TotalAssetsConclusionCard"],
+]) {
+  check(`single rendering home: ${name}`, (appSrc.split(marker).length - 1) === 1);
+}
+check("old standalone cards are gone", !appSrc.includes("function BalanceDeltaCard") && !appSrc.includes("function ArchNetWorthCard") && !appSrc.includes('className="hero"'));
+check("holdings summary defaults to Top 5 with a labelled expand",
+  appSrc.includes("data.holdings.slice(0, 5)") && appSrc.includes("查看全部 Top 10"));
+
+// --- conclusion card keeps the F-ARCH freshness layers verbatim ---
+const card = componentSlice("TotalAssetsConclusionCard");
+check("card: F-ARCH total is the headline when present", card.includes("arch ? arch.total : data.live.netWorth"));
+check("card: two freshness layers + coverage line kept",
+  card.includes("archCoverageLine(arch)") && card.includes("archLayerLine(arch.plaidRange") && card.includes("archLayerLine(arch.snapshotRange") && card.includes("Plaid 层拉取于"));
+check("card: archived snapshot compare line kept", card.includes("月度快照 · {data.sourceMonth}（存档口径）") && card.includes("环比"));
+check("card: delta wording unchanged", card.includes("较上次成功快照（日期未留存）") && card.includes("本次未更新"));
+
+// --- feature reachability: every former feature still present ---
+for (const marker of [
+  "立即更新财务数据", "检查进度", "来源台账", "刷新观测",
+  "搜索全部持仓", "查看全部持仓", "期间核对明细", "本页试算",
+  "月度记录", "账户明细", "总资产账户明细", "走势", "FIRE 进度", "持仓 Top 10",
+]) {
+  check(`reachable: ${marker}`, appSrc.includes(marker));
+}
+
+// --- screen estimate (documented height model, 390x844) ---
+// Before (design draft inventory of the pre-B1A tree): 14
+// top-level blocks, ≈12–19 screens at the default state.
+// After: conservative per-block heights from theme.css
+// metrics (status band measured with its facts + fold
+// summaries visible; anomaly strip assumed present).
+const VIEWPORT_PX = 844;
+const AFTER_BLOCKS = [
+  ["状态行（工具行 + 刷新状态带）", 360],
+  ["页签条", 56],
+  ["总资产结论卡（三卡合一）", 400],
+  ["本月关键指标 7 格（2 列 4 行）", 508],
+  ["数据异常条（假设存在）", 64],
+  ["FIRE 一行摘要", 66],
+  ["依据层 4 个折叠 summary", 246],
+];
+const afterPx = AFTER_BLOCKS.reduce((sum, [, px]) => sum + px, 0);
+const afterScreens = afterPx / VIEWPORT_PX;
+check(`overview default height ≈ ${afterScreens.toFixed(2)} screens <= 3 (R2)`, afterScreens <= 3);
+check("overview is shorter than the pre-B1A minimum (12 screens)", afterPx < 12 * VIEWPORT_PX);
+check("height model covers the draft's 5 overview layer groups (status / conclusion / metrics+anomaly / FIRE line / evidence folds)",
+  ["状态行", "结论卡", "指标", "FIRE", "依据层"].every((name) => AFTER_BLOCKS.some(([label]) => label.includes(name))));
+console.log(`screen model: before 14 blocks / 12-19 screens -> overview ${AFTER_BLOCKS.length} block groups / ~${afterScreens.toFixed(1)} screens (${afterPx}px of ${VIEWPORT_PX}px viewport)`);
+
+console.log(`validate-design-b1a: ${passed}/${passed + failed} passed`);
+process.exit(failed ? 1 : 0);

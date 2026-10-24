@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import {
@@ -560,7 +560,24 @@ function DistributionPanel({ current, live }: { current: Month; live: Dashboard[
   );
 }
 
-function TrendCharts({ months, current, live }: { months: Month[]; current: Month; live: Dashboard["live"] }) {
+// LIFE-DESIGN-001-B1A: one-line summary of the distribution
+// panel for the overview tab's folded evidence layer (R3a: a
+// fold's summary carries the key numbers, never just a title).
+// Shares are of |投资| + |存款| + |贷款|; available cash is a
+// subset of deposits and is labelled as such. Presentation-only
+// derivation from the same live figures the panel renders.
+export function distributionSummaryLine(live: Dashboard["live"]): string {
+  const investment = Math.abs(live.investment);
+  const deposits = Math.abs(live.deposits ?? 0);
+  const loans = Math.abs(live.loans ?? 0);
+  const total = investment + deposits + loans;
+  if (total <= 0) return "暂无可计算的余额";
+  const share = (value: number) => percent.format(value / total);
+  const cashPart = live.availableCash != null ? ` · 存款中现金 ${share(Math.abs(live.availableCash))}` : "";
+  return `投资 ${share(investment)} · 存款 ${share(deposits)}${cashPart} · 贷款 ${share(loans)}`;
+}
+
+function TrendCharts({ months }: { months: Month[] }) {
   const anomalyMonths = months.filter((month) => month.flexibleSpendAnomaly);
   // F0.6: months stay in the series even when spend is missing —
   // their spend/surplus points are null, so bars vanish and lines
@@ -615,8 +632,6 @@ function TrendCharts({ months, current, live }: { months: Month[]; current: Mont
           </ResponsiveContainer>
         </div>
       </article>
-
-      <DistributionPanel current={current} live={live} />
 
       {anomalyMonths.length > 0 ? (
         <div className="data-anomaly" role="note" aria-label="数据异常月份">
@@ -974,16 +989,34 @@ function InvestmentPerformanceCard({ data }: { data: Dashboard }) {
   );
 }
 
+// LIFE-DESIGN-001-B1A: the FIRE years estimate, shared by the
+// full panel (detail tab) and the overview tab's one-line FIRE
+// summary so the two never diverge. Same math as the panel has
+// always used: gap covered by the recent contribution pace.
+export function fireYearsEstimate(fire: Dashboard["fire"]): number | null {
+  if (fire.gap <= 0) return 0;
+  return fire.annualContribution > 0 ? Math.ceil(fire.gap / fire.annualContribution) : null;
+}
+
+// The overview tab's FIRE line (design draft: progress % + gap +
+// estimated years, one line, anchor to the full panel).
+export function fireSummaryLine(fire: Dashboard["fire"]): string {
+  if (fire.completeMonthsUsed === 0) return "FIRE 进度：完整月份不足，暂不估算";
+  const years = fireYearsEstimate(fire);
+  const yearsText = years == null
+    ? "当前投入节奏不足以估算达标时间"
+    : years === 0
+      ? "已达到目标"
+      : `预计还需 ${years} 年`;
+  return `FIRE 进度 ${percent.format(Math.max(0, fire.progress ?? 0))} · 缺口 ${currency.format(fire.gap)} · ${yearsText}`;
+}
+
 function FireProgress({ data }: { data: Dashboard }) {
   const rawProgress = Math.max(0, data.fire.progress ?? 0);
   const ringProgress = Math.min(rawProgress, 1);
   const circumference = 2 * Math.PI * 46;
   const offset = circumference * (1 - ringProgress);
-  const years = data.fire.gap <= 0
-    ? 0
-    : data.fire.annualContribution > 0
-      ? Math.ceil(data.fire.gap / data.fire.annualContribution)
-      : null;
+  const years = fireYearsEstimate(data.fire);
   const history = data.months
     .map((month, index) => {
       const prior = data.months.slice(Math.max(0, index - 12), index)
@@ -1092,35 +1125,86 @@ function accountTypeLabel(type: Account["type"]): string {
   return "历史转入";
 }
 
-function BalanceDeltaCard({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
+// LIFE-DESIGN-001-B1A: the three former total-assets cards —
+// the 本次余额差 fact card, the live-net-worth hero and the
+// F-ARCH card — merge into ONE conclusion card on the overview
+// tab (design draft space-3 plan, item 2). Every fact keeps
+// exactly one rendering home (R4): the F-ARCH total is the
+// headline when a stored figure exists (the live net worth
+// otherwise); the vs-last-snapshot delta drops to one line; the
+// two F-ARCH freshness layers stay as their own lines together
+// with the DATE-1 coverage line; the archived monthly snapshot
+// figure is one small compare line at the bottom. Kept facts
+// keep their wording — only the location pointers that named
+// the old layout changed （下方 → 「明细」页签）.
+function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
+  const arch = data.archNetWorth;
   const delta = data.live.weeklyDelta;
   const view = weeklyDeltaView(delta, data.live.netWorth);
+  const current = data.months.at(-1);
+  const previous = data.months.at(-2);
+  const monthDelta = current && previous ? current.total - previous.total : null;
   const asOfDate = new Date(data.asOf);
   const asOfText = Number.isNaN(asOfDate.getTime()) ? "未提供" : dateLabel.format(asOfDate);
+  const pulled = arch ? new Date(arch.pulledAt) : null;
+  const pulledText = !arch || !pulled
+    ? ""
+    : Number.isNaN(pulled.getTime())
+      ? arch.pulledAt
+      : `${dateLabel.format(pulled)} ${pulled.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
+  const plaidHasRows = arch?.rows.some((row) => row.coverage === "plaid") ?? false;
+  const snapshotHasRows = arch?.rows.some((row) => row.coverage === "snapshot") ?? false;
   return (
-    <section className="fact-card" aria-label="本次余额差（较上次成功快照）">
-      <div className="fact-card__heading">
-        <h2>本次余额差</h2>
-        <span>较上次成功快照（日期未留存）</span>
+    <section className="fact-card conclusion-card" aria-label={arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产"}>
+      <p className="eyebrow">{arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产 · 同步读取净资产"}</p>
+      <div className="conclusion-card__value">
+        <strong>{currency.format(arch ? arch.total : data.live.netWorth)}</strong>
       </div>
-      {view.comparable ? (
-        <div className={`fact-card__value ${valueTone(delta)}`}>
-          <strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>
-          {view.percent != null ? <span>{`${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}`}</span> : null}
-          <span>{view.direction}</span>
-        </div>
-      ) : (
-        <div className="fact-card__value neutral">
-          <strong className="fact-card__none">暂无可比快照</strong>
-        </div>
-      )}
+      {arch?.partial ? (
+        <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见「明细」页签的总资产账户明细。</p>
+      ) : null}
+      <div className={`delta ${valueTone(delta)}`}>
+        {view.comparable ? (
+          <>
+            <strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>
+            {view.percent != null ? <span>{`${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}`}</span> : null}
+            {view.direction ? <span>{view.direction}</span> : null}
+            <span className="delta__label">较上次成功快照</span>
+          </>
+        ) : (
+          <span>暂无可比快照</span>
+        )}
+      </div>
       <p className="fact-card__note">
         {view.comparable
-          ? "与上次成功快照的净资产之差；两次快照的间隔不固定，不代表固定时间间隔。"
-          : "首次同步、或上次快照不可用时没有可比对象；当前净资产见下方，下一次成功同步后生成对比。"}
+          ? "较上次成功快照（日期未留存）：与上次成功快照的净资产之差；两次快照的间隔不固定，不代表固定时间间隔。"
+          : "首次同步、或上次快照不可用时没有可比对象；下一次成功同步后生成对比。"}
       </p>
       {refreshFailed ? <p className="fact-card__stale">本次未更新：本次更新未成功，以上仍为上次成功同步的数据，数据日期未推进。</p> : null}
+      {arch ? (
+        <>
+          <p className="fact-card__note">Plaid 层拉取于 {pulledText}</p>
+          <p className="fact-card__note">{archCoverageLine(arch)}</p>
+          <p className="fact-card__note">
+            ● Plaid 同步层：{archLayerLine(arch.plaidRange, plaidHasRows)}
+          </p>
+          <p className="fact-card__note">
+            ● 快照层（Firance 月度快照沿用）：
+            {arch.snapshotRange
+              ? `${archLayerLine(arch.snapshotRange, snapshotHasRows)}，逐户日期见明细`
+              : archLayerLine(arch.snapshotRange, snapshotHasRows)}
+          </p>
+        </>
+      ) : null}
+      {current ? (
+        <div className="snapshot-compare">
+          <span>月度快照 · {data.sourceMonth}（存档口径）</span>
+          <strong>{currency.format(current.total)}</strong>
+          <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`}</small>
+        </div>
+      ) : null}
       <p className="fact-card__source">数据日期 {asOfText} · 月度快照 {data.sourceMonth} · 余额来源：{balanceSourceSummary(data.accounts)}</p>
+      {arch ? <p className="fact-card__source">旧月度快照保留在「明细」页签作对账存档。</p> : null}
     </section>
   );
 }
@@ -1273,6 +1357,11 @@ export function filterHoldings<T extends { ticker: string; name: string }>(rows:
 // recorded rather than recomputed from the Top 10.
 function HoldingsSection({ data }: { data: Dashboard }) {
   const [expanded, setExpanded] = useState(false);
+  // LIFE-DESIGN-001-B1A: the summary list defaults to the Top 5;
+  // the full Top 10 is one tap away and the full-set explorer
+  // below is unchanged.
+  const [showAllTop, setShowAllTop] = useState(false);
+  const topRows = showAllTop ? data.holdings : data.holdings.slice(0, 5);
   const [query, setQuery] = useState("");
   const complete = data.holdingsComplete;
   const all = data.holdingsAll;
@@ -1291,7 +1380,7 @@ function HoldingsSection({ data }: { data: Dashboard }) {
       />
       {data.holdings.length ? (
         <div className="holding-list">
-          {data.holdings.map((holding, index) => (
+          {topRows.map((holding, index) => (
             <div className="holding-row" key={`${holding.ticker}-${index}`}>
               <div className="holding-rank">{String(index + 1).padStart(2, "0")}</div>
               <div className="holding-name"><strong>{holding.ticker}</strong>{holding.name ? <span>{holding.name}</span> : null}</div>
@@ -1301,6 +1390,18 @@ function HoldingsSection({ data }: { data: Dashboard }) {
           ))}
         </div>
       ) : <p className="empty-inline">本次同步没有返回可展示的持仓。</p>}
+
+      {data.holdings.length > 5 ? (
+        <button
+          type="button"
+          className="holdings-toggle holdings-toggle--top"
+          aria-expanded={showAllTop}
+          aria-label={showAllTop ? "收起至 Top 5" : `查看全部 Top 10（共 ${data.holdings.length} 只）`}
+          onClick={() => setShowAllTop((value) => !value)}
+        >
+          {showAllTop ? "收起至 Top 5" : `查看全部 Top 10（共 ${data.holdings.length} 只）`}
+        </button>
+      ) : null}
 
       {data.holdingsCash.length > 0 ? (
         <div aria-label="现金（单列）">
@@ -1418,58 +1519,95 @@ function archDisplayLabel(id: string): string {
   return id.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-// F-ARCH-001: the new-architecture total-assets figure, rendered
-// only when a stored figure exists (data.archNetWorth non-null).
-// Freshness is stated per layer in text + symbol, never by color
-// alone; every snapshot-layer row carries its own balance date.
-function ArchNetWorthCard({ arch }: { arch: ArchNetWorthData }) {
-  const pulled = new Date(arch.pulledAt);
-  const pulledText = Number.isNaN(pulled.getTime())
-    ? arch.pulledAt
-    : `${dateLabel.format(pulled)} ${pulled.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
+// F-ARCH-001·DATE-1 (P1) card model: pure text derivations for
+// the arch card, exported so the offline validator can exercise
+// the exact strings the card renders. All date validity goes
+// through the existing isRealDateText — no second rule.
+
+// The one-line coverage statement: denominators are always the
+// full row count; the numerators count included amounts and
+// included rows carrying a valid calendar balance date.
+export function archCoverageLine(arch: ArchNetWorthData): string {
+  return `金额已计入 ${arch.amountIncluded}/${arch.amountTotal}；有效余额日期 ${arch.validDateCount}/${arch.dateTotal}`;
+}
+
+// A layer's range line. Ranges arrive pre-sanitized from the
+// server (valid calendar dates only). A null range with rows in
+// the layer means every balance date in it is invalid/unknown —
+// stated as such, never as "no accounts".
+export function archLayerLine(
+  range: ArchNetWorthData["plaidRange"],
+  layerHasRows: boolean,
+): string {
+  if (range) return `余额日期 ${range.oldest} 至 ${range.newest}`;
+  return layerHasRows ? "无有效余额日期（日期无效或未知）" : "本层无账户";
+}
+
+// One detail row's date label. The stored value is always shown
+// as-is: a valid date plainly, a non-null invalid date with its
+// original text plus 日期无效， a null date as 日期未知.
+// Missing rows are a separate category （缺失未计入） and never
+// borrow a date label.
+export function archRowDateLabel(row: ArchNetWorthData["rows"][number]): string {
+  if (row.coverage === "missing") return "缺失未计入";
+  const layer = row.coverage === "plaid" ? "Plaid 同步" : "快照";
+  if (row.asOf === null) return `${layer} · 日期未知`;
+  if (!isRealDateText(row.asOf)) return `${layer} · ${row.asOf} · 日期无效`;
+  return `${layer} · ${row.asOf}`;
+}
+
+// LIFE-DESIGN-001-B1A: the F-ARCH per-account rows move from
+// the old card's fold into the detail tab's ledger layer —
+// this is the 「逐户日期见明细」 the conclusion card's snapshot
+// layer line points at. Row rendering (name, DATE-1 date label,
+// signed amount) is unchanged; freshness is stated per layer in
+// text + symbol, never by color alone.
+function ArchAccountsDetail({ arch }: { arch: ArchNetWorthData }) {
   return (
-    <section className="fact-card" aria-label="总资产 · 新架构（F-ARCH-001）">
-      <p className="eyebrow">总资产 · 新架构（F-ARCH-001）</p>
-      <div className="fact-card__value">
-        <strong>{currency.format(arch.total)}</strong>
+    <section className="section-block" aria-label="总资产账户明细（新架构）">
+      <SectionTitle title="总资产账户明细" meta={`新架构（F-ARCH-001）· ${arch.rows.length} 个账户`} />
+      <div className="arch-rows arch-rows--detail">
+        {arch.rows.map((row) => (
+          <div className="arch-row" key={row.id}>
+            <span className="arch-row__name">{archDisplayLabel(row.id)}</span>
+            <span className="arch-row__tag">{archRowDateLabel(row)}</span>
+            <b>{row.included && row.signed != null ? signedCurrency(row.signed) : "—"}</b>
+          </div>
+        ))}
       </div>
-      {arch.partial ? (
-        <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见下。</p>
-      ) : null}
-      <p className="fact-card__note">Plaid 层拉取于 {pulledText}</p>
-      <p className="fact-card__note">
-        ● Plaid 同步层：
-        {arch.plaidRange
-          ? `余额日期 ${arch.plaidRange.oldest} 至 ${arch.plaidRange.newest}`
-          : "本层无账户"}
-      </p>
-      <p className="fact-card__note">
-        ● 快照层（Firance 月度快照沿用）：
-        {arch.snapshotRange
-          ? `余额日期 ${arch.snapshotRange.oldest} 至 ${arch.snapshotRange.newest}，逐户日期见明细`
-          : "本层无账户"}
-      </p>
-      <details className="fact-card__details">
-        <summary>账户明细（{arch.rows.length} 个账户）</summary>
-        <div className="arch-rows">
-          {arch.rows.map((row) => (
-            <div className="arch-row" key={row.id}>
-              <span className="arch-row__name">{archDisplayLabel(row.id)}</span>
-              <span className="arch-row__tag">
-                {row.coverage === "plaid"
-                  ? `Plaid 同步${row.asOf ? ` · ${row.asOf}` : ""}`
-                  : row.coverage === "snapshot"
-                    ? `快照 · ${row.asOf ?? "日期未提供"}`
-                    : "缺失未计入"}
-              </span>
-              <b>{row.included && row.signed != null ? signedCurrency(row.signed) : "—"}</b>
-            </div>
-          ))}
-        </div>
-      </details>
-      <p className="fact-card__source">旧月度快照仍保留在下方作对账存档。</p>
     </section>
   );
+}
+
+// LIFE-DESIGN-001-B1A: one-line summaries for the overview
+// tab's folded evidence layer (R3a — every fold's summary
+// carries its key numbers). All three derive from the same
+// figures their full panels render; nothing is recomputed
+// under a new caliber.
+
+// Available-cash scope: the server-caliber amount, how many
+// accounts are counted in, and — when coverage was blocked —
+// a visible flag in the folded state (R6: anomaly states are
+// never fully hidden inside a fold).
+export function cashScopeSummaryLine(cashAmount: number | null, selectedCount: number, blockedReason: string | null): string {
+  const amount = cashAmount == null ? "未提供" : currency.format(cashAmount);
+  const blocked = blockedReason ? " · 覆盖未输出，展开查看原因" : "";
+  return `可动用现金账户范围 — ${amount} · 计入 ${selectedCount} 个账户${blocked}`;
+}
+
+// Whole-period investment reconciliation: the reconciled
+// return (or 待核对） the full card reports.
+export function investmentSummaryLine(perf: Dashboard["investmentPerformance"]): string {
+  if (perf.returnAmount == null) return "投资收益核对 — 全期间待核对";
+  const label = perf.returnAmount > 0 ? "收益" : perf.returnAmount < 0 ? "亏损" : "持平";
+  return `投资收益核对 — 全期间${label} ${trendIndicator(perf.returnAmount)} ${signedCurrency(perf.returnAmount)} · 已核对`;
+}
+
+// Holdings: the Top-3 concentration (already the section's
+// headline meta) plus the full-set count.
+export function holdingsSummaryLine(data: Dashboard): string {
+  const count = data.holdingsAll.length > 0 ? ` · 全部持仓 ${data.holdingsAll.length} 只` : "";
+  return `持仓 — 前三集中度 ${percent.format(data.concentrationTop3)}${count}`;
 }
 
 function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
@@ -1485,6 +1623,25 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
       return next;
     });
   };
+  // LIFE-DESIGN-001-B1A: two tabs — 总览 (conclusion + folded
+  // evidence) and 明细 (the ledger layer). Tab state, fold
+  // states and the cash trial are mount-time component state
+  // only: every fresh page open starts on the overview tab with
+  // every fold at its default (owner ruling 2026-10-24, design
+  // option 2 — nothing is persisted anywhere).
+  const [tab, setTab] = useState<"overview" | "detail">("overview");
+  const pendingAnchor = useRef<string | null>(null);
+  useEffect(() => {
+    if (tab === "detail" && pendingAnchor.current) {
+      const anchor = pendingAnchor.current;
+      pendingAnchor.current = null;
+      document.getElementById(anchor)?.scrollIntoView({ block: "start" });
+    }
+  }, [tab]);
+  const goDetail = (anchor: string) => {
+    pendingAnchor.current = anchor;
+    setTab("detail");
+  };
   const months = useMemo(() => {
     if (range === "6m") return data.months.slice(-6);
     if (range === "12m") return data.months.slice(-12);
@@ -1495,11 +1652,8 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
     return data.months;
   }, [data.months, range]);
   const current = data.months.at(-1);
-  const previous = data.months.at(-2);
   if (!current) return null;
 
-  const monthDelta = previous ? current.total - previous.total : null;
-  const deltaView = weeklyDeltaView(data.live.weeklyDelta, data.live.netWorth);
   const savingsRate = current.income > 0 && current.totalSpend != null ? (current.income - current.totalSpend) / current.income : null;
   // F0.5: when the latest month lacks income or spend provenance, the
   // rate is a recorded value only, not a complete-month savings rate.
@@ -1524,41 +1678,75 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
   const emergencyNote = coverage.reason
     ?? `可动用现金 ${currency.format(coverage.cashAmount ?? 0)} ÷ 平均月支出 ${currency.format(spendBasis.averageMonthlySpend ?? 0)}（所用月份 ${spendBasis.usedMonthKeys.join("、")}）${excludedCashSources.size > 0 ? " · 本页试算" : ""}`;
 
-  const grouped = new Map<string, Account[]>();
-  for (const account of data.accounts) {
-    const institution = institutionName(account);
-    grouped.set(institution, [...(grouped.get(institution) ?? []), account]);
-  }
-  const accountGroups = [...grouped.entries()].sort((a, b) => {
-    const aTotal = a[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
-    const bTotal = b[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
-    return bTotal - aTotal;
-  });
-
   return (
     <>
-      <BalanceDeltaCard data={data} refreshFailed={refreshFailed} />
+      <div className="view-tabs" role="tablist" aria-label="财务视图切换">
+        <button type="button" role="tab" aria-selected={tab === "overview"} className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>总览</button>
+        <button type="button" role="tab" aria-selected={tab === "detail"} className={tab === "detail" ? "active" : ""} onClick={() => setTab("detail")}>明细</button>
+      </div>
+      {tab === "overview" ? (
+        <OverviewTab
+          data={data}
+          refreshFailed={refreshFailed}
+          current={current}
+          savingsRate={savingsRate}
+          savingsRateNote={savingsRateNote}
+          emergencyMonths={emergencyMonths}
+          emergencyNote={emergencyNote}
+          coverage={coverage}
+          excludedCashSources={excludedCashSources}
+          onToggleCashSource={toggleCashSource}
+          onGoDetail={goDetail}
+        />
+      ) : (
+        <DetailTab data={data} months={months} range={range} onRangeChange={setRange} />
+      )}
+    </>
+  );
+}
 
-      <section className="hero" aria-labelledby="hero-title">
-        <div className="hero__main">
-          <p id="hero-title" className="eyebrow">同步读取净资产</p>
-          <div className="hero__value">{currency.format(data.live.netWorth)}</div>
-          <div className={`delta ${valueTone(data.live.weeklyDelta)}`}>
-            {data.live.weeklyDelta == null ? (
-              <span>暂无可比快照</span>
-            ) : (
-              <><span>{trendIndicator(data.live.weeklyDelta)} {signedCurrency(data.live.weeklyDelta)}</span><span>{deltaView.percent == null ? "" : `（${deltaView.percent > 0 ? "+" : ""}${percent.format(deltaView.percent)}）`}</span>{deltaView.direction ? <span>{deltaView.direction}</span> : null}<span className="delta__label">较上次成功快照</span></>
-            )}
-          </div>
-        </div>
-        <div className="snapshot-compare">
-          <span>月度快照 · {data.sourceMonth}</span>
-          <strong>{currency.format(current.total)}</strong>
-          <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`}</small>
-        </div>
-      </section>
-
-      {data.archNetWorth ? <ArchNetWorthCard arch={data.archNetWorth} /> : null}
+// LIFE-DESIGN-001-B1A: the overview tab — conclusion layer
+// plus the folded evidence layer, default ≈3 screens (R1/R2).
+// Blocks, in the established home-page priority order:
+// total-assets conclusion card → this month's 7 key metrics →
+// data-anomaly strip (R6, never folded) → one-line FIRE
+// summary with an anchor into the detail tab → four evidence
+// folds whose summaries carry their key numbers (R3a).
+function OverviewTab({
+  data,
+  refreshFailed,
+  current,
+  savingsRate,
+  savingsRateNote,
+  emergencyMonths,
+  emergencyNote,
+  coverage,
+  excludedCashSources,
+  onToggleCashSource,
+  onGoDetail,
+}: {
+  data: Dashboard;
+  refreshFailed: boolean;
+  current: Month;
+  savingsRate: number | null;
+  savingsRateNote: string;
+  emergencyMonths: number | null;
+  emergencyNote: string;
+  coverage: ReturnType<typeof emergencyCoverage>;
+  excludedCashSources: ReadonlySet<string>;
+  onToggleCashSource: (source: string) => void;
+  onGoDetail: (anchor: string) => void;
+}) {
+  const anomalyMonths = data.months.filter((month) => month.flexibleSpendAnomaly);
+  const foldHint = (
+    <>
+      <span className="fold-hint fold-hint--open">展开</span>
+      <span className="fold-hint fold-hint--close">收起</span>
+    </>
+  );
+  return (
+    <>
+      <TotalAssetsConclusionCard data={data} refreshFailed={refreshFailed} />
 
       <section className="metric-grid" aria-label="本月关键指标">
         <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />
@@ -1570,25 +1758,89 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
         <Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} note="按未偿余额显示" />
       </section>
 
-      <AvailableCashPanel
-        data={data}
-        excludedSources={excludedCashSources}
-        onToggle={toggleCashSource}
-        trialCashAmount={coverage.cashAmount}
-      />
+      {anomalyMonths.length > 0 ? (
+        <div className="data-anomaly" role="note" aria-label="数据异常月份">
+          <strong>数据异常</strong>
+          <span>{anomalyMonths.map((month) => monthLabel.format(monthDate(month.key))).join("、")} 仍保留在月度记录中；支出在图表中为断点，不进入 FIRE 年支出。</span>
+        </div>
+      ) : null}
 
+      <section className="fire-teaser" aria-label="FIRE 进度摘要">
+        <p>{fireSummaryLine(data.fire)}</p>
+        <button type="button" onClick={() => onGoDetail("fire-panel")}>查看完整 FIRE 面板</button>
+      </section>
+
+      <div className="evidence-layer">
+        <details className="evidence-fold">
+          <summary><span>{cashScopeSummaryLine(coverage.cashAmount, coverage.selectedCount, coverage.reason)}</span>{foldHint}</summary>
+          <AvailableCashPanel
+            data={data}
+            excludedSources={excludedCashSources}
+            onToggle={onToggleCashSource}
+            trialCashAmount={coverage.cashAmount}
+          />
+        </details>
+
+        <details className="evidence-fold">
+          <summary><span>资产 / 支出分布 — {distributionSummaryLine(data.live)}</span>{foldHint}</summary>
+          <DistributionPanel current={current} live={data.live} />
+        </details>
+
+        <details className="evidence-fold">
+          <summary><span>{investmentSummaryLine(data.investmentPerformance)}</span>{foldHint}</summary>
+          <InvestmentPerformanceCard data={data} />
+        </details>
+
+        <details className="evidence-fold">
+          <summary><span>{holdingsSummaryLine(data)}</span>{foldHint}</summary>
+          <HoldingsSection data={data} />
+        </details>
+      </div>
+    </>
+  );
+}
+
+// LIFE-DESIGN-001-B1A: the detail tab — the ledger layer
+// (R3c/R10). Everything that used to stretch the single page
+// lives here, one tap from the overview: trend charts, the
+// full FIRE panel, the monthly records, the F-ARCH per-account
+// rows and the snapshot account detail. Content and wording
+// are the former single-page blocks, moved not rewritten.
+function DetailTab({
+  data,
+  months,
+  range,
+  onRangeChange,
+}: {
+  data: Dashboard;
+  months: Month[];
+  range: Range;
+  onRangeChange: (range: Range) => void;
+}) {
+  const grouped = new Map<string, Account[]>();
+  for (const account of data.accounts) {
+    const institution = institutionName(account);
+    grouped.set(institution, [...(grouped.get(institution) ?? []), account]);
+  }
+  const accountGroups = [...grouped.entries()].sort((a, b) => {
+    const aTotal = a[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
+    const bTotal = b[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
+    return bTotal - aTotal;
+  });
+  return (
+    <>
       <section className="section-block">
         <div className="section-heading-row">
           <SectionTitle title="走势" meta={`${months.filter((month) => !month.flexibleSpendAnomaly).length} 个有效快照`} />
           <div className="range-control" aria-label="趋势时间范围">
             {(["6m", "12m", "year", "all"] as Range[]).map((item) => (
-              <button key={item} type="button" className={range === item ? "active" : ""} onClick={() => setRange(item)} aria-pressed={range === item}>
+              <button key={item} type="button" className={range === item ? "active" : ""} onClick={() => onRangeChange(item)} aria-pressed={range === item}>
                 {item === "6m" ? "6月" : item === "12m" ? "12月" : item === "year" ? "今年" : "全部"}
               </button>
             ))}
           </div>
         </div>
-        <TrendCharts months={months} current={current} live={data.live} />
+        <TrendCharts months={months} />
       </section>
 
       <section className="section-block">
@@ -1596,14 +1848,12 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
         <MonthlyRecords months={data.months} />
       </section>
 
-      <section className="fire-section section-block">
+      <section className="fire-section section-block" id="fire-panel">
         <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
         <FireProgress data={data} />
       </section>
 
-      <InvestmentPerformanceCard data={data} />
-
-      <HoldingsSection data={data} />
+      {data.archNetWorth ? <ArchAccountsDetail arch={data.archNetWorth} /> : null}
 
       <section className="accounts-section section-block">
         <SectionTitle title="账户明细" meta={`快照 ${data.sourceMonth}`} />
