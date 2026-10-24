@@ -43,6 +43,20 @@
       "when": 1792412520065,
       "tag": "0006_plan_conflict_resolution_tracking",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792825984794,
+      "tag": "0007_annotate_home_b_lateral_lunge_window",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1792826032588,
+      "tag": "0008_fix_home_b_note_date_bracket",
+      "breakpoints": true
     }
   ]
 }

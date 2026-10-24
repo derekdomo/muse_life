@@ -1,0 +1,1 @@
+UPDATE plan_schedule SET note = '在家 B · 单板 25 分钟，与腿日隔 48 小时以上；Bench 登阶换侧向弓步（侧向弓步→脉冲弓步渐进，等量 2 组），出行周停练' WHERE day_index = 2 AND routine_code = 'home_snowboard' AND note = '在家 B · 单板 25 分钟，与腿日隔 48 小时以上';
