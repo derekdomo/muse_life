@@ -2317,6 +2317,34 @@ export function syncFocusFeedbackState(
     ? state.confirmed !== null && state.confirmedRevision > 0
     : incomingRevision < state.confirmedRevision;
   if (staleRead) return { ...state, readFailed: false };
+  // RT-1 (H3.5 re-review): a save whose callback lands after the panel
+  // unmounted is recorded into the session draft store; when the owner
+  // returns, the remounted card may still sit in "saving" locally
+  // while a successful re-read already shows this intent's choice on
+  // the server at a revision beyond the one the intent was gated on.
+  // That combination proves the intent landed: exit saving into the
+  // saved state (confirmed + selection sync to the read value, the
+  // confirmed revision takes the incoming one). A read naming a
+  // DIFFERENT value, or one at/below the gated revision, proves
+  // nothing about this intent — the ordinary saving merge below
+  // stands (confirmed only moves forward, selection never clobbered).
+  if (
+    state.status === "saving"
+    && serverConfirmed !== null
+    && serverConfirmed === state.selection
+    && incomingRevision > state.pendingExpectedRevision
+  ) {
+    return {
+      boundKey,
+      confirmed: serverConfirmed,
+      confirmedRevision: incomingRevision,
+      selection: serverConfirmed,
+      status: "saved",
+      readFailed: false,
+      pendingOperationId: null, pendingExpectedRevision: 0,
+      conflictFeedback: null, conflictRevision: null,
+    };
+  }
   if (state.status === "saving" || state.status === "error" || state.status === "conflict") {
     return {
       ...state,
@@ -2581,6 +2609,84 @@ export function focusContextUpdateNotice(contextKey: string, currentKey: string 
   return currentKey !== null && currentKey !== contextKey;
 }
 
+// CONTEXT-1 (H3.5 re-review): the "updated since you opened this
+// card" notice must be judged against the current focus key AS IT
+// STOOD WHEN THE VISIT BEGAN (the entry baseline the history view
+// captures at mount), never against the basis card's own key — a
+// previous-source card's key differs from the current key by
+// construction, so comparing against it claims an update on first
+// mount. Only a genuine mid-visit change (entry baseline known,
+// current key known, and the two now differ) earns the notice;
+// either key unknown -> no claim.
+export function focusVisitUpdateNotice(entryCurrentKey: string | null, currentKey: string | null): boolean {
+  return !!entryCurrentKey && !!currentKey && currentKey !== entryCurrentKey;
+}
+
+// WINDOW-1 (H3.5 re-review): the completed-sample count for a
+// natural (Mon–Sun) week is counted over the COMPLETE stored sample
+// list for that week — never over a range-filtered subset. A rolling
+// range that starts mid-week would otherwise miss same-week samples
+// outside the range and overstate the gap against the whole-week
+// total. In-progress sessions never count as completed.
+export function naturalWeekSampleCompleted(
+  allWorkouts: ReadonlyArray<{ date: string; status: string }>,
+  weekStart: string,
+  weekEnd: string,
+): number {
+  return allWorkouts.filter(
+    (workout) => workout.status === "completed" && workout.date >= weekStart && workout.date <= weekEnd,
+  ).length;
+}
+
+// The honest gap between a whole-week total and the completed
+// samples stored for that same week. When the stored samples exceed
+// the total the two calibres conflict: the gap is null and the
+// conflict is named — never clamped to 0 and never negative.
+export function naturalWeekGap(total: number, sampleCompleted: number): { gap: number | null; conflict: boolean } {
+  if (sampleCompleted > total) return { gap: null, conflict: true };
+  return { gap: total - sampleCompleted, conflict: false };
+}
+
+// Dual time layer for the basis card (H3.5): the card's focus
+// wording, basis and window stay frozen in the context, but its
+// FEEDBACK line is the live save state of that focusKey — once a
+// real receipt has landed in the session draft store, the line must
+// say so instead of repeating the frozen draft's "not saved". A
+// live state bound to a different key (or none yet) falls back to
+// the frozen context lines exactly as focusBasisLines adjudicates
+// them.
+export function focusBasisFeedbackLine(context: FocusRangeContext, liveState: FocusFeedbackState | null): string {
+  if (!liveState || liveState.boundKey !== context.focusKey) {
+    return focusBasisLines(context).feedbackLine;
+  }
+  if (liveState.status === "saving") {
+    return liveState.selection
+      ? `对这条重点的反馈：『${liveState.selection}』保存中`
+      : focusBasisLines(context).feedbackLine;
+  }
+  if (liveState.status === "conflict") {
+    const standing = liveState.conflictFeedback ?? liveState.confirmed;
+    if (standing && liveState.selection) {
+      return `对这条重点的反馈：已保存『${standing}』；你选『${liveState.selection}』未保存`;
+    }
+    if (standing) return `对这条重点的反馈：已保存『${standing}』`;
+    if (liveState.selection) return `对这条重点的反馈：『${liveState.selection}』尚未保存`;
+    return focusBasisLines(context).feedbackLine;
+  }
+  if (liveState.status === "error") {
+    if (liveState.selection && liveState.confirmed) {
+      return `对这条重点的反馈：『${liveState.selection}』尚未保存；已保存『${liveState.confirmed}』仍在`;
+    }
+    if (liveState.selection) return `对这条重点的反馈：『${liveState.selection}』尚未保存`;
+    if (liveState.confirmed) return `对这条重点的反馈：已保存『${liveState.confirmed}』`;
+    return "对这条重点的反馈：尚未反馈";
+  }
+  // saved / idle: the confirmed value is what stands.
+  if (liveState.confirmed) return `对这条重点的反馈：已保存『${liveState.confirmed}』`;
+  if (liveState.selection) return `对这条重点的反馈：『${liveState.selection}』尚未保存`;
+  return "对这条重点的反馈：尚未反馈";
+}
+
 // Honest degradation for a source whose stored detail sample has
 // rolled forward past the selected range: when the WHOLE range ends
 // before the earliest date still present in that source's stored
@@ -2606,16 +2712,34 @@ export function focusSampleEmptyKind(
 // is never read under another key — a different focus starts from
 // the server row for its own key, and an old opinion is never
 // migrated or auto-submitted.
+export type FocusDraftListener = (focusKey: string, state: FocusFeedbackState) => void;
+
 export interface FocusDraftStore {
   byKey: Record<string, FocusFeedbackState>;
+  // RT-1 (H3.5 re-review): publish/subscribe so a save outcome that
+  // lands while its panel is unmounted (or after a remount) drives
+  // the CURRENTLY mounted card for that key directly — no polling,
+  // no re-send. Every write through saveFocusDraft notifies each
+  // subscriber with (focusKey, state); recordFocusSaveOutcome
+  // publishes naturally because it writes through saveFocusDraft.
+  subscribers: FocusDraftListener[];
 }
 
 export function createFocusDraftStore(): FocusDraftStore {
-  return { byKey: {} };
+  return { byKey: {}, subscribers: [] };
+}
+
+export function subscribeFocusDraft(store: FocusDraftStore, listener: FocusDraftListener): () => void {
+  store.subscribers.push(listener);
+  return () => {
+    const index = store.subscribers.indexOf(listener);
+    if (index >= 0) store.subscribers.splice(index, 1);
+  };
 }
 
 export function saveFocusDraft(store: FocusDraftStore, focusKey: string, state: FocusFeedbackState): FocusDraftStore {
   store.byKey[focusKey] = state;
+  for (const listener of [...store.subscribers]) listener(focusKey, state);
   return store;
 }
 
@@ -2726,6 +2850,18 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
   useEffect(() => {
     if (feedbackState.boundKey) saveFocusDraft(focusDraftStore, feedbackState.boundKey, feedbackState);
   }, [feedbackState]);
+  // RT-1: while mounted, follow the session draft store for THIS
+  // card key. A save outcome recorded while a previous mount of this
+  // panel was gone (or one landing right now) is published by
+  // saveFocusDraft; when it names this card's key the live state
+  // adopts the notified state, so a remounted card never sits in a
+  // permanent "saving" with its buttons disabled. Same-reference
+  // notifications (this panel's own write-back above) are skipped,
+  // so the subscription can never loop.
+  useEffect(() => subscribeFocusDraft(focusDraftStore, (key, state) => {
+    if (key !== cardKey) return;
+    setFeedbackState((prev) => (prev === state ? prev : state));
+  }), [cardKey]);
   // The previous look-back survives a failed local read: the last
   // successfully read row is kept in state and the failed read never
   // replaces it with null (which would masquerade as "no history").
@@ -3315,6 +3451,30 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
   // entry, so the fold always starts closed for a fresh landing.
   const [showAllHistory, setShowAllHistory] = useState(false);
   const fullHistoryVisible = !focusRange || showAllHistory;
+  // CONTEXT-1: the current focus key as it stood when this visit
+  // began, captured once at mount. The "updated since opening"
+  // notice is judged against this baseline — never against the
+  // basis card's own key, which differs from the current key by
+  // construction for a previous-source card.
+  const [entryCurrentFocusKey] = useState<string | null>(() => currentFocusKey ?? null);
+  // Dual time layer: the basis card's feedback line follows the
+  // LIVE draft-store state for the context's focusKey (seeded from
+  // the store at mount, then kept current by subscription), while
+  // the card's focus wording, basis and window stay frozen.
+  const focusContextKey = focusContext?.focusKey ?? null;
+  const [liveBasisState, setLiveBasisState] = useState<FocusFeedbackState | null>(
+    () => (focusContextKey ? loadFocusDraft(focusDraftStore, focusContextKey) : null),
+  );
+  useEffect(() => {
+    if (!focusContextKey) {
+      setLiveBasisState(null);
+      return undefined;
+    }
+    setLiveBasisState(loadFocusDraft(focusDraftStore, focusContextKey));
+    return subscribeFocusDraft(focusDraftStore, (key, state) => {
+      if (key === focusContextKey) setLiveBasisState(state);
+    });
+  }, [focusContextKey]);
   const focusActiveCount = focusStrengths.filter((workout) => workout.status === "active").length;
   const focusCompletedCount = focusStrengths.length - focusActiveCount;
   // Rolling window vs natural week, presented separately (H3.5):
@@ -3331,8 +3491,14 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
         .filter((week) => week.coverageComplete === true && week.weekStart <= focusRange.end && shiftDateStr(week.weekStart, 6) >= focusRange.start)
         .map((week) => {
           const weekEnd = shiftDateStr(week.weekStart, 6);
-          const sampleCompleted = focusStrengths.filter((workout) => workout.status === "completed" && workout.date >= week.weekStart && workout.date <= weekEnd).length;
-          return { week, weekEnd, sampleCompleted };
+          // WINDOW-1: the whole-week sample count comes from the
+          // COMPLETE stored list, never the range subset — a
+          // same-week sample outside the selected range still
+          // counts toward the week. The in-range sample count stays
+          // presented separately in the section heading above.
+          const sampleCompleted = naturalWeekSampleCompleted(strengths, week.weekStart, weekEnd);
+          const gapInfo = naturalWeekGap(week.sessions, sampleCompleted);
+          return { week, weekEnd, sampleCompleted, gap: gapInfo.gap, gapConflict: gapInfo.conflict };
         })
     : [];
   // Rolled-out adjudication (H3.5 round-trip): each source's stored
@@ -3350,7 +3516,7 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
     ? focusSampleEmptyKind(focusRange, earliestSampleDate(allWorkouts.map((workout) => workout.date)), !!focusContext)
     : "plain-empty";
   const basisLines = focusContext ? focusBasisLines(focusContext) : null;
-  const focusKeyChanged = focusContext ? focusContextUpdateNotice(focusContext.focusKey, currentFocusKey ?? null) : false;
+  const focusKeyChanged = focusContext ? focusVisitUpdateNotice(entryCurrentFocusKey, currentFocusKey ?? null) : false;
   const returnFocusLabel = focusContext?.source === "previous" ? "返回上次重点" : "返回本次重点";
   return (
     <div className="history-view">
@@ -3366,7 +3532,10 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
             <div className="history-focus-basis">
               <p className="history-focus-basis-heading">{basisLines.heading}</p>
               <p className="history-focus-basis-focus">{focusContext.focusText}</p>
-              <p className="history-focus-basis-feedback">{basisLines.feedbackLine}</p>
+              <p className="history-focus-basis-feedback">{focusBasisFeedbackLine(focusContext, liveBasisState)}</p>
+              {focusContext.source === "previous" && !focusKeyChanged ? (
+                <p className="unified-note">这是历史依据卡，按打开时的重点呈现；与当前重点不同属正常回看。</p>
+              ) : null}
               {focusKeyChanged ? (
                 <div className="history-focus-basis-update">
                   <p>已有更新依据：打开这张卡之后，当前重点已经更新（新快照或新窗口）。这张卡仍按打开时的重点呈现，不自动切换。</p>
@@ -3399,8 +3568,12 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
           <div className="history-focus-weeks">
             <h3 className="history-focus-subtitle">相关自然周汇总 · 周一–周日</h3>
             <p className="unified-note">自然周按周一到周日计，可能跨出所选范围；与这段时间重叠的多个自然周各自是整周口径，不相加成七天总数。</p>
-            {focusWeeks.length ? focusWeeks.map(({ week, weekEnd, sampleCompleted }) => (
-              <p className="unified-note" key={week.weekStart}>全量周汇总（自然周 {fullDateLabel(week.weekStart)}–{fullDateLabel(weekEnd)}）：{week.sessions} 次 · 容量 {volumeLabel(week.volume)} {snapshot.strengthTraining.displayUnit}。与范围内已存明细样本相差 {week.sessions - sampleCompleted} 次（全量周汇总 {week.sessions} 次 − 样本已完成 {sampleCompleted} 次）；自然周与上面的滚动复盘窗不是同一窗口，数字分开呈现。</p>
+            {focusWeeks.length ? focusWeeks.map(({ week, weekEnd, sampleCompleted, gap, gapConflict }) => (
+              gapConflict ? (
+                <p className="unified-note" key={week.weekStart}>全量周汇总（自然周 {fullDateLabel(week.weekStart)}–{fullDateLabel(weekEnd)}）：整周汇总 {week.sessions} 次 · 容量 {volumeLabel(week.volume)} {snapshot.strengthTraining.displayUnit}。已存完成样本 {sampleCompleted} 次多于整周汇总 {week.sessions} 次，口径冲突，未硬补为 0；自然周与上面的滚动复盘窗不是同一窗口，数字分开呈现。</p>
+              ) : (
+                <p className="unified-note" key={week.weekStart}>全量周汇总（自然周 {fullDateLabel(week.weekStart)}–{fullDateLabel(weekEnd)}）：整周汇总 {week.sessions} 次 / 同周已存完成样本 {sampleCompleted} 次 / 缺口 {gap} 次 · 容量 {volumeLabel(week.volume)} {snapshot.strengthTraining.displayUnit}；自然周与上面的滚动复盘窗不是同一窗口，数字分开呈现。</p>
+              )
             )) : (
               <p className="unified-note">本页未取得全量周汇总：与这段时间重叠的自然周没有已确认整周覆盖的周汇总；下面仍可查看已存明细样本，不新造数字。</p>
             )}
