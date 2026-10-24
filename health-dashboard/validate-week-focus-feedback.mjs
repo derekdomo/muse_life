@@ -109,10 +109,10 @@ function extractFunction(source, name) {
   return source.slice(idx, bodyEnd + 1);
 }
 
-const NAMES = ['focusFeedbackKey', 'createFocusFeedbackState', 'syncFocusFeedbackState', 'beginFocusFeedbackSave', 'completeFocusFeedbackSave', 'failFocusFeedbackSave', 'conflictFocusFeedbackSave', 'resolvePreviousLookback', 'previousFocusWindows', 'fullDateLabel', 'buildCurrentFocusContext', 'buildPreviousFocusContext', 'focusBasisLines', 'focusContextUpdateNotice', 'focusSampleEmptyKind', 'createFocusDraftStore', 'saveFocusDraft', 'loadFocusDraft', 'recordFocusSaveOutcome', 'createFocusRangeContextStore', 'saveFocusRangeContext', 'takeFocusRangeContext'];
+const NAMES = ['focusFeedbackKey', 'createFocusFeedbackState', 'syncFocusFeedbackState', 'beginFocusFeedbackSave', 'completeFocusFeedbackSave', 'failFocusFeedbackSave', 'conflictFocusFeedbackSave', 'resolvePreviousLookback', 'previousFocusWindows', 'fullDateLabel', 'buildCurrentFocusContext', 'buildPreviousFocusContext', 'focusBasisLines', 'focusContextUpdateNotice', 'focusVisitUpdateNotice', 'naturalWeekSampleCompleted', 'naturalWeekGap', 'focusBasisFeedbackLine', 'focusSampleEmptyKind', 'createFocusDraftStore', 'saveFocusDraft', 'loadFocusDraft', 'subscribeFocusDraft', 'recordFocusSaveOutcome', 'createFocusRangeContextStore', 'saveFocusRangeContext', 'takeFocusRangeContext'];
 const code = NAMES.map((name) => stripTypeScriptTypes(extractFunction(clientSrc, name).replace(/^export /, ''))).join('\n');
 const machine = new Function(`${code}\nreturn { ${NAMES.join(', ')} };`)();
-const { focusFeedbackKey, createFocusFeedbackState, syncFocusFeedbackState, beginFocusFeedbackSave, completeFocusFeedbackSave, failFocusFeedbackSave, conflictFocusFeedbackSave, resolvePreviousLookback, previousFocusWindows, buildCurrentFocusContext, buildPreviousFocusContext, focusBasisLines, focusContextUpdateNotice, focusSampleEmptyKind, createFocusDraftStore, saveFocusDraft, loadFocusDraft, recordFocusSaveOutcome, createFocusRangeContextStore, saveFocusRangeContext, takeFocusRangeContext } = machine;
+const { focusFeedbackKey, createFocusFeedbackState, syncFocusFeedbackState, beginFocusFeedbackSave, completeFocusFeedbackSave, failFocusFeedbackSave, conflictFocusFeedbackSave, resolvePreviousLookback, previousFocusWindows, buildCurrentFocusContext, buildPreviousFocusContext, focusBasisLines, focusContextUpdateNotice, focusVisitUpdateNotice, naturalWeekSampleCompleted, naturalWeekGap, focusBasisFeedbackLine, focusSampleEmptyKind, createFocusDraftStore, saveFocusDraft, loadFocusDraft, subscribeFocusDraft, recordFocusSaveOutcome, createFocusRangeContextStore, saveFocusRangeContext, takeFocusRangeContext } = machine;
 
 const serverCode = stripTypeScriptTypes(extractFunction(serverSrc, 'decideFocusSaveOutcome').replace(/^export /, ''));
 const { decideFocusSaveOutcome } = new Function(`${serverCode}\nreturn { decideFocusSaveOutcome };`)();
@@ -760,13 +760,13 @@ check('round-trip: the dashboard takes the pending context on navigation and cle
   clientSrc.includes('takeFocusRangeContext(focusRangeContextStore)')
   && clientSrc.includes('setHistoryFocusContext(null)'));
 check('round-trip: the range page leads with the basis card (heading / focus / feedback lines) before the checkable records',
-  clientSrc.includes('history-focus-basis-heading') && clientSrc.includes('{basisLines.feedbackLine}')
+  clientSrc.includes('history-focus-basis-heading') && clientSrc.includes('{focusBasisFeedbackLine(focusContext, liveBasisState)}')
   && clientSrc.includes('当时记录的依据') && clientSrc.includes('当前可核对的记录')
   && clientSrc.indexOf('history-focus-basis-heading') < clientSrc.indexOf('当前可核对的记录'));
 check('round-trip: the return button label follows the context source （返回上次重点 for the previous card)',
   clientSrc.includes('focusContext?.source === "previous" ? "返回上次重点" : "返回本次重点"'));
 check('round-trip: a mid-visit key change shows 已有更新依据 with a 查看当前重点 button (owner-switched, never auto)',
-  clientSrc.includes('focusContextUpdateNotice(focusContext.focusKey, currentFocusKey ?? null)')
+  clientSrc.includes('focusVisitUpdateNotice(entryCurrentFocusKey, currentFocusKey ?? null)')
   && clientSrc.includes('已有更新依据') && clientSrc.includes('aria-label="查看当前重点"'));
 check('round-trip: natural weeks live in their own subsection with the no-summing note',
   clientSrc.includes('相关自然周汇总 · 周一–周日') && clientSrc.includes('不相加成七天总数') && clientSrc.includes('可能跨出所选范围'));
@@ -774,6 +774,185 @@ check('round-trip: rolled-out detail reads 当时明细未保留 for both source
   clientSrc.includes('当时明细未保留（已存样本只覆盖最近一段，这段时间的明细已滚出）')
   && clientSrc.includes('strengthEmptyKind === "rolled-out"') && clientSrc.includes('hkEmptyKind === "rolled-out"')
   && clientSrc.includes('focusSampleEmptyKind(focusRange,'));
+
+// ----------------- (24) RT-1: draft-store publish/subscribe + the
+// sync saving exit (PM 2026-10-23 16:03). A save outcome recorded
+// while the panel is unmounted must reach the CURRENTLY mounted
+// card for that key through the store's subscription — and a
+// same-key successful re-read at a revision beyond the in-flight
+// intent's gate must release a card still sitting in "saving".
+{
+  const store = createFocusDraftStore();
+  const events = [];
+  const unsubscribe = subscribeFocusDraft(store, (key, state) => events.push({ key, state }));
+  // Success outcome publishes to subscribers.
+  let st = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  st = beginFocusFeedbackSave(st, '有帮助', 'op-700');
+  saveFocusDraft(store, KEY_A, st);
+  recordFocusSaveOutcome(store, KEY_A, { kind: 'success', choice: '有帮助', revision: 1 });
+  check('rt1: success outcome is published to subscribers (key + saved state, same object the store holds)',
+    events.length === 2 && events[1].key === KEY_A && events[1].state.status === 'saved'
+    && events[1].state.confirmedRevision === 1 && events[1].state === loadFocusDraft(store, KEY_A));
+  // Failure outcome publishes too, keeping the retry identity.
+  const storeF = createFocusDraftStore();
+  const eventsF = [];
+  subscribeFocusDraft(storeF, (key, state) => eventsF.push({ key, state }));
+  let sf = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  sf = beginFocusFeedbackSave(sf, '不适用', 'op-701');
+  saveFocusDraft(storeF, KEY_A, sf);
+  recordFocusSaveOutcome(storeF, KEY_A, { kind: 'failure' });
+  check('rt1: failure outcome is published (error state, selection + operationId preserved for the retry)',
+    eventsF.length === 2 && eventsF[1].state.status === 'error' && eventsF[1].state.selection === '不适用'
+    && eventsF[1].state.pendingOperationId === 'op-701');
+  // Conflict outcome publishes with the server's standing value.
+  const storeC = createFocusDraftStore();
+  const eventsC = [];
+  subscribeFocusDraft(storeC, (key, state) => eventsC.push({ key, state }));
+  let sc = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  sc = beginFocusFeedbackSave(sc, '有帮助', 'op-702');
+  saveFocusDraft(storeC, KEY_A, sc);
+  recordFocusSaveOutcome(storeC, KEY_A, { kind: 'conflict', feedback: '不适用', revision: 1 });
+  check('rt1: conflict outcome is published (conflict state naming the server value)',
+    eventsC.length === 2 && eventsC[1].state.status === 'conflict' && eventsC[1].state.conflictFeedback === '不适用');
+  // Notifications for a different key are distinguishable by key.
+  saveFocusDraft(store, KEY_B, syncFocusFeedbackState(createFocusFeedbackState(), KEY_B, '有帮助', false, 1));
+  check('rt1: a notification for another key carries that key (a mounted card can ignore it)',
+    events.length === 3 && events[2].key === KEY_B && events[2].state.boundKey === KEY_B);
+  // Unsubscribe stops delivery.
+  unsubscribe();
+  saveFocusDraft(store, KEY_A, loadFocusDraft(store, KEY_A));
+  check('rt1: after unsubscribe no further notifications arrive', events.length === 3);
+  // Sync saving exit: same value, higher revision -> saved.
+  let x = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  x = beginFocusFeedbackSave(x, '有帮助', 'op-703'); // gated on revision 0
+  x = syncFocusFeedbackState(x, KEY_A, '有帮助', false, 1);
+  check('rt1: saving + successful read of the SAME choice at a higher revision exits to saved (confirmed/selection synced, revision adopted, readFailed cleared)',
+    x.status === 'saved' && x.confirmed === '有帮助' && x.selection === '有帮助' && x.confirmedRevision === 1 && x.readFailed === false);
+  // Same value at the gated revision itself -> still saving.
+  let y = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '不适用', false, 1);
+  y = beginFocusFeedbackSave(y, '有帮助', 'op-704'); // gated on revision 1
+  y = syncFocusFeedbackState(y, KEY_A, '有帮助', false, 1);
+  check('rt1: saving + same choice at a revision NOT above the gate stays saving',
+    y.status === 'saving' && y.selection === '有帮助' && y.pendingOperationId === 'op-704');
+  // Different value at a higher revision -> still saving, confirmed
+  // moves forward only, selection not clobbered.
+  let z = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  z = beginFocusFeedbackSave(z, '有帮助', 'op-705');
+  z = syncFocusFeedbackState(z, KEY_A, '不适用', false, 2);
+  check('rt1: saving + a DIFFERENT value at a higher revision stays saving (confirmed advances paired, selection kept)',
+    z.status === 'saving' && z.selection === '有帮助' && z.confirmed === '不适用' && z.confirmedRevision === 2);
+}
+check('rt1: the week review panel subscribes to the draft store while mounted (unsubscribe on unmount / key change)',
+  clientSrc.includes('useEffect(() => subscribeFocusDraft(focusDraftStore, (key, state) => {')
+  && clientSrc.includes('if (key !== cardKey) return;')
+  && clientSrc.includes('setFeedbackState((prev) => (prev === state ? prev : state));'));
+check('rt1: the history basis card subscribes to the draft store for its context key',
+  clientSrc.includes('return subscribeFocusDraft(focusDraftStore, (key, state) => {')
+  && clientSrc.includes('if (key === focusContextKey) setLiveBasisState(state);'));
+
+// ----------------- (25) WINDOW-1: natural-week sample counting over
+// the COMPLETE list + the honest gap (PM 2026-10-23 16:03). Fixture:
+// natural week 2026-10-12..2026-10-18 holds completed samples on
+// 10-13 (outside a 10-16..10-22 selected range) and 10-17 (inside),
+// plus an in-progress session inside the week.
+{
+  const WEEK = [
+    { date: '2026-10-13', status: 'completed' },
+    { date: '2026-10-17', status: 'completed' },
+    { date: '2026-10-15', status: 'active' },
+    { date: '2026-10-11', status: 'completed' },
+    { date: '2026-10-19', status: 'completed' },
+  ];
+  check('window1: same-week samples outside the selected range count toward the week (10-13 + 10-17 = 2)',
+    naturalWeekSampleCompleted(WEEK, '2026-10-12', '2026-10-18') === 2);
+  check('window1: in-progress sessions never count as completed; neighbouring weeks counted separately',
+    naturalWeekSampleCompleted(WEEK, '2026-10-19', '2026-10-25') === 1
+    && naturalWeekSampleCompleted(WEEK, '2026-10-05', '2026-10-11') === 1
+    && naturalWeekSampleCompleted([], '2026-10-12', '2026-10-18') === 0);
+  const g1 = naturalWeekGap(3, 2);
+  const g0 = naturalWeekGap(2, 2);
+  const gx = naturalWeekGap(1, 2);
+  check('window1: gap is total − sample when the sample fits (incl. a true zero gap), never negative',
+    g1.gap === 1 && g1.conflict === false && g0.gap === 0 && g0.conflict === false);
+  check('window1: sample above the total is an honest conflict (gap null — never clamped to 0)',
+    gx.gap === null && gx.conflict === true);
+  // Mutation sensitivity: the range-subset count this fix replaced
+  // (only 10-17 falls inside 10-16..10-22) would report 1 and flip
+  // the first fixture above red.
+  const rangeSubset = WEEK.filter((w) => w.date >= '2026-10-16' && w.date <= '2026-10-22');
+  check('window1: mutation fixture — the old range-subset count gives 1, not 2 (fixture is sensitive to the bug)',
+    naturalWeekSampleCompleted(rangeSubset, '2026-10-12', '2026-10-18') === 1);
+}
+{
+  const historyStart = clientSrc.indexOf('function HistoryView(');
+  const focusWeeksAt = clientSrc.indexOf('const focusWeeks', historyStart);
+  const focusWeeksBlock = clientSrc.slice(focusWeeksAt, clientSrc.indexOf(': [];', focusWeeksAt));
+  check('window1: source — HistoryView focusWeeks counts samples from the COMPLETE strengths list, not the range subset',
+    focusWeeksBlock.includes('naturalWeekSampleCompleted(strengths, week.weekStart, weekEnd)')
+    && focusWeeksBlock.includes('naturalWeekGap(week.sessions, sampleCompleted)')
+    && !focusWeeksBlock.includes('focusStrengths'));
+  check('window1: source — the week line is the three-part checkable form, and the conflict line refuses to clamp to 0',
+    clientSrc.includes('整周汇总 {week.sessions} 次 / 同周已存完成样本 {sampleCompleted} 次 / 缺口 {gap} 次')
+    && clientSrc.includes('已存完成样本 {sampleCompleted} 次多于整周汇总 {week.sessions} 次，口径冲突，未硬补为 0'));
+}
+
+// ----------------- (26) CONTEXT-1: the visit-baseline update notice
+// (PM 2026-10-23 16:03). A previous-source card (P ≠ C by
+// construction) must show NO "updated since opening" claim on a
+// stable visit; only a genuine mid-visit change C -> D earns it.
+{
+  check('ctx1: previous card, stable visit — entry baseline equals the current key at entry, no notice even though the card key differs',
+    focusVisitUpdateNotice('key-C', 'key-C') === false);
+  check('ctx1: previous card, mid-visit change C -> D — notice',
+    focusVisitUpdateNotice('key-C', 'key-D') === true);
+  check('ctx1: current card — same key no notice, a real key change notices',
+    focusVisitUpdateNotice('key-C', 'key-C') === false && focusVisitUpdateNotice('key-C', 'key-E') === true);
+  check('ctx1: either key unknown — no guess, no notice',
+    focusVisitUpdateNotice(null, 'key-D') === false && focusVisitUpdateNotice('key-C', null) === false
+    && focusVisitUpdateNotice('', 'key-D') === false && focusVisitUpdateNotice('key-C', '') === false
+    && focusVisitUpdateNotice(null, null) === false);
+  check('ctx1: the legacy focusContextUpdateNotice stays exported for its existing callers',
+    typeof focusContextUpdateNotice === 'function' && focusContextUpdateNotice('key-P', 'key-C') === true);
+}
+check('ctx1: source — HistoryView captures the entry baseline at mount and no longer compares the card key directly',
+  clientSrc.includes('const [entryCurrentFocusKey] = useState<string | null>(() => currentFocusKey ?? null);')
+  && !clientSrc.includes('focusContextUpdateNotice(focusContext.focusKey')
+  && clientSrc.includes('这是历史依据卡，按打开时的重点呈现；与当前重点不同属正常回看。'));
+
+// ----------------- (27) dual time layer: the basis card feedback
+// line follows the LIVE state for the context's key (H3.5). The
+// frozen context below claims an unsaved draft; once a real receipt
+// for the same key stands in the store, the line must say saved.
+{
+  const frozenCtx = { source: 'current', focusKey: KEY_A, windowStart: '2026-10-17', windowEnd: '2026-10-23', focusText: '本周重点原文', basisText: '覆盖完整', savedFeedback: '有帮助', draftFeedback: '不适用' };
+  check('dual: frozen context alone still reads the draft as unsaved (baseline sanity)',
+    focusBasisLines(frozenCtx).feedbackLine === '对这条重点的反馈：『不适用』尚未保存');
+  let live = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, '有帮助', false, 2);
+  check('dual: frozen draft unsaved + live saved state -> the line reports the saved value, not the frozen draft',
+    focusBasisFeedbackLine(frozenCtx, live) === '对这条重点的反馈：已保存『有帮助』');
+  live = beginFocusFeedbackSave(live, '不适用', 'op-800');
+  check('dual: live saving -> the selection reads 保存中',
+    focusBasisFeedbackLine(frozenCtx, live) === '对这条重点的反馈：『不适用』保存中');
+  live = failFocusFeedbackSave(live, KEY_A);
+  check('dual: live error -> the selection is unsaved AND the standing saved value is still named',
+    focusBasisFeedbackLine(frozenCtx, live) === '对这条重点的反馈：『不适用』尚未保存；已保存『有帮助』仍在');
+  let liveErr = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  liveErr = beginFocusFeedbackSave(liveErr, '不适用', 'op-801');
+  liveErr = failFocusFeedbackSave(liveErr, KEY_A);
+  check('dual: live error with nothing saved -> only the unsaved selection is named',
+    focusBasisFeedbackLine(frozenCtx, liveErr) === '对这条重点的反馈：『不适用』尚未保存');
+  let liveConflict = syncFocusFeedbackState(createFocusFeedbackState(), KEY_A, null, false);
+  liveConflict = beginFocusFeedbackSave(liveConflict, '有帮助', 'op-802');
+  liveConflict = conflictFocusFeedbackSave(liveConflict, KEY_A, '不适用', 1);
+  check('dual: live conflict -> the standing saved value and the unsaved own choice are both named',
+    focusBasisFeedbackLine(frozenCtx, liveConflict) === '对这条重点的反馈：已保存『不适用』；你选『有帮助』未保存');
+  check('dual: live state null OR bound to another key -> the frozen context line stands verbatim',
+    focusBasisFeedbackLine(frozenCtx, null) === focusBasisLines(frozenCtx).feedbackLine
+    && focusBasisFeedbackLine(frozenCtx, syncFocusFeedbackState(createFocusFeedbackState(), KEY_B, '有帮助', false, 1)) === focusBasisLines(frozenCtx).feedbackLine);
+}
+check('dual: source — the basis card renders the live line while heading/basis stay on the frozen context',
+  clientSrc.includes('{focusBasisFeedbackLine(focusContext, liveBasisState)}')
+  && clientSrc.includes('loadFocusDraft(focusDraftStore, focusContextKey)'));
 
 console.log(`\n${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
