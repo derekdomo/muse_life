@@ -1489,3 +1489,11 @@
 - 验证证据：`node health-dashboard/validate-swim-vis.mjs` 以新合成夹具实跑 **33/33** 全过（生产函数未改、判据无削弱）。清洗后私有精确匹配扫描（仅报位置/计数）：全部真实元组模式在当前树 **0 命中**（覆盖日期+距离、距离+时长、汇总值等组合模式，含 plans/changes/全部验证脚本）。
 - 局限/待决：已提交历史（2f43991、4d5b567 等）中仍含原值——按 PM 单要求单列为**所有者裁决项**（清理范围/是否改写历史），本轮未自行改史、未 force push。生产呈现代码从未含真实值（App.tsx 函数为通用逻辑），工件无需改动。
 - 回滚：git revert 本提交恢复文档与夹具原文（同时恢复隐私暴露，不建议）。
+
+## 2026-10-24 11 时 PDT（F-ARCH-001·SAVE-1 · P0：归档版本仲裁与精确读回交付）
+
+- 队列来源：PM 2026-10-24 10:12 评审第 2 单（基线 f58ca75..9368cdc）。经 space-3 工件构建交付、自检通过；client 口径未动。
+- 改了什么（仅 server 层 ingestArchNetWorth 与 getDashboard overlay）：(1) 当前版本按来源版本 pulledAt 仲裁——新增 pickCurrentArchVersion 在候选行中选 pulledAt 最大者（同 pulledAt 取 id 最大），ingest 读回与 getter 共用；payload 解析失败的行跳过、不遮蔽较新有效版本。(2) 写入前仲裁：迟到旧版（pulledAt 早于现存最大）返回 stale_version 且零写入；同 pulledAt 且规范化内容等价（除 storedAt 外全字段深比较，含逐行 id/included/signed/asOf/coverage）命中逻辑幂等、不再 append 并以既有行作读回对象；同 pulledAt 异内容返回 version_conflict 且零写入；两类新失败走既有 archIngestFailure 的计数/布尔-only 响应形状。(3) 精确读回：按本次插入行（或幂等命中行）的 id 读回并逐字段深比较，仅 total/行数相同不再算 verified。既有拒绝矩阵、DATE-1 严格日期校验与 owner/guest/已批准匿名同步三态门禁不变。
+- 验证证据（构建方自检，全合成数据）：新增 validate-arch-save.ts（bun，驱动真实 handler 与 getter 于隔离内存库）**51/51**——正序两版 getter 取新版；反序旧版 stale_version 拒且零写入、getter 不回退；同版同内容重试只 1 行且 ok、响应丢失后经同步通道重试仍幂等；同版异内容与「同 total 仅账户 ID 不同」均 version_conflict 零写入；读回替身三变体（id/coverage/asOf 不同）不得 verified；并发双序 Promise.all 后 getter 恒为 pulledAt 较大者；坏 payload 行跳过不遮蔽；同 pulledAt 平局取 id 最大；坏日期/重复 ID/total 不符既有矩阵抽查不回归；身份三态不回归；0005 旧 payload（无 DATE-1 字段）解析、计数重派生与 getter→卡一致且可幂等命中。既有全量回归：validate-arch-dates 81/81（其中一处接线断言随新选择函数更新为等价形式）、validate-refresh-chain 134/134，其余 validator 合计 717/717。
+- 局限：所有者视角写入/读回未经真实所有者会话验证（审计通道无所有者身份，owner 分支以 fake ctx 驱动真实 handler）；并发组为同库 Promise.all 交错模拟，非多进程竞速。工件源码回灌本仓（含 DATE-1 与本条的 actions.ts/App.tsx 及 validate-arch-dates.ts/validate-arch-save.ts）沿 EVID 尾巴待补，本条不报已回灌。
+- 回滚：工件侧回退本轮 server 改动即恢复原行为（append-only 表中已写行不删，getter 选择规则回退后按旧 id 倒序）；仓库侧 git revert 本提交撤回登记。
