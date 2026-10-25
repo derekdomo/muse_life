@@ -5,7 +5,7 @@
 // Meaning is never carried by color alone: every category has a symbol and
 // a distinct line style next to its name, and every figure has a text label.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import {
@@ -248,6 +248,11 @@ function coverageStateOf(
 // ------------------------------------------------------- accumulation chart
 
 function AccumulationChart({ weeks }: { weeks: WeekSummary[] }) {
+  // Per-week list is capped at the most recent 4 weeks by default so the
+  // page length stops growing with history; the full list is one tap away.
+  const [showAllWeeks, setShowAllWeeks] = useState(false);
+  const recentWeeks = [...weeks].reverse();
+  const visibleWeeks = showAllWeeks ? recentWeeks : recentWeeks.slice(0, 4);
   const presentCategories = useMemo(() => {
     const set = new Set<string>();
     for (const w of weeks) for (const c of w.byCategory) set.add(c.category);
@@ -362,7 +367,7 @@ function AccumulationChart({ weeks }: { weeks: WeekSummary[] }) {
         </>
       )}
       <ul className="mt-4 divide-y divide-[var(--border)] border-t border-[var(--border)]">
-        {[...weeks].reverse().map((w) => (
+        {visibleWeeks.map((w) => (
           <li
             key={w.weekStartMs}
             className="flex items-baseline justify-between gap-3 py-1.5 text-sm"
@@ -378,6 +383,18 @@ function AccumulationChart({ weeks }: { weeks: WeekSummary[] }) {
           </li>
         ))}
       </ul>
+      {recentWeeks.length > 4 ? (
+        <button
+          type="button"
+          aria-expanded={showAllWeeks}
+          onClick={() => setShowAllWeeks((v) => !v)}
+          className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm"
+        >
+          {showAllWeeks
+            ? "收起，只看最近 4 周"
+            : `查看全部 ${recentWeeks.length} 周`}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -399,6 +416,19 @@ export function App() {
   // Category filter: narrows ONLY the interval list below — the week's
   // summary, cutoff and timezone stay exactly as computed.
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  // Layered default view (LIFE-DESIGN-001-B3D): secondary blocks start
+  // collapsed and every page open restores these defaults — plain useState
+  // initial values, never persisted.
+  const [showAllEntries, setShowAllEntries] = useState(false);
+  const [uncoveredOpen, setUncoveredOpen] = useState(false);
+  const [prioritiesOpen, setPrioritiesOpen] = useState(false);
+  const [accumulationOpen, setAccumulationOpen] = useState(false);
+
+  // Switching weeks (or toggling the category filter) returns the record
+  // list to its capped default of the most recent 5.
+  useEffect(() => {
+    setShowAllEntries(false);
+  }, [detailWeekMs, categoryFilter]);
 
   const dashboard = useQuery({
     queryKey: ["dashboard", detailWeekMs ?? "current"],
@@ -591,7 +621,12 @@ export function App() {
     : detail.entries;
   const maxCatMinutes = Math.max(1, ...categories.map((c) => c.minutes));
   const editingPriorities = priorityDraft !== null;
-  const shownPriorities = editingPriorities ? priorityDraft : data.priorities;
+  // Record list default: the most recent 5 (entries arrive oldest → newest);
+  // "查看全部" reveals the rest. The cap applies to whatever the category
+  // filter leaves visible.
+  const visibleEntries = showAllEntries
+    ? shownEntries
+    : shownEntries.slice(-5);
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
@@ -691,15 +726,15 @@ export function App() {
               <p className="mt-1.5 text-sm text-[var(--dim)]">
                 {covState === "full" ? (
                   <>
-                    ● 已完整覆盖 · 已记录 {fmtHours(summary.coverageMinutes)}（
+                    ● 已完整覆盖（
                     {isCurrentWeek
                       ? `截至 ${fmtDateTime(nowMs)}，已过去的时间全部有记录`
                       : "整周全部有记录"}
-                    ）
+                    ）· 共 {detail.entries.length} 笔记录
                   </>
                 ) : (
                   <>
-                    ◐ 部分覆盖 · 已记录 {fmtHours(summary.coverageMinutes)}（
+                    ◐ 部分覆盖（
                     {isCurrentWeek ? `截至 ${fmtDateTime(nowMs)}` : "整周已结束"}）· 共{" "}
                     {detail.entries.length} 笔记录 · 只统计记下来的时间，不外推到整周
                   </>
@@ -746,6 +781,51 @@ export function App() {
               </button>
             ) : null}
           </div>
+        </section>
+
+        {/* ---- Uncovered time: one-line summary under the hero; the two
+            cards' explanations live in the expand ---- */}
+        <section id="uncovered-block" aria-label="记录未覆盖时间" className="mt-6 scroll-mt-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <p className="text-sm">
+              <span className="text-[var(--dim)]">未覆盖</span>{" "}
+              <span className="tabular-nums">
+                {detail.uncoveredElapsedMinutes == null
+                  ? "—（本周尚未开始）"
+                  : fmtHours(detail.uncoveredElapsedMinutes)}
+              </span>
+              {isCurrentWeek ? (
+                <>
+                  <span className="text-[var(--dim)]"> · 本周尚未到来</span>{" "}
+                  <span className="tabular-nums">{fmtHours(detail.notYetMinutes)}</span>
+                </>
+              ) : null}
+            </p>
+            <button
+              type="button"
+              aria-expanded={uncoveredOpen}
+              onClick={() => setUncoveredOpen((v) => !v)}
+              className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-sm"
+            >
+              {uncoveredOpen ? "收起说明" : "这是什么意思"}
+            </button>
+          </div>
+          {uncoveredOpen ? (
+            <div className="mt-2 space-y-2 text-xs leading-relaxed text-[var(--dim)]">
+              <p>
+                「未覆盖」是
+                {isCurrentWeek
+                  ? "截至当前、已经过去但没有记录覆盖的时间"
+                  : "这一周没有记录覆盖的部分"}
+                。它只表示这段时间没有留下记录，不代表空闲、休息或浪费——没记下来的时间就是没记下来，仅此而已。
+              </p>
+              {isCurrentWeek ? (
+                <p>
+                  「本周尚未到来」是还没发生的时间，不算未记录。
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </section>
 
         {/* ---- Block 1: recorded time by category ---- */}
@@ -961,9 +1041,7 @@ export function App() {
           {detail.entries.length > 0 ? (
             <div id="week-entries" className="scroll-mt-4">
               <div className="mt-5 flex items-baseline justify-between gap-3">
-                <p className="text-sm font-medium">
-                  本周记录（{detail.entries.length} 笔）
-                </p>
+                <p className="text-sm font-medium">本周记录</p>
                 {categoryFilter ? (
                   <span className="text-xs text-[var(--accent-soft)]">
                     过滤中：只显示「{categoryFilter}」
@@ -990,7 +1068,7 @@ export function App() {
                 </div>
               ) : null}
               <ul className="mt-3 divide-y divide-[var(--border)] border-y border-[var(--border)]">
-              {shownEntries.map((e) => (
+              {visibleEntries.map((e) => (
                 <li key={e.id} className="py-3">
                   <div className="flex items-baseline justify-between gap-3">
                     <p className="text-sm font-medium">
@@ -1061,36 +1139,20 @@ export function App() {
                 </li>
               ))}
               </ul>
+              {shownEntries.length > 5 ? (
+                <button
+                  type="button"
+                  aria-expanded={showAllEntries}
+                  onClick={() => setShowAllEntries((v) => !v)}
+                  className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm"
+                >
+                  {showAllEntries
+                    ? "收起，只看最近 5 笔"
+                    : `查看全部 ${shownEntries.length} 笔`}
+                </button>
+              ) : null}
             </div>
           ) : null}
-        </section>
-
-        {/* ---- Block 2: time not covered by records ---- */}
-        <section id="uncovered-block" aria-label="记录未覆盖时间" className="mt-12 scroll-mt-4">
-          <h2 className="font-[family-name:var(--font-ledger)] text-xl">记录未覆盖时间</h2>
-          <div className="mt-3 grid gap-3">
-            <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
-              <p className="text-sm text-[var(--dim)]">
-                {isCurrentWeek ? "截至当前 · 已过去但没有记录覆盖" : "这一周没有记录覆盖的部分"}
-              </p>
-              <p className="mt-1 font-[family-name:var(--font-ledger)] text-3xl tabular-nums">
-                {detail.uncoveredElapsedMinutes == null
-                  ? "—（本周尚未开始）"
-                  : fmtHours(detail.uncoveredElapsedMinutes)}
-              </p>
-            </div>
-            {isCurrentWeek ? (
-              <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
-                <p className="text-sm text-[var(--dim)]">本周尚未到来（还没发生，不算未记录）</p>
-                <p className="mt-1 font-[family-name:var(--font-ledger)] text-3xl tabular-nums">
-                  {fmtHours(detail.notYetMinutes)}
-                </p>
-              </div>
-            ) : null}
-          </div>
-          <p className="mt-3 text-xs leading-relaxed text-[var(--dim)]">
-            「未覆盖」只表示这段时间没有留下记录，不代表空闲、休息或浪费——没记下来的时间就是没记下来，仅此而已。
-          </p>
         </section>
 
         {/* ---- Stated priorities vs recorded time (facts only) ---- */}
@@ -1115,15 +1177,16 @@ export function App() {
                   取消
                 </button>
               </div>
-            ) : (
+            ) : data.priorities.length > 0 ? (
               <button
                 type="button"
-                onClick={() => setPriorityDraft([...data.priorities])}
+                aria-expanded={prioritiesOpen}
+                onClick={() => setPrioritiesOpen((v) => !v)}
                 className="rounded-md border border-[var(--border)] px-3 py-1 text-sm"
               >
-                {data.priorities.length > 0 ? "修改重点" : "选我的重点"}
+                {prioritiesOpen ? "收起对照" : "展开对照"}
               </button>
-            )}
+            ) : null}
           </div>
 
           {editingPriorities ? (
@@ -1164,38 +1227,80 @@ export function App() {
               </div>
             </fieldset>
           ) : data.priorities.length === 0 ? (
-            <p className="mt-3 text-sm text-[var(--dim)]">
-              还没有选自述重点。选了之后，这里会把「我想重视什么」和本周实际记录并排放在一起看。
+            <div className="mt-3">
+              <p className="text-sm text-[var(--dim)]">
+                还没有选自述重点。选了之后，这里会把「我想重视什么」和本周实际记录并排放在一起看。
+              </p>
+              <button
+                type="button"
+                onClick={() => setPriorityDraft([...data.priorities])}
+                className="mt-3 rounded-md border border-[var(--border)] px-3 py-1.5 text-sm"
+              >
+                选我的重点
+              </button>
+            </div>
+          ) : !prioritiesOpen ? (
+            /* Default: one-line summary — priority categories + recorded time. */
+            <p className="mt-3 text-sm leading-relaxed">
+              <span className="text-[var(--dim)]">重点：</span>
+              {detail.priorityMinutes.map((p, i) => (
+                <span key={p.category}>
+                  {i > 0 ? <span className="text-[var(--dim)]"> · </span> : null}
+                  <span aria-hidden="true">{CATEGORY_META[p.category]?.symbol} </span>
+                  {p.category}{" "}
+                  <span className="tabular-nums">
+                    {p.minutes > 0 ? fmtHours(p.minutes) : "尚无记录"}
+                  </span>
+                </span>
+              ))}
             </p>
           ) : (
-            <ul className="mt-3 space-y-2.5">
-              {detail.priorityMinutes.map((p) => (
-                <li
-                  key={p.category}
-                  className="flex items-baseline justify-between gap-3 text-sm"
-                >
-                  <span>
-                    <span aria-hidden="true">{CATEGORY_META[p.category]?.symbol} </span>
-                    {p.category}
-                    <span className="text-[var(--dim)]">（自述重点）</span>
-                  </span>
-                  <span className="tabular-nums">
-                    {p.minutes > 0 ? `本周已记录 ${fmtHours(p.minutes)}` : "本周尚无记录"}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <>
+              <ul className="mt-3 space-y-2.5">
+                {detail.priorityMinutes.map((p) => (
+                  <li
+                    key={p.category}
+                    className="flex items-baseline justify-between gap-3 text-sm"
+                  >
+                    <span>
+                      <span aria-hidden="true">{CATEGORY_META[p.category]?.symbol} </span>
+                      {p.category}
+                      <span className="text-[var(--dim)]">（自述重点）</span>
+                    </span>
+                    <span className="tabular-nums">
+                      {p.minutes > 0 ? `本周已记录 ${fmtHours(p.minutes)}` : "本周尚无记录"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-3 text-xs leading-relaxed text-[var(--dim)]">
+                这里只做事实对照：重点是你说的，时长是记下来的，两边并排看，不换算成分数，也不下结论；某个重点本周没记到，只说明没记到，不代表需要补练或补记。
+              </p>
+              <button
+                type="button"
+                onClick={() => setPriorityDraft([...data.priorities])}
+                className="mt-3 rounded-md border border-[var(--border)] px-3 py-1 text-sm"
+              >
+                修改重点
+              </button>
+            </>
           )}
-          {!editingPriorities && shownPriorities.length > 0 ? (
-            <p className="mt-3 text-xs leading-relaxed text-[var(--dim)]">
-              这里只做事实对照：重点是你说的，时长是记下来的，两边并排看，不换算成分数，也不下结论；某个重点本周没记到，只说明没记到，不代表需要补练或补记。
-            </p>
-          ) : null}
         </section>
 
-        {/* ---- Accumulation curve ---- */}
+        {/* ---- Accumulation curve: collapsed by default; the summary line
+            (cumulative coverage + weeks with records) always shows ---- */}
         <section aria-label="每周积累曲线" className="mt-12">
-          <h2 className="font-[family-name:var(--font-ledger)] text-xl">每周积累</h2>
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="font-[family-name:var(--font-ledger)] text-xl">每周积累</h2>
+            <button
+              type="button"
+              aria-expanded={accumulationOpen}
+              onClick={() => setAccumulationOpen((v) => !v)}
+              className="rounded-md border border-[var(--border)] px-3 py-1 text-sm"
+            >
+              {accumulationOpen ? "收起曲线" : "展开曲线"}
+            </button>
+          </div>
           <p className="mt-1.5 text-sm text-[var(--dim)]">
             累计已记录覆盖{" "}
             <span className="tabular-nums text-[var(--text)]">
@@ -1205,12 +1310,16 @@ export function App() {
             <span className="tabular-nums text-[var(--text)]">{data.weeksWithRecords} 周</span>
             。每周记下一点，曲线就是这样一周一周长起来的。
           </p>
-          <div className="mt-4">
-            <AccumulationChart weeks={data.weeks} />
-          </div>
-          <p className="mt-4 text-xs leading-relaxed text-[var(--dim)]">
-            曲线只统计手动记录并按时间轴并集去重后的覆盖时长；没有记录的那一周标为「无记录」，不猜测、不补零外推。
-          </p>
+          {accumulationOpen ? (
+            <>
+              <div className="mt-4">
+                <AccumulationChart weeks={data.weeks} />
+              </div>
+              <p className="mt-4 text-xs leading-relaxed text-[var(--dim)]">
+                曲线只统计手动记录并按时间轴并集去重后的覆盖时长；没有记录的那一周标为「无记录」，不猜测、不补零外推。
+              </p>
+            </>
+          ) : null}
         </section>
       </main>
     </div>

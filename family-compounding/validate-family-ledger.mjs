@@ -106,8 +106,10 @@ check(
   clientSrc.includes("账本还是空的。记下第一条家庭活动，积累从这里开始。"),
 );
 check(
-  "client: chart legend names the cumulative line with markers and total",
-  clientSrc.includes("累计家庭活动（实线 · 圆点）共") && clientSrc.includes("没有记录的周曲线走平，不补数据"),
+  "client: chart names the cumulative line via aria-label; totals live in the fold summary (B3C 口径)",
+  clientSrc.includes("积累曲线：按周累计的家庭活动记录次数（实线 · 圆点）") &&
+    clientSrc.includes("累计 ${dashboard.data.totalCount} 次 · 近 4 周 +") &&
+    clientSrc.includes("没有记录的周曲线走平，不补数据"),
 );
 check(
   "client: duplicate save is surfaced as not double-counted",

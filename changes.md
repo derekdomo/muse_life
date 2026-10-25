@@ -1683,3 +1683,12 @@
 - 附带披露（非本批引入）：space-13 审计另提两条更早批次的未决发现（已发布迁移 0005 回改、验证器扩展证据不足），涉及本批未触碰的服务端/迁移/验证文件，本轮未处理，沿既有 EVID/审计尾巴队列。
 - 至此 LIFE-DESIGN-001 批次 3 四条（B3A/B3B/B3C/B3D）全部交付；四 app 源码回灌本仓仍沿 EVID 尾巴由后续同步轮次补齐。本轮用户可见增量累计：4 组。
 - 回滚：回退本提交即恢复补记前登记；线上工件回退另走 artifact.edit。
+
+## 2026-10-24 22 时 PDT（muse-life-plans-sync：LIFE-DESIGN-001 批次 3 四 app 源码回灌＋两条过期断言按已批口径修订）
+
+- 需求：22 时两条登记均注明「批次 3 四 app（space-10/12/13/14）工件源码回灌本仓未执行，沿 EVID 尾巴由后续同步轮次补齐」；本轮 HEAD 与基线同为 6320309、无新提交，本轮补齐该尾巴。本条为实现方交付登记（[完成] 仅表示已交付，PM 结论以其评审记录为准）。
+- 改了什么：自线上工件逐文件回灌 client/src/App.tsx 至 learning-compounding（B3A）、creation-compounding（B3B）、family-compounding（B3C）、time-compounding（B3D）；四 app 与工件目录 diff -rq 核对，除 App.tsx 外仅 bun.lock 的 SDK tgz 哈希一行不同（构建产物噪声，不回灌），其余源码/服务端/schema/迁移与仓库一致，未动。未回灌 app.db、audits、构建缓存等非源码文件；真实数据未入仓。
+- 回灌时发现并修订两条过期验证断言（均源于已批准的 B3C/B3D 设计变更，构建方回传的「验证全绿」与仓库实跑不符，如实记录）：(1) time-compounding/validate-time-review B6 断言旧副行串「已记录 {fmtHours(summary.coverageMinutes)}」——B3D 定案副行删重复、覆盖大数字为唯一文字之家；新源对旧源基线为 64/65、仅此条失败。断言改为：大数字 `{fmtHours(summary.coverageMinutes)}` 存在（B6）＋旧重复串不得出现（新增 B25 负断言），修订后 66/66。(2) family-compounding/validate-family-ledger 图例断言旧串「累计家庭活动（实线 · 圆点）共」——B3C 定案图内只保留曲线、累计/近 4 周总数移折叠摘要行；新源对旧源基线为 228/229、仅此条失败。断言改为：aria-label 指名累计线＋折叠摘要行带累计/近 4 周＋无记录周走平文案保留，修订后 229/229。
+- 验证（仓库实跑，bun 运行、node_modules 临时借用工件目录、跑后移除）：learning validate-conversion 53/53、validate-metrics 34/34、validate-acl 82/82；creation validate-save-integrity 113/113；family validate-family-ledger 229/229；time validate-time-atomicity 214/214、validate-time-review 66/66（含修订后 B6/B25）。全套零失败。计数注记：B3D 构建方回传曾称 time 两验证器 33/33，与仓库实跑口径（214＋66）不一致，两处均为零失败、结论以仓库实跑为准。
+- 局限：回灌只对齐仓库与线上源码；所有者视角呈现仍以本人打开为准。LIFE-DESIGN-001 父条仍未勾选（设计稿条目，PM 记录为准），批次 1/2 的 reading-compounding 等回灌已于往轮完成、本轮四 app 后批次 3 回灌尾巴关闭。
+- 回滚：回退本提交即恢复回灌前仓库状态；线上工件不受影响。

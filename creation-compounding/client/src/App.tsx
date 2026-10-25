@@ -388,6 +388,9 @@ function ProjectCard({
   const [editNext, setEditNext] = useState(project.nextMilestone ?? "");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteError, setDeleteError] = useState(false);
+  // Stage ruler is collapsed by default; the fold state is local only,
+  // so every fresh open of the page/tab starts collapsed.
+  const [rulerOpen, setRulerOpen] = useState(false);
 
   const update = useMutation({
     mutationFn: () =>
@@ -419,8 +422,10 @@ function ProjectCard({
   });
 
   const allDone = project.nextStage == null;
-  const stageBadge = allDone
-    ? "✓ 五个阶段全部达成"
+  // The card's single statement of the next milestone lives in the
+  // header below; the ruler summary line only carries stage position.
+  const rulerSummary = allDone
+    ? `阶段 ${STAGE_ORDER.length} / ${STAGE_ORDER.length} · ✓ 五个阶段全部达成`
     : `阶段 ${project.currentStageIndex} / ${STAGE_ORDER.length} · 下一阶段：${STAGE_LABEL[project.nextStage as StageKey]}`;
 
   return (
@@ -431,17 +436,17 @@ function ProjectCard({
           {project.note ? <p className="mt-0.5 text-sm text-[var(--dim)]">{project.note}</p> : null}
         </div>
         <span
-          className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${
+          className={`tnum shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${
             allDone
               ? "border-[var(--accent-2)] text-[var(--accent-2)]"
               : "border-[var(--border)] text-[var(--dim)]"
           }`}
         >
-          {stageBadge}
+          {allDone ? "✓ 阶段 5 / 5" : `阶段 ${project.currentStageIndex} / ${STAGE_ORDER.length}`}
         </span>
       </div>
 
-      <p className="mt-3 text-sm">
+      <p className="mt-2 text-sm">
         <span className="text-[var(--dim)]">下一里程碑：</span>
         {project.nextMilestone ??
           (allDone ? "五个阶段已走完 — 下一步由你定义" : STAGE_LABEL[project.nextStage as StageKey])}
@@ -452,8 +457,24 @@ function ProjectCard({
         {project.lastEntryDate ? ` · 最近一条 ${project.lastEntryDate}` : ""}
       </p>
 
-      <div className="mt-4 border-t border-[var(--border)] pt-4">
-        <StageRuler project={project} today={today} />
+      <div className="mt-3 border-t border-[var(--border)] pt-3">
+        <button
+          type="button"
+          aria-expanded={rulerOpen}
+          aria-label={`${rulerOpen ? "收起" : "展开"}阶段标尺：${rulerSummary}`}
+          onClick={() => setRulerOpen((v) => !v)}
+          className="flex w-full items-center justify-between gap-3 text-left"
+        >
+          <span className="tnum text-sm">{rulerSummary}</span>
+          <span aria-hidden="true" className="shrink-0 text-sm text-[var(--dim)]">
+            {rulerOpen ? "▾ 收起" : "▸ 展开"}
+          </span>
+        </button>
+        {rulerOpen ? (
+          <div className="mt-3">
+            <StageRuler project={project} today={today} />
+          </div>
+        ) : null}
       </div>
 
       {editing ? (
@@ -797,6 +818,9 @@ function Ledger({ data, projectFilter, onFilterChange }: { data: Dashboard; proj
 
 function AddProjectForm() {
   const queryClient = useQueryClient();
+  // Collapsed behind the 「＋ 新增项目」 button by default; local state
+  // only, so every fresh open starts collapsed.
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [next, setNext] = useState("");
@@ -832,9 +856,32 @@ function AddProjectForm() {
     add.mutate();
   };
 
+  if (!open) {
+    return (
+      <button
+        type="button"
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+        className="w-full rounded-[var(--radius)] border border-dashed border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-base font-medium text-[var(--accent)]"
+      >
+        ＋ 新增项目
+      </button>
+    );
+  }
+
   return (
     <form onSubmit={submit} className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4">
-      <h2 className="font-display text-lg font-bold">新增项目</h2>
+      <div className="flex items-start justify-between gap-3">
+        <h2 className="font-display text-lg font-bold">新增项目</h2>
+        <button
+          type="button"
+          aria-expanded={true}
+          onClick={() => setOpen(false)}
+          className="shrink-0 rounded-md border border-[var(--border)] px-2 py-1 text-xs text-[var(--dim)]"
+        >
+          收起
+        </button>
+      </div>
       <p className="mt-1 text-sm text-[var(--dim)]">一个自有产品 / 项目一张卡，阶段标尺各记各的，互不折算。</p>
       <div className="mt-3 space-y-3">
         <div>
@@ -1048,10 +1095,24 @@ export function App() {
               <section aria-label="本周产出明细" className="mt-6">
                 <h2 className="font-display text-xl font-bold">本周产出明细</h2>
                 <div className="mt-3 space-y-3">
-                  {data.thisWeekEntries.map((row) => (
+                  {data.thisWeekEntries.slice(0, 5).map((row) => (
                     <EntryCard key={row.id} row={row} today={data.today} />
                   ))}
                 </div>
+                {data.thisWeekEntries.length > 5 ? (
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <p className="tnum text-sm text-[var(--dim)]">
+                      本周共 {data.thisWeekEntries.length} 条，这里只列最近 5 条
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setTab("ledger")}
+                      className="shrink-0 rounded-lg border border-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent)]"
+                    >
+                      查看全部 →
+                    </button>
+                  </div>
+                ) : null}
               </section>
             ) : null}
 
@@ -1074,7 +1135,7 @@ export function App() {
             </div>
             {data.projects.length === 0 ? (
               <p className="mt-4 text-center text-sm text-[var(--dim)]">
-                还没有项目。用上面的表单添加第一个 — 名称、当前阶段、下一里程碑都从它开始。
+                还没有项目。点上面的「＋ 新增项目」添加第一个 — 名称、当前阶段、下一里程碑都从它开始。
               </p>
             ) : null}
           </div>

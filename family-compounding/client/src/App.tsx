@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
@@ -66,7 +66,7 @@ const sectionCls =
 
 /* ---------------- accumulation chart ---------------- */
 
-function AccumulationChart({ series, total }: { series: WeekPoint[]; total: number }) {
+function AccumulationChart({ series }: { series: WeekPoint[] }) {
   const W = 660;
   const H = 230;
   const padL = 36;
@@ -81,10 +81,10 @@ function AccumulationChart({ series, total }: { series: WeekPoint[]; total: numb
     );
   }
   // One fact line: cumulative activity count per week. Meaning rides on
-  // the axis numbers, the +N labels and the legend text — the line is a
-  // solid sky-blue stroke with filled circle markers, and a dashed
-  // orange reference line marks the current total (line style + text
-  // label, never color alone).
+  // the axis numbers and the +N labels — the line is a solid sky-blue
+  // stroke with filled circle markers. The current total itself is NOT
+  // repeated inside the chart: it lives in the overview and in this
+  // section's fold summary line.
   const maxY = Math.max(1, ...series.map((p) => p.cumulative));
   const n = series.length;
   const x = (i: number) =>
@@ -101,7 +101,7 @@ function AccumulationChart({ series, total }: { series: WeekPoint[]; total: numb
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label={`积累曲线：累计家庭活动（实线 · 圆点）共 ${total} 次；虚线是当前累计总数的位置`}
+        aria-label="积累曲线：按周累计的家庭活动记录次数（实线 · 圆点）"
       >
         {gridVals.map((v) => (
           <g key={v}>
@@ -111,18 +111,6 @@ function AccumulationChart({ series, total }: { series: WeekPoint[]; total: numb
             </text>
           </g>
         ))}
-        <line
-          x1={padL}
-          x2={W - padR}
-          y1={y(total)}
-          y2={y(total)}
-          stroke="var(--accent-2)"
-          strokeWidth="1.5"
-          strokeDasharray="6 5"
-        />
-        <text x={W - padR} y={y(total) - 6} textAnchor="end" fontSize="11" fill="var(--dim)" className="tnum">
-          当前累计 {total} 次
-        </text>
         <path d={linePath} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
         {series.map((p, i) => (
           <g key={p.weekStart}>
@@ -148,26 +136,9 @@ function AccumulationChart({ series, total }: { series: WeekPoint[]; total: numb
           {last ? formatWeek(last.weekStart) : ""}当周
         </text>
       </svg>
-      <div className="mt-1 space-y-1.5 text-sm text-[var(--dim)]">
-        <p>
-          <span
-            aria-hidden="true"
-            className="mr-1.5 inline-block h-0 w-6 border-t-[3px] border-solid align-middle"
-            style={{ borderColor: "var(--accent)" }}
-          />
-          <span className="tnum">累计家庭活动（实线 · 圆点）共 {total} 次</span>
-          ——按周累计的记录次数，+N 是当周新增条数。
-        </p>
-        <p>
-          <span
-            aria-hidden="true"
-            className="mr-1.5 inline-block h-0 w-6 border-t-[3px] border-dashed align-middle"
-            style={{ borderColor: "var(--accent-2)" }}
-          />
-          虚线是当前累计总数的位置，曲线走到虚线就停在最新一周。
-        </p>
-        <p>没有记录的周曲线走平，不补数据；曲线只会持平或上升，删掉记错的记录后会按真实记录重新计算。</p>
-      </div>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        实线 · 圆点是按周累计的记录次数，+N 是当周新增条数。没有记录的周曲线走平，不补数据；曲线只会持平或上升，删掉记错的记录后会按真实记录重新计算。
+      </p>
     </div>
   );
 }
@@ -740,10 +711,91 @@ function TypeManager({ types }: { types: TypeRow[] }) {
   );
 }
 
+/* ---------------- fold section ---------------- */
+
+// A section that starts folded: a title, a one-line summary carrying
+// the section's key fact as text + numbers, and an expand toggle. The
+// open state is plain component state — nothing is persisted — so
+// every visit starts from the same folded defaults.
+function FoldSection({
+  title,
+  summary,
+  children,
+}: {
+  title: string;
+  summary: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className={sectionCls} aria-label={title}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="font-display text-lg font-bold">{title}</h2>
+          <p className="mt-0.5 text-sm text-[var(--dim)] tnum">{summary}</p>
+        </div>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-label={open ? `收起${title}` : `展开${title}`}
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--text)]"
+        >
+          {open ? "收起" : "展开"}
+        </button>
+      </div>
+      {open ? <div className="mt-3">{children}</div> : null}
+    </section>
+  );
+}
+
+/* ---------------- recent records ---------------- */
+
+// Always visible, but bounded: the latest 5 records by default, with
+// a 查看全部 toggle for the rest (the server returns up to 30). The
+// per-row two-step delete confirmation is unchanged.
+function RecentRecords({ data }: { data: Dashboard }) {
+  const [showAll, setShowAll] = useState(false);
+  const rows = data.recentActivities;
+  const visible = showAll ? rows : rows.slice(0, 5);
+  return (
+    <section className={sectionCls} aria-label="最近记录">
+      <h2 className="font-display text-lg font-bold">最近记录</h2>
+      {rows.length === 0 ? (
+        <p className="py-4 text-sm text-[var(--dim)]">
+          还没有任何记录。点上面的「＋记一条」，或在聊天里告诉 Muse，由 Muse 代记（来源会标为聊天记录）。
+        </p>
+      ) : (
+        <>
+          <ul>
+            {visible.map((row) => (
+              <ActivityItem key={row.id} row={row} today={data.today} />
+            ))}
+          </ul>
+          {rows.length > 5 ? (
+            <button
+              type="button"
+              aria-expanded={showAll}
+              onClick={() => setShowAll((v) => !v)}
+              className="mt-3 w-full rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm font-bold text-[var(--text)]"
+            >
+              {showAll ? "收起，只看最近 5 条" : `查看全部（共 ${rows.length} 条）`}
+            </button>
+          ) : null}
+          <p className="mt-2 text-xs text-[var(--faint)]">
+            记错了可以删掉这一条——总数、时长、曲线和日历都会按删后的记录重新计算。
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 /* ---------------- app ---------------- */
 
 export function App() {
   const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: () => api.getDashboard({}) });
+  const [formOpen, setFormOpen] = useState(false);
 
   return (
     <div className="min-h-full bg-[var(--bg)] text-[var(--text)]">
@@ -808,7 +860,9 @@ export function App() {
               <p className="mt-4 border-t border-[var(--border)] pt-3 text-base">
                 {dashboard.data.totalCount === 0
                   ? "账本还是空的。记下第一条家庭活动，积累从这里开始。"
-                  : `本月共 ${dashboard.data.thisMonthCount} 次家庭活动，累计 ${dashboard.data.totalCount} 次——一次一次记下来，就是在长。`}
+                  : dashboard.data.thisMonthCount === 0
+                    ? "这个月还没有新的记录。记下一次，这个月的节奏就续上了，积累也继续往前走。"
+                    : "这个月保持着记下来的节奏——累计是底子，本月是新长出来的部分，一次一次记，就是在长。"}
               </p>
               {dashboard.data.totalCount === 0 ? (
                 <p className="mt-2 text-sm text-[var(--dim)]">
@@ -823,49 +877,53 @@ export function App() {
               ) : null}
             </section>
 
-            <section className={sectionCls} aria-label="每周积累曲线">
-              <h2 className="font-display text-lg font-bold">每周积累</h2>
-              <p className="mb-2 mt-0.5 text-sm text-[var(--dim)]">按周累计次数，长期看这条线怎么长。</p>
-              <AccumulationChart series={dashboard.data.series} total={dashboard.data.totalCount} />
-            </section>
-
-            <section className={sectionCls} aria-label="月历">
-              <h2 className="font-display text-lg font-bold">月历</h2>
-              <p className="mb-3 mt-0.5 text-sm text-[var(--dim)]">有记录的日期标出次数（● ×N），没有标记的日期留空。</p>
-              <MonthCalendar data={dashboard.data} />
-            </section>
-
             <section className={sectionCls} aria-label="记一条家庭活动">
-              <h2 className="font-display text-lg font-bold">记一条</h2>
-              <p className="mb-4 mt-0.5 text-sm text-[var(--dim)]">十秒钟记完：日期、类型必填，时长和备注都可以留空。</p>
-              <RecordForm data={dashboard.data} />
+              <button
+                type="button"
+                aria-expanded={formOpen}
+                onClick={() => setFormOpen((v) => !v)}
+                className="w-full rounded-lg border border-[var(--accent)] px-4 py-3 text-base font-bold text-[var(--accent)]"
+              >
+                {formOpen ? "收起" : "＋记一条"}
+              </button>
+              <p className="mt-2 text-sm text-[var(--dim)]">
+                平时在聊天里告诉 Muse 就能代记（来源会标为聊天记录）；这里是手动记录的备用入口，需要时点开。
+              </p>
+              {formOpen ? (
+                <div className="mt-4 border-t border-[var(--border)] pt-4">
+                  <p className="mb-4 text-sm text-[var(--dim)]">十秒钟记完：日期、类型必填，时长和备注都可以留空。</p>
+                  <RecordForm data={dashboard.data} />
+                </div>
+              ) : null}
             </section>
 
-            <section className={sectionCls} aria-label="最近记录">
-              <h2 className="font-display text-lg font-bold">最近记录</h2>
-              {dashboard.data.recentActivities.length === 0 ? (
-                <p className="py-4 text-sm text-[var(--dim)]">
-                  还没有任何记录。用上面的表单记一条，或在聊天里告诉 Muse，由 Muse 代记（来源会标为聊天记录）。
-                </p>
-              ) : (
-                <>
-                  <ul>
-                    {dashboard.data.recentActivities.map((row) => (
-                      <ActivityItem key={row.id} row={row} today={dashboard.data.today} />
-                    ))}
-                  </ul>
-                  <p className="mt-2 text-xs text-[var(--faint)]">
-                    记错了可以删掉这一条——总数、时长、曲线和日历都会按删后的记录重新计算。
-                  </p>
-                </>
-              )}
-            </section>
+            <FoldSection
+              title="每周积累"
+              summary={`累计 ${dashboard.data.totalCount} 次 · 近 4 周 +${dashboard.data.series
+                .slice(-4)
+                .reduce((sum, p) => sum + p.newCount, 0)} 次`}
+            >
+              <p className="mb-2 text-sm text-[var(--dim)]">按周累计次数，长期看这条线怎么长。</p>
+              <AccumulationChart series={dashboard.data.series} />
+            </FoldSection>
 
-            <section className={sectionCls} aria-label="活动类型管理">
-              <h2 className="font-display text-lg font-bold">活动类型</h2>
-              <p className="mb-2 mt-0.5 text-sm text-[var(--dim)]">类型可以自由增删，删掉的类型不会影响已经记下的活动。</p>
+            <FoldSection
+              title="月历"
+              summary={
+                dashboard.data.lastActivityDate
+                  ? `本月 ${dashboard.data.thisMonthCount} 次 · 最近一次 ${formatDay(dashboard.data.lastActivityDate, dashboard.data.today)}`
+                  : `本月 ${dashboard.data.thisMonthCount} 次 · 还没有记录`
+              }
+            >
+              <p className="mb-3 text-sm text-[var(--dim)]">有记录的日期标出次数（● ×N），没有标记的日期留空。</p>
+              <MonthCalendar data={dashboard.data} />
+            </FoldSection>
+
+            <RecentRecords data={dashboard.data} />
+
+            <FoldSection title="管理活动类型" summary="类型可以自由增删，删掉的类型不会影响已经记下的活动。">
               <TypeManager types={dashboard.data.types} />
-            </section>
+            </FoldSection>
           </>
         )}
       </main>

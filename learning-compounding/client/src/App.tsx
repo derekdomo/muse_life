@@ -677,6 +677,87 @@ function CohortView({ data }: { data: Dashboard }) {
   );
 }
 
+/* ---------------- overview: compact skill rows + cohort fold ---------------- */
+
+// Compact one-line-per-skill summary for the overview. Expanding a row
+// swaps in the existing full SkillCard. Expansion state is plain
+// component state: it resets every time the overview is reopened and
+// is never persisted.
+function SkillAssetRow({ skill }: { skill: SkillStat }) {
+  const [open, setOpen] = useState(false);
+  if (!open) {
+    return (
+      <button
+        type="button"
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+        className="block w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4 text-left"
+      >
+        <span className="flex items-baseline justify-between gap-3">
+          <span className="font-display text-base font-bold leading-snug">{skill.name}</span>
+          <span className="tnum shrink-0 text-sm text-[var(--dim)]">连续 {skill.streakDays} 天</span>
+        </span>
+        <span className="tnum mt-1.5 block text-sm text-[var(--dim)]">
+          转化率 {pct(skill.conversionRate)} ·{" "}
+          {skill.lastInputDate ? `最近输入 ${skill.lastInputDate}` : "还没有输入记录"} ·{" "}
+          <span className="text-[var(--accent)]">▸ 展开详情</span>
+        </span>
+      </button>
+    );
+  }
+  return (
+    <div>
+      <SkillCard skill={skill} />
+      <button
+        type="button"
+        aria-expanded={true}
+        onClick={() => setOpen(false)}
+        className="mt-2 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--dim)]"
+      >
+        ▾ 收起「{skill.name}」
+      </button>
+    </div>
+  );
+}
+
+// The cohort (batch conversion) view demoted to an evidence-layer
+// fold: the summary line carries the overall rate and the window;
+// expanding swaps in the existing full CohortView. Like the skill
+// rows, the fold resets to collapsed on every open.
+function CohortFold({ data }: { data: Dashboard }) {
+  const [open, setOpen] = useState(false);
+  const all = data.totals.cohorts.all;
+  if (!open) {
+    return (
+      <button
+        type="button"
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+        className="block w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4 text-left"
+      >
+        <span className="font-display text-base font-bold">输入批次转化率（依据层）</span>
+        <span className="tnum mt-1 block text-sm text-[var(--dim)]">
+          总转化率 {cohortPct(all.rate)} · 窗口 {all.windowStart} 至 {all.windowEnd} ·{" "}
+          <span className="text-[var(--accent)]">▸ 展开明细</span>
+        </span>
+      </button>
+    );
+  }
+  return (
+    <div>
+      <CohortView data={data} />
+      <button
+        type="button"
+        aria-expanded={true}
+        onClick={() => setOpen(false)}
+        className="mt-2 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--dim)]"
+      >
+        ▾ 收起批次转化率
+      </button>
+    </div>
+  );
+}
+
 /* ---------------- ledger ---------------- */
 
 function ConvertForm({ row, onDone }: { row: InputRow; onDone: () => void }) {
@@ -935,11 +1016,9 @@ function Ledger({ data }: { data: Dashboard }) {
           </div>
         ))
       )}
-      {data.totals.unconvertedCount > 0 ? (
-        <p className="mt-6 text-sm text-[var(--dim)]">
-          ○ 待转化 {data.totals.unconvertedCount} 条 — 它们不会过期消失，转化成笔记、实验、项目推进或决策后就会变成资产。
-        </p>
-      ) : null}
+      <p className="tnum mt-6 text-sm text-[var(--dim)]">
+        当前筛选结果 {filtered.length} 条（账本共 {data.inputs.length} 条）
+      </p>
     </div>
   );
 }
@@ -1213,34 +1292,38 @@ export function App() {
                   <CompoundChart series={data.series} />
                 </div>
                 <p className="mt-2 text-xs text-[var(--faint)]">
-                  活跃学习日 {data.totals.activeDays} 天 · ○ 待转化 {data.totals.unconvertedCount} 条
+                  活跃学习日 {data.totals.activeDays} 天
                 </p>
               </div>
             </section>
 
+            <button
+              type="button"
+              onClick={() => setTab("ledger")}
+              className="mt-5 w-full rounded-lg border border-[var(--accent)] px-4 py-3 text-base font-semibold text-[var(--accent)]"
+            >
+              ＋ 记一笔输入
+            </button>
+
             <div className="mt-5">
               <ActionCard data={data} />
-            </div>
-
-            <div className="mt-5">
-              <CohortView data={data} />
-            </div>
-
-            <div className="mt-5">
-              <QuickAdd data={data} />
             </div>
 
             <section aria-label="技能资产" className="mt-6">
               <h2 className="font-display text-xl font-bold">技能资产</h2>
               <div className="mt-3 space-y-3">
                 {data.skills.map((skill) => (
-                  <SkillCard key={skill.id} skill={skill} />
+                  <SkillAssetRow key={skill.id} skill={skill} />
                 ))}
               </div>
               {data.skills.length === 0 ? (
                 <p className="mt-3 text-sm text-[var(--dim)]">还没有技能。去「技能管理」添加第一个在学的技能。</p>
               ) : null}
             </section>
+
+            <div className="mt-5">
+              <CohortFold data={data} />
+            </div>
           </div>
         ) : tab === "ledger" ? (
           <div className="mt-2">

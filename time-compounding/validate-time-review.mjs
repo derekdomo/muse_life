@@ -318,7 +318,7 @@ const MUST_CONTAIN = [
   ["B3 零记录分类占比文案", "暂无可计算记录"],
   ["B4 主按钮 补记一段", "补记一段"],
   ["B5 部分覆盖标签", "部分覆盖"],
-  ["B6 已记录…（截至…）口径", "已记录 {fmtHours(summary.coverageMinutes)}"],
+  ["B6 覆盖大数字为已记录时长唯一文字之家（B3D 口径）", "{fmtHours(summary.coverageMinutes)}"],
   ["B7 占比标注 占已记录时间", "占已记录时间"],
   ["B8 完整覆盖标签", "已完整覆盖"],
   ["B9 过滤中标注", "过滤中"],
@@ -336,6 +336,7 @@ for (const [name, needle] of MUST_CONTAIN) {
   check(name, appSrc.includes(needle));
 }
 const MUST_NOT_CONTAIN = [
+  ["B25 副行不得重复已记录时长（B3D 去重）", "已记录 {fmtHours(summary.coverageMinutes)}"],
   ["B19 无跨 app 本周表现总分", "表现总分"],
   ["B20 无自动同步训练/陪伴进账本的文案", "自动同步"],
   ["B21 无财务评语引用", "财务"],
