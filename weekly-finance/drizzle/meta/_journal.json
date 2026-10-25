@@ -43,6 +43,13 @@
       "when": 1792879592995,
       "tag": "0006_arch_daily_spend",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792899070978,
+      "tag": "0007_arch_daily_spend_chunks_staging",
+      "breakpoints": true
     }
   ]
 }

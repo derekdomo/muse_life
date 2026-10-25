@@ -831,7 +831,7 @@ check("UI: flow rows show the effective period (generic ?? native) and the nativ
 check("UI: monthly record period display uses the effective period too",
   appSrc.includes("entry.periodStart ?? entry.nativePeriodStart ?? null"));
 check("UI: established intervals stay readable when the period total is blocked",
-  appSrc.includes("已成立区间的月度收益仍可在上方「月度记录」中查看") && appSrc.includes("区间 {month.key}"));
+  appSrc.includes("已成立区间的月度收益仍可在下方「月度记录」中查看") && appSrc.includes("区间 {month.key}"));
 
 // --- date-validation fix (PM 2026-10-19): an illegal YYYY-MM
 // balance month must NOT roll into a legal balance date ---

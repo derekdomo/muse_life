@@ -92,7 +92,7 @@ function buildRequest(txns: any[], overrides: any = {}) {
 
 function checkResponseShape(name: string, res: any) {
   const keys = Object.keys(res).sort();
-  const expected = ["coverageStart", "days", "issue", "ok", "readBackVerified", "throughDate", "totalMatches"].sort();
+  const expected = ["chunksExpected", "chunksReceived", "coverageStart", "days", "issue", "ok", "readBackVerified", "throughDate", "totalMatches"].sort();
   check(`${name}: response keys exactly counts/dates/booleans only`, JSON.stringify(keys) === JSON.stringify(expected));
   check(`${name}: response has no amount/total/posted/pending fields`, !("amount" in res) && !("total" in res) && !("posted" in res) && !("pending" in res) && !("totals" in res));
 }
@@ -105,6 +105,7 @@ function checkResponseShape(name: string, res: any) {
   const res = await Actions.ingestArchDailySpend.handler(ownerCtx(db), req);
   checkResponseShape("happy", res);
   check("happy: ok + readBackVerified", res.ok === true && res.readBackVerified === true && res.issue === null && res.totalMatches === true);
+  check("happy: full mode chunk counters stay 0", res.chunksReceived === 0 && res.chunksExpected === 0);
   check("happy: days count 5", res.days === 5 && res.coverageStart === COVERAGE_START && res.throughDate === THROUGH_DATE);
   check("happy: exactly 1 stored row", dailyRowCount(sqlite) === 1);
   const stored = storedDailyPayload(sqlite);

@@ -868,6 +868,29 @@ const ingestArchNetWorthResponse = z.object({
 
 type IngestArchNetWorthResult = z.infer<typeof ingestArchNetWorthResponse>;
 
+const dailySpendTxnInputSchema = z.object({
+  id: z.string().min(1).max(200),
+  date: z.string(),
+  amount: z.number().finite(),
+  status: z.enum(["posted", "pending"]),
+  kind: z.enum(["spend", "transfer", "loan_principal", "refund", "loan_mixed", "unmatched_transfer"]),
+  category: z.string().max(64).optional(),
+  account: z.string().max(200).optional(),
+  refundOf: z.string().nullable().optional(),
+});
+
+type DailySpendTxnInput = z.infer<typeof dailySpendTxnInputSchema>;
+
+// F-ARCH-001 chunked ingest: mode selects the protocol leg.
+// "full" (the default, and the only leg that existed before the
+// chunk protocol) carries the whole window's transactions + days
+// in one request. "chunk" carries one calendar-month slice of
+// the window (batchId / chunkIndex / chunkCount / fromDate /
+// toDate, plus only that slice's transactions and days) and
+// stages it, invisible to every read path. "finalize" carries
+// only the batch id and the declared full-window counts / totals;
+// the server reassembles the staged chunks, recomputes the whole
+// window and publishes through the exact full-mode path.
 const ingestArchDailySpendRequest = z.object({
   arch: z.literal("F-ARCH-001"),
   version: z.literal(1),
@@ -875,21 +898,30 @@ const ingestArchDailySpendRequest = z.object({
   coverageStart: z.string(),
   throughDate: z.string(),
   fullCoverageStart: z.string().nullable(),
-  transactions: z
-    .array(
-      z.object({
-        id: z.string().min(1).max(200),
-        date: z.string(),
-        amount: z.number().finite(),
-        status: z.enum(["posted", "pending"]),
-        kind: z.enum(["spend", "transfer", "loan_principal", "refund", "loan_mixed", "unmatched_transfer"]),
-        category: z.string().max(64).optional(),
-        account: z.string().max(200).optional(),
-        refundOf: z.string().nullable().optional(),
-      }),
-    )
-    .max(20000),
-  days: z.array(archDailySpendDaySchema),
+  mode: z.enum(["full", "chunk", "finalize"]).optional(),
+  batchId: z.string().min(1).max(128).optional(),
+  chunkIndex: z.number().int().nonnegative().optional(),
+  chunkCount: z.number().int().min(1).max(120).optional(),
+  fromDate: z.string().optional(),
+  toDate: z.string().optional(),
+  counts: z
+    .object({
+      transactions: z.number().int().nonnegative(),
+      conflicts: z.number().int().nonnegative().optional(),
+      unappliedRefunds: z.number().int().nonnegative().optional(),
+      unclassified: z.number().int().nonnegative().optional(),
+      excludedTransfer: z.number().int().nonnegative().optional(),
+      excludedLoanPrincipal: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
+  totals: z
+    .object({
+      posted: z.number(),
+      pending: z.number(),
+    })
+    .optional(),
+  transactions: z.array(dailySpendTxnInputSchema).max(20000).optional(),
+  days: z.array(archDailySpendDaySchema).optional(),
 });
 
 const ingestArchDailySpendResponse = z.object({
@@ -900,12 +932,539 @@ const ingestArchDailySpendResponse = z.object({
   throughDate: z.string(),
   totalMatches: z.boolean(),
   readBackVerified: z.boolean(),
+  // Chunk protocol progress: how many distinct chunks of the
+  // batch are staged vs how many the batch declares. Full-mode
+  // responses keep the 0 defaults — the fields exist so a chunk
+  // caller can resume an interrupted batch without guessing.
+  chunksReceived: z.number().int().nonnegative().default(0),
+  chunksExpected: z.number().int().nonnegative().default(0),
 });
 
 type IngestArchDailySpendResult = z.infer<typeof ingestArchDailySpendResponse>;
+type IngestArchDailySpendArgs = z.infer<typeof ingestArchDailySpendRequest>;
 
-function dailySpendFailure(issue: string, coverageStart = "", throughDate = ""): IngestArchDailySpendResult {
-  return { ok: false, issue, days: 0, coverageStart, throughDate, totalMatches: false, readBackVerified: false };
+function dailySpendFailure(
+  issue: string,
+  coverageStart = "",
+  throughDate = "",
+  chunksReceived = 0,
+  chunksExpected = 0,
+): IngestArchDailySpendResult {
+  return {
+    ok: false,
+    issue,
+    days: 0,
+    coverageStart,
+    throughDate,
+    totalMatches: false,
+    readBackVerified: false,
+    chunksReceived,
+    chunksExpected,
+  };
+}
+
+// One staged chunk's stored payload: the chunk request's own
+// fields, normalized through this schema on write and on read so
+// the idempotency deep-compare runs over identically-shaped
+// objects on both sides.
+const archDailySpendChunkSchema = z.object({
+  batchId: z.string(),
+  chunkIndex: z.number().int().nonnegative(),
+  chunkCount: z.number().int().positive(),
+  pulledAt: z.string(),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  fullCoverageStart: z.string().nullable(),
+  fromDate: z.string(),
+  toDate: z.string(),
+  transactions: z.array(dailySpendTxnInputSchema),
+  days: z.array(archDailySpendDaySchema),
+});
+
+type ArchDailySpendChunk = z.infer<typeof archDailySpendChunkSchema>;
+
+function parseDailySpendChunkRow(row: { payload: string }): ArchDailySpendChunk | null {
+  try {
+    const parsed = archDailySpendChunkSchema.safeParse(JSON.parse(row.payload));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function chunkPayloadsEquivalent(a: ArchDailySpendChunk, b: ArchDailySpendChunk): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// Submitted-days vs server-recompute comparison, shared by the
+// full and chunk legs (the chunk leg recomputes its slice with
+// {fromDate, toDate} and compares only that slice's days). Amount
+// tolerance is 0.01; counts, partial flags, unclassified ids and
+// the category set must match exactly (category amounts use the
+// same tolerance). The fullCoverageStart equality check applies
+// only when the caller passes an expectation — a chunk's own
+// recompute derives fullCoverageStart from the slice alone, so
+// the chunk leg skips it and finalize checks the full-window
+// value against the declaration instead.
+function dailyDaysMatch(
+  recomputed: DailySpendResult,
+  submittedDays: ArchDailySpendDay[],
+  expectedFullCoverageStart?: string | null,
+): boolean {
+  if (expectedFullCoverageStart !== undefined && recomputed.fullCoverageStart !== expectedFullCoverageStart) {
+    return false;
+  }
+  if (submittedDays.length !== recomputed.days.length) return false;
+  for (let i = 0; i < recomputed.days.length; i++) {
+    const rec = recomputed.days[i]!;
+    const sub = submittedDays[i]!;
+    if (rec.date !== sub.date) return false;
+    if (Math.abs(rec.posted - sub.posted) > 0.01) return false;
+    if (Math.abs(rec.pending - sub.pending) > 0.01) return false;
+    if (rec.spendCount !== sub.spendCount) return false;
+    if (rec.pendingCount !== sub.pendingCount) return false;
+    if (rec.partial !== sub.partial) return false;
+    if (rec.unclassified.length !== sub.unclassified.length || rec.unclassified.some((v, j) => v !== sub.unclassified[j])) return false;
+    const recMap = new Map(rec.categories.map((c) => [c.key, c.amount] as const));
+    const subMap = new Map(sub.categories.map((c) => [c.key, c.amount] as const));
+    if (recMap.size !== subMap.size) return false;
+    for (const [k, v] of recMap) {
+      const sv = subMap.get(k);
+      if (sv === undefined || Math.abs(v - sv) > 0.01) return false;
+    }
+  }
+  return true;
+}
+
+// The one publish path for a fully recomputed daily-spend
+// payload, shared verbatim by the full leg and by finalize:
+// SAVE-1 version arbitration (greatest pulledAt is current;
+// same-version equivalent content is an idempotent hit, anything
+// else at the same version is a conflict; an older version is
+// stale), the conditional INSERT evaluated by the database at
+// commit time, the committed-state re-arbitration when the
+// INSERT loses a race, and the exact by-id read-back deep
+// compare. Returns only the arbitration outcome — callers shape
+// the response.
+async function publishDailySpend(
+  ctx: Ctx,
+  pulledAtMs: number,
+  payload: ArchDailySpend,
+): Promise<{ issue: string | null; readBackVerified: boolean }> {
+  const db = ctx.db<typeof schema>();
+  const existingRows = await db.select().from(schema.archDailySpend);
+  let maxStoredMs = Number.NEGATIVE_INFINITY;
+  const sameVersion: { row: DailySpendStoredRow; parsed: ArchDailySpend }[] = [];
+  for (const row of existingRows) {
+    const parsed = parseDailySpendStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyVersionKey(row, parsed);
+    if (key > maxStoredMs) maxStoredMs = key;
+    if (key === pulledAtMs) sameVersion.push({ row, parsed });
+  }
+  if (pulledAtMs < maxStoredMs) return { issue: "stale_version", readBackVerified: false };
+  let targetRowId: number | null = null;
+  if (sameVersion.length > 0) {
+    const hit = sameVersion.find((candidate) => spendPayloadsEquivalent(candidate.parsed, payload));
+    if (!hit) return { issue: "version_conflict", readBackVerified: false };
+    targetRowId = hit.row.id;
+  }
+  if (targetRowId === null) {
+    const payloadJson = JSON.stringify(payload);
+    const insertedRows = (await db.all(
+      sql`INSERT INTO arch_daily_spend (payload, pulled_at, created_at)
+          SELECT ${payloadJson}, ${pulledAtMs}, ${Date.now()}
+          WHERE NOT EXISTS (
+            SELECT 1 FROM arch_daily_spend
+            WHERE pulled_at >= ${pulledAtMs} AND json_valid(payload)
+          )
+          RETURNING id`,
+    )) as unknown as Array<{ id?: number } | [number]>;
+    const insertedRow = insertedRows[0];
+    const insertedId = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow?.id;
+    if (insertedId != null) {
+      targetRowId = insertedId;
+    } else {
+      const committedRows = await db.select().from(schema.archDailySpend);
+      let committedMaxMs = Number.NEGATIVE_INFINITY;
+      const committedSame: { row: DailySpendStoredRow; parsed: ArchDailySpend }[] = [];
+      for (const row of committedRows) {
+        const parsedCommitted = parseDailySpendStoredRow(row);
+        if (!parsedCommitted) continue;
+        const key = dailyVersionKey(row, parsedCommitted);
+        if (key > committedMaxMs) committedMaxMs = key;
+        if (key === pulledAtMs) committedSame.push({ row, parsed: parsedCommitted });
+      }
+      if (pulledAtMs < committedMaxMs) return { issue: "stale_version", readBackVerified: false };
+      const winner = committedSame.find((candidate) => spendPayloadsEquivalent(candidate.parsed, payload));
+      if (winner) {
+        targetRowId = winner.row.id;
+      } else {
+        return { issue: "version_conflict", readBackVerified: false };
+      }
+    }
+  }
+  let readBackVerified = false;
+  if (targetRowId !== null) {
+    const backRows = await db
+      .select()
+      .from(schema.archDailySpend)
+      .where(eq(schema.archDailySpend.id, targetRowId))
+      .limit(1);
+    const backRow = backRows[0];
+    if (backRow) {
+      const parsedBack = parseDailySpendStoredRow(backRow);
+      readBackVerified = parsedBack !== null && spendPayloadsEquivalent(parsedBack, payload);
+    }
+  }
+  return { issue: readBackVerified ? null : "read_back_mismatch", readBackVerified };
+}
+
+function isValidPulledAt(value: string): boolean {
+  return Number.isFinite(Date.parse(value)) && /(?:Z|[+-]\d{2}:?\d{2})\s*$/i.test(value);
+}
+
+// Chunk leg: validate one slice of a batch and stage it. The
+// batch's staged rows are the only state this leg touches — a
+// recompute mismatch or a same-index content conflict voids the
+// WHOLE batch (every staged row deleted) so a poisoned batch can
+// never be finalized later; arch_daily_spend is never written
+// here. A clean slice is staged only after its own per-slice
+// recompute matches the submitted slice days, and counts as
+// received only after the staged row reads back deep-equal.
+async function ingestDailySpendChunk(
+  ctx: Ctx,
+  args: IngestArchDailySpendArgs,
+): Promise<IngestArchDailySpendResult> {
+  const coverageStart = args.coverageStart ?? "";
+  const throughDate = args.throughDate ?? "";
+  const batchId = args.batchId;
+  const chunkIndex = args.chunkIndex;
+  const chunkCount = args.chunkCount;
+  const fromDate = args.fromDate;
+  const toDate = args.toDate;
+  const txns = args.transactions;
+  const days = args.days;
+  if (
+    !batchId || chunkIndex === undefined || chunkCount === undefined ||
+    !fromDate || !toDate || !txns || !days || chunkIndex >= chunkCount
+  ) {
+    return dailySpendFailure("invalid_chunk", coverageStart, throughDate, 0, chunkCount ?? 0);
+  }
+  if (!isValidPulledAt(args.pulledAt)) {
+    return dailySpendFailure("invalid_pulled_at", coverageStart, throughDate, 0, chunkCount);
+  }
+  const pulledAtMs = Date.parse(args.pulledAt);
+  if (
+    !isRealDateKey(coverageStart) || !isRealDateKey(throughDate) ||
+    !isRealDateKey(fromDate) || !isRealDateKey(toDate)
+  ) {
+    return dailySpendFailure("invalid_date", coverageStart, throughDate, 0, chunkCount);
+  }
+  for (const txn of txns) {
+    if (!isRealDateKey(txn.date)) {
+      return dailySpendFailure("invalid_date", coverageStart, throughDate, 0, chunkCount);
+    }
+  }
+  if (coverageStart > throughDate) {
+    return dailySpendFailure("invalid_window", coverageStart, throughDate, 0, chunkCount);
+  }
+  if (fromDate < coverageStart || toDate > throughDate || fromDate > toDate) {
+    return dailySpendFailure("invalid_chunk_range", coverageStart, throughDate, 0, chunkCount);
+  }
+  const db = ctx.db<typeof schema>();
+  const deleteBatch = async () => {
+    await db.delete(schema.archDailySpendChunks).where(eq(schema.archDailySpendChunks.batchId, batchId));
+  };
+  const stagedRows = await db
+    .select()
+    .from(schema.archDailySpendChunks)
+    .where(eq(schema.archDailySpendChunks.batchId, batchId));
+  const staged: ArchDailySpendChunk[] = [];
+  for (const row of stagedRows) {
+    const parsed = parseDailySpendChunkRow(row);
+    if (parsed) staged.push(parsed);
+  }
+  // Every chunk of one batch must declare the same version and
+  // window; a drifted declaration means the caller is mixing two
+  // different pulls under one batch id.
+  for (const prior of staged) {
+    if (
+      prior.pulledAt !== args.pulledAt ||
+      prior.coverageStart !== coverageStart ||
+      prior.throughDate !== throughDate ||
+      prior.chunkCount !== chunkCount
+    ) {
+      return dailySpendFailure("batch_mismatch", coverageStart, throughDate, staged.length, chunkCount);
+    }
+  }
+  // A batch older than the published version can never publish;
+  // reject it at the door instead of staging dead weight.
+  const officialRows = await db.select().from(schema.archDailySpend);
+  let maxStoredMs = Number.NEGATIVE_INFINITY;
+  for (const row of officialRows) {
+    const parsed = parseDailySpendStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyVersionKey(row, parsed);
+    if (key > maxStoredMs) maxStoredMs = key;
+  }
+  if (pulledAtMs < maxStoredMs) {
+    return dailySpendFailure("stale_version", coverageStart, throughDate, staged.length, chunkCount);
+  }
+  const chunkPayload = archDailySpendChunkSchema.parse({
+    batchId,
+    chunkIndex,
+    chunkCount,
+    pulledAt: args.pulledAt,
+    coverageStart,
+    throughDate,
+    fullCoverageStart: args.fullCoverageStart,
+    fromDate,
+    toDate,
+    transactions: txns,
+    days,
+  });
+  const sameIndex = staged.find((prior) => prior.chunkIndex === chunkIndex);
+  if (sameIndex) {
+    if (chunkPayloadsEquivalent(sameIndex, chunkPayload)) {
+      const received = new Set(staged.map((prior) => prior.chunkIndex)).size;
+      return {
+        ok: true,
+        issue: null,
+        days: days.length,
+        coverageStart,
+        throughDate,
+        totalMatches: true,
+        readBackVerified: true,
+        chunksReceived: received,
+        chunksExpected: chunkCount,
+      };
+    }
+    await deleteBatch();
+    return dailySpendFailure("chunk_conflict", coverageStart, throughDate, 0, chunkCount);
+  }
+  // Per-slice recompute: the slice must stand on its own, exactly
+  // like a full ingest of just [fromDate, toDate].
+  const recomputed = summarizeSpendDailyServer(txns as DailySpendTxn[], { fromDate, toDate });
+  if (!dailyDaysMatch(recomputed, days)) {
+    await deleteBatch();
+    return {
+      ok: false,
+      issue: "daily_mismatch",
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: false,
+      readBackVerified: false,
+      chunksReceived: 0,
+      chunksExpected: chunkCount,
+    };
+  }
+  const inserted = await db
+    .insert(schema.archDailySpendChunks)
+    .values({
+      batchId,
+      chunkIndex,
+      chunkCount,
+      pulledAt: new Date(pulledAtMs),
+      fromDate,
+      toDate,
+      payload: JSON.stringify(chunkPayload),
+    })
+    .returning({ id: schema.archDailySpendChunks.id });
+  const newRowId = inserted[0]?.id;
+  let readBackVerified = false;
+  if (newRowId != null) {
+    const backRows = await db
+      .select()
+      .from(schema.archDailySpendChunks)
+      .where(eq(schema.archDailySpendChunks.id, newRowId))
+      .limit(1);
+    const backRow = backRows[0];
+    if (backRow) {
+      const parsedBack = parseDailySpendChunkRow(backRow);
+      readBackVerified = parsedBack !== null && chunkPayloadsEquivalent(parsedBack, chunkPayload);
+    }
+  }
+  if (!readBackVerified) {
+    return {
+      ok: false,
+      issue: "read_back_mismatch",
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: true,
+      readBackVerified: false,
+      chunksReceived: staged.length,
+      chunksExpected: chunkCount,
+    };
+  }
+  const received = new Set([...staged.map((prior) => prior.chunkIndex), chunkIndex]).size;
+  return {
+    ok: true,
+    issue: null,
+    days: days.length,
+    coverageStart,
+    throughDate,
+    totalMatches: true,
+    readBackVerified: true,
+    chunksReceived: received,
+    chunksExpected: chunkCount,
+  };
+}
+
+// Finalize leg: reassemble a complete batch and publish it. The
+// staged chunks must tile [coverageStart, throughDate] exactly
+// (first chunk starts at coverageStart, last ends at throughDate,
+// each chunk starts the day after the previous one ends); a gap
+// rejects with batch_incomplete and KEEPS the staged rows so the
+// caller can supply the missing chunk. Once tiled, the merged
+// transactions are recomputed over the full window and every
+// declared value (transaction count, the five derived counts,
+// totals within 0.01, fullCoverageStart) must equal the
+// recompute — any drift voids the batch. Publishing itself is
+// the shared publishDailySpend path, and the published payload
+// always carries the server's recompute, never the client's
+// merged values. Staged rows are deleted only after a successful
+// publish (including an idempotent same-version hit).
+async function finalizeDailySpendBatch(
+  ctx: Ctx,
+  args: IngestArchDailySpendArgs,
+): Promise<IngestArchDailySpendResult> {
+  const coverageStart = args.coverageStart ?? "";
+  const throughDate = args.throughDate ?? "";
+  const batchId = args.batchId;
+  const chunkCount = args.chunkCount;
+  const declaredCounts = args.counts;
+  const declaredTotals = args.totals;
+  if (!batchId || chunkCount === undefined || !declaredCounts || !declaredTotals) {
+    return dailySpendFailure("invalid_finalize", coverageStart, throughDate, 0, chunkCount ?? 0);
+  }
+  if (!isValidPulledAt(args.pulledAt)) {
+    return dailySpendFailure("invalid_pulled_at", coverageStart, throughDate, 0, chunkCount);
+  }
+  const pulledAtMs = Date.parse(args.pulledAt);
+  if (!isRealDateKey(coverageStart) || !isRealDateKey(throughDate)) {
+    return dailySpendFailure("invalid_date", coverageStart, throughDate, 0, chunkCount);
+  }
+  if (coverageStart > throughDate) {
+    return dailySpendFailure("invalid_window", coverageStart, throughDate, 0, chunkCount);
+  }
+  const db = ctx.db<typeof schema>();
+  const deleteBatch = async () => {
+    await db.delete(schema.archDailySpendChunks).where(eq(schema.archDailySpendChunks.batchId, batchId));
+  };
+  const stagedRows = await db
+    .select()
+    .from(schema.archDailySpendChunks)
+    .where(eq(schema.archDailySpendChunks.batchId, batchId));
+  const byIndex = new Map<number, ArchDailySpendChunk>();
+  for (const row of stagedRows) {
+    const parsed = parseDailySpendChunkRow(row);
+    if (parsed) byIndex.set(parsed.chunkIndex, parsed);
+  }
+  const complete =
+    byIndex.size === chunkCount &&
+    Array.from({ length: chunkCount }, (_, i) => i).every((i) => byIndex.has(i));
+  if (!complete) {
+    return dailySpendFailure("batch_incomplete", coverageStart, throughDate, byIndex.size, chunkCount);
+  }
+  const ordered = Array.from({ length: chunkCount }, (_, i) => byIndex.get(i)!);
+  for (const chunk of ordered) {
+    if (
+      chunk.pulledAt !== args.pulledAt ||
+      chunk.coverageStart !== coverageStart ||
+      chunk.throughDate !== throughDate ||
+      chunk.chunkCount !== chunkCount ||
+      chunk.fullCoverageStart !== args.fullCoverageStart
+    ) {
+      await deleteBatch();
+      return dailySpendFailure("batch_mismatch", coverageStart, throughDate, 0, chunkCount);
+    }
+  }
+  let tiles = ordered[0]!.fromDate === coverageStart && ordered[ordered.length - 1]!.toDate === throughDate;
+  for (let i = 1; tiles && i < ordered.length; i++) {
+    if (nextDateKey(ordered[i - 1]!.toDate) !== ordered[i]!.fromDate) tiles = false;
+  }
+  if (!tiles) {
+    return dailySpendFailure("batch_incomplete", coverageStart, throughDate, byIndex.size, chunkCount);
+  }
+  const allTxns: DailySpendTxnInput[] = ordered.flatMap((chunk) => chunk.transactions);
+  const recomputed = summarizeSpendDailyServer(allTxns as DailySpendTxn[], {
+    fromDate: coverageStart,
+    toDate: throughDate,
+  });
+  const recomputedCounts = {
+    transactions: allTxns.length,
+    conflicts: recomputed.conflicts.length,
+    unappliedRefunds: recomputed.unappliedRefunds.length,
+    unclassified: recomputed.unclassified.length,
+    excludedTransfer: recomputed.excludedCounts.transfer,
+    excludedLoanPrincipal: recomputed.excludedCounts.loanPrincipal,
+  };
+  const countsMatch =
+    declaredCounts.transactions === recomputedCounts.transactions &&
+    (declaredCounts.conflicts === undefined || declaredCounts.conflicts === recomputedCounts.conflicts) &&
+    (declaredCounts.unappliedRefunds === undefined || declaredCounts.unappliedRefunds === recomputedCounts.unappliedRefunds) &&
+    (declaredCounts.unclassified === undefined || declaredCounts.unclassified === recomputedCounts.unclassified) &&
+    (declaredCounts.excludedTransfer === undefined || declaredCounts.excludedTransfer === recomputedCounts.excludedTransfer) &&
+    (declaredCounts.excludedLoanPrincipal === undefined || declaredCounts.excludedLoanPrincipal === recomputedCounts.excludedLoanPrincipal);
+  const totalsMatch =
+    Math.abs(declaredTotals.posted - recomputed.totals.posted) <= 0.01 &&
+    Math.abs(declaredTotals.pending - recomputed.totals.pending) <= 0.01;
+  if (!countsMatch || !totalsMatch || recomputed.fullCoverageStart !== args.fullCoverageStart) {
+    await deleteBatch();
+    return {
+      ok: false,
+      issue: "finalize_mismatch",
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: false,
+      readBackVerified: false,
+      chunksReceived: 0,
+      chunksExpected: chunkCount,
+    };
+  }
+  const payload: ArchDailySpend = {
+    arch: "F-ARCH-001",
+    version: 1,
+    kind: "daily-spend",
+    pulledAt: args.pulledAt,
+    storedAt: new Date().toISOString(),
+    coverageStart,
+    throughDate,
+    fullCoverageStart: recomputed.fullCoverageStart,
+    days: recomputed.days,
+    totals: recomputed.totals,
+    counts: recomputedCounts,
+  };
+  const published = await publishDailySpend(ctx, pulledAtMs, payload);
+  if (!published.readBackVerified) {
+    return {
+      ok: false,
+      issue: published.issue,
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: true,
+      readBackVerified: false,
+      chunksReceived: byIndex.size,
+      chunksExpected: chunkCount,
+    };
+  }
+  await deleteBatch();
+  return {
+    ok: true,
+    issue: null,
+    days: payload.days.length,
+    coverageStart,
+    throughDate,
+    totalMatches: true,
+    readBackVerified: true,
+    chunksReceived: chunkCount,
+    chunksExpected: chunkCount,
+  };
 }
 
 function archIngestFailure(issue: string): IngestArchNetWorthResult {
@@ -3379,7 +3938,7 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       let snapshot = await getState(ctx);
       if (snapshot?.status === "running" && !isStaleRunningState(snapshot.status, snapshot.updatedAt, new Date())) {
-        return { ok: true, status: "already_running", message: "每周更新正在进行中" };
+        return { ok: true, status: "already_running", message: "更新正在进行中" };
       }
       // F0.7 generation contract: mint this refresh's generation id
       // BEFORE spawning the task and store it on the state row, with
@@ -3445,7 +4004,7 @@ export const Actions = {
           // appeared) is retried against the new snapshot.
           snapshot = await getState(ctx);
           if (snapshot?.status === "running" && !isStaleRunningState(snapshot.status, snapshot.updatedAt, new Date())) {
-            return { ok: true, status: "already_running", message: "每周更新正在进行中" };
+            return { ok: true, status: "already_running", message: "更新正在进行中" };
           }
         }
       }
@@ -3483,7 +4042,7 @@ export const Actions = {
         }
         const nowState = await getState(ctx);
         if (nowState?.status === "running") {
-          return { ok: true, status: "already_running", message: "每周更新正在进行中" };
+          return { ok: true, status: "already_running", message: "更新正在进行中" };
         }
         if (nowState?.status === "idle") {
           return { ok: true, status: "started", message: "更新已完成" };
@@ -3528,7 +4087,7 @@ export const Actions = {
       const nowState = await getState(ctx);
       ctx.invalidateQueries();
       if (nowState?.status === "running") {
-        return { ok: true, status: "already_running", message: "每周更新正在进行中" };
+        return { ok: true, status: "already_running", message: "更新正在进行中" };
       }
       if (nowState?.status === "idle") {
         return { ok: true, status: "started", message: "更新已完成" };
@@ -4173,6 +4732,18 @@ export const Actions = {
     response: ingestArchDailySpendResponse,
     async handler(ctx, args): Promise<IngestArchDailySpendResult> {
       if (!isOwnerOrSyncChannel(ctx)) return dailySpendFailure("forbidden", args.coverageStart ?? "", args.throughDate ?? "");
+      // Chunk protocol dispatch: every leg passes the same write
+      // gate above; staged chunks are never visible to any read
+      // path, and only finalize publishes — through the same
+      // publishDailySpend path the full leg uses.
+      const mode = args.mode ?? "full";
+      if (mode === "chunk") return ingestDailySpendChunk(ctx, args);
+      if (mode === "finalize") return finalizeDailySpendBatch(ctx, args);
+      const txns = args.transactions;
+      const submittedDays = args.days;
+      if (!txns || !submittedDays) {
+        return dailySpendFailure("invalid_request", args.coverageStart, args.throughDate);
+      }
       const pulledAtMs = Date.parse(args.pulledAt);
       if (!Number.isFinite(pulledAtMs) || !/(?:Z|[+-]\d{2}:?\d{2})\s*$/i.test(args.pulledAt)) {
         return dailySpendFailure("invalid_pulled_at", args.coverageStart, args.throughDate);
@@ -4180,7 +4751,7 @@ export const Actions = {
       if (!isRealDateKey(args.coverageStart) || !isRealDateKey(args.throughDate)) {
         return dailySpendFailure("invalid_date", args.coverageStart, args.throughDate);
       }
-      for (const txn of args.transactions) {
+      for (const txn of txns) {
         if (!isRealDateKey(txn.date)) {
           return dailySpendFailure("invalid_date", args.coverageStart, args.throughDate);
         }
@@ -4188,42 +4759,25 @@ export const Actions = {
       if (args.coverageStart > args.throughDate) {
         return dailySpendFailure("invalid_window", args.coverageStart, args.throughDate);
       }
-      // Server recompute
-      const recomputed = summarizeSpendDailyServer(args.transactions as DailySpendTxn[], {
+      // Server recompute; the submitted days must match it day by
+      // day, and the published payload always carries the
+      // recompute — never the client's numbers.
+      const recomputed = summarizeSpendDailyServer(txns as DailySpendTxn[], {
         fromDate: args.coverageStart,
         toDate: args.throughDate,
       });
-      // Compare with submitted days
-      let mismatch = false;
-      if (recomputed.fullCoverageStart !== args.fullCoverageStart) mismatch = true;
-      if (!mismatch) {
-        if (args.days.length !== recomputed.days.length) mismatch = true;
-        else {
-          for (let i = 0; i < recomputed.days.length; i++) {
-            const rec = recomputed.days[i]!;
-            const sub = args.days[i]!;
-            if (rec.date !== sub.date) { mismatch = true; break; }
-            if (Math.abs(rec.posted - sub.posted) > 0.01) { mismatch = true; break; }
-            if (Math.abs(rec.pending - sub.pending) > 0.01) { mismatch = true; break; }
-            if (rec.spendCount !== sub.spendCount) { mismatch = true; break; }
-            if (rec.pendingCount !== sub.pendingCount) { mismatch = true; break; }
-            if (rec.partial !== sub.partial) { mismatch = true; break; }
-            if (rec.unclassified.length !== sub.unclassified.length || rec.unclassified.some((v, j) => v !== sub.unclassified[j])) { mismatch = true; break; }
-            // categories as maps
-            const recMap = new Map(rec.categories.map((c) => [c.key, c.amount] as const));
-            const subMap = new Map(sub.categories.map((c) => [c.key, c.amount] as const));
-            if (recMap.size !== subMap.size) { mismatch = true; break; }
-            let catMismatch = false;
-            for (const [k, v] of recMap) {
-              const sv = subMap.get(k);
-              if (sv === undefined || Math.abs(v - sv) > 0.01) { catMismatch = true; break; }
-            }
-            if (catMismatch) { mismatch = true; break; }
-          }
-        }
-      }
-      if (mismatch) {
-        return { ok: false, issue: "daily_mismatch", days: 0, coverageStart: args.coverageStart, throughDate: args.throughDate, totalMatches: false, readBackVerified: false };
+      if (!dailyDaysMatch(recomputed, submittedDays, args.fullCoverageStart)) {
+        return {
+          ok: false,
+          issue: "daily_mismatch",
+          days: 0,
+          coverageStart: args.coverageStart,
+          throughDate: args.throughDate,
+          totalMatches: false,
+          readBackVerified: false,
+          chunksReceived: 0,
+          chunksExpected: 0,
+        };
       }
       const payload: ArchDailySpend = {
         arch: "F-ARCH-001",
@@ -4237,7 +4791,7 @@ export const Actions = {
         days: recomputed.days,
         totals: recomputed.totals,
         counts: {
-          transactions: args.transactions.length,
+          transactions: txns.length,
           conflicts: recomputed.conflicts.length,
           unappliedRefunds: recomputed.unappliedRefunds.length,
           unclassified: recomputed.unclassified.length,
@@ -4245,80 +4799,19 @@ export const Actions = {
           excludedLoanPrincipal: recomputed.excludedCounts.loanPrincipal,
         },
       };
-      const db = ctx.db<typeof schema>();
-      const existingRows = await db.select().from(schema.archDailySpend);
-      let maxStoredMs = Number.NEGATIVE_INFINITY;
-      const sameVersion: { row: DailySpendStoredRow; parsed: ArchDailySpend }[] = [];
-      for (const row of existingRows) {
-        const parsed = parseDailySpendStoredRow(row);
-        if (!parsed) continue;
-        const key = dailyVersionKey(row, parsed);
-        if (key > maxStoredMs) maxStoredMs = key;
-        if (key === pulledAtMs) sameVersion.push({ row, parsed });
-      }
-      if (pulledAtMs < maxStoredMs) return dailySpendFailure("stale_version", args.coverageStart, args.throughDate);
-      let targetRowId: number | null = null;
-      if (sameVersion.length > 0) {
-        const hit = sameVersion.find((candidate) => spendPayloadsEquivalent(candidate.parsed, payload));
-        if (!hit) return dailySpendFailure("version_conflict", args.coverageStart, args.throughDate);
-        targetRowId = hit.row.id;
-      }
-      if (targetRowId === null) {
-        const payloadJson = JSON.stringify(payload);
-        const insertedRows = (await db.all(
-          sql`INSERT INTO arch_daily_spend (payload, pulled_at, created_at)
-              SELECT ${payloadJson}, ${pulledAtMs}, ${Date.now()}
-              WHERE NOT EXISTS (
-                SELECT 1 FROM arch_daily_spend
-                WHERE pulled_at >= ${pulledAtMs} AND json_valid(payload)
-              )
-              RETURNING id`,
-        )) as unknown as Array<{ id?: number } | [number]>;
-        const insertedRow = insertedRows[0];
-        const insertedId = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow?.id;
-        if (insertedId != null) {
-          targetRowId = insertedId;
-        } else {
-          const committedRows = await db.select().from(schema.archDailySpend);
-          let committedMaxMs = Number.NEGATIVE_INFINITY;
-          const committedSame: { row: DailySpendStoredRow; parsed: ArchDailySpend }[] = [];
-          for (const row of committedRows) {
-            const parsedCommitted = parseDailySpendStoredRow(row);
-            if (!parsedCommitted) continue;
-            const key = dailyVersionKey(row, parsedCommitted);
-            if (key > committedMaxMs) committedMaxMs = key;
-            if (key === pulledAtMs) committedSame.push({ row, parsed: parsedCommitted });
-          }
-          if (pulledAtMs < committedMaxMs) return dailySpendFailure("stale_version", args.coverageStart, args.throughDate);
-          const winner = committedSame.find((candidate) => spendPayloadsEquivalent(candidate.parsed, payload));
-          if (winner) {
-            targetRowId = winner.row.id;
-          } else {
-            return dailySpendFailure("version_conflict", args.coverageStart, args.throughDate);
-          }
-        }
-      }
-      let readBackVerified = false;
-      if (targetRowId !== null) {
-        const backRows = await db
-          .select()
-          .from(schema.archDailySpend)
-          .where(eq(schema.archDailySpend.id, targetRowId))
-          .limit(1);
-        const backRow = backRows[0];
-        if (backRow) {
-          const parsedBack = parseDailySpendStoredRow(backRow);
-          readBackVerified = parsedBack !== null && spendPayloadsEquivalent(parsedBack, payload);
-        }
-      }
+      const published = await publishDailySpend(ctx, pulledAtMs, payload);
+      if (published.issue === "stale_version") return dailySpendFailure("stale_version", args.coverageStart, args.throughDate);
+      if (published.issue === "version_conflict") return dailySpendFailure("version_conflict", args.coverageStart, args.throughDate);
       return {
-        ok: readBackVerified,
-        issue: readBackVerified ? null : "read_back_mismatch",
+        ok: published.readBackVerified,
+        issue: published.issue,
         days: payload.days.length,
         coverageStart: args.coverageStart,
         throughDate: args.throughDate,
         totalMatches: true,
-        readBackVerified,
+        readBackVerified: published.readBackVerified,
+        chunksReceived: 0,
+        chunksExpected: 0,
       };
     },
   }),

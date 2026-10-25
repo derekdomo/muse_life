@@ -194,3 +194,31 @@
   类目展开，承载于「明细」页签（LIFE-DESIGN-001 结构不变，总览不拉
   长）；覆盖窗起止与 partial 日在页内明示；月度 Firance 快照在页内
   标明为对账存档。
+- **分片写入协议（2026-10-24 20:24 所有者裁定 (c) 追加）**：全量单次
+  载荷约 197KB 超出受控调用通道的内联传参上限（约 44KB 截断），故
+  `ingestArchDailySpend` 在原 `full` 模式（默认、字节级兼容保留）之外
+  新增分片模式：请求加 `mode: "chunk" | "finalize"`、`batchId`（≤128
+  字符）、`chunkIndex`、`chunkCount`（≤120）、片内 `fromDate/toDate`。
+  分片按月（或等价小粒度）切分，单片体积远低于截断线。服务端规则：
+  (1) 每片沿用同一门禁与过期（stale）校验；批次声明（batchId／
+  pulledAt／覆盖窗／chunkCount）须与该批次已收分片一致，不一致返回
+  `batch_mismatch`；片内日期范围非法返回 `invalid_chunk_range`。
+  (2) 每片独立以 `summarizeSpendDailyServer` 重算并与声明逐日比对
+  （容差 0.01），失真返回 `daily_mismatch` 并将整批暂存作废；同片同
+  内容重发幂等，同片异内容返回 `chunk_conflict` 并整批作废。分片只
+  入暂存表 `arch_daily_spend_chunks`（迁移 0007），未 finalize 的批次
+  对呈现读路径不可见。(3) `finalize` 须集齐全部分片且日期范围无缝
+  拼接覆盖全窗（缺片返回 `batch_incomplete`、暂存保留待补），再对
+  全窗独立重算并与 finalize 声明的总量／计数／fullCoverageStart 比
+  对，不符返回 `finalize_mismatch` 且不发布；通过后沿 `full` 模式同
+  一发布路径（SAVE-1 仲裁＋条件 INSERT＋逐行读回深比对）原子发布到
+  `arch_daily_spend`，并清空该批次暂存。整批重跑（新 pulledAt／
+  batchId）幂等。响应增 `chunksReceived/chunksExpected` 计数，仍只回
+  计数、日期与布尔，不含金额。
+- **分片协议生产首写（2026-10-24 晚 PDT 落地）**：管线从干净状态
+  重跑（Plaid 直拉全窗，最新可用日 2026-10-23），对账复现（729 日
+  双实现 0 差异、月度交叉 0 差异）后按月切 25 片（单片 ≤15,334 字
+  节）逐片提交，25/25 逐片校验通过，finalize 全窗总对账通过并发布：
+  `arch_daily_spend` 首行落地，729 日，覆盖 2024-10-25 → 2026-10-23，
+  全覆盖自 2026-09-06。每日刷新任务 `space-3-daily-refresh` 同轮扩
+  为双写（总资产＋日花销同协议小片），正文已回读确认。

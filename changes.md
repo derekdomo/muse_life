@@ -1626,3 +1626,23 @@
 - 所有者 2026-10-24 20:25 PT 在本 chat 指令：财务总览（space-3）的 daily overview 与 weekly view 合并，不搞两个视图，所有的都是 daily。
 - 执行口径：客户端只保留单一以日数据为基础的视图，独立周视图撤销；周聚合数字若保留，只能作为日行的汇总呈现出现在同一视图内，不得是独立视图/页签。用户可见文案中的 weekly/周视图命名一并清扫（内部标识符如 weeklyDelta 可留）。月度 Firance 快照仍按 F-ARCH-001 作对账存档，不属本次合并范围。数据口径与公式不变（B 类呈现变更），设计规则照旧（首屏结论、折叠复位、不回长）。
 - 派工：并入正在执行的 F-ARCH 日花销分片写入同一构建轮次顺序实施（避免双 builder 同 app 冲突），plans 登记随该轮提交一并落。
+
+## 2026-10-24 21 时 PDT（F-ARCH-001 分片写入落地：生产首写完成＋每日任务双写＋视图合并构建完成）
+
+- 需求：所有者 2026-10-24 20:24 裁定 (c)——给 space-3「财务总览」服务端加分片写入，解除上条登记的「载荷传输」唯一未决尾巴；同轮顺序实施 20:25 视图合并直令（见上条）。本条为实现方交付登记，证据类 A（写路径/数据管道）＋B（视图合并呈现）。
+- 改了什么（服务端，工件线上已上线）：ingestArchDailySpend 新增 mode=chunk/finalize 分片协议（full 单次模式为默认、字节级兼容保留）：分片带 batchId/chunkIndex/chunkCount/片内 fromDate–toDate，先入暂存表 arch_daily_spend_chunks（迁移 0007）；服务端逐片同门禁＋批次声明一致性（batch_mismatch）＋片内范围校验（invalid_chunk_range）＋过期校验＋逐片独立重算比对（daily_mismatch 整批作废）、同片异内容 chunk_conflict 整批作废、同片同内容重发幂等、暂存行回读校验；finalize 须集齐全片且日期无缝拼接全窗（batch_incomplete 暂存保留）、全窗重算与声明总量/计数/fullCoverageStart 一致（finalize_mismatch 不发布），通过后沿 full 同一发布路径（SAVE-1 仲裁＋条件 INSERT＋逐行读回深比对）原子发布并清空暂存；未 finalize 批次对读路径不可见；响应增 chunksReceived/chunksExpected，仍只回计数/日期/布尔。SPEC 第 8 节已补协议正文与首写记录。
+- 生产首写证据（金额不入仓，只记结构结论）：管线从干净状态重跑——Plaid 直拉 accounts＋transactions-get 全窗（2024-10-25→2026-10-24 请求，最新可用日 last_date=2026-10-23、窗内零 pending）；分类按 SPEC §8 v4（账本 567 行：spend 280／loan_mixed 153／unmatched_transfer 104／transfer 3／refund 27；原始 795 行全数处置、唯一 ID 795/795）；计算走仓库 finance-arch.mjs summarizeSpendDaily，对账复现：729 日（2024-10-25→2026-10-23）双实现 0 差异、逐月汇总与 summarizeSpendMonth 交叉 0 差异、全覆盖自 2026-09-06、conflicts 0、unappliedRefunds 26、unclassified 257。按月切 25 片（单片 ≤15,334 字节，batchId 由 pulledAt 派生）逐片经 invoke_action 提交：25/25 每片回执 ok＋totalMatches＋readBackVerified；finalize 回执 ok＋totalMatches＋readBackVerified、days=729——arch_daily_spend 由 0 行变为首个发布版本。
+- 每日任务双写：cron space-3-daily-refresh 正文已更新（只增日花销一段：同分片协议、月度交叉 0 差异门、任一片被拒整批停手报告；标题行「每周财务总览」改「财务总览」），既有纪律（F-ARCH 通道限定、F0.7 挂起链不碰、双层新鲜度分开、失败不写或只写可核实部分并如实报、一行汇报、无金额）全部保留；cron.view 回读确认，时刻（每日约 07:39 PT）与投递不变。
+- 视图合并（所有者 2026-10-24 20:25 直令，B 类）：space-3 构建已完成上线（构建完成卡 web-artifact-build-completed-6bb3117e-a47d-407b-a4d0-998183562165）——daily overview 与 weekly view 合并为单一 daily 视图、独立周视图/页签/入口撤销、周聚合仅作同视图内日数据汇总行、用户可见 weekly/每周 文案清扫、月度 Firance 存档不动、口径公式不变。构建方验证明细（可达性对照与回归计数）以其完成回传为准补记于 plans 对应登记。
+- 管线存档：本轮重跑脚本、25 片与 finalize 声明、全量载荷与审计文件存 goal hidden_files/f-arch-daily/run-2026-10-24-firstwrite/，STATUS.md 已更新为「已上线」。
+- 验证：新增 validate-arch-daily-spend-chunks 33/33（坏片摘要拒绝且零写入、未集齐不发布、重复片幂等、批次不一致、范围非法、过期片、拼接缺口、finalize 总对账不符拒绝）；既有全套回归零失败（validate-arch-daily-spend 47/47、validate-arch-save 51/51、validate-arch-concurrency 49/49、validate-arch-dates 81/81、validate-refresh-chain 134/134 及仓库 .mjs 验证器），client+server typecheck 干净（以上为分片协议构建方回传证据）。
+- 局限：所有者视角呈现以本人打开为准（审计环境为非所有者身份）；本轮工件源码回灌本仓（server/src/actions.ts、schema.ts、迁移 0007、validate-arch-daily-spend-chunks.ts、视图合并客户端改动）未执行——本轮运行环境对工件文件为只读委托通道，源码回灌沿 EVID 尾巴由同步轮次补齐，工件线上版本为当前事实源。
+- 回滚：数据侧——arch_daily_spend 为只追加表，首写版本可按既有版本仲裁被后续版本取代，暂存表清空不影响已发布行；cron 正文可经 cron.update 恢复上一版（正文存于 job 历史）；仓库侧回退本提交即恢复。
+
+## 2026-10-24 21 时 PDT（muse-life-plans-sync：F-ARCH-001 分片写入＋视图合并工件源码回灌）
+
+- 需求：F-ARCH-001 的 EVID 尾巴——21 时交付登记注明「本轮工件源码回灌本仓未执行，沿 EVID 尾巴由同步轮次补齐」；同轮一并提交工作区中待落仓的 21 时交付登记（plans/changes/SPEC 分片协议节）。
+- 改了什么：自线上工件 space-3（财务总览）逐文件回灌至 weekly-finance/：server/src/actions.ts、server/src/schema.ts（ingestArchDailySpend chunk/finalize 分片协议＋暂存表）、drizzle/0007_arch_daily_spend_chunks_staging.sql、drizzle/meta/_journal.json、validate-arch-daily-spend-chunks.ts（新增）、validate-arch-daily-spend.ts、client/src/App.tsx、client/src/theme.css（DAILY-MERGE-001 单一 daily 视图）、DATA-PLAN.md（DAILY-MERGE-001 节）、validate-design-b1a.mjs、validate-payload.mjs、validate-investment-performance.mjs。未回灌 app.db、audits、构建缓存等非源码文件；真实金额与个人数据未入仓。
+- 验证（仓库实跑，node_modules 临时借用工件目录、跑后移除）：validate-arch-daily-spend-chunks 33/33、validate-arch-daily-spend 47/47、validate-design-b1a 99/99、validate-payload 50/50、validate-finance-arch 146/146、validate-arch-save 51/51、validate-arch-concurrency 49/49、validate-arch-dates 81/81、validate-refresh-chain 134/134，零失败，与构建方回传计数一致。
+- 局限：回灌只对齐仓库与线上源码；所有者视角呈现仍以本人打开为准。F-ARCH-001 整条不勾选，余项（F0.6/F1.6 卡片迁移、异常阈值定案）沿原队列。
+- 回滚：回退本提交即恢复回灌前仓库状态；线上工件不受影响。

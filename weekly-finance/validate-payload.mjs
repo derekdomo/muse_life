@@ -182,7 +182,7 @@ check("wiring: refresh start is an atomic conditional claim on the read snapshot
 check("wiring: only the start-claim winner spawns (claim failure re-reads and answers already_running before any spawn)",
   refreshSection.indexOf("if (!claimed)") > -1
   && refreshSection.indexOf("if (!claimed)") < refreshSection.indexOf("ctx.agent.spawnTask")
-  && refreshSection.includes('return { ok: true, status: "already_running", message: "每周更新正在进行中" };'));
+  && refreshSection.includes('return { ok: true, status: "already_running", message: "更新正在进行中" };'));
 check("wiring: spawn-tail CAS additionally requires claimedGeneration IS NULL (an in-flight claim is never stolen)",
   src.includes("isNull(schema.financeState.claimedGeneration)")
   && src.slice(src.indexOf("async function casSpawnTailState"), src.indexOf("export const Actions")).includes("isNull(schema.financeState.claimedGeneration)"));

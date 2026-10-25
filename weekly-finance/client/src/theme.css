@@ -243,32 +243,14 @@ main {
 .cash-scope-toggle input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
 .cash-scope-excluded { color: var(--dim); font-size: 10px; font-weight: 720; white-space: nowrap; }
 
-/* LIFE-DESIGN-001-B1A: overview/detail tabs, merged conclusion
-   card, FIRE teaser row and the folded evidence layer. */
-.view-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 3px;
-  padding: 3px;
-  margin-bottom: 12px;
-  background: var(--surface-tint);
-  border-radius: 999px;
-}
-.view-tabs button {
-  min-height: 38px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--dim);
-  font-size: 13px;
-  font-weight: 720;
-  cursor: pointer;
-}
-.view-tabs button.active { background: var(--surface); color: var(--text); box-shadow: 0 2px 9px rgba(25,48,39,.12); }
-.view-tabs button:focus-visible, .fire-teaser button:focus-visible, .evidence-fold > summary:focus-visible {
+/* LIFE-DESIGN-001-B1A + DAILY-MERGE-001: single daily view —
+   merged conclusion card, FIRE teaser row and the folded
+   evidence / ledger layers (no tab bar remains). */
+.fire-teaser button:focus-visible, .evidence-fold > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+.daily-days-fold { margin-top: 10px; }
 .conclusion-card__caliber {
   margin: 0 0 10px;
   font-size: 12px;

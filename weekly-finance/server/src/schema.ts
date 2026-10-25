@@ -79,6 +79,30 @@ export const archDailySpend = sqliteTable("arch_daily_spend", {
     .$defaultFn(() => new Date()),
 });
 
+// F-ARCH-001 chunked daily-spend ingest (0007): staging rows for
+// the chunked write protocol of ingestArchDailySpend. A batch's
+// chunks land here one at a time (each independently recomputed
+// and read-back verified server-side); nothing here is ever read
+// by getDashboard — the batch becomes visible only when finalize
+// publishes it into arch_daily_spend through the same SAVE-1 path
+// as a full ingest, after which the batch's staging rows are
+// deleted. A rejected chunk (recompute mismatch or same-index
+// conflict) voids the whole batch: its staging rows are deleted
+// and arch_daily_spend is never touched.
+export const archDailySpendChunks = sqliteTable("arch_daily_spend_chunks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  batchId: text("batch_id").notNull(),
+  chunkIndex: integer("chunk_index").notNull(),
+  chunkCount: integer("chunk_count").notNull(),
+  pulledAt: integer("pulled_at", { mode: "timestamp_ms" }).notNull(),
+  fromDate: text("from_date").notNull(),
+  toDate: text("to_date").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const refreshObservations = sqliteTable("refresh_observations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   generation: text("generation"),

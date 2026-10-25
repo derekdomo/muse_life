@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import {
@@ -123,7 +123,7 @@ export function weeklyDeltaView(delta: number | null, netWorth: number): WeeklyD
 // (type "account" / "investment"). Income, spend, transfer and
 // contribution entries are never counted as accounts or balance
 // coverage. Without per-source success timestamps the live flag only
-// supports "同步读取" wording, never a "本周实时" claim; the read date
+// supports "同步读取" wording, never a "当日实时" claim; the read date
 // itself is stated separately via asOf.
 export function balanceSourceSummary(accounts: Array<{ type: string; live: boolean }>): string {
   const balanceAccounts = accounts.filter((account) => account.type === "account" || account.type === "investment");
@@ -561,7 +561,7 @@ function DistributionPanel({ current, live }: { current: Month; live: Dashboard[
 }
 
 // LIFE-DESIGN-001-B1A: one-line summary of the distribution
-// panel for the overview tab's folded evidence layer (R3a: a
+// panel for the single daily view's folded evidence layer (R3a: a
 // fold's summary carries the key numbers, never just a title).
 // Shares are of |投资| + |存款| + |贷款|; available cash is a
 // subset of deposits and is labelled as such. Presentation-only
@@ -974,7 +974,7 @@ function InvestmentPerformanceCard({ data }: { data: Dashboard }) {
         {" · "}整个期间外部净投入 {perf.netFlow == null ? "未知（任一区间未核实时不给整个期间合计，各区间已记录金额见下方明细）" : currency.format(perf.netFlow)}
         （现金净转入 + 非银行直接投入如 RSU、雇主缴款；提现为负）
       </p>
-      {perf.reason ? <p className="fact-card__note">待核对：{perf.reason}。任一区间未核实时不累计整个期间收益，也不跨缺口补 0；已成立区间的月度收益仍可在上方「月度记录」中查看。</p> : null}
+      {perf.reason ? <p className="fact-card__note">待核对：{perf.reason}。任一区间未核实时不累计整个期间收益，也不跨缺口补 0；已成立区间的月度收益仍可在下方「月度记录」中查看。</p> : null}
       <details className="fact-card__details">
         <summary aria-label="投资收益期间核对明细">期间核对明细（双端余额与投入期间）</summary>
         <div className="month-record__meta-list">
@@ -990,15 +990,15 @@ function InvestmentPerformanceCard({ data }: { data: Dashboard }) {
 }
 
 // LIFE-DESIGN-001-B1A: the FIRE years estimate, shared by the
-// full panel (detail tab) and the overview tab's one-line FIRE
-// summary so the two never diverge. Same math as the panel has
+// full panel and the daily view's one-line FIRE summary so the
+// two never diverge. Same math as the panel has
 // always used: gap covered by the recent contribution pace.
 export function fireYearsEstimate(fire: Dashboard["fire"]): number | null {
   if (fire.gap <= 0) return 0;
   return fire.annualContribution > 0 ? Math.ceil(fire.gap / fire.annualContribution) : null;
 }
 
-// The overview tab's FIRE line (design draft: progress % + gap +
+// The daily view's FIRE line (design draft: progress % + gap +
 // estimated years, one line, anchor to the full panel).
 export function fireSummaryLine(fire: Dashboard["fire"]): string {
   if (fire.completeMonthsUsed === 0) return "FIRE 进度：完整月份不足，暂不估算";
@@ -1127,8 +1127,8 @@ function accountTypeLabel(type: Account["type"]): string {
 
 // LIFE-DESIGN-001-B1A: the three former total-assets cards —
 // the 本次余额差 fact card, the live-net-worth hero and the
-// F-ARCH card — merge into ONE conclusion card on the overview
-// tab (design draft space-3 plan, item 2). Every fact keeps
+// F-ARCH card — merge into ONE conclusion card at the top of
+// the single daily view (design draft space-3 plan, item 2). Every fact keeps
 // exactly one rendering home (R4): the F-ARCH total is the
 // headline when a stored figure exists (the live net worth
 // otherwise); the vs-last-snapshot delta drops to one line; the
@@ -1139,13 +1139,13 @@ function accountTypeLabel(type: Account["type"]): string {
 // the delta line (weeklyDelta, whose percent denominator is the
 // OLD live.netWorth) is labelled 旧同步口径 and must never read
 // as the headline's own change; the old sync net worth stays
-// traceable in the detail tab's arch account section. This is
+// traceable in the same view's 「总资产账户明细」 ledger fold. This is
 // presentation binding only — no formula changed. The
 // two F-ARCH freshness layers stay as their own lines together
 // with the DATE-1 coverage line; the archived monthly snapshot
 // figure is one small compare line at the bottom. Kept facts
 // keep their wording — only the location pointers that named
-// the old layout changed （下方 → 「明细」页签）.
+// the old two-tab layout changed （「明细」页签 → 下方折叠）.
 function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
   const arch = data.archNetWorth;
   const delta = data.live.weeklyDelta;
@@ -1174,7 +1174,7 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
         <p className="fact-card__note">金额已计入 {arch.amountIncluded}/{arch.amountTotal} 个账户 · 有效余额日期 {arch.validDateCount}/{arch.dateTotal} 个账户 · Plaid 层拉取于 {pulledText}</p>
       ) : null}
       {arch?.partial ? (
-        <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见「明细」页签的总资产账户明细。</p>
+        <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见下方「总资产账户明细」。</p>
       ) : null}
       <div className={`delta ${valueTone(delta)}`}>
         {view.comparable ? (
@@ -1208,7 +1208,7 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
           <p className="fact-card__note">
             ● 快照层（Firance 月度快照沿用）：
             {arch.snapshotRange
-              ? `${archLayerLine(arch.snapshotRange, snapshotHasRows)}，逐户日期见明细`
+              ? `${archLayerLine(arch.snapshotRange, snapshotHasRows)}，逐户日期见下方「总资产账户明细」`
               : archLayerLine(arch.snapshotRange, snapshotHasRows)}
           </p>
         </>
@@ -1221,7 +1221,7 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
         </div>
       ) : null}
       <p className="fact-card__source">数据日期 {asOfText} · 月度快照 {data.sourceMonth} · 余额来源：{balanceSourceSummary(data.accounts)}</p>
-      {arch ? <p className="fact-card__source">旧同步口径净资产 {currency.format(data.live.netWorth)}（旧同步口径变化量的基准，逐项见「明细」页签）；旧月度快照保留在「明细」页签作对账存档。</p> : null}
+      {arch ? <p className="fact-card__source">旧同步口径净资产 {currency.format(data.live.netWorth)}（旧同步口径变化量的基准，逐项见下方「总资产账户明细」）；旧月度快照保留在下方「月度记录」作对账存档。</p> : null}
     </section>
   );
 }
@@ -1574,11 +1574,11 @@ export function archRowDateLabel(row: ArchNetWorthData["rows"][number]): string 
 }
 
 // LIFE-DESIGN-001-B1A: the F-ARCH per-account rows move from
-// the old card's fold into the detail tab's ledger layer —
-// this is the 「逐户日期见明细」 the conclusion card's snapshot
-// layer line points at. Row rendering (name, DATE-1 date label,
-// signed amount) is unchanged; freshness is stated per layer in
-// text + symbol, never by color alone.
+// the old card's fold into the single view's ledger layer —
+// this is the 「逐户日期见下方「总资产账户明细」」 the conclusion card's
+// snapshot layer line points at. Row rendering (name, DATE-1
+// date label, signed amount) is unchanged; freshness is stated
+// per layer in text + symbol, never by color alone.
 function ArchAccountsDetail({ arch, liveNetWorth, weeklyDelta }: { arch: ArchNetWorthData; liveNetWorth: number; weeklyDelta: number | null }) {
   return (
     <section className="section-block" aria-label="总资产账户明细（新架构）">
@@ -1603,8 +1603,8 @@ function ArchAccountsDetail({ arch, liveNetWorth, weeklyDelta }: { arch: ArchNet
   );
 }
 
-// LIFE-DESIGN-001-B1A: one-line summaries for the overview
-// tab's folded evidence layer (R3a — every fold's summary
+// LIFE-DESIGN-001-B1A: one-line summaries for the single
+// daily view's folded evidence layer (R3a — every fold's summary
 // carries its key numbers). All three derive from the same
 // figures their full panels render; nothing is recomputed
 // under a new caliber.
@@ -1634,6 +1634,205 @@ export function holdingsSummaryLine(data: Dashboard): string {
   return `持仓 — 前三集中度 ${percent.format(data.concentrationTop3)}${count}`;
 }
 
+// DAILY-MERGE-001 (owner ruling 2026-10-24): the former two
+// presentations — the overview tab (conclusion + folded
+// evidence) and the detail tab (daily series, daily spend,
+// monthly archive) — are merged into ONE daily view. There is
+// no tab bar and no second view: the page opens on the
+// conclusion, the daily-basis sections (net-worth daily series
+// and daily spend) sit directly underneath it, and everything
+// that used to live behind the detail tab stays reachable in
+// the SAME view inside default-closed folds (the four evidence
+// folds, then the ledger folds: monthly trend charts, monthly
+// archive records, the full FIRE panel, the F-ARCH per-account
+// rows and the snapshot account detail). Fold state is
+// mount-time component state only — every fresh page open
+// starts with every fold closed (owner ruling 2026-10-24,
+// design option 2 — nothing is persisted anywhere).
+// The only multi-day aggregate numbers in the view are the
+// near-7-day rows inside the daily sections, and both are
+// summed from the daily rows themselves
+// (recentDailySpendSummary over archDailySpend.days,
+// recentDailyNetWorthChange over archNetWorthSeries) — no
+// separate multi-day caliber remains in the presentation.
+// The snapshot-to-snapshot delta line inside the conclusion
+// card is a snapshot comparison fact carrying its own in-place
+// 旧同步口径 label; it is not a multi-day aggregate.
+// Reachability (former location -> single daily view):
+//   conclusion card / 7 key metrics / anomaly strip / FIRE
+//     one-liner -> top of the view, unchanged order
+//   net-worth daily series -> visible chart under the teaser
+//   daily spend -> visible section under the daily series;
+//     its current-month per-day rows fold inside the section
+//   cash scope / distribution / investment / holdings panels
+//     -> the four evidence folds under the daily sections
+//   trend charts + range control -> 「走势」 ledger fold
+//   monthly records (Firance archive) -> 「月度记录」 ledger fold
+//   full FIRE panel -> 「FIRE 进度」 ledger fold (id fire-panel;
+//     the one-liner's button opens and scrolls to it)
+//   F-ARCH per-account rows -> 「总资产账户明细」 ledger fold
+//   snapshot account detail -> 「账户明细」 ledger fold
+export const dailyCategoryLabels: Record<string, string> = {
+  FOOD_AND_DRINK: "餐饮",
+  TRANSPORTATION: "交通",
+  TRAVEL: "旅行",
+  RENT_AND_UTILITIES: "住房与水电",
+  GENERAL_MERCHANDISE: "购物",
+  ENTERTAINMENT: "娱乐",
+  PERSONAL_CARE: "个人护理",
+  GENERAL_SERVICES: "服务",
+  MEDICAL: "医疗",
+  EDUCATION: "教育",
+  BANK_FEES: "银行费用",
+  GOVERNMENT_AND_NON_PROFIT: "政府与非营利",
+  LOAN_PAYMENTS: "贷款",
+  UNCATEGORIZED: "未分类",
+};
+
+export function dailyCategoryLabel(key: string): string {
+  return dailyCategoryLabels[key] ?? key;
+}
+
+type DailySpendDayLike = { date: string; posted: number };
+type DailyNetWorthPointLike = { date: string; total: number };
+
+// DAILY-MERGE-001: the near-7-day spend aggregate, summed ONLY
+// from the stored daily-spend rows (the most recent `count`
+// days by date). It is a summary row over daily rows — never a
+// separately-sourced figure. Null when there are no daily rows.
+export function recentDailySpendSummary(days: DailySpendDayLike[], count = 7) {
+  if (days.length === 0) return null;
+  const sorted = [...days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const recent = sorted.slice(-count);
+  const first = recent[0];
+  const last = recent[recent.length - 1];
+  if (!first || !last) return null;
+  return {
+    total: recent.reduce((sum, day) => sum + day.posted, 0),
+    days: recent.length,
+    startDate: first.date,
+    endDate: last.date,
+  };
+}
+
+// DAILY-MERGE-001: the near-7-day net-worth change, read ONLY
+// from the stored daily net-worth series (last point minus the
+// point `count` days earlier in the series). Null when the
+// series has fewer than two points.
+export function recentDailyNetWorthChange(series: DailyNetWorthPointLike[], count = 7) {
+  if (series.length < 2) return null;
+  const sorted = [...series].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const last = sorted[sorted.length - 1];
+  const baseIndex = Math.max(0, sorted.length - 1 - count);
+  const base = sorted[baseIndex];
+  if (!last || !base || baseIndex === sorted.length - 1) return null;
+  return {
+    change: last.total - base.total,
+    days: sorted.length - 1 - baseIndex,
+    startDate: base.date,
+    endDate: last.date,
+  };
+}
+
+function NetWorthDailySeries({ series }: { series: Dashboard["archNetWorthSeries"] }) {
+  const chartData = series.map((point) => ({ ...point, label: point.date }));
+  const firstDate = series[0]?.date ?? "";
+  const recentChange = recentDailyNetWorthChange(series);
+  return (
+    <article className="chart-panel chart-panel--wide" style={{ marginBottom: 12 }}>
+      <div className="chart-heading"><h3>净值日序列</h3><span>纵轴：万美元</span></div>
+      <div className="chart-frame">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chartData} margin={{ top: 12, right: 6, left: -20, bottom: 0 }}>
+            <defs>
+              <linearGradient id="netWorthDailyFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.28} />
+                <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} stroke="var(--grid)" />
+            <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={24} />
+            <YAxis tickFormatter={(value: number) => (value / 10_000).toFixed(0)} tickLine={false} axisLine={false} width={50} />
+            <Tooltip content={<ChartTooltip />} />
+            <Area type="monotone" dataKey="total" name="净资产" stroke="var(--accent)" strokeWidth={2.5} fill="url(#netWorthDailyFill)" dot={false} activeDot={{ r: 4 }} />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+      <p className="fact-card__note" style={{ margin: "8px 8px 4px" }}>日序列自 {firstDate} 起（arch 每日写入）；此前只有月度快照，不回造日数据。</p>
+      {recentChange ? (
+        <p className="fact-card__note" style={{ margin: "2px 8px 4px" }}>近 {recentChange.days} 天净值变化 {trendIndicator(recentChange.change)} {signedCurrency(recentChange.change)}（按日净值序列汇总 · {recentChange.startDate} 至 {recentChange.endDate}）</p>
+      ) : null}
+    </article>
+  );
+}
+
+function DailySpendSection({ data }: { data: Dashboard }) {
+  const daily = data.archDailySpend;
+  if (!daily) return null;
+  const throughMonth = daily.throughDate.slice(0, 7);
+  const monthDays = daily.days.filter((d) => d.date.startsWith(throughMonth)).slice().reverse();
+  const monthTotal = monthDays.reduce((sum, d) => sum + d.posted, 0);
+  const recentSpend = recentDailySpendSummary(daily.days);
+  const metaParts = [`覆盖 ${daily.coverageStart} 至 ${daily.throughDate}`];
+  if (daily.fullCoverageStart && daily.fullCoverageStart !== daily.coverageStart) {
+    metaParts.push(`全覆盖自 ${daily.fullCoverageStart}`);
+  }
+  return (
+    <section className="section-block" aria-label="日花销">
+      <SectionTitle title="日花销" meta={metaParts.join(" · ")} />
+      <p className="fact-card__note" style={{ marginTop: 10 }}>本月已发生合计 {currency.format(monthTotal)}（日流口径，截至 {daily.throughDate}）</p>
+      {recentSpend ? (
+        <p className="fact-card__note" style={{ marginTop: 6 }}>近 {recentSpend.days} 天花销合计 {currency.format(recentSpend.total)}（按日花销汇总 · {recentSpend.startDate} 至 {recentSpend.endDate}）</p>
+      ) : null}
+      <details className="evidence-fold daily-days-fold">
+        <summary>
+          <span>本月逐日明细 — {monthDays.length} 天</span>
+          <span className="fold-hint fold-hint--open">展开</span>
+          <span className="fold-hint fold-hint--close">收起</span>
+        </summary>
+        <div className="month-records" style={{ marginTop: 10 }}>
+          {monthDays.map((day) => {
+            const parts = day.date.split("-");
+            const m = Number(parts[1] ?? 0);
+            const dnum = Number(parts[2] ?? 0);
+            const topCat = day.categories[0];
+            const topLabel = topCat ? dailyCategoryLabel(topCat.key) : null;
+            return (
+              <details className="month-record" key={day.date}>
+                <summary aria-label={`${m}月${dnum}日日花销详情`}>
+                  <span className="month-record__title">{m}月{dnum}日</span>
+                  {day.partial ? <span className="month-record__flag">部分覆盖</span> : null}
+                  {day.pending > 0 ? <span className="month-record__meta">待入账 {currency.format(day.pending)}</span> : null}
+                  {topLabel ? <span className="month-record__meta">{topLabel}</span> : null}
+                  <span className="month-record__total">{currency.format(day.posted)}</span>
+                </summary>
+                <div className="month-record__detail">
+                  {day.categories.length > 0 ? day.categories.map((cat) => (
+                    <p key={cat.key}>{dailyCategoryLabel(cat.key)} · {currency.format(cat.amount)}</p>
+                  )) : <p>当日无已入账花销分类</p>}
+                  {day.unclassified.length > 0 ? <p>未分类 {day.unclassified.length} 笔待确认</p> : null}
+                  {day.pending > 0 ? <p>待入账 {currency.format(day.pending)} · {day.pendingCount} 笔</p> : null}
+                  <p>已入账 {day.spendCount} 笔{day.partial ? " · 部分覆盖" : ""}</p>
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      </details>
+      <p className="fact-card__note" style={{ marginTop: 10 }}>日花销为 Plaid 交易日流口径；下方月度记录为 Firance 月度快照，仅作对账存档。</p>
+    </section>
+  );
+}
+
+// DAILY-MERGE-001: the single daily view (see the merge note
+// above the daily category labels). Blocks, in the established
+// home-page priority order: total-assets conclusion card →
+// this month's 7 key metrics → data-anomaly strip (never
+// folded) → one-line FIRE summary with an anchor to the full
+// panel → net-worth daily series → daily spend → four evidence
+// folds whose summaries carry their key numbers → the ledger
+// folds (monthly trend / monthly archive / full FIRE panel /
+// F-ARCH account rows / snapshot account detail).
 function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
   const [range, setRange] = useState<Range>("12m");
   // F1.1: the owner's available-cash trial selection. Page-local
@@ -1647,24 +1846,10 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
       return next;
     });
   };
-  // LIFE-DESIGN-001-B1A: two tabs — 总览 (conclusion + folded
-  // evidence) and 明细 (the ledger layer). Tab state, fold
-  // states and the cash trial are mount-time component state
-  // only: every fresh page open starts on the overview tab with
-  // every fold at its default (owner ruling 2026-10-24, design
-  // option 2 — nothing is persisted anywhere).
-  const [tab, setTab] = useState<"overview" | "detail">("overview");
-  const pendingAnchor = useRef<string | null>(null);
-  useEffect(() => {
-    if (tab === "detail" && pendingAnchor.current) {
-      const anchor = pendingAnchor.current;
-      pendingAnchor.current = null;
-      document.getElementById(anchor)?.scrollIntoView({ block: "start" });
-    }
-  }, [tab]);
-  const goDetail = (anchor: string) => {
-    pendingAnchor.current = anchor;
-    setTab("detail");
+  const openFirePanel = () => {
+    const panel = document.getElementById("fire-panel");
+    if (panel instanceof HTMLDetailsElement) panel.open = true;
+    panel?.scrollIntoView({ block: "start" });
   };
   const months = useMemo(() => {
     if (range === "6m") return data.months.slice(-6);
@@ -1701,66 +1886,6 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
   const emergencyMonths = coverage.months;
   const emergencyNote = coverage.reason
     ?? `可动用现金 ${currency.format(coverage.cashAmount ?? 0)} ÷ 平均月支出 ${currency.format(spendBasis.averageMonthlySpend ?? 0)}（所用月份 ${spendBasis.usedMonthKeys.join("、")}）${excludedCashSources.size > 0 ? " · 本页试算" : ""}`;
-
-  return (
-    <>
-      <div className="view-tabs" role="tablist" aria-label="财务视图切换">
-        <button type="button" role="tab" aria-selected={tab === "overview"} className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>总览</button>
-        <button type="button" role="tab" aria-selected={tab === "detail"} className={tab === "detail" ? "active" : ""} onClick={() => setTab("detail")}>明细</button>
-      </div>
-      {tab === "overview" ? (
-        <OverviewTab
-          data={data}
-          refreshFailed={refreshFailed}
-          current={current}
-          savingsRate={savingsRate}
-          savingsRateNote={savingsRateNote}
-          emergencyMonths={emergencyMonths}
-          emergencyNote={emergencyNote}
-          coverage={coverage}
-          excludedCashSources={excludedCashSources}
-          onToggleCashSource={toggleCashSource}
-          onGoDetail={goDetail}
-        />
-      ) : (
-        <DetailTab data={data} months={months} range={range} onRangeChange={setRange} />
-      )}
-    </>
-  );
-}
-
-// LIFE-DESIGN-001-B1A: the overview tab — conclusion layer
-// plus the folded evidence layer, default ≈3 screens (R1/R2).
-// Blocks, in the established home-page priority order:
-// total-assets conclusion card → this month's 7 key metrics →
-// data-anomaly strip (R6, never folded) → one-line FIRE
-// summary with an anchor into the detail tab → four evidence
-// folds whose summaries carry their key numbers (R3a).
-function OverviewTab({
-  data,
-  refreshFailed,
-  current,
-  savingsRate,
-  savingsRateNote,
-  emergencyMonths,
-  emergencyNote,
-  coverage,
-  excludedCashSources,
-  onToggleCashSource,
-  onGoDetail,
-}: {
-  data: Dashboard;
-  refreshFailed: boolean;
-  current: Month;
-  savingsRate: number | null;
-  savingsRateNote: string;
-  emergencyMonths: number | null;
-  emergencyNote: string;
-  coverage: ReturnType<typeof emergencyCoverage>;
-  excludedCashSources: ReadonlySet<string>;
-  onToggleCashSource: (source: string) => void;
-  onGoDetail: (anchor: string) => void;
-}) {
   const anomalyMonths = data.months.filter((month) => month.flexibleSpendAnomaly);
   const foldHint = (
     <>
@@ -1768,6 +1893,17 @@ function OverviewTab({
       <span className="fold-hint fold-hint--close">收起</span>
     </>
   );
+  const grouped = new Map<string, Account[]>();
+  for (const account of data.accounts) {
+    const institution = institutionName(account);
+    grouped.set(institution, [...(grouped.get(institution) ?? []), account]);
+  }
+  const accountGroups = [...grouped.entries()].sort((a, b) => {
+    const aTotal = a[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
+    const bTotal = b[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
+    return bTotal - aTotal;
+  });
+
   return (
     <>
       <TotalAssetsConclusionCard data={data} refreshFailed={refreshFailed} />
@@ -1791,8 +1927,16 @@ function OverviewTab({
 
       <section className="fire-teaser" aria-label="FIRE 进度摘要">
         <p>{fireSummaryLine(data.fire)}</p>
-        <button type="button" onClick={() => onGoDetail("fire-panel")}>查看完整 FIRE 面板</button>
+        <button type="button" onClick={openFirePanel}>查看完整 FIRE 面板</button>
       </section>
+
+      {data.archNetWorthSeries.length > 0 ? (
+        <div style={{ marginTop: 14 }}>
+          <NetWorthDailySeries series={data.archNetWorthSeries} />
+        </div>
+      ) : null}
+
+      <DailySpendSection data={data} />
 
       <div className="evidence-layer">
         <details className="evidence-fold">
@@ -1800,7 +1944,7 @@ function OverviewTab({
           <AvailableCashPanel
             data={data}
             excludedSources={excludedCashSources}
-            onToggle={onToggleCashSource}
+            onToggle={toggleCashSource}
             trialCashAmount={coverage.cashAmount}
           />
         </details>
@@ -1820,188 +1964,76 @@ function OverviewTab({
           <HoldingsSection data={data} />
         </details>
       </div>
-    </>
-  );
-}
 
-// LIFE-DESIGN-001-B1A: the detail tab — the ledger layer
-// (R3c/R10). Everything that used to stretch the single page
-// lives here, one tap from the overview: trend charts, the
-// full FIRE panel, the monthly records, the F-ARCH per-account
-// rows and the snapshot account detail. Content and wording
-// are the former single-page blocks, moved not rewritten.
-export const dailyCategoryLabels: Record<string, string> = {
-  FOOD_AND_DRINK: "餐饮",
-  TRANSPORTATION: "交通",
-  TRAVEL: "旅行",
-  RENT_AND_UTILITIES: "住房与水电",
-  GENERAL_MERCHANDISE: "购物",
-  ENTERTAINMENT: "娱乐",
-  PERSONAL_CARE: "个人护理",
-  GENERAL_SERVICES: "服务",
-  MEDICAL: "医疗",
-  EDUCATION: "教育",
-  BANK_FEES: "银行费用",
-  GOVERNMENT_AND_NON_PROFIT: "政府与非营利",
-  LOAN_PAYMENTS: "贷款",
-  UNCATEGORIZED: "未分类",
-};
-
-export function dailyCategoryLabel(key: string): string {
-  return dailyCategoryLabels[key] ?? key;
-}
-
-function NetWorthDailySeries({ series }: { series: Dashboard["archNetWorthSeries"] }) {
-  const chartData = series.map((point) => ({ ...point, label: point.date }));
-  const firstDate = series[0]?.date ?? "";
-  return (
-    <article className="chart-panel chart-panel--wide" style={{ marginBottom: 12 }}>
-      <div className="chart-heading"><h3>净值日序列</h3><span>纵轴：万美元</span></div>
-      <div className="chart-frame">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={chartData} margin={{ top: 12, right: 6, left: -20, bottom: 0 }}>
-            <defs>
-              <linearGradient id="netWorthDailyFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.28} />
-                <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid vertical={false} stroke="var(--grid)" />
-            <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={24} />
-            <YAxis tickFormatter={(value: number) => (value / 10_000).toFixed(0)} tickLine={false} axisLine={false} width={50} />
-            <Tooltip content={<ChartTooltip />} />
-            <Area type="monotone" dataKey="total" name="净资产" stroke="var(--accent)" strokeWidth={2.5} fill="url(#netWorthDailyFill)" dot={false} activeDot={{ r: 4 }} />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-      <p className="fact-card__note" style={{ margin: "8px 8px 4px" }}>日序列自 {firstDate} 起（arch 每日写入）；此前只有月度快照，不回造日数据。</p>
-    </article>
-  );
-}
-
-function DailySpendSection({ data }: { data: Dashboard }) {
-  const daily = data.archDailySpend;
-  if (!daily) return null;
-  const throughMonth = daily.throughDate.slice(0, 7);
-  const monthDays = daily.days.filter((d) => d.date.startsWith(throughMonth)).slice().reverse();
-  const monthTotal = monthDays.reduce((sum, d) => sum + d.posted, 0);
-  const metaParts = [`覆盖 ${daily.coverageStart} 至 ${daily.throughDate}`];
-  if (daily.fullCoverageStart && daily.fullCoverageStart !== daily.coverageStart) {
-    metaParts.push(`全覆盖自 ${daily.fullCoverageStart}`);
-  }
-  return (
-    <section className="section-block" aria-label="日花销">
-      <SectionTitle title="日花销" meta={metaParts.join(" · ")} />
-      <p className="fact-card__note" style={{ marginTop: 10 }}>本月已发生合计 {currency.format(monthTotal)}（日流口径，截至 {daily.throughDate}）</p>
-      <div className="month-records" style={{ marginTop: 10 }}>
-        {monthDays.map((day) => {
-          const parts = day.date.split("-");
-          const m = Number(parts[1] ?? 0);
-          const dnum = Number(parts[2] ?? 0);
-          const topCat = day.categories[0];
-          const topLabel = topCat ? dailyCategoryLabel(topCat.key) : null;
-          return (
-            <details className="month-record" key={day.date}>
-              <summary aria-label={`${m}月${dnum}日日花销详情`}>
-                <span className="month-record__title">{m}月{dnum}日</span>
-                {day.partial ? <span className="month-record__flag">部分覆盖</span> : null}
-                {day.pending > 0 ? <span className="month-record__meta">待入账 {currency.format(day.pending)}</span> : null}
-                {topLabel ? <span className="month-record__meta">{topLabel}</span> : null}
-                <span className="month-record__total">{currency.format(day.posted)}</span>
-              </summary>
-              <div className="month-record__detail">
-                {day.categories.length > 0 ? day.categories.map((cat) => (
-                  <p key={cat.key}>{dailyCategoryLabel(cat.key)} · {currency.format(cat.amount)}</p>
-                )) : <p>当日无已入账花销分类</p>}
-                {day.unclassified.length > 0 ? <p>未分类 {day.unclassified.length} 笔待确认</p> : null}
-                {day.pending > 0 ? <p>待入账 {currency.format(day.pending)} · {day.pendingCount} 笔</p> : null}
-                <p>已入账 {day.spendCount} 笔{day.partial ? " · 部分覆盖" : ""}</p>
-              </div>
-            </details>
-          );
-        })}
-      </div>
-      <p className="fact-card__note" style={{ marginTop: 10 }}>日花销为 Plaid 交易日流口径；下方月度记录为 Firance 月度快照，仅作对账存档。</p>
-    </section>
-  );
-}
-
-function DetailTab({
-  data,
-  months,
-  range,
-  onRangeChange,
-}: {
-  data: Dashboard;
-  months: Month[];
-  range: Range;
-  onRangeChange: (range: Range) => void;
-}) {
-  const grouped = new Map<string, Account[]>();
-  for (const account of data.accounts) {
-    const institution = institutionName(account);
-    grouped.set(institution, [...(grouped.get(institution) ?? []), account]);
-  }
-  const accountGroups = [...grouped.entries()].sort((a, b) => {
-    const aTotal = a[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
-    const bTotal = b[1].reduce((sum, item) => sum + Math.abs(item.value), 0);
-    return bTotal - aTotal;
-  });
-  return (
-    <>
-      <section className="section-block">
-        <div className="section-heading-row">
-          <SectionTitle title="走势" meta={`${months.filter((month) => !month.flexibleSpendAnomaly).length} 个有效快照`} />
-          <div className="range-control" aria-label="趋势时间范围">
-            {(["6m", "12m", "year", "all"] as Range[]).map((item) => (
-              <button key={item} type="button" className={range === item ? "active" : ""} onClick={() => onRangeChange(item)} aria-pressed={range === item}>
-                {item === "6m" ? "6月" : item === "12m" ? "12月" : item === "year" ? "今年" : "全部"}
-              </button>
-            ))}
-          </div>
-        </div>
-        {data.archNetWorthSeries.length > 0 ? <NetWorthDailySeries series={data.archNetWorthSeries} /> : null}
-        <TrendCharts months={months} />
-      </section>
-
-      <section className="section-block">
-        <SectionTitle title="月度记录" meta="Firance 月度快照 · 对账存档 · 点按展开" />
-        <MonthlyRecords months={data.months} />
-      </section>
-
-      <DailySpendSection data={data} />
-
-      <section className="fire-section section-block" id="fire-panel">
-        <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
-        <FireProgress data={data} />
-      </section>
-
-      {data.archNetWorth ? <ArchAccountsDetail arch={data.archNetWorth} liveNetWorth={data.live.netWorth} weeklyDelta={data.live.weeklyDelta} /> : null}
-
-      <section className="accounts-section section-block">
-        <SectionTitle title="账户明细" meta={`快照 ${data.sourceMonth}`} />
-        <div className="account-groups">
-          {accountGroups.map(([institution, rows]) => (
-            <div className="account-group" key={institution}>
-              <div className="account-group__heading"><span className="institution-icon" aria-hidden="true">{institution.slice(0, 1).toUpperCase()}</span><h3>{institution}</h3></div>
-              <div>
-                {rows.map((account) => {
-                  const isLoan = account.type === "account" && account.value < 0;
-                  return (
-                    <div className="account-row" key={`${account.type}-${account.source}`}>
-                      <div>
-                        <strong>{account.label}</strong>
-                        <span>{accountTypeLabel(account.type)}{isLoan ? " · 负债" : ""} · {account.live ? "同步读取" : "月度快照"}{account.mask ? ` ···${account.mask}` : ""}{account.type === "account" ? ` · 分类：${cashflowRoleLabel(account.cashflowRole ?? null)}` : ""}</span>
-                      </div>
-                      <b className="neutral">{isLoan ? `−${currencyPrecise.format(Math.abs(account.value))}` : currencyPrecise.format(account.value)}</b>
-                    </div>
-                  );
-                })}
+      <div className="evidence-layer">
+        <details className="evidence-fold">
+          <summary><span>走势 — 月度趋势 · {data.months.length} 份快照（存档口径）</span>{foldHint}</summary>
+          <section className="section-block">
+            <div className="section-heading-row">
+              <SectionTitle title="走势" meta={`${months.filter((month) => !month.flexibleSpendAnomaly).length} 个有效快照`} />
+              <div className="range-control" aria-label="趋势时间范围">
+                {(["6m", "12m", "year", "all"] as Range[]).map((item) => (
+                  <button key={item} type="button" className={range === item ? "active" : ""} onClick={() => setRange(item)} aria-pressed={range === item}>
+                    {item === "6m" ? "6月" : item === "12m" ? "12月" : item === "year" ? "今年" : "全部"}
+                  </button>
+                ))}
               </div>
             </div>
-          ))}
-        </div>
-      </section>
+            <TrendCharts months={months} />
+          </section>
+        </details>
+
+        <details className="evidence-fold">
+          <summary><span>月度记录 — {data.months.length} 份 Firance 月度快照 · 对账存档</span>{foldHint}</summary>
+          <section className="section-block">
+            <SectionTitle title="月度记录" meta="Firance 月度快照 · 对账存档 · 点按展开" />
+            <MonthlyRecords months={data.months} />
+          </section>
+        </details>
+
+        <details className="evidence-fold" id="fire-panel">
+          <summary><span>FIRE 进度 — {fireSummaryLine(data.fire)}</span>{foldHint}</summary>
+          <section className="fire-section section-block">
+            <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
+            <FireProgress data={data} />
+          </section>
+        </details>
+
+        {data.archNetWorth ? (
+          <details className="evidence-fold">
+            <summary><span>总资产账户明细 — {data.archNetWorth.rows.length} 个账户 · 新架构（F-ARCH-001）</span>{foldHint}</summary>
+            <ArchAccountsDetail arch={data.archNetWorth} liveNetWorth={data.live.netWorth} weeklyDelta={data.live.weeklyDelta} />
+          </details>
+        ) : null}
+
+        <details className="evidence-fold">
+          <summary><span>账户明细 — {data.accounts.length} 条 · 快照 {data.sourceMonth}</span>{foldHint}</summary>
+          <section className="accounts-section section-block">
+            <SectionTitle title="账户明细" meta={`快照 ${data.sourceMonth}`} />
+            <div className="account-groups">
+              {accountGroups.map(([institution, rows]) => (
+                <div className="account-group" key={institution}>
+                  <div className="account-group__heading"><span className="institution-icon" aria-hidden="true">{institution.slice(0, 1).toUpperCase()}</span><h3>{institution}</h3></div>
+                  <div>
+                    {rows.map((account) => {
+                      const isLoan = account.type === "account" && account.value < 0;
+                      return (
+                        <div className="account-row" key={`${account.type}-${account.source}`}>
+                          <div>
+                            <strong>{account.label}</strong>
+                            <span>{accountTypeLabel(account.type)}{isLoan ? " · 负债" : ""} · {account.live ? "同步读取" : "月度快照"}{account.mask ? ` ···${account.mask}` : ""}{account.type === "account" ? ` · 分类：${cashflowRoleLabel(account.cashflowRole ?? null)}` : ""}</span>
+                          </div>
+                          <b className="neutral">{isLoan ? `−${currencyPrecise.format(Math.abs(account.value))}` : currencyPrecise.format(account.value)}</b>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        </details>
+      </div>
     </>
   );
 }
@@ -2714,7 +2746,7 @@ export function App() {
         ) : (
           <div className="empty-state">
             <div className="empty-state__rule" />
-            <p>首次同步会读取 Firance 月度快照，并把可匹配的账户余额更新到本周。</p>
+            <p>首次同步会读取 Firance 月度快照，并把可匹配的账户余额更新到最新。</p>
             <button type="button" onClick={() => refresh.mutate()} disabled={isRefreshing}>{isRefreshing ? "正在同步…" : "开始首次同步"}</button>
             {response?.refresh.message ? <small>{response.refresh.message}</small> : null}
           </div>
@@ -2724,7 +2756,7 @@ export function App() {
           <footer>
             <p>{response?.data ? `更新时间 ${timestampLabel.format(new Date(response.data.asOf))}` : emptyFooterText(status)}</p>
             {status === "error" ? <p className="footer-error">{visibleMessage ?? (response?.data ? "本次更新失败，显示上次数据。" : "数据暂不可用，请重新更新。")}</p> : null}
-            <p>月度来自 Firance 快照；投资与银行余额每周经 Plaid 刷新，非 Plaid 账户沿用快照值；银行同步可能延迟；内容仅供参考，不构成投资建议。</p>
+            <p>月度来自 Firance 快照；投资与银行余额经 Plaid 同步刷新，非 Plaid 账户沿用快照值；银行同步可能延迟；内容仅供参考，不构成投资建议。</p>
           </footer>
         ) : null}
       </main>
