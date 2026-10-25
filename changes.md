@@ -1620,3 +1620,9 @@
 - 验证：validate-finance-arch 146/146、validate-arch-daily-spend 46/46、validate-arch-dates 81/81、validate-arch-save 51/51、validate-arch-concurrency 49/49，全过零回归。
 - 局限：生产写入与所有者视角呈现均未验（写入未发生）；载荷基于 2026-10-24 晚拉取，通道开通时若已隔日应重拉重算再写（管线脚本可直接重跑）；分类映射按 SPEC 第 8 节 v4 执行，TRANSFER_OUT 配对采用一对一贪心（对日 posted 总额无影响，仅影响 excluded/unclassified 归桶）。
 - 回滚：本轮无生产写入、无数据迁移，仓库侧回退本提交即恢复；cron 正文未改动。
+
+## 2026-10-24 20 时 PDT（所有者直令登记：财务总览视图合并）
+
+- 所有者 2026-10-24 20:25 PT 在本 chat 指令：财务总览（space-3）的 daily overview 与 weekly view 合并，不搞两个视图，所有的都是 daily。
+- 执行口径：客户端只保留单一以日数据为基础的视图，独立周视图撤销；周聚合数字若保留，只能作为日行的汇总呈现出现在同一视图内，不得是独立视图/页签。用户可见文案中的 weekly/周视图命名一并清扫（内部标识符如 weeklyDelta 可留）。月度 Firance 快照仍按 F-ARCH-001 作对账存档，不属本次合并范围。数据口径与公式不变（B 类呈现变更），设计规则照旧（首屏结论、折叠复位、不回长）。
+- 派工：并入正在执行的 F-ARCH 日花销分片写入同一构建轮次顺序实施（避免双 builder 同 app 冲突），plans 登记随该轮提交一并落。
