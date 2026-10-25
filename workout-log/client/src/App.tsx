@@ -381,7 +381,9 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
   // W-HOMEB-001: text-only guide, prepared ahead of the dated swap —
   // from 2026-11-16 until the first snowboard trip this replaces the
   // bench-step-up slot in Home B at equal volume (2 sets); the stored
-  // plan itself is unchanged until then.
+  // plan itself is unchanged until then (see the day-2 schedule note).
+  // No demo image and no video: no verified real demonstration exists
+  // for this movement, so it ships text cues only.
   "lateral-lunge": {
     title: "侧向弓步",
     focus: "横向力量与耐力 · 单板横向重心转移",
@@ -1095,6 +1097,129 @@ function CurrentWeekProgress({ workouts, weekSummaries, activeWorkout, onOpenWor
   );
 }
 
+// LIFE-DESIGN-001-B2B (4): merged "本周" block — the former
+// 「本周进行中」 progress and 「本周安排」 schedule in ONE section.
+// Default state: one progress-summary line + the 7 schedule rows
+// (today marked ●). The per-session rows live behind an expansion
+// that is collapsed on every open (no remembered state). Boundary,
+// stated in the block heading: sessions completed this week appear
+// ONLY here; History below lists only earlier records, so no record
+// ever appears in both places. A this-week session row is itself a
+// details element with the same detail content History rows carry
+// (volume + per-exercise sets), keeping every record reachable.
+function ThisWeekSection({ plan, workouts, weekSummaries, focus }: {
+  plan: Plan | null;
+  workouts: Workout[];
+  weekSummaries?: readonly WeekSummary[] | null;
+  focus: { id: number; n: number } | null;
+}) {
+  const summary = currentWeekSummaryWithTotals(workouts, weekSummaries);
+  const today = todayScheduleIndex();
+  const entries = plan ? [...plan.schedule].sort((a, b) => a.day_index - b.day_index) : [];
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const sessionsPanelId = useId();
+  useEffect(() => {
+    if (!focus) return;
+    if (!summary.sessions.some((workout) => workout.id === focus.id)) return;
+    setSessionsOpen(true);
+    // The session's own details element carries the shared
+    // history-workout-<id> anchor; open it and scroll to it once
+    // the expansion above it is open.
+    requestAnimationFrame(() => {
+      const el = document.getElementById(`history-workout-${focus.id}`);
+      if (el instanceof HTMLDetailsElement) {
+        el.open = true;
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+    // summary.sessions is derived from workouts each render; the
+    // effect intentionally keys only on the focus nonce.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
+
+  const progressText = summary.hasFullTotals
+    ? summary.totalSessions > 0
+      ? `已保存完成 ${summary.totalSessions} 次 · 共 ${summary.totalCompletedSets} 组`
+      : "本周暂无已保存完成记录"
+    : summary.detailCount > 0
+      ? `最近样本内已保存完成 ${summary.detailCount} 次 · 共 ${summary.detailCompletedSets} 组（全周总数未确认）`
+      : "最近样本内暂无已保存完成记录（全周未确认）";
+
+  return (
+    <section className="this-week-section" aria-labelledby="this-week-title">
+      <div className="section-heading">
+        <h2 id="this-week-title">本周</h2>
+        <span>{compactDate(summary.start)}–{compactDate(summary.today)}</span>
+      </div>
+      <p className="this-week-boundary">边界：本周（周一至今天）完成的训练只列在这里展开看；更早的记录只在下方「最近训练」里，同一条不会出现两次。</p>
+      <p className="this-week-summary">{progressText}</p>
+      {entries.length > 0 ? (
+        <ol className="schedule-list">
+          {entries.map((entry) => {
+            const isToday = entry.day_index === today;
+            return (
+              <li key={entry.day_index} className={`schedule-row${isToday ? " is-today" : ""}`} aria-current={isToday ? "date" : undefined}>
+                <span className="schedule-day">{SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}</span>
+                <span className="schedule-what">
+                  <strong>{SCHEDULE_CODE_LABELS[entry.routine_code] ?? entry.routine_code}</strong>
+                  {entry.note ? <small>{entry.note}</small> : null}
+                </span>
+                {isToday ? <span className="today-badge">● 今天</span> : null}
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
+      {entries.length > 0 ? (
+        <p className="schedule-note">出发周（12 月初）减量：在家 B 停掉，健身房腿日量减约三成。</p>
+      ) : null}
+      <button
+        type="button"
+        className="this-week-toggle"
+        aria-expanded={sessionsOpen}
+        aria-controls={sessionsPanelId}
+        onClick={() => setSessionsOpen((open) => !open)}
+      >
+        <span>本周会话明细</span>
+        <span className="this-week-toggle-state">{sessionsOpen ? `收起 ▲` : `展开 ▼ · ${summary.sessions.length} 条`}</span>
+      </button>
+      {sessionsOpen ? (
+        <div id={sessionsPanelId}>
+          {summary.sessions.length === 0 ? (
+            <p className="current-week-empty">本周暂无已保存完成记录</p>
+          ) : (
+            <div className="history-list">
+              {summary.sessions.map((workout) => (
+                <details className="history-row" key={workout.id} id={`history-workout-${workout.id}`}>
+                  <summary>
+                    <span className="history-date">{formatDate(workout.completed_at ?? workout.started_at)}</span>
+                    <strong>{ROUTINE_META[workout.routine].label}</strong>
+                    <span>{completedCount(workout)} 组</span>
+                    <span>{formatDuration(workout.started_at, workout.completed_at)}</span>
+                    <i aria-hidden="true">›</i>
+                  </summary>
+                  <div className="history-detail">
+                    <p>总训练量 <strong>{Math.round(trainingVolume(workout)).toLocaleString("zh-CN")} {workout.unit}</strong></p>
+                    {groupSets(workout.sets).map((exercise) => (
+                      <div key={exercise.key}>
+                        <span>{exercise.name}</span>
+                        <span>{exercise.sets.filter((set) => set.completed).map((set) => `${set.weight ?? "自重"}×${set.reps ?? "—"}`).join(" / ") || "未完成"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ))}
+            </div>
+          )}
+          {summary.hasFullTotals && summary.missingDetailCount > 0 ? (
+            <p className="current-week-note">明细展示最近 {summary.detailCount} 条，其余 {summary.missingDetailCount} 条未在明细中展开</p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
   const { start, end } = previousCompleteWeek();
   const priorStart = new Date(start);
@@ -1123,58 +1248,55 @@ function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; co
         </div>
         <span>{week.length} 次 · {sets} 组</span>
       </div>
-      <p className="review-body">
-        {week.length === 0
-          ? "上周一到周日没有完成记录。沿用当前安排，完成推、拉、腿各一练后再判断动作调整。"
-          : completeRound
-            ? "上周已完成推、拉、腿各一轮。负荷建议只看最近一次可比训练：全部组完成且都达到次数上限才增重，有组低于下限则建议降重，未完成则保持，无可比记录不给建议。"
-            : `上周${routines.size > 0 ? `记录了 ${Array.from(routines).map((routine) => ROUTINE_META[routine].label).join("、")}` : "没有有效训练"}${missing.length > 0 ? `，缺少 ${missing.map((routine) => ROUTINE_META[routine].label).join("、")}` : "，但至少一次训练未完成全部组数"}；已记录动作仍按最近一次可比训练判断负荷：全部组完成且都达到次数上限才增重，有组低于下限则建议降重，未完成则保持，无可比记录不给建议。`}
-      </p>
 
-      {reviews.length > 0 ? (
-        <details className="review-evidence">
-          <summary>查看各动作表现依据 <span>{reviews.length} 个动作</span></summary>
-          <div>
-            {reviews.map((review) => (
-              <p key={`${review.key}-${review.unit}`}>
-                <strong>{review.name}</strong>
-                <span>
-                  该复盘周 {review.completed}/{review.planned} 组 · {review.atTop} 组到上限
-                  {review.prior ? `；前周 ${review.prior.atTop}/${review.prior.completed} 组到上限` : "；前周无记录"}
-                </span>
-                <small>{weightTrend(review)}</small>
-              </p>
-            ))}
-          </div>
-        </details>
-      ) : null}
-
-      <div className="review-change">
-        <span>下次训练参考</span>
-        {week.length === 0 ? (
-          <>
-            <strong>暂不新增动作</strong>
-            <p>先补齐一轮推、拉、腿；空缺数据不当作训练短板，也不据此改动作。</p>
-          </>
-        ) : (
-          <>
-            <strong>动作结构不变，按最近一次可比训练调负荷</strong>
-            <ul>
-              {recommendations.map((recommendation) => (
-                <li key={recommendation.text}>
-                  {recommendation.text}
-                  {recommendation.basis ? <span className="review-basis">{recommendation.basis}</span> : null}
-                </li>
-              ))}
-            </ul>
-            <p>
-              {completeRound
-                ? "增重幅度与训练预填一致：lb +5、kg +2.5。只有连续几周仍出现明确短板，才考虑替换或新增动作。"
-                : "未练到的训练日不当作短板；先补齐完整一轮，再考虑替换或新增动作。"}
+      <details className="review-evidence">
+        <summary>查看依据{reviews.length > 0 ? <span>{reviews.length} 个动作 · 含负荷建议</span> : <span>含负荷建议</span>}</summary>
+        <div>
+          <p className="review-body">
+            {week.length === 0
+              ? "上周一到周日没有完成记录。沿用当前安排，完成推、拉、腿各一练后再判断动作调整。"
+              : completeRound
+                ? "上周已完成推、拉、腿各一轮。负荷建议只看最近一次可比训练：全部组完成且都达到次数上限才增重，有组低于下限则建议降重，未完成则保持，无可比记录不给建议。"
+                : `上周${routines.size > 0 ? `记录了 ${Array.from(routines).map((routine) => ROUTINE_META[routine].label).join("、")}` : "没有有效训练"}${missing.length > 0 ? `，缺少 ${missing.map((routine) => ROUTINE_META[routine].label).join("、")}` : "，但至少一次训练未完成全部组数"}；已记录动作仍按最近一次可比训练判断负荷：全部组完成且都达到次数上限才增重，有组低于下限则建议降重，未完成则保持，无可比记录不给建议。`}
+          </p>
+          {reviews.map((review) => (
+            <p key={`${review.key}-${review.unit}`}>
+              <strong>{review.name}</strong>
+              <span>
+                该复盘周 {review.completed}/{review.planned} 组 · {review.atTop} 组到上限
+                {review.prior ? `；前周 ${review.prior.atTop}/${review.prior.completed} 组到上限` : "；前周无记录"}
+              </span>
+              <small>{weightTrend(review)}</small>
             </p>
-          </>
-        )}
-      </div>
+          ))}
+          <div className="review-change">
+            <span>下次训练参考</span>
+            {week.length === 0 ? (
+              <>
+                <strong>暂不新增动作</strong>
+                <p>先补齐一轮推、拉、腿；空缺数据不当作训练短板，也不据此改动作。</p>
+              </>
+            ) : (
+              <>
+                <strong>动作结构不变，按最近一次可比训练调负荷</strong>
+                <ul>
+                  {recommendations.map((recommendation) => (
+                    <li key={recommendation.text}>
+                      {recommendation.text}
+                      {recommendation.basis ? <span className="review-basis">{recommendation.basis}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                <p>
+                  {completeRound
+                    ? "增重幅度与训练预填一致：lb +5、kg +2.5。只有连续几周仍出现明确短板，才考虑替换或新增动作。"
+                    : "未练到的训练日不当作短板；先补齐完整一轮，再考虑替换或新增动作。"}
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      </details>
     </section>
   );
 }
@@ -2831,12 +2953,15 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
 
       <CurrentWeekProgress workouts={recent} weekSummaries={weekSummaries} activeWorkout={workout} compact />
 
-      <div className="progress-track" aria-label={`已完成 ${doneCount} 组，共 ${total} 组`}>
-        <span style={{ width: `${total ? (doneCount / total) * 100 : 0}%` }} />
-      </div>
-
-      <div className="workout-status-bar">
+      {/* LIFE-DESIGN-001-B2B (8): progress bar + status bar merged
+          into ONE row — completion count, an inline progress track,
+          and the save-state text. Save-state logic, the 查看 jump
+          and every in-flight state are unchanged. */}
+      <div className="workout-status-bar workout-status-merged">
         <span className="completion-count">已完成 {doneCount} / {total} 组</span>
+        <span className="progress-track progress-track-inline" role="img" aria-label={`已完成 ${doneCount} 组，共 ${total} 组`}>
+          <span style={{ width: `${total ? (doneCount / total) * 100 : 0}%` }} />
+        </span>
         <span className="save-aggregate" data-kind={saveAggregate.kind} role="status">
           {saveAggregate.label}
           {saveAggregate.firstAbnormal && (saveAggregate.kind === "error" || saveAggregate.kind === "blocked") ? (
@@ -2936,10 +3061,17 @@ function History({ workouts, focus }: {
     }
   }, [focus]);
 
+  // LIFE-DESIGN-001-B2B (6): default shows the most recent 5;
+  // 「查看全部」 expands to the full list the caller passes (the
+  // existing 20-record cap). The expansion is not remembered —
+  // every open starts collapsed back to 5.
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? workouts : workouts.slice(0, 5);
   if (workouts.length === 0) {
     return (
       <section className="history-section">
         <div className="section-heading"><h2>最近训练</h2></div>
+        <p className="history-boundary">只列本周之前的记录；本周的在上方「本周」里。</p>
         <p className="empty-history">第一次训练完成后，重量和次数会留在这里。</p>
       </section>
     );
@@ -2947,8 +3079,9 @@ function History({ workouts, focus }: {
   return (
     <section className="history-section">
       <div className="section-heading"><h2>最近训练</h2><span>{workouts.length} 次</span></div>
+      <p className="history-boundary">只列本周之前的记录；本周的在上方「本周」里。</p>
       <div className="history-list">
-        {workouts.map((workout) => (
+        {visible.map((workout) => (
           <details className="history-row" key={workout.id} id={`history-workout-${workout.id}`}>
             <summary>
               <span className="history-date">{formatDate(workout.completed_at ?? workout.started_at)}</span>
@@ -2969,6 +3102,16 @@ function History({ workouts, focus }: {
           </details>
         ))}
       </div>
+      {workouts.length > 5 ? (
+        <button
+          type="button"
+          className="history-toggle"
+          aria-expanded={showAll}
+          onClick={() => setShowAll((all) => !all)}
+        >
+          {showAll ? "收起 ▲" : `查看全部 ▼ · 共 ${workouts.length} 条`}
+        </button>
+      ) : null}
     </section>
   );
 }
@@ -2981,36 +3124,6 @@ function History({ workouts, focus }: {
 function todayScheduleIndex(now = new Date()) {
   // Monday = 0 … Sunday = 6, matching plan_schedule.day_index.
   return (now.getDay() + 6) % 7;
-}
-
-function WeeklySchedule({ plan }: { plan: Plan }) {
-  const today = todayScheduleIndex();
-  const entries = [...plan.schedule].sort((a, b) => a.day_index - b.day_index);
-  if (entries.length === 0) return null;
-  return (
-    <section className="schedule-section" aria-labelledby="schedule-title">
-      <div className="section-heading">
-        <h2 id="schedule-title">本周安排</h2>
-        <span>今天 {SCHEDULE_DAY_LABELS[today]}</span>
-      </div>
-      <ol className="schedule-list">
-        {entries.map((entry) => {
-          const isToday = entry.day_index === today;
-          return (
-            <li key={entry.day_index} className={`schedule-row${isToday ? " is-today" : ""}`} aria-current={isToday ? "date" : undefined}>
-              <span className="schedule-day">{SCHEDULE_DAY_LABELS[entry.day_index] ?? ""}</span>
-              <span className="schedule-what">
-                <strong>{SCHEDULE_CODE_LABELS[entry.routine_code] ?? entry.routine_code}</strong>
-                {entry.note ? <small>{entry.note}</small> : null}
-              </span>
-              {isToday ? <span className="today-badge">● 今天</span> : null}
-            </li>
-          );
-        })}
-      </ol>
-      <p className="schedule-note">出发周（12 月初）减量：在家 B 停掉，健身房腿日量减约三成。</p>
-    </section>
-  );
 }
 
 function DailyChecklist({ plan }: { plan: Plan }) {
@@ -3449,6 +3562,13 @@ function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCl
   }, [freshPlan]);
   const planData = freshPlan ?? lastGoodPlan;
   const planReadFailed = plan.isError || (plan.data != null && !plan.data.forbidden && plan.data.read_error != null);
+  // LIFE-DESIGN-001-B2B (4): the no-duplication boundary — sessions
+  // completed this week (Mon–today, by completed_at) are listed
+  // ONLY in the merged 本周 block; History receives only earlier
+  // records. Same rule workoutsInRange applies everywhere else.
+  const weekRange = currentWeekRange();
+  const thisWeekIds = new Set(workoutsInRange(recent, weekRange.start, weekRange.end).map((workout) => workout.id));
+  const earlierWorkouts = recent.filter((workout) => !thisWeekIds.has(workout.id));
 
   return (
     <main className="home-shell">
@@ -3470,14 +3590,6 @@ function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCl
           <button type="button" aria-pressed={unit === "kg"} onClick={() => setUnit("kg")}>kg</button>
         </div>
       </section>
-
-      <CurrentWeekProgress
-        workouts={recent}
-        weekSummaries={weekSummaries}
-        onOpenWorkout={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}
-      />
-
-      <WeeklyReview workouts={recent} comparableHistory={comparableHistory} />
 
       <section className="routine-selector" aria-label="选择训练日">
         {ALL_ROUTINES.map((routine, index) => {
@@ -3510,8 +3622,14 @@ function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCl
         </p>
       ) : null}
 
-      {planData ? <WeeklySchedule key={`schedule-${planData.daily_date}`} plan={planData} /> : null}
       {planData ? <DailyChecklist key={`daily-${planData.daily_date}`} plan={planData} /> : null}
+
+      <ThisWeekSection plan={planData} workouts={recent} weekSummaries={weekSummaries} focus={historyFocus} />
+
+      <WeeklyReview workouts={recent} comparableHistory={comparableHistory} />
+
+      <History workouts={earlierWorkouts} focus={historyFocus} />
+
       {planData ? <PlanConflicts plan={planData} /> : null}
       {planData ? (
         <PlanEditor
@@ -3519,8 +3637,6 @@ function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCl
           plan={planData}
         />
       ) : null}
-
-      <History workouts={recent} focus={historyFocus} />
     </main>
   );
 }

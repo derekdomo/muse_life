@@ -1598,3 +1598,13 @@
 
 - 所有者 2026-10-24 20:09 PT 指令：space-3 显示名由原名改为「财务总览」（artifact 目录层已由 COS 侧改完，slug space-3 不变，内容与数据不动）。
 - 本仓对齐：plans.md 与本文件内对该面板的称呼已统一为「财务总览」（内部代码名 weekly-finance 不动）；后续一切汇报与用户可见文案用新名。与每日刷新改造配套生效：每日节奏＋新名。
+
+## 2026-10-24 20 时 PDT（muse-life-plans-sync 19:55 轮次续：LIFE-DESIGN-001 批次 2 交付——B2A 读书 space-15＋B2B 训练 space-6）
+
+- 队列来源：所有者 2026-10-24 拍板设计稿 5 项全采＋分批落地（批次 2＝读书＋训练，顺次推进）；批次 1（B1A/B1B）已交付，本轮由同步轮次登记 B2A/B2B 两条并派 builder 实现，PM 暂停不作门控。证据类 B（纯呈现/信息架构）＋验证脚本维护。
+- B2A（space-15 读书复利，仅 client 6 文件：App/Home/Books/Snippets/Cards/Tags）：回味页「最近复用」明确定位 teaser 并加跳知识卡页完整账本入口；书单页导入区收进默认折叠「＋导入新书」、「记一次阅读」表单＋最近 20 条记录移页底默认折叠「阅读记录」（摘要行＝最近一次日期＋总条数）；片段卡改紧凑态（原文前两行＋出处＋含 ✓/○ 与数字的状态行），展开走既有提问/成卡/批注/标签机制，列表默认最近 10 条＋「查看全部」；知识卡新建表单收进「＋新建知识卡」、卡片改紧凑态（核心＋复用数一行，展开见引用/批注/复用登记），复用账本原样；主题页每标签默认折叠（摘要行＝标签名＋N 条片段·M 张卡＋▼/▲ 文字标记），跨页签跳转目标在片段/知识卡页自动展开定位（R8）；折叠不记忆、每次打开恢复默认；阅读器与微信读书带入流程未动，server/schema/口径未动。构建审计 pass（无 console 错误、无移动溢出、安全审查无发现；审计为非所有者身份、内容靠源码/diff 逐项核对）。屏数（390×844 结构估算，构建方口径）：书单约 3.5–4→1.5–2 屏、片段 10 条展开约 9–12→约 3 屏、知识卡 10 张→约 2 屏、主题 10 标签约 3–5→约 1 屏、回味约 2→2 屏。功能可达对照表随构建回传全文给出（导入/只加书名/记阅读/片段四操作区/知识卡登记复用/主题跳转均有明确到达路径）。
+- B2B（space-6 训练记录，仅 client App.tsx＋theme.css）：起始页重排为 完成回执（条件置顶）→Hero→选择训练日（主动作上移）→体态微练打卡→上周复盘（默认结论标题一行＋依据折叠、负荷建议与进阶数值随依据折叠）→本周合并区块→最近训练（更早记录、默认 5 条＋查看全部至 20 条）→计划编辑整块折叠；「本周进行中」与「本周安排」合并为 ThisWeekSection（进度摘要一行＋逐日 7 行今日 ● 标记＋有界说明，会话行只在本周内出现、History 只列更早，同一条不重复）；训练中页进度条与状态条合并一行（已完成 X/Y 组＋内联进度条＋保存状态文字，失败附「未保存」），结束区与自动保存/休息计时接线保留。构建审计 pass（390px 渲染、保存状态符号＋文字、44px 触控）；屏数估算：起始页默认 8–11 屏→约 3–4 屏（动作按钮在内边距口径下约 3.7 屏、略高于区间上沿，如实记录）。独立 inspect 复核（只读）逐项确认上述结构与接线、服务端/口径/公式未动。
+- 源码回灌：两 app 改动文件已整文件覆盖回灌本仓并逐字节核对一致（reading-compounding client 6 文件、workout-log client 2 文件）；space-6 drizzle 0007/0008 与线上仅排版换行差异（SQL 语义一致），本轮未动迁移。
+- 验证证据：workout-log 仓库实跑 validate-week-current 58/58（见下迁移说明）、validate-autosave 69/69、validate-rest-timer 48/48、validate-start 66/66、validate-receipt 36/36、validate-muscle-diagram 36/36；reading-compounding 在同源线上树以 bun 实跑 validate-save-atomicity 123/123、validate-reader-switch 58/58、validate-import-generations 138/138、validate-reading-qa 107/107。基线比对（HEAD 临时副本实跑）：validate-finish 97 过 1 败、validate-progression 1 败、validate-muscle-receipt 28 过 2 败在改前 HEAD 与改后计数完全一致，均为既有基线、非本批引入；validate-plan-safe 在线上树因 SDK 模块缺失崩溃（既有环境形态，改前同类）。
+- 验证脚本迁移（H-VALID-MAINT 同例）：validate-week-current 1 项失败为 B2B 退役结构断言——旧 WeekCurrentSummary 的 onOpenWorkout 直绑针随组件合并消失，History-focus 机制本身未变（回执 onViewRecord 仍以递增 n 调 setHistoryFocus，ThisWeekSection 与 History 均接收 focus={historyFocus} 并就地展开目标行）。已把该断言迁移为新接线等价针（不断言删除、行为覆盖不变），复跑 58/58。
+- 局限：所有者视角未验（构建/审计/inspect 均为非所有者通道，最终以所有者本人打开 space-15/space-6 为准）；屏数为结构估算非实机像素测量；批次 3（space-10/12/13/14）沿原顺序后续推进，本轮未动。本轮用户可见增量：2 组（读书五页签紧凑化、训练起始页重排）。

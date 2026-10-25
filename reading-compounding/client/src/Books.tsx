@@ -298,6 +298,11 @@ export function Books({
   const [importPhase, setImportPhase] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importNote, setImportNote] = useState<string | null>(null);
+  // Presentation only (LIFE-DESIGN-001-B2A): the import area and the
+  // reading-log area start collapsed on every open — fold state is
+  // never persisted.
+  const [showImport, setShowImport] = useState(false);
+  const [showLog, setShowLog] = useState(false);
 
   // Add-book form
   const [showAdd, setShowAdd] = useState(false);
@@ -511,6 +516,11 @@ export function Books({
     { status: "done", label: "✓ 读完" },
   ];
   const sessions = [...library.sessions].reverse().slice(0, 20);
+  const sessionTotal = library.sessions.length;
+  const latestSessionDate =
+    library.sessions.length > 0
+      ? library.sessions.reduce((m, s) => (s.date > m ? s.date : m), "")
+      : null;
   const bookTitle = (id: number | null) =>
     id != null ? (library.books.find((b) => b.id === id)?.title ?? null) : null;
 
@@ -530,7 +540,32 @@ export function Books({
       />
 
       <section aria-label="导入新书">
-        <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          aria-expanded={showImport}
+          onClick={() => setShowImport((v) => !v)}
+          className="rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white"
+        >
+          {showImport ? "▲ 收起导入" : "＋ 导入新书"}
+        </button>
+        {importPhase && (
+          <p role="status" className="mt-2 text-sm text-[var(--accent)]">
+            {importPhase}
+          </p>
+        )}
+        {importError && (
+          <p role="alert" className="mt-2 text-sm text-[var(--accent2)]">
+            导入失败：{importError}。原文件与原阅读位置都保留着，可以重试。
+          </p>
+        )}
+        {importNote && (
+          <p role="status" className="mt-2 text-sm text-[var(--accent)]">
+            {importNote}
+          </p>
+        )}
+        {showImport && (
+          <>
+        <div className="mt-3 flex flex-wrap gap-2">
           <button
             type="button"
             disabled={importPhase != null}
@@ -552,21 +587,6 @@ export function Books({
           EPUB 在这台设备上解析，正文只存入本应用的私有存储，不会上传到任何外部服务。
           只加书名的条目仅入书单，不代表已读或已导入全文。
         </p>
-        {importPhase && (
-          <p role="status" className="mt-2 text-sm text-[var(--accent)]">
-            {importPhase}
-          </p>
-        )}
-        {importError && (
-          <p role="alert" className="mt-2 text-sm text-[var(--accent2)]">
-            导入失败：{importError}。原文件与原阅读位置都保留着，可以重试。
-          </p>
-        )}
-        {importNote && (
-          <p role="status" className="mt-2 text-sm text-[var(--accent)]">
-            {importNote}
-          </p>
-        )}
         {showAdd && (
           <div className="mt-3 space-y-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
             <div>
@@ -616,6 +636,8 @@ export function Books({
             </button>
           </div>
         )}
+          </>
+        )}
       </section>
 
       {groups.map((g) => {
@@ -642,8 +664,23 @@ export function Books({
         <p className="text-sm text-[var(--dim)]">书单是空的。</p>
       )}
 
-      <section aria-label="记阅读" className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-        <h2 className="text-base font-semibold">记一次阅读</h2>
+      <section aria-label="阅读记录" className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <button
+          type="button"
+          aria-expanded={showLog}
+          onClick={() => setShowLog((v) => !v)}
+          className="flex w-full items-center justify-between gap-2 text-left"
+        >
+          <span className="text-base font-semibold">阅读记录</span>
+          <span className="text-xs text-[var(--dim)]">
+            {sessionTotal > 0
+              ? `最近一次 ${latestSessionDate} · 共 ${sessionTotal} 条 · ${showLog ? "▲ 收起" : "▼ 展开"}`
+              : `共 0 条 · ${showLog ? "▲ 收起" : "▼ 展开"}`}
+          </span>
+        </button>
+        {showLog && (
+          <>
+        <h3 className="mt-4 text-sm font-semibold">记一次阅读</h3>
         <p className="mt-1 text-xs text-[var(--dim)]">
           只有这里记下的才算阅读日；导入、看回味都不算。
         </p>
@@ -720,6 +757,8 @@ export function Books({
               </li>
             ))}
           </ul>
+        )}
+          </>
         )}
       </section>
     </div>

@@ -97,6 +97,7 @@ export function App() {
                 onOpenReader={openReader}
                 onGoSnippets={() => setTab("snippets")}
                 onGoBooks={() => setTab("books")}
+                onGoCards={() => setTab("cards")}
               />
             )}
             {tab === "books" && (

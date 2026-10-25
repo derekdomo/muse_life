@@ -45,6 +45,14 @@ function CardItem({
   // below by its real server id, never re-registered.
   const [lastReuseId, setLastReuseId] = useState<number | null>(null);
   const reuseKeyRef = useRef<string>(newRequestId());
+  // Compact by default (LIFE-DESIGN-001-B2A): core + reuse count on
+  // the summary lines; the snippet quote, annotation, tags, edit form
+  // and reuse registration appear on expand. A jump target
+  // (highlighted) opens expanded (R8). Fold state never persists.
+  const [expanded, setExpanded] = useState(highlighted);
+  useEffect(() => {
+    if (highlighted) setExpanded(true);
+  }, [highlighted]);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["library"] });
@@ -148,6 +156,16 @@ function CardItem({
         </span>
       </p>
 
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((v) => !v)}
+        className="mt-3 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+      >
+        {expanded ? "▲ 收起" : "▼ 展开（片段引用 · 批注 · 标签 · 复用登记）"}
+      </button>
+      {expanded && (
+        <>
       {snippet && (
         <blockquote className="font-serif-book mt-3 border-l-2 border-[var(--border)] pl-3 text-[15px] leading-relaxed text-[var(--dim)]">
           「{snippet.text}」
@@ -347,6 +365,8 @@ function CardItem({
       {msg && (
         <p role="status" className="mt-2 text-sm text-[var(--dim)]">{msg}</p>
       )}
+        </>
+      )}
     </article>
   );
 }
@@ -365,6 +385,9 @@ export function Cards({
   const [annotation, setAnnotation] = useState("");
   const [tags, setTags] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+  // The new-card form starts collapsed behind its button on every
+  // open (LIFE-DESIGN-001-B2A); fold state is never persisted.
+  const [showNew, setShowNew] = useState(false);
 
   const create = useMutation({
     mutationFn: () =>
@@ -411,7 +434,16 @@ export function Cards({
   return (
     <div className="space-y-6">
       <section aria-label="新建知识卡" className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-        <h2 className="text-base font-semibold">新建知识卡</h2>
+        <button
+          type="button"
+          aria-expanded={showNew}
+          onClick={() => setShowNew((v) => !v)}
+          className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white"
+        >
+          {showNew ? "▲ 收起" : "＋ 新建知识卡"}
+        </button>
+        {msg && <p role="status" className="mt-2 text-sm text-[var(--dim)]">{msg}</p>}
+        {showNew && (
         <div className="mt-3 space-y-3">
           <div>
             <label htmlFor="new-core" className={labelCls}>一句话核心</label>
@@ -436,7 +468,6 @@ export function Cards({
             <label htmlFor="new-tags" className={labelCls}>标签（可空，逗号分隔）</label>
             <input id="new-tags" value={tags} onChange={(e) => setTags(e.target.value)} className={inputCls} />
           </div>
-          {msg && <p role="status" className="text-sm text-[var(--dim)]">{msg}</p>}
           <button
             type="button"
             disabled={create.isPending || !core.trim()}
@@ -446,6 +477,7 @@ export function Cards({
             {create.isPending ? "保存中…" : "保存知识卡"}
           </button>
         </div>
+        )}
       </section>
 
       <section aria-label="全部知识卡" className="space-y-3">

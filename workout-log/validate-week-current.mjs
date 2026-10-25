@@ -255,8 +255,17 @@ function mkWorkout(id, routine, startedIso, completedIso, totalSets, completedSe
     && clientSrc.includes('recommendationBasis(comparable.workout.completed_at, comparable.workout.unit, review.unit)'));
   check('basis: line format is 依据：{date} · {unit} 记录 with the 已换算 marker on unit mismatch',
     clientSrc.includes('`依据：${parts.join(" · ")}`') && clientSrc.includes('parts.push("已换算")'));
+  // Wiring assertion migrated for LIFE-DESIGN-001-B2B (2026-10-24): the old
+  // WeekCurrentSummary onOpenWorkout binding was retired when 本周进行中 and
+  // 本周安排 merged into ThisWeekSection; the History-focus mechanism itself
+  // is unchanged — a record control still sets historyFocus with an
+  // incrementing n, and both start-page lists (ThisWeekSection for this
+  // week's sessions, History for earlier ones) receive that focus and expand
+  // the target row in place. Assert the new binding sites, not the old prop.
   check('wiring: each session row on the start page opens its record through the History focus',
-    clientSrc.includes('onOpenWorkout={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}'));
+    clientSrc.includes('onViewRecord={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}')
+    && clientSrc.includes('<ThisWeekSection plan={planData} workouts={recent} weekSummaries={weekSummaries} focus={historyFocus} />')
+    && clientSrc.includes('<History workouts={earlierWorkouts} focus={historyFocus} />'));
   check('title: the layer is titled 本周进行中 with the Monday..today range',
     clientSrc.includes('`本周进行中 · ${compactDate(summary.start)}–${compactDate(summary.today)}`'));
   // Totals assertion updated for the W2.3 P1 fix: the header line now

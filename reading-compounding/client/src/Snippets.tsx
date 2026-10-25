@@ -897,6 +897,16 @@ function SnippetCard({
   const [reflectionDraft, setReflectionDraft] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // Compact by default (LIFE-DESIGN-001-B2A): first two lines of the
+  // quote + one source line + one status line; the full text and the
+  // four action areas （提问/成卡/批注/标签） appear on expand via the
+  // same in-place mechanisms as before. A cross-tab jump target
+  // (highlighted) opens expanded (R8: jump = expand). Fold state is
+  // never persisted — every open starts from the default.
+  const [expanded, setExpanded] = useState(highlighted);
+  useEffect(() => {
+    if (highlighted) setExpanded(true);
+  }, [highlighted]);
   // The card this form most recently saved (server id), so the
   // success note can jump straight to that card.
   const [lastCardId, setLastCardId] = useState<number | null>(null);
@@ -991,6 +1001,41 @@ function SnippetCard({
         highlighted ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/40" : "border-[var(--border)]"
       }`}
     >
+      {!expanded ? (
+        <>
+          <blockquote className="font-serif-book text-[17px] leading-relaxed line-clamp-2">
+            「{snippet.text}」
+          </blockquote>
+          <p className="mt-2 truncate text-xs text-[var(--dim)]">{sourceLabelOf(snippet)}</p>
+          <p className="mt-1 text-xs text-[var(--dim)]">
+            来源：{SNIPPET_SOURCE_LABEL[snippet.source]}
+            {snippet.internalized ? " · ✓ 已内化" : " · ○ 未内化"}
+            {snippet.cardIds.length > 0 ? ` · 已成卡 ${snippet.cardIds.length} 张` : " · 未成卡"}
+            {snippet.thinkPrompt ? " · 有思考提示" : ""}
+            {snippet.reflection ? " · 有批注" : ""}
+            {` · 标签 ${snippet.tags.length} 个`}
+          </p>
+          <button
+            type="button"
+            aria-expanded={false}
+            onClick={() => setExpanded(true)}
+            className="mt-3 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
+          >
+            ▼ 展开全文（提问 · 成卡 · 批注 · 标签）
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="mb-2 flex justify-end">
+            <button
+              type="button"
+              aria-expanded={true}
+              onClick={() => setExpanded(false)}
+              className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs"
+            >
+              ▲ 收起
+            </button>
+          </div>
       <p className="text-xs text-[var(--dim)]">
         <span className="font-medium text-[var(--text)]">原文</span> · {sourceLabelOf(snippet)} ·{" "}
         {SNIPPET_SOURCE_LABEL[snippet.source]}
@@ -1252,6 +1297,8 @@ function SnippetCard({
       {showQa && (
         <SnippetQaPanel snippet={snippet} cards={cards} onViewCard={onViewCard} />
       )}
+        </>
+      )}
     </article>
   );
 }
@@ -1276,6 +1323,9 @@ export function Snippets({
   const [chapterLabel, setChapterLabel] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [ocrBusy, setOcrBusy] = useState(false);
+  // Default list shows the 10 most recent saved snippets; the rest
+  // is one tap away （查看全部）. Never persisted across opens.
+  const [showAllSnippets, setShowAllSnippets] = useState(false);
 
   useEffect(() => {
     if (focusId != null) {
@@ -1365,6 +1415,11 @@ export function Snippets({
 
   const drafts = library.snippets.filter((s) => s.status === "draft");
   const saved = [...library.snippets.filter((s) => s.status === "saved")].reverse();
+  // A jump target beyond the first 10 pulls the full list in, so the
+  // target always exists in the DOM and opens expanded (R8).
+  const focusIdx = focusId != null ? saved.findIndex((s) => s.id === focusId) : -1;
+  const visibleSaved =
+    showAllSnippets || focusIdx >= 10 ? saved : saved.slice(0, 10);
 
   return (
     <div className="space-y-6">
@@ -1443,7 +1498,7 @@ export function Snippets({
             还没有片段。在阅读器里选中正文即可存片段，或用上方入口从微信读书带入。
           </p>
         )}
-        {saved.map((s) => (
+        {visibleSaved.map((s) => (
           <SnippetCard
             key={s.id}
             snippet={s}
@@ -1454,6 +1509,24 @@ export function Snippets({
             highlighted={focusId === s.id}
           />
         ))}
+        {!showAllSnippets && saved.length > 10 && focusIdx < 10 && (
+          <button
+            type="button"
+            onClick={() => setShowAllSnippets(true)}
+            className="w-full rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm"
+          >
+            查看全部（共 {saved.length} 条，现显示最近 10 条）
+          </button>
+        )}
+        {showAllSnippets && saved.length > 10 && (
+          <button
+            type="button"
+            onClick={() => setShowAllSnippets(false)}
+            className="w-full rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm"
+          >
+            只看最近 10 条
+          </button>
+        )}
       </section>
     </div>
   );

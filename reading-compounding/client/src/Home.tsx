@@ -26,12 +26,14 @@ export function Home({
   onOpenReader,
   onGoSnippets,
   onGoBooks,
+  onGoCards,
 }: {
   dashboard: Dashboard;
   library: Library;
   onOpenReader: (book: Book, chapter?: number, offset?: number) => void;
   onGoSnippets: () => void;
   onGoBooks: () => void;
+  onGoCards: () => void;
 }) {
   const queryClient = useQueryClient();
   const [reflectionDraft, setReflectionDraft] = useState<string | null>(null);
@@ -323,7 +325,7 @@ export function Home({
         )}
       </section>
 
-      {/* 最近复用 */}
+      {/* 最近复用：只是预告（teaser），完整账本在知识卡页签 */}
       {dashboard.recentReuses.length > 0 && (
         <section aria-label="最近复用">
           <h2 className="text-xs font-medium tracking-wide text-[var(--dim)]">最近复用 ↻</h2>
@@ -340,6 +342,16 @@ export function Home({
               </li>
             ))}
           </ul>
+          <p className="mt-3 text-xs text-[var(--dim)]">
+            这里只列最近几笔，是完整账本的预告。
+          </p>
+          <button
+            type="button"
+            onClick={onGoCards}
+            className="mt-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm"
+          >
+            去「知识卡」看完整复用账本
+          </button>
         </section>
       )}
     </div>
