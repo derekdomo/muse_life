@@ -9,7 +9,7 @@
 - 仓库建立（derekdomo/muse_life，private）。
 - 从 muse_incubator 迁入 4 个 interactive app 的代码（只含代码，不含 app.db 等数据；这批代码当天早些时候曾短暂推入 muse_incubator，按用户指示改归本仓）：
   - `house-hunting/`（南湾看房周报，源 artifact space-2）
-  - `weekly-finance/`（每周财务总览，源 artifact space-3）
+  - `weekly-finance/`（财务总览，源 artifact space-3）
   - `health-dashboard/`（健康看板，源 artifact space-4）
   - `workout-log/`（训练记录，源 artifact space-6）
 - 同步方式：本仓已配 deploy key，Muse 侧可用 git 直接读写。
@@ -1593,3 +1593,8 @@
 - 改了什么（weekly-finance/，全部为工件线上源码逐字节回灌、无功能改动）：(1) `server/src/actions.ts` +581 行：`ingestArchDailySpend` 受控写入通道（与 `ingestArchNetWorth` 并列、同一门禁语义）、服务端日花销同口径重算 `summarizeSpendDailyServer`、版本仲裁与精确读回、getDashboard 附最新日花销快照；(2) `server/src/schema.ts` +21 行：`archDailySpend` 表定义（0006，只追加、仲裁在写语句不在唯一索引，注释在位）；(3) `drizzle/0006_arch_daily_spend.sql` 新增（arch_daily_spend 表）＋`drizzle/meta/_journal.json` 增 0006 条目；(4) `client/src/App.tsx` +101/−1：日花销呈现 `DailySpendSection`（日净值序列与日花销展示），「月度记录」标题行随线上版调整；(5) 新增 `validate-arch-daily-spend.ts`（249 行，真实 handler＋内存 DB 验证）。回灌后 6 文件与 ts-spaces/space-3 线上树逐字节一致（cmp 全过）；差异范围核对：actions/schema 为纯新增、App 仅日花销段与 1 行标题，0006/journal 仅日花销条目，无夹带其他改动；未提交 app.db/.env/任何真实数据（验证夹具为 acct_a/acct_b 合成小额）。
 - 验证证据：线上树（与回灌后仓库逐字节一致）实跑——`bun validate-arch-daily-spend.ts` 46/46、`validate-arch-save.ts` 51/51、`validate-arch-concurrency.ts` 49/49、`validate-arch-dates.ts` 81/81、`validate-refresh-chain.ts` 134/134；`tsc --noEmit` 服务端与客户端均无错误输出；mjs 套件：facts-card 147/147、cashflow 90/90、available-cash 101/101、holdings 66/66、investment-performance 106/106、monthly-facts 73/73、payload 50/50、check-progress 68/68、design-b1a 79/79、color 16/16；仓库侧实跑 `node validate-finance-arch.mjs` 146/146、design-b1a 79/79、color 16/16（其余 mjs 在仓库直跑因无 node_modules 缺 typescript 包报错、为既有环境形态，改在同源线上树实跑如上）。
 - 局限：本轮仅回灌与登记，无工件功能变更、所有者视角未验；`F-ARCH-001` 整条仍不勾选——异常阈值定案仍待所有者裁定（沿原条挂起），每日链定常首跑（10-25 约 07:39 PT）结果由明日轮次记录。本轮用户可见增量：0 组（回灌不计）。
+
+## 2026-10-24 20 时 PDT（改名对齐：财务总览）
+
+- 所有者 2026-10-24 20:09 PT 指令：space-3 显示名由原名改为「财务总览」（artifact 目录层已由 COS 侧改完，slug space-3 不变，内容与数据不动）。
+- 本仓对齐：plans.md 与本文件内对该面板的称呼已统一为「财务总览」（内部代码名 weekly-finance 不动）；后续一切汇报与用户可见文案用新名。与每日刷新改造配套生效：每日节奏＋新名。
