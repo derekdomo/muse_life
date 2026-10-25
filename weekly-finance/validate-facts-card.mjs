@@ -264,8 +264,16 @@ check("band facts: previous complete month present but unverified reads 未核�
   factsUnverified[0].label === "上一完整月" && factsUnverified[0].text.includes("2026-09") && factsUnverified[0].text.includes("未核实"));
 check("band facts: current month without a snapshot is stated as not yet obtained",
   factsUnverified[1].label === "当月" && factsUnverified[1].text.includes("尚无快照"));
-check("band facts: unverified history months are named with their month keys",
-  factsUnverified[2].label === "历史月份" && factsUnverified[2].text.includes("未核实") && factsUnverified[2].text.includes("2026-08"));
+check("band facts: pre-2026-09 unverified history is disregarded under the owner ruling (stated as ignored, not named, not verified)",
+  factsUnverified[2].label === "历史月份" && factsUnverified[2].text.includes("忽略") && factsUnverified[2].text.includes("2026-09 之前")
+  && factsUnverified[2].text.includes("1 个") && !factsUnverified[2].text.includes("2026-08") && !factsUnverified[2].text.includes("均已核实"));
+const NOW_NOV = new Date(2026, 10, 15); // 2026-11-15 local
+const factsNov = monthAvailabilityFacts([
+  bandMonth("2026-08-31", "unknown"), bandMonth("2026-09-30", "unknown"), bandMonth("2026-10-31", "complete"),
+], NOW_NOV);
+check("band facts: from a 2026-11 view, an unverified 2026-09 still counts and is named while 2026-08 stays disregarded",
+  factsNov[2].label === "历史月份" && factsNov[2].text.includes("未核实") && factsNov[2].text.includes("2026-09")
+  && factsNov[2].text.includes("忽略") && !factsNov[2].text.includes("2026-08"));
 const factsMissing = monthAvailabilityFacts([bandMonth("2026-10-15", "partial")], NOW);
 check("band facts: a missing previous complete month reads 缺失； the in-progress current month shows its as-of date",
   factsMissing[0].text.includes("缺失") && factsMissing[1].text.includes("仅进行中") && factsMissing[1].text.includes("2026-10-15"));
