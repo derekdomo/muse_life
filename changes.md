@@ -1646,3 +1646,9 @@
 - 验证（仓库实跑，node_modules 临时借用工件目录、跑后移除）：validate-arch-daily-spend-chunks 33/33、validate-arch-daily-spend 47/47、validate-design-b1a 99/99、validate-payload 50/50、validate-finance-arch 146/146、validate-arch-save 51/51、validate-arch-concurrency 49/49、validate-arch-dates 81/81、validate-refresh-chain 134/134，零失败，与构建方回传计数一致。
 - 局限：回灌只对齐仓库与线上源码；所有者视角呈现仍以本人打开为准。F-ARCH-001 整条不勾选，余项（F0.6/F1.6 卡片迁移、异常阈值定案）沿原队列。
 - 回滚：回退本提交即恢复回灌前仓库状态；线上工件不受影响。
+
+## 2026-10-24 21 时 PDT（所有者纠正登记：视图合并的本意与 Calendar view 返工）
+
+- 所有者 2026-10-24 21:16 PT 在本 chat 纠正：20:25 的「合并」指的是 daily/weekly 数据口径合一，不是取消分页组织；页签撤销版把所有东西堆在一页、太长——可以分 tab。此前实现方把「合并」误读为拍平单页，口径在此纠正。
+- 另一纠正：日花销要的是 Calendar view（月历网格），交付的逐日列表不算数，返工做真月历。
+- 返工口径：恢复页签组织（按已批准的设计裁定①：总览／明细两页签）；日花销主呈现改为 Calendar 月历网格——每格日期＋当日花销金额（数字为第一通道，色弱规则照旧、不得只靠颜色深浅表意）、今日标注、无数据日如实标缺失、月份前后切换、点某日下钻当日 category 分布；数据源 arch_daily_spend（729 日、全覆盖自 2026-09-06，此前覆盖如实标注）。数据口径与公式不变；validate-design-b1a 中「无页签」断言按新结构修订（此前断言源于实现方误读，一并纠正）。
