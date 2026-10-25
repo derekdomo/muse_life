@@ -1,26 +1,27 @@
-// LIFE-DESIGN-001-B1A validation, updated for DAILY-MERGE-001
-// (owner ruling 2026-10-24): the former two-tab restructure
-// (B1A, options 1A + 2A) is superseded in STRUCTURE by the
-// single daily view — no tab bar, no second view; the daily
-// sections are visible in the one view and every former detail
-// feature is reachable in the same view inside default-closed
-// folds. B1A assertions that protect facts (conclusion-card
-// wording, F-ARCH in-place caliber labels, summary-line
-// helpers, single rendering homes, fold defaults) are kept
-// verbatim; the tab/overview/detail structure assertions are
-// replaced by single-view assertions, and new assertions cover
-// the merge contract: no independent second view or tab, no
-// user-visible weekly / 每周 wording anywhere in client or
-// server sources, and multi-day aggregates existing ONLY as
-// near-7-day summary rows summed from the daily rows.
+// LIFE-DESIGN-001-B1A validation, updated for the
+// DAILY-MERGE-001 CORRECTION (owner correction 2026-10-24
+// 21:16 PT): the "merge" is a DATA-CALIBER merge only — the
+// page organisation returns to ruling 1: two tabs, 「总览」
+// (overview, default) and 「明细」 (detail), tab state kept in
+// mount-time component state only. Daily spend in the detail
+// tab is a TRUE Calendar month grid (weekday header, aligned
+// date cells, text amounts) built by the exported pure helpers
+// buildSpendCalendarMonth / spendCalendarMonthSummary /
+// buildSpendDayDetail — the old per-day LIST fold is gone.
+// Assertions that protect facts (conclusion-card wording,
+// F-ARCH in-place caliber labels, summary-line helpers, fold
+// defaults, no persistence, no weekly wording in client or
+// server sources, near-7-day aggregates summed only from the
+// daily rows) are kept; the previous single-view assertions
+// (no tablist etc.) were products of the misreading and are
+// replaced by two-tab + Calendar assertions.
 //
-// Behaviour runs against the REAL summary helpers extracted
-// from client/src/App.tsx (type annotations stripped
-// mechanically, formatters sliced verbatim from the same
-// file); structure assertions run against the real client +
-// server + theme sources; the screen estimate is a documented
-// height model over the single view's default block inventory.
-// All fixtures are synthetic; no real amount is read.
+// Behaviour runs against the REAL helpers extracted from
+// client/src/App.tsx (type annotations stripped mechanically,
+// formatters sliced verbatim from the same file); structure
+// assertions run against the real client + server + theme
+// sources. All fixtures are synthetic; no real amount is read,
+// and app.db is never touched.
 import { readFileSync } from "node:fs";
 
 const appSrc = readFileSync(new URL("./client/src/App.tsx", import.meta.url), "utf8");
@@ -52,9 +53,18 @@ const fmtStart = appSrc.indexOf("const currency = new Intl.NumberFormat");
 const fmtEnd = appSrc.indexOf("function monthDate");
 if (fmtStart < 0 || fmtEnd < 0) throw new Error("formatter block not found");
 const formatters = appSrc.slice(fmtStart, fmtEnd);
+// The category label table, sliced verbatim for the drill-down helper.
+const labelsStart = appSrc.indexOf("export const dailyCategoryLabels");
+const labelsEnd = appSrc.indexOf("export function dailyCategoryLabel");
+if (labelsStart < 0 || labelsEnd < 0) throw new Error("category labels not found");
+const categoryLabels = appSrc.slice(labelsStart, labelsEnd)
+  .replace("export const", "const")
+  .replace(": Record<string, string>", "");
 function loadHelpers() {
   const parts = [
     formatters,
+    categoryLabels,
+    extractFn(appSrc, "dailyCategoryLabel"),
     extractFn(appSrc, "trendIndicator"),
     extractFn(appSrc, "signedCurrency"),
     extractFn(appSrc, "fireYearsEstimate", [["fire: Dashboard[\"fire\"]", "fire"]]),
@@ -65,8 +75,13 @@ function loadHelpers() {
     extractFn(appSrc, "holdingsSummaryLine", [["data: Dashboard", "data"]]),
     extractFn(appSrc, "recentDailySpendSummary", [["days: DailySpendDayLike[]", "days"]]),
     extractFn(appSrc, "recentDailyNetWorthChange", [["series: DailyNetWorthPointLike[]", "series"]]),
+    extractFn(appSrc, "buildSpendCalendarMonth", [["days: SpendCalendarDayLike[]", "days"], ["cells: SpendCalendarCell[]", "cells"], ["weeks: SpendCalendarCell[][]", "weeks"]]),
+    extractFn(appSrc, "spendCalendarMonthSummary", [["days: SpendCalendarDayLike[]", "days"]]),
+    extractFn(appSrc, "spendCalendarMonthBounds"),
+    extractFn(appSrc, "shiftSpendCalendarMonth"),
+    extractFn(appSrc, "buildSpendDayDetail", [[": SpendDayDetail", ""], ["day: SpendCalendarDayLike | null", "day"]]),
   ];
-  return new Function(`${parts.join("\n")}; return { fireYearsEstimate, fireSummaryLine, distributionSummaryLine, cashScopeSummaryLine, investmentSummaryLine, holdingsSummaryLine, recentDailySpendSummary, recentDailyNetWorthChange };`)();
+  return new Function(`${parts.join("\n")}; return { fireYearsEstimate, fireSummaryLine, distributionSummaryLine, cashScopeSummaryLine, investmentSummaryLine, holdingsSummaryLine, recentDailySpendSummary, recentDailyNetWorthChange, buildSpendCalendarMonth, spendCalendarMonthSummary, spendCalendarMonthBounds, shiftSpendCalendarMonth, buildSpendDayDetail };`)();
 }
 const H = loadHelpers();
 
@@ -76,7 +91,6 @@ check("years: negative gap -> 0", H.fireYearsEstimate({ gap: -100, annualContrib
 check("years: ceil of gap / pace", H.fireYearsEstimate({ gap: 100001, annualContribution: 10000 }) === 11);
 check("years: exact division", H.fireYearsEstimate({ gap: 100000, annualContribution: 10000 }) === 10);
 check("years: no pace -> null (never a fabricated 0)", H.fireYearsEstimate({ gap: 100, annualContribution: 0 }) === null);
-// mutation sensitivity: floor instead of ceil understates the wait
 check("mutation: floor would understate, real helper ceils",
   Math.floor(100001 / 10000) !== H.fireYearsEstimate({ gap: 100001, annualContribution: 10000 }));
 const fireOk = { completeMonthsUsed: 12, progress: 0.25, gap: 750000, annualContribution: 75000, target: 1000000, annualSpend: 40000 };
@@ -119,11 +133,9 @@ check("holdings line: concentration + full-set count",
 check("holdings line: legacy cache without full set omits the count",
   H.holdingsSummaryLine({ concentrationTop3: 0.5, holdingsAll: [] }) === "持仓 — 前三集中度 50%");
 
-// --- DAILY-MERGE-001: near-7-day aggregates derive ONLY from
-// the daily rows (the one permitted multi-day presentation:
-// a summary row inside the same daily view). ---
+// --- near-7-day aggregates derive ONLY from the daily rows ---
 const spendDays = [
-  { date: "2026-10-03", posted: 999 }, // outside the last-7 window: must be excluded
+  { date: "2026-10-03", posted: 999 },
   { date: "2026-10-04", posted: 10 },
   { date: "2026-10-05", posted: 20 },
   { date: "2026-10-06", posted: 0 },
@@ -140,8 +152,6 @@ check("7d spend: unsorted input is ordered by date first",
 check("7d spend: fewer rows -> all of them, honestly counted",
   H.recentDailySpendSummary(spendDays.slice(5))?.days === 3 && H.recentDailySpendSummary(spendDays.slice(5))?.total === 150);
 check("7d spend: no daily rows -> null, never a fabricated 0", H.recentDailySpendSummary([]) === null);
-// mutation sensitivity: summing the FIRST 7 rows (incl. the
-// stale 999 day) is a different number the real helper avoids
 check("mutation: first-7 sum would differ, real helper takes the last 7",
   spendDays.slice(0, 7).reduce((s, d) => s + d.posted, 0) !== spendSummary?.total);
 const nwSeries = [
@@ -161,65 +171,193 @@ check("7d net worth: short series falls back to its first point",
   H.recentDailyNetWorthChange(nwSeries.slice(5))?.change === 40 && H.recentDailyNetWorthChange(nwSeries.slice(5))?.days === 2);
 check("7d net worth: fewer than two points -> null", H.recentDailyNetWorthChange(nwSeries.slice(0, 1)) === null && H.recentDailyNetWorthChange([]) === null);
 
-// --- structure: single daily view, single homes, fold defaults ---
+// --- Calendar helpers: real month-grid behaviour ---
+// Synthetic fixture: October 2026 (Oct 1 2026 is a Thursday, so
+// the Monday-start offset is 3). One zero-spend day, one partial
+// day, one missing day (Oct 3), today = Oct 24, Oct 25+ future.
+const calDays = [
+  { date: "2026-10-01", posted: 100, pending: 0, pendingCount: 0, spendCount: 2, partial: false, categories: [{ key: "FOOD_AND_DRINK", amount: 100 }], unclassified: [] },
+  { date: "2026-10-02", posted: 0, pending: 0, pendingCount: 0, spendCount: 0, partial: false, categories: [], unclassified: [] },
+  { date: "2026-10-05", posted: 50, pending: 20, pendingCount: 1, spendCount: 1, partial: true, categories: [{ key: "TRAVEL", amount: 30 }, { key: "FOOD_AND_DRINK", amount: 20 }], unclassified: ["txn-x"] },
+  { date: "2026-10-24", posted: 10, pending: 0, pendingCount: 0, spendCount: 1, partial: false, categories: [{ key: "TRANSPORTATION", amount: 10 }], unclassified: [] },
+];
+const cal = H.buildSpendCalendarMonth(calDays, "2026-10", "2026-10-24");
+check("calendar: month identity + length", cal.year === 2026 && cal.month === 10 && cal.daysInMonth === 31);
+check("calendar: Monday-start offset for Oct 2026 (Thu 1st) is 3", cal.firstOffset === 3);
+check("calendar: weeks are 5 rows of exactly 7 cells", cal.weeks.length === 5 && cal.weeks.every((w) => w.length === 7) && cal.cells.length === 35);
+check("calendar: leading blanks pad the first week", cal.cells.slice(0, 3).every((c) => c.isBlank && c.date === null && c.day === null));
+check("calendar: Oct 1 lands in the Thursday column (index 3)", cal.cells[3]?.date === "2026-10-01" && cal.cells[3]?.day === 1 && cal.weeks[0]?.[3]?.date === "2026-10-01");
+check("calendar: weekday alignment holds all month (Oct 31 is Saturday, index 33)",
+  cal.cells[33]?.date === "2026-10-31" && cal.cells[34]?.isBlank === true);
+check("calendar: data day carries its amount", cal.cells[3]?.hasData === true && cal.cells[3]?.amount === 100);
+check("calendar: zero-spend day is data with amount 0, not missing",
+  cal.cells.find((c) => c.date === "2026-10-02")?.hasData === true && cal.cells.find((c) => c.date === "2026-10-02")?.amount === 0);
+check("calendar: missing day (Oct 3) has no data and null amount",
+  cal.cells.find((c) => c.date === "2026-10-03")?.hasData === false && cal.cells.find((c) => c.date === "2026-10-03")?.amount === null);
+check("calendar: partial day is flagged on the cell model",
+  cal.cells.find((c) => c.date === "2026-10-05")?.partial === true && cal.cells.find((c) => c.date === "2026-10-01")?.partial === false);
+check("calendar: today cell is flagged (Oct 24)",
+  cal.cells.find((c) => c.date === "2026-10-24")?.isToday === true && cal.cells.find((c) => c.date === "2026-10-23")?.isToday === false);
+check("calendar: future days are flagged, today is not future",
+  cal.cells.find((c) => c.date === "2026-10-25")?.isFuture === true && cal.cells.find((c) => c.date === "2026-10-24")?.isFuture === false
+  && cal.cells.find((c) => c.date === "2026-10-01")?.isFuture === false);
+check("mutation: a Sunday-start offset (4) would misalign Oct 2026, real helper uses Monday-start (3)",
+  ((new Date(2026, 9, 1).getDay()) % 7) === 4 && cal.firstOffset === 3);
+const feb = H.buildSpendCalendarMonth([], "2026-02", "2026-10-24");
+check("calendar: Feb 2026 (Sun 1st) offset is 6 with 28 days / 35 cells",
+  feb.firstOffset === 6 && feb.daysInMonth === 28 && feb.cells.length === 35 && feb.cells[6]?.date === "2026-02-01" && feb.cells[33]?.date === "2026-02-28");
+const calSummary = H.spendCalendarMonthSummary(calDays, "2026-10", "2026-10-23");
+check("calendar summary: total sums only that month's posted rows", calSummary.total === 160 && calSummary.count === 4);
+check("calendar summary: daily average is total / days-with-data", calSummary.average === 40);
+check("calendar summary: max day carries amount + date", calSummary.maxAmount === 100 && calSummary.maxDate === "2026-10-01");
+check("calendar summary: through-month is recognised and dated",
+  calSummary.isThroughMonth === true && calSummary.throughDate === "2026-10-23");
+check("calendar summary: other months are not labelled through-months",
+  H.spendCalendarMonthSummary(calDays, "2026-09", "2026-10-23").isThroughMonth === false
+  && H.spendCalendarMonthSummary(calDays, "2026-09", "2026-10-23").total === 0
+  && H.spendCalendarMonthSummary(calDays, "2026-09", "2026-10-23").average === null
+  && H.spendCalendarMonthSummary(calDays, "2026-09", "2026-10-23").maxAmount === null);
+check("calendar bounds: min is the coverage-start month, max is today's month",
+  H.spendCalendarMonthBounds("2024-10-25", "2026-10-24").minMonth === "2024-10"
+  && H.spendCalendarMonthBounds("2024-10-25", "2026-10-24").maxMonth === "2026-10");
+check("calendar shift: forward / backward / across year boundary",
+  H.shiftSpendCalendarMonth("2026-10", 1) === "2026-11"
+  && H.shiftSpendCalendarMonth("2026-10", -1) === "2026-09"
+  && H.shiftSpendCalendarMonth("2026-01", -1) === "2025-12"
+  && H.shiftSpendCalendarMonth("2025-12", 1) === "2026-01");
+const detailWithNw = H.buildSpendDayDetail(calDays[2], 12345);
+check("drill-down: identity + precise posted + counts assembled",
+  detailWithNw.hasData === true && detailWithNw.date === "2026-10-05" && detailWithNw.posted === 50
+  && detailWithNw.pending === 20 && detailWithNw.pendingCount === 1 && detailWithNw.spendCount === 1);
+check("drill-down: categories sorted by amount desc with Chinese labels",
+  detailWithNw.categories.length === 2 && detailWithNw.categories[0]?.key === "TRAVEL"
+  && detailWithNw.categories[0]?.label === "旅行" && detailWithNw.categories[1]?.label === "餐饮");
+check("drill-down: partial + unclassified counts carried",
+  detailWithNw.partial === true && detailWithNw.unclassifiedCount === 1);
+check("drill-down: same-day net worth attached when the series has that date",
+  detailWithNw.hasNetWorth === true && detailWithNw.netWorth === 12345);
+check("drill-down: no net-worth point that day -> explicit no-record state",
+  H.buildSpendDayDetail(calDays[0], null).hasNetWorth === false && H.buildSpendDayDetail(calDays[0], null).netWorth === null);
+check("drill-down: missing day -> hasData false, nothing fabricated",
+  H.buildSpendDayDetail(null, null).hasData === false && H.buildSpendDayDetail(null, 500).posted === null
+  && H.buildSpendDayDetail(null, 500).hasNetWorth === true);
+
+// --- structure: two tabs restored, single homes, fold defaults ---
 function componentSlice(name) {
   const start = appSrc.indexOf(`function ${name}`);
   if (start < 0) throw new Error(`component not found: ${name}`);
   const end = appSrc.indexOf("\n}\n", start) + 3;
   return appSrc.slice(start, end);
 }
-check("DAILY-MERGE: no tab bar, no second view (no tablist, no tab buttons, no tab state)",
-  !appSrc.includes('role="tablist"') && !appSrc.includes(">总览</button>") && !appSrc.includes(">明细</button>")
-  && !appSrc.includes('useState<"overview" | "detail">') && !appSrc.includes("OverviewTab") && !appSrc.includes("DetailTab"));
-check("DAILY-MERGE: tab styles are gone from the theme", !css.includes(".view-tabs"));
-check("DAILY-MERGE: no user-visible weekly wording in client or server sources",
+check("tabs: tablist with two labelled tabs exists",
+  appSrc.includes('role="tablist"') && appSrc.includes('role="tab"') && appSrc.includes(">总览</button>") && appSrc.includes(">明细</button>"));
+check("tabs: tab state is mount-time state in DashboardView, default overview",
+  appSrc.includes('useState<"overview" | "detail">("overview")')
+  && componentSlice("DashboardView").includes('useState<"overview" | "detail">("overview")'));
+check("tabs: OverviewTab and DetailTab components exist and render once each",
+  appSrc.includes("function OverviewTab") && appSrc.includes("function DetailTab")
+  && (appSrc.split("<OverviewTab").length - 1) === 1 && (appSrc.split("<DetailTab").length - 1) === 1);
+check("tabs: theme carries the .view-tabs styles", css.includes(".view-tabs") && css.includes(".view-tab.active"));
+check("no weekly wording in client or server sources",
   !appSrc.includes("每周") && !appSrc.includes("本周") && !css.includes("每周") && !serverSrc.includes("每周") && !serverSrc.includes("本周"));
-check("DAILY-MERGE: refresh already-running message carries no weekly naming",
+check("refresh already-running message carries no weekly naming",
   serverSrc.includes('message: "更新正在进行中"') && !serverSrc.includes("每周更新"));
-check("no fold/view state is persisted (ruling: reset on every open)",
+check("no fold/view/tab state is persisted (ruling: reset on every open)",
   !appSrc.includes("localStorage") && !appSrc.includes("sessionStorage"));
 check("no <details> renders open by default", !/<details[^>]*\sopen[\s=>]/.test(appSrc));
-check("all folds default-closed: 4 evidence + 5 ledger + 1 daily-days + FIRE fold counted in source",
-  (appSrc.match(/<details className="evidence-fold/g) ?? []).length === 10);
+check("all folds default-closed: 4 evidence + 5 ledger = 9 folds (the daily LIST fold is gone)",
+  (appSrc.match(/<details className="evidence-fold/g) ?? []).length === 9);
+check("the rejected per-day LIST is gone (no list fold, no DailySpendSection)",
+  !appSrc.includes("本月逐日明细") && !appSrc.includes("daily-days-fold") && !appSrc.includes("function DailySpendSection"));
 check("fold controls carry text hints （展开/收起）, not colour or icon alone",
   appSrc.includes("fold-hint--open") && css.includes(".evidence-fold[open ] .fold-hint--close"));
+check("shared state stays in the parent: cash trial + trend range declared exactly once, in DashboardView",
+  (appSrc.split("useState<ReadonlySet<string>>(new Set())").length - 1) === 1
+  && componentSlice("DashboardView").includes("useState<ReadonlySet<string>>(new Set())")
+  && componentSlice("DashboardView").includes('useState<Range>("12m")'));
 
-const view = componentSlice("DashboardView");
-check("view: conclusion card first", view.indexOf("<TotalAssetsConclusionCard") > -1
-  && view.indexOf("<TotalAssetsConclusionCard") < view.indexOf('aria-label="本月关键指标"'));
-check("view: 7 key metrics kept", view.includes('aria-label="本月关键指标"'));
-check("view: anomaly strip stays visible (R6)", view.includes('aria-label="数据异常月份"'));
-check("view: FIRE is one summary line + anchor button", view.includes("fireSummaryLine(data.fire)") && view.includes("查看完整 FIRE 面板"));
-check("view: four evidence fold summaries wired to their helpers",
-  view.includes("cashScopeSummaryLine(") && view.includes("distributionSummaryLine(")
-  && view.includes("investmentSummaryLine(") && view.includes("holdingsSummaryLine("));
-check("view order: conclusion -> daily series -> daily spend -> evidence folds -> ledger folds",
-  view.indexOf("<NetWorthDailySeries") > view.indexOf("fire-teaser")
-  && view.indexOf("<DailySpendSection") > view.indexOf("<NetWorthDailySeries")
-  && view.indexOf("cashScopeSummaryLine(") > view.indexOf("<DailySpendSection")
-  && view.indexOf("<TrendCharts") > view.indexOf("cashScopeSummaryLine("));
-check("view: monthly trend charts live in the 走势 ledger fold", view.includes("<TrendCharts") && view.includes("走势 — 月度趋势"));
-check("view: monthly records live in the 月度记录 ledger fold", view.includes("<MonthlyRecords months={data.months} />") && view.includes("月度记录 —"));
-check("view: full FIRE panel lives in its ledger fold with the anchor id", view.includes("<FireProgress") && view.includes('id="fire-panel"'));
-check("view: F-ARCH account rows live in their ledger fold", view.includes("<ArchAccountsDetail") && view.includes("总资产账户明细 —"));
-check("view: snapshot account detail lives in the 账户明细 ledger fold", view.includes("accounts-section") && view.includes('title="账户明细"'));
-check("FIRE anchor jump: teaser button opens the folded panel in the same view (R8)",
-  view.includes("openFirePanel") && appSrc.includes('document.getElementById("fire-panel")') && appSrc.includes("panel.open = true") && appSrc.includes("scrollIntoView"));
-check("DAILY-MERGE: 7d spend row is wired to the daily rows inside DailySpendSection",
-  componentSlice("DailySpendSection").includes("recentDailySpendSummary(daily.days)")
-  && componentSlice("DailySpendSection").includes("按日花销汇总"));
-check("DAILY-MERGE: 7d net-worth row is wired to the daily series inside NetWorthDailySeries",
+const overview = componentSlice("OverviewTab");
+check("overview order: conclusion -> 7 metrics -> anomaly strip -> FIRE line -> daily series -> spend strip",
+  overview.indexOf("<TotalAssetsConclusionCard") > -1
+  && overview.indexOf("<TotalAssetsConclusionCard") < overview.indexOf('aria-label="本月关键指标"')
+  && overview.indexOf('aria-label="本月关键指标"') < overview.indexOf('aria-label="数据异常月份"')
+  && overview.indexOf('aria-label="数据异常月份"') < overview.indexOf("fire-teaser")
+  && overview.indexOf("fire-teaser") < overview.indexOf("<NetWorthDailySeries")
+  && overview.indexOf("<NetWorthDailySeries") < overview.indexOf("<DailySpendSummaryStrip"));
+check("overview: 7 key metrics kept", overview.includes('aria-label="本月关键指标"'));
+check("overview: anomaly strip stays visible, never folded (R6)", overview.includes('aria-label="数据异常月份"'));
+check("overview: FIRE is one summary line + anchor button", overview.includes("fireSummaryLine(data.fire)") && overview.includes("查看完整 FIRE 面板"));
+check("overview: daily series keeps its near-7-day change row",
   componentSlice("NetWorthDailySeries").includes("recentDailyNetWorthChange(series)")
   && componentSlice("NetWorthDailySeries").includes("按日净值序列汇总"));
-check("DAILY-MERGE: current-month per-day rows fold inside the daily spend section",
-  componentSlice("DailySpendSection").includes("本月逐日明细") && componentSlice("DailySpendSection").includes("daily-days-fold"));
+const strip = componentSlice("DailySpendSummaryStrip");
+check("overview spend strip: only the near-7-day row from the daily rows + the calendar jump",
+  strip.includes("recentDailySpendSummary(daily.days)") && strip.includes("按日花销汇总")
+  && strip.includes("查看日历明细") && strip.includes("onViewCalendar"));
+check("overview spend strip: the current-month total moved to the Calendar (not duplicated here)",
+  !strip.includes("本月已发生合计"));
+
+const detailTab = componentSlice("DetailTab");
+check("detail order: Calendar -> 4 evidence folds -> ledger folds",
+  detailTab.indexOf("<SpendCalendar") > -1
+  && detailTab.indexOf("<SpendCalendar") < detailTab.indexOf("cashScopeSummaryLine(")
+  && detailTab.indexOf("cashScopeSummaryLine(") < detailTab.indexOf("<TrendCharts"));
+check("detail: four evidence fold summaries wired to their helpers",
+  detailTab.includes("cashScopeSummaryLine(") && detailTab.includes("distributionSummaryLine(")
+  && detailTab.includes("investmentSummaryLine(") && detailTab.includes("holdingsSummaryLine("));
+check("detail: monthly trend charts live in the 走势 ledger fold", detailTab.includes("<TrendCharts") && detailTab.includes("走势 — 月度趋势"));
+check("detail: monthly records live in the 月度记录 ledger fold", detailTab.includes("<MonthlyRecords months={data.months} />") && detailTab.includes("月度记录 —"));
+check("detail: full FIRE panel lives in its ledger fold with the anchor id", detailTab.includes("<FireProgress") && detailTab.includes('id="fire-panel"'));
+check("detail: F-ARCH account rows live in their ledger fold", detailTab.includes("<ArchAccountsDetail") && detailTab.includes("总资产账户明细 —"));
+check("detail: snapshot account detail lives in the 账户明细 ledger fold", detailTab.includes("accounts-section") && detailTab.includes('title="账户明细"'));
+const view = componentSlice("DashboardView");
+check("FIRE cross-tab wiring: overview button switches tab, opens fire-panel and scrolls",
+  view.includes("openFirePanel") && view.includes('setActiveTab("detail")')
+  && appSrc.includes('document.getElementById("fire-panel")') && appSrc.includes("panel.open = true") && appSrc.includes("scrollIntoView"));
+check("calendar cross-tab wiring: strip button switches tab and scrolls to the calendar",
+  view.includes("viewCalendar") && view.includes('document.getElementById("spend-calendar")'));
+
+// --- Calendar component source wiring ---
+const calSrc = componentSlice("SpendCalendar");
+check("calendar: renders from the production helpers",
+  calSrc.includes("buildSpendCalendarMonth(daily.days, monthKey, todayKey)")
+  && calSrc.includes("spendCalendarMonthSummary(daily.days, monthKey, daily.throughDate)")
+  && calSrc.includes("buildSpendDayDetail("));
+check("calendar: default month is the throughDate month",
+  calSrc.includes("daily.throughDate.slice(0, 7)"));
+check("calendar: month title + prev/next + back-to-current-month controls",
+  calSrc.includes("年 {model.month} 月") && calSrc.includes('aria-label="前月"')
+  && calSrc.includes('aria-label="后月"') && calSrc.includes('aria-label="回到本月"') && calSrc.includes("回到本月"));
+check("calendar: navigation bounds disable at coverage start / current month",
+  calSrc.includes("spendCalendarMonthBounds(daily.coverageStart, todayKey)")
+  && calSrc.includes("monthKey > bounds.minMonth") && calSrc.includes("monthKey < bounds.maxMonth")
+  && calSrc.includes("disabled={!canPrev}") && calSrc.includes("disabled={!canNext}"));
+check("calendar: weekday header is one Mon-Sun row of 7",
+  calSrc.includes('["一", "二", "三", "四", "五", "六", "日"]') && css.includes(".spend-cal__weekdays") && css.includes("repeat(7"));
+check("calendar: grid cells render the amount as text (compact) and missing days as a dash",
+  calSrc.includes("compactCurrency.format(cell.amount ?? 0)") && calSrc.includes(': "—"'));
+check("calendar: future days render no amount (blank, weakened)",
+  calSrc.includes('cell.isFuture ? ""') && css.includes(".spend-cal__cell--future"));
+check("calendar: today / selected / partial ride on text + border, not colour alone",
+  calSrc.includes("今天") && calSrc.includes("已选") && calSrc.includes("◑ 部分")
+  && css.includes(".spend-cal__cell--today") && css.includes(".spend-cal__cell--selected"));
+check("calendar: tapping a day toggles the drill-down (same day closes)",
+  calSrc.includes('previous === cell.date ? null : cell.date') && calSrc.includes("aria-pressed={isSelected}"));
+check("calendar: monthly summary row carries the moved current-month total + average + max day",
+  calSrc.includes("本月已发生合计") && calSrc.includes("日均") && calSrc.includes("最高单日") && calSrc.includes("截至"));
+check("calendar: partial-coverage period is labelled next to the month",
+  calSrc.includes("部分覆盖期间 · 全覆盖自"));
+check("calendar: drill-down states the day's net worth or its honest absence",
+  calSrc.includes("当日净值") && calSrc.includes("当日净值暂无记录") && calSrc.includes("archNetWorthSeries.find"));
+check("calendar: theme carries the calendar styles", css.includes(".spend-cal__grid") && css.includes(".spend-cal__cell") && css.includes(".spend-cal__detail"));
 
 for (const [name, marker] of [
   ["trend charts", "<TrendCharts"], ["full FIRE panel", "<FireProgress"],
   ["monthly records", "<MonthlyRecords"], ["cash scope panel", "<AvailableCashPanel"],
   ["distribution panel", "<DistributionPanel"], ["investment card", "<InvestmentPerformanceCard"],
   ["holdings section", "<HoldingsSection"], ["conclusion card", "<TotalAssetsConclusionCard"],
-  ["net-worth daily series", "<NetWorthDailySeries"], ["daily spend section", "<DailySpendSection"],
+  ["net-worth daily series", "<NetWorthDailySeries"], ["daily spend calendar", "<SpendCalendar"],
+  ["daily spend summary strip", "<DailySpendSummaryStrip"],
 ]) {
   check(`single rendering home: ${name}`, (appSrc.split(marker).length - 1) === 1);
 }
@@ -236,12 +374,7 @@ check("card: archived snapshot compare line kept", card.includes("月度快照 �
 check("card: delta wording unchanged", card.includes("较上次成功快照（日期未留存）") && card.includes("本次未更新"));
 
 // --- F-ARCH labeling (PM 2026-10-24): every fact labelled in
-// place with its own caliber. The headline is the NEW
-// architecture total; weeklyDelta and its percent denominator
-// are the OLD live.netWorth — the card must never let the old
-// delta read as the new total's change (synthetic case: new
-// total 100, old sync net worth 80, old delta 5 must NOT imply
-// the new figure went 95 -> 100). ---
+// place with its own caliber. ---
 check("label: headline labelled 混合余额日期的最近已知净值 (new architecture)",
   card.includes("混合余额日期的最近已知净值（新架构 F-ARCH-001）"));
 check("label: amounts/dates coverage counts + Plaid pull time adjacent to the headline",
@@ -259,44 +392,49 @@ check("label: detail view traces back to the old sync net worth",
   && appSrc.includes("旧同步口径 · 较上次成功快照（日期未留存）${trendIndicator(weeklyDelta)}")
   && appSrc.includes("与旧同步口径不要互相推导"));
 
-// --- feature reachability: every former feature still present
-// in the single daily view (DAILY-MERGE-001 reachability table:
-// overview-tab features at the top of the view, detail-tab
-// features in the daily sections and the ledger folds) ---
+// --- feature reachability under the two-tab organisation ---
 for (const marker of [
   "立即更新财务数据", "检查进度", "来源台账", "刷新观测",
   "搜索全部持仓", "查看全部持仓", "期间核对明细", "本页试算",
   "月度记录", "账户明细", "总资产账户明细", "走势", "FIRE 进度", "持仓 Top 10",
-  "净值日序列", "日花销", "本月逐日明细",
+  "净值日序列", "日花销", "日花销日历", "查看日历明细", "回到本月", "本月已发生合计",
 ]) {
   check(`reachable: ${marker}`, appSrc.includes(marker));
 }
 
-// --- screen estimate (documented height model, 390x844) ---
-// Before (design draft inventory of the pre-B1A tree): 14
-// top-level blocks, ≈12–19 screens at the default state.
-// After: conservative per-block heights from theme.css
-// metrics (status band measured with its facts + fold
-// summaries visible; anomaly strip assumed present).
+// --- screen estimate (documented height model, 390x844,
+// TWO-TAB model): the page no longer stacks everything in one
+// scroll. Overview default = status band + tab bar + conclusion
+// + metrics + anomaly + FIRE line + daily series + spend strip
+// (target <= 3 screens). Detail default = status band + tab
+// bar + the Calendar + the 9 closed fold summaries. ---
 const VIEWPORT_PX = 844;
-const AFTER_BLOCKS = [
+const OVERVIEW_BLOCKS = [
   ["状态行（工具行 + 刷新状态带）", 360],
+  ["页签条", 52],
   ["总资产结论卡（三卡合一）", 400],
   ["本月关键指标 7 格（2 列 4 行）", 508],
   ["数据异常条（假设存在）", 64],
   ["FIRE 一行摘要", 66],
-  ["净值日序列图（每日视图主体）", 320],
-  ["日花销（标题 + 月合计 + 近 7 天汇总行 + 逐日折叠 summary）", 170],
+  ["净值日序列图", 320],
+  ["日花销摘要条（近 7 天行 + 覆盖 meta + 日历按钮）", 150],
+];
+const overviewPx = OVERVIEW_BLOCKS.reduce((sum, [, px]) => sum + px, 0);
+const overviewScreens = overviewPx / VIEWPORT_PX;
+check(`overview tab default height ≈ ${overviewScreens.toFixed(2)} screens <= 3 (R2)`, overviewScreens <= 3);
+const DETAIL_BLOCKS = [
+  ["状态行（工具行 + 刷新状态带）", 360],
+  ["页签条", 52],
+  ["日花销 Calendar（导航 + 汇总行 + 星期行 + 5 行格子 + 口径注）", 560],
   ["依据层 4 个折叠 summary", 246],
   ["台账层 5 个折叠 summary（走势/月度记录/FIRE/总资产账户/账户明细）", 305],
 ];
-const afterPx = AFTER_BLOCKS.reduce((sum, [, px]) => sum + px, 0);
-const afterScreens = afterPx / VIEWPORT_PX;
-check(`single daily view default height ≈ ${afterScreens.toFixed(2)} screens <= 3 (R2)`, afterScreens <= 3);
-check("single daily view is shorter than the pre-B1A minimum (12 screens)", afterPx < 12 * VIEWPORT_PX);
-check("height model covers the merged view's layer groups (status / conclusion / metrics+anomaly / FIRE line / daily sections / evidence folds / ledger folds)",
-  ["状态行", "结论卡", "指标", "FIRE", "日序列", "日花销", "依据层", "台账层"].every((name) => AFTER_BLOCKS.some(([label]) => label.includes(name))));
-console.log(`screen model: before 14 blocks / 12-19 screens -> single daily view ${AFTER_BLOCKS.length} block groups / ~${afterScreens.toFixed(1)} screens (${afterPx}px of ${VIEWPORT_PX}px viewport)`);
+const detailPx = DETAIL_BLOCKS.reduce((sum, [, px]) => sum + px, 0);
+const detailScreens = detailPx / VIEWPORT_PX;
+check(`detail tab default height ≈ ${detailScreens.toFixed(2)} screens <= 3`, detailScreens <= 3);
+check("height model is a two-tab model (tab bar + Calendar named)",
+  OVERVIEW_BLOCKS.some(([label]) => label.includes("页签")) && DETAIL_BLOCKS.some(([label]) => label.includes("Calendar")));
+console.log(`screen model (two-tab): overview ~${overviewScreens.toFixed(1)} screens (${overviewPx}px), detail ~${detailScreens.toFixed(1)} screens (${detailPx}px) of ${VIEWPORT_PX}px viewport`);
 
 console.log(`validate-design-b1a: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

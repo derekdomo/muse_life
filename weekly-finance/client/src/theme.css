@@ -243,14 +243,119 @@ main {
 .cash-scope-toggle input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
 .cash-scope-excluded { color: var(--dim); font-size: 10px; font-weight: 720; white-space: nowrap; }
 
-/* LIFE-DESIGN-001-B1A + DAILY-MERGE-001: single daily view —
+/* LIFE-DESIGN-001-B1A + DAILY-MERGE-001 (corrected
+   2026-10-24): two tabs (ruling 1) — 总览 / 明细 — with the
    merged conclusion card, FIRE teaser row and the folded
-   evidence / ledger layers (no tab bar remains). */
+   evidence / ledger layers inside the detail tab. */
 .fire-teaser button:focus-visible, .evidence-fold > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-.daily-days-fold { margin-top: 10px; }
+.view-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 12px;
+  background: var(--surface-tint);
+  border-radius: 999px;
+}
+.view-tab {
+  flex: 1;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 13px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.view-tab.active { background: var(--surface); color: var(--text); box-shadow: 0 2px 9px rgba(25,48,39,.1); }
+.view-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.spend-summary-strip {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.spend-summary-strip__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.spend-summary-strip__head h2 { margin: 0; font-size: 15px; letter-spacing: -.02em; }
+.spend-summary-strip__head span { color: var(--dim); font-size: 11px; }
+.spend-summary-strip__row { margin: 0; font-size: 12px; font-weight: 650; line-height: 1.55; font-variant-numeric: tabular-nums; }
+.spend-summary-strip__button {
+  justify-self: start;
+  min-height: 36px;
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.spend-cal__nav { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
+.spend-cal__title { flex: 1; margin: 0; font-size: 18px; letter-spacing: -.02em; text-align: center; white-space: nowrap; }
+.spend-cal__nav-button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.spend-cal__nav-button:disabled { cursor: not-allowed; opacity: .45; }
+.spend-cal__summary { margin: 8px 0 12px; font-size: 12px; font-weight: 650; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.spend-cal__weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin-bottom: 4px; }
+.spend-cal__weekday { padding: 4px 0; color: var(--dim); font-size: 11px; font-weight: 720; text-align: center; }
+.spend-cal__grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.spend-cal__cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 66px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+button.spend-cal__cell { cursor: pointer; }
+.spend-cal__cell--blank { border-color: transparent; background: transparent; }
+.spend-cal__cell--today { border: 2px solid var(--accent); }
+.spend-cal__cell--selected { border: 3px solid var(--text); }
+.spend-cal__cell--future { opacity: .45; }
+.spend-cal__day { font-size: 12px; font-weight: 720; line-height: 1.2; }
+.spend-cal__amount { font-family: "SF Mono", ui-monospace, monospace; font-size: 11px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+.spend-cal__marks { display: flex; flex-wrap: wrap; gap: 1px 4px; }
+.spend-cal__mark { color: var(--accent); font-size: 9px; font-weight: 720; line-height: 1.3; }
+.spend-cal__detail {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.spend-cal__detail h4 { margin: 0 0 4px; font-size: 14px; }
+.spend-cal__detail p { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.55; font-variant-numeric: tabular-nums; }
+@media (min-width: 720px) {
+  .spend-cal__cell { min-height: 82px; padding: 8px; }
+  .spend-cal__amount { font-size: 12px; }
+}
 .conclusion-card__caliber {
   margin: 0 0 10px;
   font-size: 12px;
