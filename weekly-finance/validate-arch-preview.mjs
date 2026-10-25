@@ -209,6 +209,15 @@ for (const scenario of SCENARIOS) {
 
 // --- wiring: fold placement, badge, controls, net-worth note ---
 check("detail tab mounts the demo section", app.includes("<ArchDemoPreviewSection foldHint={foldHint} />"));
+check("demo fold is a fold-system member with its own stable data marker",
+  app.includes('<details className="evidence-fold" data-arch-demo="spend-preview">')
+  && (app.match(/data-arch-demo="spend-preview"/g) ?? []).length === 1);
+check("demo detection is decoupled from the Calendar component (anchored on the model + the fold marker)",
+  (() => {
+    const start = app.indexOf("function ArchDemoPreviewSection");
+    const slice = app.slice(start, app.indexOf("\n}\n", start) + 3);
+    return start > -1 && slice.includes("buildArchDemoPreview(scenario, asOfDate)") && !slice.includes("SpendCalendar") && !slice.includes("archDailySpend");
+  })());
 check("fold title is exact", app.includes("合成预览 · 花销演示（F-ARCH-001）"));
 check("synthetic badge text is present", app.includes("合成数据 · 非生产"));
 check("component renders only the pure model", app.includes("const model = buildArchDemoPreview(scenario, asOfDate);"));

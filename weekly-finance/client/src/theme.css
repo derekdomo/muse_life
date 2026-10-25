@@ -470,36 +470,13 @@ button.spend-cal__cell { cursor: pointer; }
 .arch-rows--detail { margin-top: 4px; }
 .arch-rows--detail .arch-row:first-child { border-top: 0; }
 
-/* ARCH-DEMO-001: synthetic spend preview fold in the detail
-   tab. Meaning rides on text labels and symbols, never color
-   alone; every new control is >=44px tall, keyboard reachable
-   and shows a visible focus outline. The fold carries its own
-   class (it is a synthetic demo, not an evidence fold) with
-   the same shell styling as .evidence-fold. */
-.arch-demo-fold {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: var(--shadow);
-  padding: 0 16px 6px;
-}
-.arch-demo-fold > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 48px;
-  padding: 6px 0;
-  font-size: 12px;
-  font-weight: 720;
-  cursor: pointer;
-  list-style: none;
-}
-.arch-demo-fold > summary::-webkit-details-marker { display: none; }
-.arch-demo-fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.arch-demo-fold .fold-hint--close { display: none; }
-.arch-demo-fold[open ] .fold-hint--open { display: none; }
-.arch-demo-fold[open ] .fold-hint--close { display: inline; }
+/* ARCH-DEMO-001: synthetic spend preview in the detail tab.
+   The fold is a member of the LIFE-DESIGN fold system (shell
+   styling, summary layout and 展开/收起 hints all come from
+   .evidence-fold above); only the demo-specific controls
+   below are new. Meaning rides on text labels and symbols,
+   never color alone; every new control is >=44px tall,
+   keyboard reachable and shows a visible focus outline. */
 .arch-demo-badge {
   display: inline-block;
   margin-left: 8px;

@@ -138,10 +138,20 @@ check("mutation: floor would understate, real helper ceils",
   Math.floor(100001 / 10000) !== H.fireYearsEstimate({ gap: 100001, annualContribution: 10000 }));
 const fireOk = { completeMonthsUsed: 12, progress: 0.25, gap: 750000, annualContribution: 75000, target: 1000000, annualSpend: 40000 };
 check("fire line: progress + gap + years in one line",
-  H.fireSummaryLine(fireOk) === "FIRE 进度 25% · 缺口 $750,000 · 预计还需 10 年");
+  H.fireSummaryLine(fireOk) === "FIRE 进度 25% · 缺口 $750,000 · 预计还需 10 年（线性估算，不含投资回报）");
 check("fire line: reached target", H.fireSummaryLine({ ...fireOk, progress: 1, gap: 0 }).includes("已达到目标"));
 check("fire line: no pace stated honestly", H.fireSummaryLine({ ...fireOk, annualContribution: 0 }).includes("不足以估算达标时间"));
 check("fire line: insufficient months gated", H.fireSummaryLine({ ...fireOk, completeMonthsUsed: 0 }) === "FIRE 进度：完整月份不足，暂不估算");
+check("fire line: years estimate carries the linear-estimate label",
+  H.fireSummaryLine(fireOk).includes("线性估算，不含投资回报"));
+check("fire line: no label when target reached (no years estimate)",
+  !H.fireSummaryLine({ ...fireOk, progress: 1, gap: 0 }).includes("线性估算，不含投资回报"));
+check("fire line: no label when months are insufficient (no years estimate)",
+  !H.fireSummaryLine({ ...fireOk, completeMonthsUsed: 0 }).includes("线性估算，不含投资回报"));
+check("fire line: no label when pace cannot estimate (no years estimate)",
+  !H.fireSummaryLine({ ...fireOk, annualContribution: 0 }).includes("线性估算，不含投资回报"));
+check("fire panel: years note carries the linear-estimate label",
+  appSrc.includes("线性估算，不含投资回报；按近"));
 
 // --- distributionSummaryLine ---
 const dist = H.distributionSummaryLine({ investment: 600000, deposits: 300000, loans: 100000, availableCash: 120000 });
@@ -540,8 +550,8 @@ check("refresh already-running message carries no weekly naming",
 check("no fold/view/tab state is persisted (ruling: reset on every open)",
   !appSrc.includes("localStorage") && !appSrc.includes("sessionStorage"));
 check("no <details> renders open by default", !/<details[^>]*\sopen[\s=>]/.test(appSrc));
-check("all folds default-closed: 4 evidence + 5 ledger = 9 folds in the detail tab (LIST fold gone; FIRE fold moved to its tab; caliber fold added)",
-  (appSrc.match(/<details className="evidence-fold/g) ?? []).length === 9);
+check("all folds default-closed: 4 evidence + 1 synthetic demo (ARCH-DEMO-001) + 5 ledger = 10 folds in the detail tab (LIST fold gone; FIRE fold moved to its tab; caliber fold added)",
+  (appSrc.match(/<details className="evidence-fold/g) ?? []).length === 10);
 check("the rejected per-day LIST is gone (no list fold, no DailySpendSection)",
   !appSrc.includes("本月逐日明细") && !appSrc.includes("daily-days-fold") && !appSrc.includes("function DailySpendSection"));
 check("fold controls carry text hints （展开/收起）, not colour or icon alone",
@@ -573,10 +583,29 @@ check("overview spend strip: the current-month total moved to the Calendar (not 
   !strip.includes("本月已发生合计"));
 
 const detailTab = componentSlice("DetailTab");
-check("detail order: Calendar -> 4 evidence folds -> ledger folds",
+check("detail order: Calendar -> demo fold -> 4 evidence folds -> ledger folds",
   detailTab.indexOf("<SpendCalendar") > -1
-  && detailTab.indexOf("<SpendCalendar") < detailTab.indexOf("cashScopeSummaryLine(")
+  && detailTab.indexOf("<SpendCalendar") < detailTab.indexOf("<ArchDemoPreviewSection")
+  && detailTab.indexOf("<ArchDemoPreviewSection") < detailTab.indexOf("cashScopeSummaryLine(")
   && detailTab.indexOf("cashScopeSummaryLine(") < detailTab.indexOf("<TrendCharts"));
+// ARCH-DEMO-001 (F-ARCH-001 synthetic spend preview): the demo
+// fold is a member of the fold system with its own stable
+// marker. Detection anchors on the fold's own data marker and
+// the pure model — never on the Calendar component — so the
+// demo stays decoupled from SpendCalendar.
+const demoFoldStart = appSrc.indexOf('data-arch-demo="spend-preview"');
+check("demo fold (ARCH-DEMO-001): exists in the detail tab, anchored on its own data marker",
+  demoFoldStart > -1 && detailTab.includes("<ArchDemoPreviewSection")
+  && (appSrc.match(/data-arch-demo="spend-preview"/g) ?? []).length === 1);
+check("demo fold (ARCH-DEMO-001): exact title + synthetic badge in its summary",
+  appSrc.includes("合成预览 · 花销演示（F-ARCH-001）") && appSrc.includes("合成数据 · 非生产")
+  && appSrc.indexOf("合成预览 · 花销演示（F-ARCH-001）") > demoFoldStart);
+check("demo fold (ARCH-DEMO-001): default-closed (its own <details> tag carries no open attribute)",
+  demoFoldStart > -1 && !/\sopen[\s=>]/.test(appSrc.slice(appSrc.lastIndexOf("<details", demoFoldStart), demoFoldStart)));
+check("demo fold (ARCH-DEMO-001): renders only the pure synthetic model, decoupled from the Calendar",
+  componentSlice("ArchDemoPreviewSection").includes("buildArchDemoPreview(scenario, asOfDate)")
+  && !componentSlice("ArchDemoPreviewSection").includes("SpendCalendar")
+  && !componentSlice("ArchDemoPreviewSection").includes("data.arch"));
 check("detail: four evidence fold summaries wired to their helpers",
   detailTab.includes("cashScopeSummaryLine(") && detailTab.includes("distributionSummaryLine(")
   && detailTab.includes("investmentSummaryLine(") && detailTab.includes("holdingsSummaryLine("));
@@ -755,8 +784,9 @@ for (const marker of [
 // conclusion + metrics + anomaly + FIRE line + trend chart +
 // spend strip (target <= 3 screens). FIRE tab = status band +
 // tab bar + the expanded panel. Detail default = status
-// band + tab bar + the Calendar + the 9 closed fold
-// summaries. OVERVIEW-TRIM-001 shrinks the conclusion card
+// band + tab bar + the Calendar + the 10 closed fold
+// summaries (ARCH-DEMO-001 added the synthetic demo fold).
+// OVERVIEW-TRIM-001 shrinks the conclusion card
 // (paragraphs moved to the caliber fold). ---
 const VIEWPORT_PX = 844;
 const OVERVIEW_BLOCKS = [
@@ -784,6 +814,7 @@ const DETAIL_BLOCKS = [
   ["状态行（工具行 + 刷新状态带）", 360],
   ["页签条", 52],
   ["日历 Calendar（指标切换 + 导航 + 汇总行 + 星期行 + 5 行格子 + 口径注）", 604],
+  ["合成预览演示折叠 summary（ARCH-DEMO-001，默认关闭）", 61],
   ["依据层 4 个折叠 summary", 246],
   ["台账层 5 个折叠 summary（口径/走势/月度记录/总资产账户/账户明细）", 305],
 ];

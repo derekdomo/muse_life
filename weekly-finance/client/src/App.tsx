@@ -1259,7 +1259,7 @@ export function fireSummaryLine(fire: Dashboard["fire"]): string {
     ? "当前投入节奏不足以估算达标时间"
     : years === 0
       ? "已达到目标"
-      : `预计还需 ${years} 年`;
+      : `预计还需 ${years} 年（线性估算，不含投资回报）`;
   return `FIRE 进度 ${percent.format(Math.max(0, fire.progress ?? 0))} · 缺口 ${currency.format(fire.gap)} · ${yearsText}`;
 }
 
@@ -1317,7 +1317,7 @@ function FireProgress({ data }: { data: Dashboard }) {
           <strong>{currency.format(data.fire.target)}</strong>
           <p className="fire-gap">缺口 {currency.format(data.fire.gap)}</p>
           <p className="fire-years">{years == null ? "当前投入节奏不足以估算达标时间" : years === 0 ? "已达到目标" : `距目标还差 ${years} 年`}</p>
-          {years != null && years > 0 ? <small>按近 {data.fire.completeMonthsUsed} 个完整有效月的投入节奏估算</small> : null}
+          {years != null && years > 0 ? <small>线性估算，不含投资回报；按近 {data.fire.completeMonthsUsed} 个完整有效月的投入节奏估算</small> : null}
         </div>
       </div>
 
@@ -2995,7 +2995,7 @@ function ArchDemoPreviewSection({ foldHint }: { foldHint: ReactNode }) {
     setExpandedTxn(null);
   };
   return (
-    <details className="arch-demo-fold">
+    <details className="evidence-fold" data-arch-demo="spend-preview">
       <summary>
         <span>合成预览 · 花销演示（F-ARCH-001）<span className="arch-demo-badge">合成数据 · 非生产</span></span>
         {foldHint}
