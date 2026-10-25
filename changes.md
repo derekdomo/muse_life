@@ -1661,3 +1661,15 @@
 - 验证证据：构建审计 verdict=pass（源码与构建产物双查、产物字符串与 needle 命中核对）。仓库实跑（node_modules 临时借用工件目录、跑后移除）全套 17 脚本共 1,406 项断言零失败：validate-design-b1a 148/148、validate-finance-arch 146/146、validate-facts-card 147/147、validate-refresh-chain 134/134、validate-investment-performance 106/106、validate-available-cash 101/101、validate-cashflow 90/90、validate-arch-dates 81/81、validate-monthly-facts 73/73、validate-check-progress 68/68、validate-holdings 66/66、validate-arch-save 51/51、validate-payload 50/50、validate-arch-concurrency 49/49、validate-arch-daily-spend 47/47、validate-arch-daily-spend-chunks 33/33、validate-color-vision 16/16；client+server typecheck 干净。计数注记：构建方回传 validate-design-b1a 为 109/109，与仓库实跑 148/148 不一致——同一文件、两处实跑均为零失败，以仓库实跑计数为准，断言全过结论不变。
 - 局限：所有者视角渲染未验——构建审计身份为非所有者，线上截图只能得到「仅所有者可查看」回退页，Calendar 实际渲染与点选手感以所有者本人打开为准；本轮未动任何数据（arch_daily_spend 仍为已发布 729 日版本，2024-10-25→2026-10-23）。
 - 回滚：回退本提交即恢复拍平单页版仓库源码；线上工件如需回退，另以 artifact.edit 回到上一构建。
+
+## 2026-10-24 22 时 PDT（muse-life-plans-sync：基线后增量核对＋LIFE-DESIGN-001 批次 3 登记与三项交付）
+
+- 基线与增量：基线 454be0d → HEAD 084cc4c，pull 无冲突；基线后 3 笔（30e32db 视图合并 builder 交接细节、7a37412 所有者纠正登记、084cc4c CALENDAR-RESTORE-001 返工交付：总览/明细页签恢复＋日花销 Calendar 真月历、仓库实跑 validate-design-b1a 148/148、全套 17 脚本 1,406 项零失败）均为其他 chat 已交付成果，本轮不重复接单。无新出现的未完成编号条目；F-ARCH-001 整条仍未勾选（F0.6/F1.6 卡片迁移、异常阈值定案等余项沿原队列）。
+- 队列推进：按 plans「推荐执行顺序」与已批准的分批落地顺序，批次 1（B1A/B1B）、批次 2（B2A/B2B）已交付，本轮登记批次 3 四条（B3A 学习 space-10、B3B 创造 space-12、B3C 陪伴 space-13、B3D 时间 space-14）并派 artifact builder 实现，四条均只改呈现与信息架构、数据/口径/公式/功能不动、守色弱规则。
+- B3B（space-12 创造复利）已交付：本周产出明细封顶最近 5 条＋「查看全部」跳推进账本；项目卡瘦身（卡头名＋阶段 x/5 徽标＋全卡唯一一处下一里程碑、计数行常显、五段阶段标尺默认折叠、展开后既有操作原样）；新增项目表单收进「＋ 新增项目」按钮；推进账本页签与服务端未动。屏数估算（390×844 结构估算、非实测）：项目卡折叠态约 1.5–2 屏→约 0.4–0.5 屏。构建审计无待办项。
+- B3C（space-13 陪伴复利）已交付：默认常显区块 6→2、整页约 4–6 屏→约 2.2 屏（构建方口径）；总览结论句去数字复述；「记一条」收进按钮展开（冲突双路随表单）；每周积累图与月历默认折叠（摘要行带数字）；最近记录默认 5 条＋查看全部；活动类型管理移页底折叠；服务端 actions/schema 未动，两验证脚本全绿、构建审计 pass。局限：真实数据态下冲突「作为新的一条保存」全流程与活动类型编辑/删除未能实测（当前数据为空、源码确认接线未改），以所有者本人使用为准。
+- B3D（space-14 时间复利）已交付：仅改 client/src/App.tsx——Hero 副行删覆盖时长重复（大数字为唯一文字之家）、本周记录默认最近 5 笔＋查看全部、未覆盖时间并入 Hero 下一行摘要（说明文字进展开）、自述重点对照默认一行摘要、每周积累默认折叠、逐周清单默认最近 4 周＋查看全部；默认约 6–9 屏→约 3.2 屏（结构估算）；validate-time-atomicity＋validate-time-review 33/33、构建审计 verdict=pass，服务端/schema/迁移未动。
+- B3A（space-10 学习复利）：builder 构建已完成（完成卡已生成），但详细回传未送达本轮上下文；已另派 artifact 只读核查逐项验证规格落地，结论回传后补记，本轮暂不勾选、不报已交付。
+- 源码回灌：本轮四 app 的工件源码回灌本仓未执行，沿 EVID 尾巴由后续同步轮次补齐（工件线上版本为当前事实源）；未提交 app.db/.env/任何真实数据。
+- 仍（需用户确认）不变：CWEB-LEVEL-001 四参数/路径、W6.2-PM-IMG 整批过目、H4.6 恢复参考 T、H-SWIM-PRIV-001 已提交历史清理范围。本轮用户可见增量：3 组（创造/陪伴/时间三 app 精简交付）。
+- 回滚：仓库侧回退本提交即恢复登记前状态；线上工件如需回退，另以 artifact.edit 回到上一构建。
