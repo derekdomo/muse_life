@@ -1830,6 +1830,102 @@ function OverviewTab({
 // full FIRE panel, the monthly records, the F-ARCH per-account
 // rows and the snapshot account detail. Content and wording
 // are the former single-page blocks, moved not rewritten.
+export const dailyCategoryLabels: Record<string, string> = {
+  FOOD_AND_DRINK: "餐饮",
+  TRANSPORTATION: "交通",
+  TRAVEL: "旅行",
+  RENT_AND_UTILITIES: "住房与水电",
+  GENERAL_MERCHANDISE: "购物",
+  ENTERTAINMENT: "娱乐",
+  PERSONAL_CARE: "个人护理",
+  GENERAL_SERVICES: "服务",
+  MEDICAL: "医疗",
+  EDUCATION: "教育",
+  BANK_FEES: "银行费用",
+  GOVERNMENT_AND_NON_PROFIT: "政府与非营利",
+  LOAN_PAYMENTS: "贷款",
+  UNCATEGORIZED: "未分类",
+};
+
+export function dailyCategoryLabel(key: string): string {
+  return dailyCategoryLabels[key] ?? key;
+}
+
+function NetWorthDailySeries({ series }: { series: Dashboard["archNetWorthSeries"] }) {
+  const chartData = series.map((point) => ({ ...point, label: point.date }));
+  const firstDate = series[0]?.date ?? "";
+  return (
+    <article className="chart-panel chart-panel--wide" style={{ marginBottom: 12 }}>
+      <div className="chart-heading"><h3>净值日序列</h3><span>纵轴：万美元</span></div>
+      <div className="chart-frame">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chartData} margin={{ top: 12, right: 6, left: -20, bottom: 0 }}>
+            <defs>
+              <linearGradient id="netWorthDailyFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.28} />
+                <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} stroke="var(--grid)" />
+            <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={24} />
+            <YAxis tickFormatter={(value: number) => (value / 10_000).toFixed(0)} tickLine={false} axisLine={false} width={50} />
+            <Tooltip content={<ChartTooltip />} />
+            <Area type="monotone" dataKey="total" name="净资产" stroke="var(--accent)" strokeWidth={2.5} fill="url(#netWorthDailyFill)" dot={false} activeDot={{ r: 4 }} />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+      <p className="fact-card__note" style={{ margin: "8px 8px 4px" }}>日序列自 {firstDate} 起（arch 每日写入）；此前只有月度快照，不回造日数据。</p>
+    </article>
+  );
+}
+
+function DailySpendSection({ data }: { data: Dashboard }) {
+  const daily = data.archDailySpend;
+  if (!daily) return null;
+  const throughMonth = daily.throughDate.slice(0, 7);
+  const monthDays = daily.days.filter((d) => d.date.startsWith(throughMonth)).slice().reverse();
+  const monthTotal = monthDays.reduce((sum, d) => sum + d.posted, 0);
+  const metaParts = [`覆盖 ${daily.coverageStart} 至 ${daily.throughDate}`];
+  if (daily.fullCoverageStart && daily.fullCoverageStart !== daily.coverageStart) {
+    metaParts.push(`全覆盖自 ${daily.fullCoverageStart}`);
+  }
+  return (
+    <section className="section-block" aria-label="日花销">
+      <SectionTitle title="日花销" meta={metaParts.join(" · ")} />
+      <p className="fact-card__note" style={{ marginTop: 10 }}>本月已发生合计 {currency.format(monthTotal)}（日流口径，截至 {daily.throughDate}）</p>
+      <div className="month-records" style={{ marginTop: 10 }}>
+        {monthDays.map((day) => {
+          const parts = day.date.split("-");
+          const m = Number(parts[1] ?? 0);
+          const dnum = Number(parts[2] ?? 0);
+          const topCat = day.categories[0];
+          const topLabel = topCat ? dailyCategoryLabel(topCat.key) : null;
+          return (
+            <details className="month-record" key={day.date}>
+              <summary aria-label={`${m}月${dnum}日日花销详情`}>
+                <span className="month-record__title">{m}月{dnum}日</span>
+                {day.partial ? <span className="month-record__flag">部分覆盖</span> : null}
+                {day.pending > 0 ? <span className="month-record__meta">待入账 {currency.format(day.pending)}</span> : null}
+                {topLabel ? <span className="month-record__meta">{topLabel}</span> : null}
+                <span className="month-record__total">{currency.format(day.posted)}</span>
+              </summary>
+              <div className="month-record__detail">
+                {day.categories.length > 0 ? day.categories.map((cat) => (
+                  <p key={cat.key}>{dailyCategoryLabel(cat.key)} · {currency.format(cat.amount)}</p>
+                )) : <p>当日无已入账花销分类</p>}
+                {day.unclassified.length > 0 ? <p>未分类 {day.unclassified.length} 笔待确认</p> : null}
+                {day.pending > 0 ? <p>待入账 {currency.format(day.pending)} · {day.pendingCount} 笔</p> : null}
+                <p>已入账 {day.spendCount} 笔{day.partial ? " · 部分覆盖" : ""}</p>
+              </div>
+            </details>
+          );
+        })}
+      </div>
+      <p className="fact-card__note" style={{ marginTop: 10 }}>日花销为 Plaid 交易日流口径；下方月度记录为 Firance 月度快照，仅作对账存档。</p>
+    </section>
+  );
+}
+
 function DetailTab({
   data,
   months,
@@ -1864,13 +1960,16 @@ function DetailTab({
             ))}
           </div>
         </div>
+        {data.archNetWorthSeries.length > 0 ? <NetWorthDailySeries series={data.archNetWorthSeries} /> : null}
         <TrendCharts months={months} />
       </section>
 
       <section className="section-block">
-        <SectionTitle title="月度记录" meta="每月一份快照 · 点按展开" />
+        <SectionTitle title="月度记录" meta="Firance 月度快照 · 对账存档 · 点按展开" />
         <MonthlyRecords months={data.months} />
       </section>
+
+      <DailySpendSection data={data} />
 
       <section className="fire-section section-block" id="fire-panel">
         <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />

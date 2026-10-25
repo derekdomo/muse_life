@@ -314,6 +314,355 @@ const archNetWorthSchema = z.object({
 
 type ArchNetWorth = z.infer<typeof archNetWorthSchema>;
 
+// F-ARCH-001 daily-spend stored payload. Written only by
+// ingestArchDailySpend (server-recomputed, read-back verified)
+// and surfaced on the dashboard as an overlay read from the
+// arch_daily_spend table — the legacy finance payload itself
+// never carries it, so buildDashboard always emits null and the
+// .default(null) keeps pre-existing stored payloads readable.
+const archDailySpendCategorySchema = z.object({
+  key: z.string(),
+  amount: z.number(),
+});
+
+const archDailySpendDaySchema = z.object({
+  date: z.string(),
+  posted: z.number(),
+  pending: z.number(),
+  categories: z.array(archDailySpendCategorySchema),
+  spendCount: z.number().int().nonnegative(),
+  pendingCount: z.number().int().nonnegative(),
+  unclassified: z.array(z.string()),
+  partial: z.boolean(),
+});
+
+const archDailySpendSchema = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  kind: z.literal("daily-spend"),
+  pulledAt: z.string(),
+  storedAt: z.string(),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  fullCoverageStart: z.string().nullable(),
+  days: z.array(archDailySpendDaySchema),
+  totals: z.object({
+    posted: z.number(),
+    pending: z.number(),
+  }),
+  counts: z.object({
+    transactions: z.number().int().nonnegative(),
+    conflicts: z.number().int().nonnegative(),
+    unappliedRefunds: z.number().int().nonnegative(),
+    unclassified: z.number().int().nonnegative(),
+    excludedTransfer: z.number().int().nonnegative(),
+    excludedLoanPrincipal: z.number().int().nonnegative(),
+  }),
+});
+
+type ArchDailySpend = z.infer<typeof archDailySpendSchema>;
+type ArchDailySpendDay = z.infer<typeof archDailySpendDaySchema>;
+
+// ---------- Daily spend port (F-ARCH-001, mirrors finance-arch.mjs) ----------
+export type DailySpendTxn = {
+  id: string;
+  date: string;
+  amount: number;
+  status: "posted" | "pending";
+  kind: "spend" | "transfer" | "loan_principal" | "refund" | "loan_mixed" | "unmatched_transfer";
+  category?: string;
+  account?: string;
+  refundOf?: string | null;
+};
+
+export type DailySpendResult = {
+  days: ArchDailySpendDay[];
+  totals: { posted: number; pending: number };
+  offsets: Array<{ refundId: string; of: string; amount: number; date: string; refundDate: string }>;
+  conflicts: Array<{ id: string; reason: string }>;
+  unappliedRefunds: Array<{ refundId: string; of: string | null; amount: number; reason: string; date: string }>;
+  unclassified: Array<{ id: string; date: string; kind: string }>;
+  excludedCounts: { transfer: number; loanPrincipal: number };
+  accountStarts: Record<string, string>;
+  fullCoverageStart: string | null;
+  classificationComplete: boolean;
+};
+
+export function nextDateKey(dateKey: string): string {
+  const [y = 1970, m = 1, d = 1] = String(dateKey).split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + 1);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+export function summarizeSpendDailyServer(
+  txns: DailySpendTxn[],
+  options: { asOf?: string | null; asOfDate?: string | null; fromDate?: string | null; toDate?: string | null } = {},
+): DailySpendResult {
+  const asOf = options.asOf ?? options.asOfDate ?? null;
+  const fromDate = options.fromDate ?? null;
+  const toDate = options.toDate ?? null;
+  const afterAsOf = (row: DailySpendTxn) => asOf !== null && row.date > asOf;
+
+  const groups = new Map<string, DailySpendTxn[]>();
+  for (const t of txns) {
+    if (afterAsOf(t)) continue;
+    if (!groups.has(t.id)) groups.set(t.id, []);
+    groups.get(t.id)!.push(t);
+  }
+  const allDatesById = new Map<string, Set<string>>();
+  for (const t of txns) {
+    if (!allDatesById.has(t.id)) allDatesById.set(t.id, new Set());
+    allDatesById.get(t.id)!.add(t.date);
+  }
+  const canonical = new Map<string, DailySpendTxn>();
+  const conflicts: Array<{ id: string; reason: string }> = [];
+  for (const [id, rows] of groups) {
+    const seenKeys = new Set<string>();
+    const uniq: DailySpendTxn[] = [];
+    for (const r of rows) {
+      const key = JSON.stringify([r.date, r.amount, r.status, r.kind, r.refundOf ?? null]);
+      if (!seenKeys.has(key)) { seenKeys.add(key); uniq.push(r); }
+    }
+    const byStatus = new Map<string, DailySpendTxn[]>();
+    for (const r of uniq) {
+      if (!byStatus.has(r.status)) byStatus.set(r.status, []);
+      byStatus.get(r.status)!.push(r);
+    }
+    let hasConflict = false;
+    for (const sameStatus of byStatus.values()) if (sameStatus.length > 1) hasConflict = true;
+    if (hasConflict) {
+      conflicts.push({ id, reason: "conflicting-duplicates" });
+      continue;
+    }
+    const chosen = byStatus.get("posted")?.[0] ?? byStatus.get("pending")?.[0] ?? uniq[0];
+    if (chosen) canonical.set(id, chosen);
+  }
+  const conflictIds = new Set(conflicts.map((c) => c.id));
+
+  type DayInternal = {
+    date: string;
+    posted: number;
+    pending: number;
+    categories: Map<string, number>;
+    spendCount: number;
+    pendingCount: number;
+    unclassified: string[];
+  };
+  const dayMap = new Map<string, DayInternal>();
+  const emptyDay = (date: string): DayInternal => ({
+    date, posted: 0, pending: 0, categories: new Map(), spendCount: 0, pendingCount: 0, unclassified: [],
+  });
+  const dayFor = (date: string): DayInternal => {
+    if (!dayMap.has(date)) dayMap.set(date, emptyDay(date));
+    return dayMap.get(date)!;
+  };
+  const addCategory = (day: DayInternal, key: string, delta: number) => {
+    day.categories.set(key, (day.categories.get(key) ?? 0) + delta);
+  };
+
+  const countedSpend = new Map<string, number>();
+  const originOf = new Map<string, { date: string; category: string }>();
+  const unclassified: Array<{ id: string; date: string; kind: string }> = [];
+  const excludedCounts = { transfer: 0, loanPrincipal: 0 };
+  let totalPosted = 0;
+  let totalPending = 0;
+  for (const [id, row] of canonical) {
+    if (row.kind === "refund") continue;
+    if (row.kind === "transfer") { excludedCounts.transfer += 1; continue; }
+    if (row.kind === "loan_principal") { excludedCounts.loanPrincipal += 1; continue; }
+    if (row.kind === "spend") {
+      const amt = Math.abs(row.amount);
+      const category = typeof row.category === "string" && row.category ? row.category : "UNCATEGORIZED";
+      if (row.status === "pending") {
+        const day = dayFor(row.date);
+        day.pending += amt;
+        day.pendingCount += 1;
+        totalPending += amt;
+      } else {
+        const day = dayFor(row.date);
+        day.posted += amt;
+        day.spendCount += 1;
+        addCategory(day, category, amt);
+        totalPosted += amt;
+        countedSpend.set(id, amt);
+        originOf.set(id, { date: row.date, category });
+      }
+    } else {
+      unclassified.push({ id, date: row.date, kind: row.kind });
+      dayFor(row.date).unclassified.push(id);
+    }
+  }
+
+  const refundRows = [...canonical.values()]
+    .filter((r) => r.kind === "refund")
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const offsets: DailySpendResult["offsets"] = [];
+  const unappliedRefunds: DailySpendResult["unappliedRefunds"] = [];
+  for (const r of refundRows) {
+    if (r.status !== "posted") continue;
+    const amt = Math.abs(r.amount);
+    const orig = r.refundOf != null ? canonical.get(r.refundOf) : undefined;
+    if (!orig) {
+      let reason = "original-missing";
+      if (r.refundOf != null && conflictIds.has(r.refundOf)) reason = "original-conflicted";
+      else if (r.refundOf != null && (allDatesById.get(r.refundOf)?.size ?? 0) > 0) reason = "original-after-asof";
+      unappliedRefunds.push({ refundId: r.id, of: r.refundOf ?? null, amount: amt, reason, date: r.date });
+      continue;
+    }
+    if (orig.kind !== "spend") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-not-spend", date: r.date }); continue; }
+    if (orig.status !== "posted") { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-pending", date: r.date }); continue; }
+    const remaining = countedSpend.get(orig.id);
+    if (remaining === undefined) { unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt, reason: "original-not-counted", date: r.date }); continue; }
+    const applied = Math.min(amt, remaining);
+    if (applied > 0) {
+      const origin = originOf.get(orig.id)!;
+      const day = dayFor(origin.date);
+      day.posted -= applied;
+      addCategory(day, origin.category, -applied);
+      totalPosted -= applied;
+      countedSpend.set(orig.id, remaining - applied);
+      offsets.push({ refundId: r.id, of: orig.id, amount: applied, date: origin.date, refundDate: r.date });
+    }
+    if (amt > applied) {
+      unappliedRefunds.push({ refundId: r.id, of: orig.id, amount: amt - applied, reason: "exceeds-original", date: r.date });
+    }
+  }
+
+  const accountStart = new Map<string, string>();
+  for (const t of txns) {
+    if (afterAsOf(t) || typeof t.account !== "string" || !t.account) continue;
+    const cur = accountStart.get(t.account);
+    if (!cur || t.date < cur) {
+      accountStart.set(t.account, t.date);
+    }
+  }
+  const gatingStarts: string[] = [];
+  {
+    const gatingAccounts = new Set<string>();
+    for (const [, row] of canonical) {
+      if (row.kind === "spend" && row.status === "posted" && typeof row.account === "string" && row.account) {
+        gatingAccounts.add(row.account);
+      }
+    }
+    for (const account of gatingAccounts) {
+      const s = accountStart.get(account);
+      if (s) gatingStarts.push(s);
+    }
+  }
+  const fullCoverageStart = gatingStarts.length ? gatingStarts.reduce((a, b) => (a > b ? a : b)) : null;
+
+  let dates: string[];
+  if (fromDate && toDate && fromDate <= toDate) {
+    dates = [];
+    for (let cur = fromDate; ; cur = nextDateKey(cur)) {
+      dates.push(cur);
+      if (cur === toDate) break;
+    }
+  } else {
+    dates = [...dayMap.keys()].sort();
+  }
+  const days: ArchDailySpendDay[] = dates.map((date) => {
+    const day = dayMap.get(date) ?? emptyDay(date);
+    const categories = [...day.categories.entries()]
+      .map(([key, amount]) => ({ key, amount }))
+      .filter((c) => Math.abs(c.amount) > 1e-9)
+      .sort((a, b) => b.amount - a.amount || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return {
+      date,
+      posted: day.posted,
+      pending: day.pending,
+      categories,
+      spendCount: day.spendCount,
+      pendingCount: day.pendingCount,
+      unclassified: day.unclassified,
+      partial: fullCoverageStart !== null && date < fullCoverageStart,
+    };
+  });
+  return {
+    days,
+    totals: { posted: totalPosted, pending: totalPending },
+    offsets,
+    conflicts,
+    unappliedRefunds,
+    unclassified,
+    excludedCounts,
+    accountStarts: Object.fromEntries([...accountStart.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))),
+    fullCoverageStart,
+    classificationComplete: unclassified.length === 0 && conflicts.length === 0 && unappliedRefunds.length === 0,
+  };
+}
+
+export function spendPayloadsEquivalent(a: ArchDailySpend, b: ArchDailySpend): boolean {
+  const numEq = (x: number, y: number) => Math.abs(x - y) < 1e-9;
+  if (
+    a.arch !== b.arch ||
+    a.version !== b.version ||
+    a.kind !== b.kind ||
+    a.pulledAt !== b.pulledAt ||
+    a.coverageStart !== b.coverageStart ||
+    a.throughDate !== b.throughDate ||
+    a.fullCoverageStart !== b.fullCoverageStart
+  ) return false;
+  if (!numEq(a.totals.posted, b.totals.posted) || !numEq(a.totals.pending, b.totals.pending)) return false;
+  if (
+    a.counts.transactions !== b.counts.transactions ||
+    a.counts.conflicts !== b.counts.conflicts ||
+    a.counts.unappliedRefunds !== b.counts.unappliedRefunds ||
+    a.counts.unclassified !== b.counts.unclassified ||
+    a.counts.excludedTransfer !== b.counts.excludedTransfer ||
+    a.counts.excludedLoanPrincipal !== b.counts.excludedLoanPrincipal
+  ) return false;
+  if (a.days.length !== b.days.length) return false;
+  return a.days.every((day, i) => {
+    const other = b.days[i];
+    if (!other) return false;
+    if (day.date !== other.date || !numEq(day.posted, other.posted) || !numEq(day.pending, other.pending)) return false;
+    if (day.spendCount !== other.spendCount || day.pendingCount !== other.pendingCount || day.partial !== other.partial) return false;
+    if (day.unclassified.length !== other.unclassified.length || day.unclassified.some((v, j) => v !== other.unclassified[j])) return false;
+    if (day.categories.length !== other.categories.length) return false;
+    return day.categories.every((cat, j) => {
+      const oc = other.categories[j];
+      return oc !== undefined && cat.key === oc.key && numEq(cat.amount, oc.amount);
+    });
+  });
+}
+
+type DailySpendStoredRow = { id: number; payload: string; pulledAt: Date };
+
+function parseDailySpendStoredRow(row: DailySpendStoredRow): ArchDailySpend | null {
+  try {
+    const parsed = archDailySpendSchema.safeParse(JSON.parse(row.payload));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function dailyVersionKey(row: DailySpendStoredRow, parsed: ArchDailySpend): number {
+  const ms = Date.parse(parsed.pulledAt);
+  return Number.isFinite(ms) ? ms : row.pulledAt.getTime();
+}
+
+export function pickCurrentDailySpendVersion(
+  rows: DailySpendStoredRow[],
+): { row: DailySpendStoredRow; parsed: ArchDailySpend } | null {
+  let best: { row: DailySpendStoredRow; parsed: ArchDailySpend; key: number } | null = null;
+  for (const row of rows) {
+    const parsed = parseDailySpendStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyVersionKey(row, parsed);
+    if (!best || key > best.key || (key === best.key && row.id > best.row.id)) {
+      best = { row, parsed, key };
+    }
+  }
+  return best ? { row: best.row, parsed: best.parsed } : null;
+}
+
+
 // F-ARCH-001·DATE-1 read-path date eligibility (pure). Stored
 // rows are NEVER rewritten: a legacy row whose asOf is not a
 // real calendar date (2026-02-30 and friends, persisted before
@@ -357,6 +706,8 @@ const dashboardSchema = z.object({
   // F-ARCH-001 overlay: null unless getDashboard finds a stored
   // new-architecture figure to overlay (see archNetWorthSchema).
   archNetWorth: archNetWorthSchema.nullable().default(null),
+  archDailySpend: archDailySpendSchema.nullable().default(null),
+  archNetWorthSeries: z.array(z.object({ date: z.string(), total: z.number() })).default([]),
   sourceMonth: z.string(),
   months: z.array(monthSchema),
   live: z.object({
@@ -516,6 +867,46 @@ const ingestArchNetWorthResponse = z.object({
 });
 
 type IngestArchNetWorthResult = z.infer<typeof ingestArchNetWorthResponse>;
+
+const ingestArchDailySpendRequest = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  pulledAt: z.string().min(1).max(64),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  fullCoverageStart: z.string().nullable(),
+  transactions: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(200),
+        date: z.string(),
+        amount: z.number().finite(),
+        status: z.enum(["posted", "pending"]),
+        kind: z.enum(["spend", "transfer", "loan_principal", "refund", "loan_mixed", "unmatched_transfer"]),
+        category: z.string().max(64).optional(),
+        account: z.string().max(200).optional(),
+        refundOf: z.string().nullable().optional(),
+      }),
+    )
+    .max(20000),
+  days: z.array(archDailySpendDaySchema),
+});
+
+const ingestArchDailySpendResponse = z.object({
+  ok: z.boolean(),
+  issue: z.string().nullable(),
+  days: z.number().int().nonnegative(),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  totalMatches: z.boolean(),
+  readBackVerified: z.boolean(),
+});
+
+type IngestArchDailySpendResult = z.infer<typeof ingestArchDailySpendResponse>;
+
+function dailySpendFailure(issue: string, coverageStart = "", throughDate = ""): IngestArchDailySpendResult {
+  return { ok: false, issue, days: 0, coverageStart, throughDate, totalMatches: false, readBackVerified: false };
+}
 
 function archIngestFailure(issue: string): IngestArchNetWorthResult {
   return { ok: false, issue, rows: 0, included: 0, missing: 0, totalMatches: false, readBackVerified: false };
@@ -2511,6 +2902,8 @@ function buildDashboard(
   return {
     asOf,
     archNetWorth: null,
+    archDailySpend: null,
+    archNetWorthSeries: [],
     sourceMonth: latestRaw.key,
     months,
     live: {
@@ -2907,6 +3300,39 @@ export const Actions = {
           // presentation (ranges from valid calendar dates
           // alone + coverage counts) on this in-memory copy.
           data = { ...data, archNetWorth: sanitizeArchNetWorthDates(currentArch.parsed) };
+        }
+        // Daily-spend overlay + net-worth daily series.
+        try {
+          const dailyRows = await ctx.db<typeof schema>()
+            .select()
+            .from(schema.archDailySpend);
+          const currentDaily = pickCurrentDailySpendVersion(dailyRows);
+          if (currentDaily) {
+            data = { ...data, archDailySpend: currentDaily.parsed };
+          }
+        } catch {
+          // Table may not exist on legacy DBs before migration; keep null.
+        }
+        // Build archNetWorthSeries: per payload pulledAt calendar
+        // date (first 10 chars) keep version with greatest
+        // (pulledAt, id), emit {date,total} sorted ascending.
+        {
+          const byDate = new Map<string, { parsed: ArchNetWorth; row: ArchStoredRow; key: number }>();
+          for (const row of archRows) {
+            const parsed = parseArchStoredRow(row);
+            if (!parsed) continue;
+            const dateKey = parsed.pulledAt.slice(0, 10);
+            if (!dateKey) continue;
+            const key = archVersionKey(row, parsed);
+            const existing = byDate.get(dateKey);
+            if (!existing || key > existing.key || (key === existing.key && row.id > existing.row.id)) {
+              byDate.set(dateKey, { parsed, row, key });
+            }
+          }
+          const series = [...byDate.entries()]
+            .map(([date, entry]) => ({ date, total: entry.parsed.total }))
+            .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+          data = { ...data, archNetWorthSeries: series };
         }
       }
       const staleRunning = isStaleRunningState(state?.status, state?.updatedAt, new Date());
@@ -3736,6 +4162,161 @@ export const Actions = {
         rows: rows.length,
         included: rows.length - missing.length,
         missing: missing.length,
+        totalMatches: true,
+        readBackVerified,
+      };
+    },
+  }),
+
+  ingestArchDailySpend: defineAction({
+    request: ingestArchDailySpendRequest,
+    response: ingestArchDailySpendResponse,
+    async handler(ctx, args): Promise<IngestArchDailySpendResult> {
+      if (!isOwnerOrSyncChannel(ctx)) return dailySpendFailure("forbidden", args.coverageStart ?? "", args.throughDate ?? "");
+      const pulledAtMs = Date.parse(args.pulledAt);
+      if (!Number.isFinite(pulledAtMs) || !/(?:Z|[+-]\d{2}:?\d{2})\s*$/i.test(args.pulledAt)) {
+        return dailySpendFailure("invalid_pulled_at", args.coverageStart, args.throughDate);
+      }
+      if (!isRealDateKey(args.coverageStart) || !isRealDateKey(args.throughDate)) {
+        return dailySpendFailure("invalid_date", args.coverageStart, args.throughDate);
+      }
+      for (const txn of args.transactions) {
+        if (!isRealDateKey(txn.date)) {
+          return dailySpendFailure("invalid_date", args.coverageStart, args.throughDate);
+        }
+      }
+      if (args.coverageStart > args.throughDate) {
+        return dailySpendFailure("invalid_window", args.coverageStart, args.throughDate);
+      }
+      // Server recompute
+      const recomputed = summarizeSpendDailyServer(args.transactions as DailySpendTxn[], {
+        fromDate: args.coverageStart,
+        toDate: args.throughDate,
+      });
+      // Compare with submitted days
+      let mismatch = false;
+      if (recomputed.fullCoverageStart !== args.fullCoverageStart) mismatch = true;
+      if (!mismatch) {
+        if (args.days.length !== recomputed.days.length) mismatch = true;
+        else {
+          for (let i = 0; i < recomputed.days.length; i++) {
+            const rec = recomputed.days[i]!;
+            const sub = args.days[i]!;
+            if (rec.date !== sub.date) { mismatch = true; break; }
+            if (Math.abs(rec.posted - sub.posted) > 0.01) { mismatch = true; break; }
+            if (Math.abs(rec.pending - sub.pending) > 0.01) { mismatch = true; break; }
+            if (rec.spendCount !== sub.spendCount) { mismatch = true; break; }
+            if (rec.pendingCount !== sub.pendingCount) { mismatch = true; break; }
+            if (rec.partial !== sub.partial) { mismatch = true; break; }
+            if (rec.unclassified.length !== sub.unclassified.length || rec.unclassified.some((v, j) => v !== sub.unclassified[j])) { mismatch = true; break; }
+            // categories as maps
+            const recMap = new Map(rec.categories.map((c) => [c.key, c.amount] as const));
+            const subMap = new Map(sub.categories.map((c) => [c.key, c.amount] as const));
+            if (recMap.size !== subMap.size) { mismatch = true; break; }
+            let catMismatch = false;
+            for (const [k, v] of recMap) {
+              const sv = subMap.get(k);
+              if (sv === undefined || Math.abs(v - sv) > 0.01) { catMismatch = true; break; }
+            }
+            if (catMismatch) { mismatch = true; break; }
+          }
+        }
+      }
+      if (mismatch) {
+        return { ok: false, issue: "daily_mismatch", days: 0, coverageStart: args.coverageStart, throughDate: args.throughDate, totalMatches: false, readBackVerified: false };
+      }
+      const payload: ArchDailySpend = {
+        arch: "F-ARCH-001",
+        version: 1,
+        kind: "daily-spend",
+        pulledAt: args.pulledAt,
+        storedAt: new Date().toISOString(),
+        coverageStart: args.coverageStart,
+        throughDate: args.throughDate,
+        fullCoverageStart: recomputed.fullCoverageStart,
+        days: recomputed.days,
+        totals: recomputed.totals,
+        counts: {
+          transactions: args.transactions.length,
+          conflicts: recomputed.conflicts.length,
+          unappliedRefunds: recomputed.unappliedRefunds.length,
+          unclassified: recomputed.unclassified.length,
+          excludedTransfer: recomputed.excludedCounts.transfer,
+          excludedLoanPrincipal: recomputed.excludedCounts.loanPrincipal,
+        },
+      };
+      const db = ctx.db<typeof schema>();
+      const existingRows = await db.select().from(schema.archDailySpend);
+      let maxStoredMs = Number.NEGATIVE_INFINITY;
+      const sameVersion: { row: DailySpendStoredRow; parsed: ArchDailySpend }[] = [];
+      for (const row of existingRows) {
+        const parsed = parseDailySpendStoredRow(row);
+        if (!parsed) continue;
+        const key = dailyVersionKey(row, parsed);
+        if (key > maxStoredMs) maxStoredMs = key;
+        if (key === pulledAtMs) sameVersion.push({ row, parsed });
+      }
+      if (pulledAtMs < maxStoredMs) return dailySpendFailure("stale_version", args.coverageStart, args.throughDate);
+      let targetRowId: number | null = null;
+      if (sameVersion.length > 0) {
+        const hit = sameVersion.find((candidate) => spendPayloadsEquivalent(candidate.parsed, payload));
+        if (!hit) return dailySpendFailure("version_conflict", args.coverageStart, args.throughDate);
+        targetRowId = hit.row.id;
+      }
+      if (targetRowId === null) {
+        const payloadJson = JSON.stringify(payload);
+        const insertedRows = (await db.all(
+          sql`INSERT INTO arch_daily_spend (payload, pulled_at, created_at)
+              SELECT ${payloadJson}, ${pulledAtMs}, ${Date.now()}
+              WHERE NOT EXISTS (
+                SELECT 1 FROM arch_daily_spend
+                WHERE pulled_at >= ${pulledAtMs} AND json_valid(payload)
+              )
+              RETURNING id`,
+        )) as unknown as Array<{ id?: number } | [number]>;
+        const insertedRow = insertedRows[0];
+        const insertedId = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow?.id;
+        if (insertedId != null) {
+          targetRowId = insertedId;
+        } else {
+          const committedRows = await db.select().from(schema.archDailySpend);
+          let committedMaxMs = Number.NEGATIVE_INFINITY;
+          const committedSame: { row: DailySpendStoredRow; parsed: ArchDailySpend }[] = [];
+          for (const row of committedRows) {
+            const parsedCommitted = parseDailySpendStoredRow(row);
+            if (!parsedCommitted) continue;
+            const key = dailyVersionKey(row, parsedCommitted);
+            if (key > committedMaxMs) committedMaxMs = key;
+            if (key === pulledAtMs) committedSame.push({ row, parsed: parsedCommitted });
+          }
+          if (pulledAtMs < committedMaxMs) return dailySpendFailure("stale_version", args.coverageStart, args.throughDate);
+          const winner = committedSame.find((candidate) => spendPayloadsEquivalent(candidate.parsed, payload));
+          if (winner) {
+            targetRowId = winner.row.id;
+          } else {
+            return dailySpendFailure("version_conflict", args.coverageStart, args.throughDate);
+          }
+        }
+      }
+      let readBackVerified = false;
+      if (targetRowId !== null) {
+        const backRows = await db
+          .select()
+          .from(schema.archDailySpend)
+          .where(eq(schema.archDailySpend.id, targetRowId))
+          .limit(1);
+        const backRow = backRows[0];
+        if (backRow) {
+          const parsedBack = parseDailySpendStoredRow(backRow);
+          readBackVerified = parsedBack !== null && spendPayloadsEquivalent(parsedBack, payload);
+        }
+      }
+      return {
+        ok: readBackVerified,
+        issue: readBackVerified ? null : "read_back_mismatch",
+        days: payload.days.length,
+        coverageStart: args.coverageStart,
+        throughDate: args.throughDate,
         totalMatches: true,
         readBackVerified,
       };

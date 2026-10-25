@@ -36,6 +36,13 @@
       "when": 1792856372321,
       "tag": "0005_arch_net_worth",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792879592995,
+      "tag": "0006_arch_daily_spend",
+      "breakpoints": true
     }
   ]
 }

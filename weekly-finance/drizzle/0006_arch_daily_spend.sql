@@ -1,0 +1,6 @@
+CREATE TABLE arch_daily_spend (
+  id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+  payload TEXT NOT NULL,
+  pulled_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
