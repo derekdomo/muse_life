@@ -153,6 +153,21 @@ export const archDailyInvest = sqliteTable("arch_daily_invest", {
     .$defaultFn(() => new Date()),
 });
 
+// TRADING-MERGE-001 (0009): the merged 「交易日志」 dataset lives
+// in its own single-row store, fully independent of finance_state
+// and the arch_* tables. The dataset is one JSON document,
+// replaced wholesale by saveTradingData and extended only at its
+// journal tail by appendTradingJournal; getDashboard surfaces it
+// as the optional `trading` field and getTradingSummary reads
+// counts from it. Exactly one row (id = 1) ever exists.
+export const tradingState = sqliteTable("trading_state", {
+  id: integer("id").primaryKey(),
+  payload: text("payload").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const refreshObservations = sqliteTable("refresh_observations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   generation: text("generation"),

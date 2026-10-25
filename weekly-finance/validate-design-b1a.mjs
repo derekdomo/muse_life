@@ -109,7 +109,7 @@ function loadHelpers() {
     extractFn(appSrc, "buildNetWorthTrend", [["months: NetWorthTrendMonthLike[]", "months"], ["daily: DailyNetWorthPointLike[]", "daily"], [": NetWorthTrendModel", ""], ["dailyPoints: NetWorthTrendPoint[]", "dailyPoints"], ["monthlyPoints: NetWorthTrendPoint[]", "monthlyPoints"], ["points: NetWorthTrendPoint[]", "points"]]),
     extractFn(appSrc, "netWorthTrendRangeStart", [["range: Range", "range"]]),
     extractFn(appSrc, "filterNetWorthTrend", [["model: NetWorthTrendModel", "model"], ["range: Range", "range"], [": NetWorthTrendView", ""]]),
-    extractFn(appSrc, "buildInvestMonthView", [["investDays: InvestDayLike[]", "investDays"], ["monthlyReturns: MonthlyReturnLike[]", "monthlyReturns"], [": InvestMonthView", ""], ["cells: InvestMonthCell[]", "cells"]]),
+    extractFn(appSrc, "buildInvestMonthView", [["investDays: InvestDayLike[]", "investDays"], ["monthlyReturns: MonthlyReturnLike[]", "monthlyReturns"], [": InvestMonthView", ""], ["cells: InvestMonthCell[]", "cells"], ["chain: InvestInterval[]", "chain"]]),
     extractFn(appSrc, "fireYearsEstimate", [["fire: Dashboard[\"fire\"]", "fire"]]),
     extractFn(appSrc, "fireSummaryLine", [["fire: Dashboard[\"fire\"]", "fire"]]),
     extractFn(appSrc, "distributionSummaryLine", [["live: Dashboard[\"live\"]", "live"]]),
@@ -289,13 +289,17 @@ const investDays = [
   { date: "2026-10-25", pnl: -300 },
 ];
 const monthlyReturns = [
+  { key: "2025-02-28", investmentReturn: 900 },
   { key: "2025-03-31", investmentReturn: -4200 },
   { key: "2026-09-30", investmentReturn: 8100 },
-  { key: "2026-10-31", investmentReturn: null },
+  { key: "2026-10-31", investmentReturn: null, investmentReturnReason: "期间外部净投入未知" },
 ];
 const marView = H.buildInvestMonthView(investDays, monthlyReturns, "2025-03", "2026-10-25", "2026-10-24");
-check("invest: a pre-era month with a monthly figure is monthly mode with the figure as its total",
+check("invest: a pre-era month whose interval spans month-end -> month-end is monthly mode with the figure as its total",
   marView.mode === "monthly" && marView.total === -4200 && marView.dailyCount === 0 && marView.monthlyTotal === -4200);
+check("invest: the proven full-month interval carries both ends (2025-02-28 -> 2025-03-31)",
+  marView.monthlyInterval?.startKey === "2025-02-28" && marView.monthlyInterval?.endKey === "2025-03-31"
+  && marView.monthlyInterval?.fullMonth === true && marView.intervals.length === 1);
 check("invest: pre-era cells are monthly-only and carry NO amount (the monthly value is never split into days)",
   marView.cells.every((c) => c.mode !== "daily") && marView.cells.every((c) => c.pnl === null)
   && marView.cells.find((c) => c.date === "2025-03-15")?.mode === "monthly-only");
@@ -307,16 +311,136 @@ check("invest: the era month sums its real daily points (total / average / max d
   && octView.maxAmount === 1200 && octView.maxDate === "2026-10-24");
 check("invest: daily cells carry their signed pnl", octView.cells.find((c) => c.date === "2026-10-25")?.pnl === -300
   && octView.cells.find((c) => c.date === "2026-10-24")?.mode === "daily");
+check("invest: daily mode reports the recorded coverage (first / last recorded day)",
+  octView.dailyFirstDate === "2026-10-24" && octView.dailyLastDate === "2026-10-25");
 check("invest: a pre-era day inside the era month is NOT monthly-only when the month's figure is unproven (null)",
   octView.cells.find((c) => c.date === "2026-10-23")?.mode === "none");
 check("invest: future days are future, never data", octView.cells.find((c) => c.date === "2026-10-26")?.mode === "future");
 const sepView = H.buildInvestMonthView(investDays, monthlyReturns, "2026-09", "2026-10-25", "2026-10-24");
-check("invest: the month before the era with a figure is monthly mode", sepView.mode === "monthly" && sepView.total === 8100);
+check("invest: an interval ending in Sep 2026 but starting Mar 2025 is NOT the September return (interval mode, no monthly total, no monthly-only cells)",
+  sepView.mode === "interval" && sepView.monthlyTotal === null && sepView.total === 8100
+  && sepView.intervals.length === 1 && sepView.intervals[0]?.startKey === "2025-03-31" && sepView.intervals[0]?.endKey === "2026-09-30"
+  && sepView.intervals[0]?.fullMonth === false
+  && sepView.cells.find((c) => c.date === "2026-09-15")?.mode === "none");
 const junView = H.buildInvestMonthView(investDays, monthlyReturns, "2025-06", "2026-10-25", "2026-10-24");
 check("invest: a month with neither daily points nor a figure is an honest none",
   junView.mode === "none" && junView.total === null && junView.cells.find((c) => c.date === "2025-06-10")?.mode === "none");
 check("mutation: splitting the March monthly figure across its 31 days would fabricate daily values — every March cell pnl stays null",
   marView.cells.filter((c) => c.date != null).every((c) => c.pnl === null) && marView.dailyCount === 0);
+
+// --- CAL-METRICS-001 fix: interval attribution acceptance matrix ---
+// ① full month-end -> month-end intervals: true zero / negative /
+// positive are all the named natural month's return.
+const febZero = H.buildInvestMonthView([], [
+  { key: "2025-01-31", investmentReturn: 100 },
+  { key: "2025-02-28", investmentReturn: 0 },
+], "2025-02", "2026-10-25", "2026-10-24");
+check("invest attribution: a true 0 full-month return is monthly mode with total 0 (not missing)",
+  febZero.mode === "monthly" && febZero.monthlyTotal === 0 && febZero.total === 0);
+const aprPos = H.buildInvestMonthView([], [
+  { key: "2025-03-31", investmentReturn: -50 },
+  { key: "2025-04-30", investmentReturn: 2750 },
+], "2025-04", "2026-10-25", "2026-10-24");
+check("invest attribution: a positive full-month return is monthly mode",
+  aprPos.mode === "monthly" && aprPos.monthlyTotal === 2750 && aprPos.monthlyInterval?.startKey === "2025-03-31");
+// ② non-month-aligned intervals keep both ends and their amount —
+// never renamed as a whole month, never averaged into days.
+const mayFirst = H.buildInvestMonthView([], [
+  { key: "2025-04-01", investmentReturn: 10 },
+  { key: "2025-05-01", investmentReturn: 640 },
+], "2025-05", "2026-10-25", "2026-10-24");
+check("invest attribution: month-start -> next-month-start is an interval, not May's return",
+  mayFirst.mode === "interval" && mayFirst.monthlyTotal === null && mayFirst.total === 640
+  && mayFirst.intervals[0]?.startKey === "2025-04-01" && mayFirst.intervals[0]?.endKey === "2025-05-01");
+const mayMid = H.buildInvestMonthView([], [
+  { key: "2025-04-15", investmentReturn: 10 },
+  { key: "2025-05-15", investmentReturn: -125 },
+], "2025-05", "2026-10-25", "2026-10-24");
+check("invest attribution: mid-month -> mid-month keeps both ends and the signed amount",
+  mayMid.mode === "interval" && mayMid.intervals[0]?.startKey === "2025-04-15" && mayMid.intervals[0]?.endKey === "2025-05-15"
+  && mayMid.intervals[0]?.amount === -125 && mayMid.monthlyTotal === null);
+const crossMonths = H.buildInvestMonthView([], [
+  { key: "2025-01-31", investmentReturn: 10 },
+  { key: "2025-04-30", investmentReturn: 4321 },
+], "2025-04", "2026-10-25", "2026-10-24");
+check("invest attribution: a multi-month span ending at a month end is still not that month's return",
+  crossMonths.mode === "interval" && crossMonths.monthlyTotal === null
+  && crossMonths.intervals[0]?.startKey === "2025-01-31" && crossMonths.intervals[0]?.endKey === "2025-04-30");
+// ② pending candidates keep their server reason + both ends.
+const firstEver = H.buildInvestMonthView([], [
+  { key: "2025-03-31", investmentReturn: null, investmentReturnReason: "首期快照是期间起点，只作期初余额，不产生收益" },
+], "2025-03", "2026-10-25", "2026-10-24");
+check("invest attribution: the first-ever snapshot is pending with a null start and its reason preserved",
+  firstEver.mode === "pending" && firstEver.monthlyTotal === null && firstEver.intervals.length === 1
+  && firstEver.intervals[0]?.startKey === null && firstEver.intervals[0]?.endKey === "2025-03-31"
+  && firstEver.intervals[0]?.reason === "首期快照是期间起点，只作期初余额，不产生收益");
+const missingFlow = H.buildInvestMonthView([], [
+  { key: "2025-02-28", investmentReturn: 10 },
+  { key: "2025-03-31", investmentReturn: null, investmentReturnReason: "期间外部净投入未知" },
+], "2025-03", "2026-10-25", "2026-10-24");
+check("invest attribution: a full-month-shaped interval with unknown flow stays pending (shape alone proves nothing without a value)",
+  missingFlow.mode === "pending" && missingFlow.monthlyTotal === null
+  && missingFlow.intervals[0]?.fullMonth === true && missingFlow.intervals[0]?.reason === "期间外部净投入未知"
+  && missingFlow.cells.find((c) => c.date === "2025-03-15")?.mode === "none");
+// ③ several snapshots inside one month, shuffled input, duplicate
+// and conflicting end keys: nothing is picked first, nothing doubles.
+const multiSnap = H.buildInvestMonthView([], [
+  { key: "2025-03-31", investmentReturn: 700 },
+  { key: "2025-02-28", investmentReturn: 100 },
+  { key: "2025-03-15", investmentReturn: 300 },
+], "2025-03", "2026-10-25", "2026-10-24");
+check("invest attribution: shuffled input + two snapshots in March -> two intervals, no monthly total, no first-pick",
+  multiSnap.mode === "interval" && multiSnap.monthlyTotal === null && multiSnap.total === null && multiSnap.intervals.length === 2
+  && multiSnap.intervals[0]?.startKey === "2025-02-28" && multiSnap.intervals[0]?.endKey === "2025-03-15" && multiSnap.intervals[0]?.amount === 300
+  && multiSnap.intervals[1]?.startKey === "2025-03-15" && multiSnap.intervals[1]?.endKey === "2025-03-31" && multiSnap.intervals[1]?.amount === 700);
+const dupSame = H.buildInvestMonthView([], [
+  { key: "2025-02-28", investmentReturn: 100 },
+  { key: "2025-03-31", investmentReturn: 700 },
+  { key: "2025-03-31", investmentReturn: 700 },
+], "2025-03", "2026-10-25", "2026-10-24");
+check("invest attribution: a same-value duplicate end key counts once and the month stays provable",
+  dupSame.mode === "monthly" && dupSame.monthlyTotal === 700 && dupSame.intervals.length === 1 && dupSame.intervals[0]?.conflict === false);
+const dupConflict = H.buildInvestMonthView([], [
+  { key: "2025-02-28", investmentReturn: 100 },
+  { key: "2025-03-31", investmentReturn: 700 },
+  { key: "2025-03-31", investmentReturn: 701 },
+], "2025-03", "2026-10-25", "2026-10-24");
+check("invest attribution: a conflicting duplicate end key takes NEITHER value and is flagged conflict / pending",
+  dupConflict.mode === "pending" && dupConflict.monthlyTotal === null && dupConflict.intervals.length === 1
+  && dupConflict.intervals[0]?.conflict === true && dupConflict.intervals[0]?.amount === null);
+// "YYYY-MM" keys normalise to the month's last day before comparing.
+const ymKeys = H.buildInvestMonthView([], [
+  { key: "2025-02", investmentReturn: 100 },
+  { key: "2025-03", investmentReturn: 260 },
+], "2025-03", "2026-10-25", "2026-10-24");
+check("invest attribution: YYYY-MM keys normalise to month ends, so the full month is still provable",
+  ymKeys.mode === "monthly" && ymKeys.monthlyTotal === 260
+  && ymKeys.monthlyInterval?.startKey === "2025-02-28" && ymKeys.monthlyInterval?.endKey === "2025-03-31");
+// ④ era boundaries: a single recorded daily, a gap day, an explicit
+// 0 / negative daily; monthly and daily never stack.
+const eraCross = H.buildInvestMonthView(
+  [{ date: "2026-10-24", pnl: 0 }, { date: "2026-10-26", pnl: -88 }],
+  [
+    { key: "2026-09-30", investmentReturn: 100 },
+    { key: "2026-10-31", investmentReturn: 5000 },
+  ],
+  "2026-10", "2026-10-26", "2026-10-24");
+check("invest attribution: era month with daily points stays daily; the proven monthly figure is reported but NEVER added to the daily subtotal",
+  eraCross.mode === "daily" && eraCross.total === -88 && eraCross.monthlyTotal === 5000 && eraCross.dailyCount === 2
+  && eraCross.dailyFirstDate === "2026-10-24" && eraCross.dailyLastDate === "2026-10-26");
+check("invest attribution: an explicit 0 daily is a daily cell; a missing day between recorded days is none, not a fabricated value",
+  eraCross.cells.find((c) => c.date === "2026-10-24")?.mode === "daily" && eraCross.cells.find((c) => c.date === "2026-10-24")?.pnl === 0
+  && eraCross.cells.find((c) => c.date === "2026-10-25")?.mode === "none");
+check("invest attribution: pre-era days of an era month with a PROVEN full-month figure are monthly-only (no amount on the cell)",
+  eraCross.cells.find((c) => c.date === "2026-10-10")?.mode === "monthly-only" && eraCross.cells.find((c) => c.date === "2026-10-10")?.pnl === null);
+const singleDaily = H.buildInvestMonthView(
+  [{ date: "2026-10-24", pnl: 42 }], [], "2026-10", "2026-10-25", "2026-10-24");
+check("invest attribution: a single recorded daily -> daily mode with first == last recorded day and no intervals",
+  singleDaily.mode === "daily" && singleDaily.total === 42 && singleDaily.average === 42
+  && singleDaily.dailyFirstDate === "2026-10-24" && singleDaily.dailyLastDate === "2026-10-24" && singleDaily.intervals.length === 0);
+const emptyInvest = H.buildInvestMonthView([], [], "2025-06", "2026-10-25", "2026-10-24");
+check("invest attribution: empty daily + empty monthly data is an honest none with no intervals",
+  emptyInvest.mode === "none" && emptyInvest.total === null && emptyInvest.intervals.length === 0 && emptyInvest.monthlyInterval === null);
 
 // --- Calendar helpers: real month-grid behaviour ---
 // Synthetic fixture: October 2026 (Oct 1 2026 is a Thursday, so
@@ -403,8 +527,8 @@ check("tabs: order is 总览 / FIRE / 明细 (FIRE-TAB-001)",
   && appSrc.indexOf(">总览</button>") < appSrc.indexOf(">FIRE</button>")
   && appSrc.indexOf(">FIRE</button>") < appSrc.indexOf(">明细</button>"));
 check("tabs: tab state is mount-time state in DashboardView, default overview",
-  appSrc.includes('useState<"overview" | "fire" | "detail">("overview")')
-  && componentSlice("DashboardView").includes('useState<"overview" | "fire" | "detail">("overview")'));
+  appSrc.includes('useState<"overview" | "fire" | "detail" | "trading">("overview")')
+  && componentSlice("DashboardView").includes('useState<"overview" | "fire" | "detail" | "trading">("overview")'));
 check("tabs: OverviewTab, FireTab and DetailTab components exist and render once each",
   appSrc.includes("function OverviewTab") && appSrc.includes("function FireTab") && appSrc.includes("function DetailTab")
   && (appSrc.split("<OverviewTab").length - 1) === 1 && (appSrc.split("<FireTab").length - 1) === 1 && (appSrc.split("<DetailTab").length - 1) === 1);
@@ -496,14 +620,20 @@ check("calendar metrics: income reuses the flow grid via the day-shape adapter +
 check("calendar metrics: invest renders from buildInvestMonthView with signed text amounts",
   calSrc.includes("buildInvestMonthView(investData?.days ?? [], data.months, monthKey, todayKey, INVEST_DAILY_ERA_START_CLIENT)")
   && calSrc.includes("signedCompactCurrency(cell.pnl ?? 0)") && calSrc.includes('"仅月度"'));
-check("calendar metrics: invest summary separates daily months from monthly-only months",
-  calSrc.includes("本月收益·损失合计") && calSrc.includes("本月收益·损失（月度）") && calSrc.includes("日粒度 · {investView.dailyCount} 天"));
+check("calendar metrics: invest summary separates recorded-daily subtotal / proven full month / interval / pending (CAL-METRICS-001 fix)",
+  calSrc.includes("已记录日收益·损失小计") && calSrc.includes("日均（按已记录 {investView.dailyCount} 天）")
+  && calSrc.includes("本月收益·损失") && calSrc.includes("完整自然月")
+  && calSrc.includes("区间收益·损失") && calSrc.includes("非完整自然月")
+  && calSrc.includes("该月收益待核对") && !calSrc.includes("本月收益·损失合计"));
 check("calendar metrics: income summary carries its own total label", calSrc.includes("本月入账合计"));
 check("calendar metrics: one-line caliber notes live in the detail tab, per metric",
   calSrc.includes("入账口径：外部流入（收入＋退款），排除账户间转移与贷款相关流")
   && calSrc.includes("投资收益·损失口径：当日投资价值变化 − 当日净投入") && calSrc.includes("不摊分到日"));
 check("calendar metrics: invest drill-down shows the value-change / net-flow / pnl composition",
   calSrc.includes("当日价值变化") && calSrc.includes("当日净投入") && calSrc.includes("收益·损失 {signedPreciseCurrency(selectedInvestDay.pnl)}"));
+check("calendar metrics: invest drill-down names a proven month with its interval ends, else lists each candidate interval (CAL-METRICS-001 fix)",
+  calSrc.includes("本月收益·损失（月度）") && calSrc.includes("investIntervalRange(investView.monthlyInterval)")
+  && calSrc.includes("investView.intervals.map") && calSrc.includes("区间收益待核对"));
 check("calendar metrics: server gates exist for both new figures (chunked income + era-floored invest)",
   serverSrc.includes("ingestArchDailyIncome") && serverSrc.includes("ingestArchDailyInvest")
   && serverSrc.includes("arch_daily_income") && serverSrc.includes("arch_daily_invest") && serverSrc.includes("INVEST_DAILY_ERA_START"));

@@ -4825,12 +4825,112 @@ async function casSpawnTailState(
   return rows.length === 1;
 }
 
+// TRADING-MERGE-001: the merged 「交易日志」 data layer. The
+// trading dataset is a single JSON document stored in its own
+// trading_state row — it never touches finance_state or the
+// arch_* tables, and the arch append-only semantics are
+// unaffected. saveTradingData replaces the document wholesale,
+// appendTradingJournal extends only its journal tail (chunked
+// pushes), getTradingSummary reads counts back for the pusher's
+// integrity check, and getDashboard surfaces the document as its
+// optional `trading` field for the 「交易」 tab. The dataset
+// shape mirrors the trading pipeline's push contract exactly:
+// generated_at, accounts (id → name), current_total, positions[],
+// open_options[], closed_trades[], daily[], realized_daily[]
+// ({date, inflow, realized, realized_options, cum_realized}),
+// events[], stats{all, options, stocks}, by_ticker,
+// dividends_total, max_drawdown_pct, data_start, journal[].
+const saveTradingDataResponse = z.object({
+  ok: z.boolean(),
+  generated_at: z.string().nullable(),
+});
+
+const appendTradingJournalResponse = z.object({
+  ok: z.boolean(),
+  journal_count: z.number(),
+  generated_at: z.string().nullable(),
+});
+
+const getTradingSummaryResponse = z.object({
+  generated_at: z.string().nullable(),
+  current_total: z.number().nullable(),
+  journal_count: z.number(),
+  closed_count: z.number(),
+  positions_count: z.number(),
+});
+
+function emptyTradingDataset(): Record<string, unknown> {
+  const now = new Date();
+  const iso = now.toISOString();
+  return {
+    generated_at: iso,
+    accounts: {},
+    current_total: 0,
+    positions: [],
+    open_options: [],
+    closed_trades: [],
+    journal: [],
+    daily: [],
+    realized_daily: [],
+    events: [],
+    stats: { all: null, options: null, stocks: null },
+    by_ticker: {},
+    dividends_total: 0,
+    max_drawdown_pct: 0,
+    data_start: iso.slice(0, 10),
+  };
+}
+
+function parseTradingDataset(payload: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function tradingArrayLength(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+async function readTradingDataset(ctx: Ctx): Promise<Record<string, unknown> | null> {
+  const rows = await ctx.db<typeof schema>()
+    .select()
+    .from(schema.tradingState)
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return parseTradingDataset(row.payload);
+}
+
+async function writeTradingDataset(
+  ctx: Ctx,
+  dataset: Record<string, unknown>,
+): Promise<void> {
+  const db = ctx.db<typeof schema>();
+  const payload = JSON.stringify(dataset);
+  await db.batch([
+    db.delete(schema.tradingState),
+    db.insert(schema.tradingState).values({ id: 1, payload }),
+  ]);
+}
+
 export const Actions = {
   getDashboard: defineAction({
     request: z.object({}),
     response: z.object({
       access: z.enum(["owner", "guest_denied"]),
       data: dashboardSchema.nullable(),
+      // TRADING-MERGE-001: the ONLY addition to this schema — an
+      // optional sibling field carrying the trading dataset for
+      // the 「交易」 tab. Every pre-existing field is byte-for-byte
+      // unchanged; the field is null until the first trading push
+      // and always null for guests.
+      trading: z.record(z.string(), z.unknown()).nullable().optional(),
       refresh: z.object({
         status: z.enum(["idle", "running", "error"]),
         message: z.string().nullable(),
@@ -4847,6 +4947,7 @@ export const Actions = {
         return {
           access: "guest_denied" as const,
           data: null,
+          trading: null,
           refresh: { status: "idle" as const, message: "财务数据仅所有者可查看", updatedAt: null, startedAt: null },
         };
       }
@@ -4943,10 +5044,23 @@ export const Actions = {
           data = { ...data, archNetWorthSeries: series };
         }
       }
+      // TRADING-MERGE-001: the trading dataset rides along as a
+      // sibling field, read from its own store. A missing table
+      // (legacy DB before migration 0009) or an unparsable stored
+      // document keeps trading null — the finance view is
+      // completely unchanged and the 「交易」 tab shows its empty
+      // state.
+      let trading: Record<string, unknown> | null = null;
+      try {
+        trading = await readTradingDataset(ctx);
+      } catch {
+        trading = null;
+      }
       const staleRunning = isStaleRunningState(state?.status, state?.updatedAt, new Date());
       return {
         access: "owner" as const,
         data,
+        trading,
         refresh: {
           status: payloadCorrupted ? "error" : staleRunning ? "error" : (state?.status ?? "idle"),
           message: payloadCorrupted
@@ -5992,6 +6106,94 @@ export const Actions = {
         return { ok: false, issue: published.issue, days: 0, readBackVerified: false };
       }
       return { ok: true, issue: null, days: payload.days.length, readBackVerified: true };
+    },
+  }),
+
+  // TRADING-MERGE-001: replace the stored trading dataset
+  // wholesale. The pipeline computes the dataset from Plaid
+  // brokerage data and pushes it here; journal rows ride the
+  // append action below (the core push carries journal: []).
+  // Same write gate as the other ingest paths.
+  saveTradingData: defineAction({
+    request: z.object({ dataset: z.record(z.string(), z.unknown()) }),
+    response: saveTradingDataResponse,
+    async handler(ctx, args): Promise<z.infer<typeof saveTradingDataResponse>> {
+      if (!isOwnerOrSyncChannel(ctx)) {
+        return { ok: false, generated_at: null };
+      }
+      await writeTradingDataset(ctx, args.dataset);
+      ctx.invalidateQueries();
+      const generatedAt = args.dataset["generated_at"];
+      return {
+        ok: true,
+        generated_at: typeof generatedAt === "string" ? generatedAt : null,
+      };
+    },
+  }),
+
+  // TRADING-MERGE-001: append rows to the stored dataset's
+  // journal tail (chunked pushes of a large journal). With no
+  // dataset stored yet, an empty one is created first so the
+  // append always lands.
+  appendTradingJournal: defineAction({
+    request: z.object({
+      rows: z.array(z.record(z.string(), z.unknown())),
+    }),
+    response: appendTradingJournalResponse,
+    async handler(ctx, args): Promise<z.infer<typeof appendTradingJournalResponse>> {
+      if (!isOwnerOrSyncChannel(ctx)) {
+        return { ok: false, journal_count: 0, generated_at: null };
+      }
+      const dataset = (await readTradingDataset(ctx)) ?? emptyTradingDataset();
+      const existingJournal = Array.isArray(dataset["journal"])
+        ? (dataset["journal"] as unknown[])
+        : [];
+      const nextJournal = [...existingJournal, ...args.rows];
+      dataset["journal"] = nextJournal;
+      await writeTradingDataset(ctx, dataset);
+      ctx.invalidateQueries();
+      const generatedAt = dataset["generated_at"];
+      return {
+        ok: true,
+        journal_count: nextJournal.length,
+        generated_at: typeof generatedAt === "string" ? generatedAt : null,
+      };
+    },
+  }),
+
+  // TRADING-MERGE-001: counts-only read-back so the pusher can
+  // verify a push's integrity without downloading the dataset.
+  getTradingSummary: defineAction({
+    request: z.object({}),
+    response: getTradingSummaryResponse,
+    async handler(ctx): Promise<z.infer<typeof getTradingSummaryResponse>> {
+      const empty: z.infer<typeof getTradingSummaryResponse> = {
+        generated_at: null,
+        current_total: null,
+        journal_count: 0,
+        closed_count: 0,
+        positions_count: 0,
+      };
+      if (!isOwnerOrSyncChannel(ctx)) return empty;
+      let dataset: Record<string, unknown> | null = null;
+      try {
+        dataset = await readTradingDataset(ctx);
+      } catch {
+        dataset = null;
+      }
+      if (!dataset) return empty;
+      const generatedAt = dataset["generated_at"];
+      const currentTotal = dataset["current_total"];
+      return {
+        generated_at: typeof generatedAt === "string" ? generatedAt : null,
+        current_total:
+          typeof currentTotal === "number" && Number.isFinite(currentTotal)
+            ? currentTotal
+            : null,
+        journal_count: tradingArrayLength(dataset["journal"]),
+        closed_count: tradingArrayLength(dataset["closed_trades"]),
+        positions_count: tradingArrayLength(dataset["positions"]),
+      };
     },
   }),
 } satisfies ActionsModule;

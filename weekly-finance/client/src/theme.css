@@ -36,6 +36,16 @@
   --space-muted: var(--dim);
   --space-border: var(--border);
   --space-accent: var(--accent);
+  /* TRADING-MERGE-001: aliases for the merged 「交易」 tab.
+     Gains/losses ride on the same Okabe-Ito pair as the rest
+     of the page (--positive / --negative); meaning is always
+     carried by +/− signs and ▲▼ glyphs, colour only assists.
+     --event is the Okabe-Ito reddish purple used for the ◆
+     important-day markers. */
+  --up: var(--positive);
+  --down: var(--negative);
+  --event: #CC79A7;
+  --surface-alt: var(--surface-tint);
 }
 
 * { box-sizing: border-box; }
@@ -50,6 +60,12 @@ body {
 }
 button, input { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
+
+/* TRADING-MERGE-001: tabular mono numerals for the 交易 tab. */
+.font-num {
+  font-family: "SF Mono", "Roboto Mono", ui-monospace, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
 
 .app-shell { min-height: 100vh; background: var(--bg); }
 main {

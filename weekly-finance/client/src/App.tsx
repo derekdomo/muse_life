@@ -16,6 +16,7 @@ XAxis,
 YAxis,
 } from "recharts";
 import { api, type ApiResponse } from "./api";
+import { TradingTab } from "./TradingTab";
 
 type Dashboard = NonNullable<ApiResponse<typeof api, "getDashboard">["data"]>;
 type Month = Dashboard["months"][number];
@@ -2054,7 +2055,27 @@ export function signedPreciseCurrency(value: number): string {
 }
 
 export type InvestDayLike = { date: string; pnl: number };
-export type MonthlyReturnLike = { key: string; investmentReturn: number | null };
+export type MonthlyReturnLike = {
+  key: string;
+  investmentReturn: number | null;
+  investmentReturnReason?: string | null;
+};
+// One candidate return interval: the server derives each
+// month row's investmentReturn over the span between two
+// ADJACENT snapshots (previous snapshot key -> this row's
+// key), so the figure belongs to that interval — not to
+// the calendar month its end happens to land in. startKey
+// is null only for the very first snapshot (no predecessor).
+// conflict marks two rows sharing one endKey with different
+// values: no amount is taken from either.
+export type InvestInterval = {
+  startKey: string | null;
+  endKey: string;
+  amount: number | null;
+  reason: string | null;
+  fullMonth: boolean;
+  conflict: boolean;
+};
 export type InvestMonthCell = {
   date: string | null;
   day: number | null;
@@ -2068,22 +2089,41 @@ export type InvestMonthView = {
   year: number;
   month: number;
   cells: InvestMonthCell[];
-  mode: "daily" | "monthly" | "none";
+  mode: "daily" | "monthly" | "interval" | "pending" | "none";
   total: number | null;
   average: number | null;
   maxAmount: number | null;
   maxDate: string | null;
   dailyCount: number;
+  // Only a PROVEN full-natural-month value (previous month's
+  // last day -> this month's last day) may land here.
   monthlyTotal: number | null;
+  intervals: InvestInterval[];
+  monthlyInterval: InvestInterval | null;
+  dailyFirstDate: string | null;
+  dailyLastDate: string | null;
 };
 
 // The investment month view: weekday-aligned cells like the
 // spend calendar, but a day is one of — daily (a real daily
 // pnl point), monthly-only (before the daily era and the
-// month carries a monthly figure: the cell states 仅月度 and
-// no amount), none, or future. The monthly figure is used
-// ONLY as the month total in monthly mode; it is never
-// divided across days.
+// month carries a PROVEN full-month figure: the cell states
+// 仅月度 and no amount), none, or future. A monthly figure
+// is never divided across days and never added to daily
+// points.
+//
+// CAL-METRICS-001 fix: each server month row's return covers
+// the interval between adjacent snapshots, so the client
+// rebuilds those intervals from a key-sorted copy of the
+// month rows (input order never changes adjacency): an
+// interval's startKey is the previous row's key, its endKey
+// its own ("YYYY-MM" keys normalise to that month's last
+// day before comparing). Candidates are the intervals whose
+// endKey lands in the viewed month; same-endKey duplicates
+// with the same value count once, with different values
+// they conflict and contribute no amount. Only an interval
+// spanning exactly the previous month's last day -> this
+// month's last day may be called the month's return.
 export function buildInvestMonthView(
   investDays: InvestDayLike[],
   monthlyReturns: MonthlyReturnLike[],
@@ -2099,7 +2139,40 @@ export function buildInvestMonthView(
   const firstOffset = (new Date(year, month - 1, 1).getDay() + 6) % 7;
   const byDate = new Map();
   for (const day of investDays) byDate.set(day.date, day.pnl);
-  const monthlyTotal = monthlyReturns.find((entry) => entry.key.slice(0, 7) === monthKey)?.investmentReturn ?? null;
+  const monthLastDay = `${monthKey}-${pad(daysInMonth)}`;
+  const prevMonthDate = new Date(year, month - 1, 0);
+  const prevMonthLastDay = `${prevMonthDate.getFullYear()}-${pad(prevMonthDate.getMonth() + 1)}-${pad(prevMonthDate.getDate())}`;
+  const normalizeKey = (key: string): string => {
+    if (/^\d{4}-\d{2}$/.test(key)) {
+      const [ky = 1970, km = 1] = key.split("-").map(Number);
+      return `${key}-${pad(new Date(ky, km, 0).getDate())}`;
+    }
+    return key;
+  };
+  const sorted = monthlyReturns
+    .map((entry, index) => ({ entry, index, endKey: normalizeKey(entry.key) }))
+    .sort((a, b) => (a.endKey < b.endKey ? -1 : a.endKey > b.endKey ? 1 : a.index - b.index));
+  const chain: InvestInterval[] = [];
+  sorted.forEach((item, i) => {
+    const startKey = i > 0 ? (sorted[i - 1]?.endKey ?? null) : null;
+    const amount = item.entry.investmentReturn;
+    const reason = item.entry.investmentReturnReason ?? null;
+    const existing = chain.find((iv) => iv.endKey === item.endKey);
+    if (existing) {
+      if (!existing.conflict && existing.amount !== amount) {
+        existing.conflict = true;
+        existing.amount = null;
+        existing.reason = reason ?? existing.reason;
+      }
+      return;
+    }
+    chain.push({ startKey, endKey: item.endKey, amount, reason, fullMonth: false, conflict: false });
+  });
+  const intervals = chain
+    .filter((iv) => iv.endKey.slice(0, 7) === monthKey)
+    .map((iv) => ({ ...iv, fullMonth: iv.startKey === prevMonthLastDay && iv.endKey === monthLastDay }));
+  const monthlyInterval = intervals.find((iv) => iv.fullMonth) ?? null;
+  const monthlyTotal = monthlyInterval != null && !monthlyInterval.conflict ? monthlyInterval.amount : null;
   const cells: InvestMonthCell[] = [];
   for (let i = 0; i < firstOffset; i += 1) {
     cells.push({ date: null, day: null, mode: "blank", pnl: null, isToday: false, isBlank: true });
@@ -2108,6 +2181,8 @@ export function buildInvestMonthView(
   let dailyCount = 0;
   let maxAmount: number | null = null;
   let maxDate: string | null = null;
+  let dailyFirstDate: string | null = null;
+  let dailyLastDate: string | null = null;
   for (let dayNum = 1; dayNum <= daysInMonth; dayNum += 1) {
     const date = `${year}-${pad(month)}-${pad(dayNum)}`;
     const pnl = byDate.get(date) ?? null;
@@ -2121,6 +2196,8 @@ export function buildInvestMonthView(
     if (cellMode === "daily" && pnl != null) {
       total += pnl;
       dailyCount += 1;
+      if (dailyFirstDate == null) dailyFirstDate = date;
+      dailyLastDate = date;
       if (maxAmount == null || pnl > maxAmount) {
         maxAmount = pnl;
         maxDate = date;
@@ -2131,20 +2208,45 @@ export function buildInvestMonthView(
   while (cells.length % 7 !== 0) {
     cells.push({ date: null, day: null, mode: "blank", pnl: null, isToday: false, isBlank: true });
   }
-  const mode = dailyCount > 0 ? "daily" : monthlyTotal != null ? "monthly" : "none";
+  const hasValuedInterval = intervals.some((iv) => iv.amount != null);
+  const mode = dailyCount > 0
+    ? "daily"
+    : monthlyTotal != null
+      ? "monthly"
+      : intervals.length === 0
+        ? "none"
+        : hasValuedInterval
+          ? "interval"
+          : "pending";
   return {
     monthKey,
     year,
     month,
     cells,
     mode,
-    total: mode === "daily" ? total : mode === "monthly" ? monthlyTotal : null,
+    total: mode === "daily"
+      ? total
+      : mode === "monthly"
+        ? monthlyTotal
+        : mode === "interval" && intervals.length === 1
+          ? (intervals[0]?.amount ?? null)
+          : null,
     average: mode === "daily" && dailyCount > 0 ? total / dailyCount : null,
     maxAmount: mode === "daily" ? maxAmount : null,
     maxDate: mode === "daily" ? maxDate : null,
     dailyCount,
     monthlyTotal,
+    intervals,
+    monthlyInterval,
+    dailyFirstDate,
+    dailyLastDate,
   };
+}
+
+// Display range for one candidate interval; a null startKey
+// is the first snapshot ever recorded (no predecessor).
+export function investIntervalRange(interval: InvestInterval): string {
+  return `${interval.startKey ?? "无上期快照"} → ${interval.endKey}`;
 }
 
 function NetWorthDailySeries({ months, series }: { months: Dashboard["months"]; series: Dashboard["archNetWorthSeries"] }) {
@@ -2338,15 +2440,37 @@ function SpendCalendar({ data }: { data: Dashboard }) {
         <p className="fact-card__note">部分覆盖期间 · 全覆盖自 {flowPayload?.fullCoverageStart}</p>
       ) : null}
       {metric === "invest" ? (
-        <p className="spend-cal__summary">
-          {investView.mode === "daily" ? (
-            <>本月收益·损失合计 {signedPreciseCurrency(investView.total ?? 0)}（日粒度 · {investView.dailyCount} 天）{" · "}日均 {investView.average == null ? "—" : signedPreciseCurrency(investView.average)}{" · "}最高单日 {investView.maxAmount == null || investView.maxDate == null ? "—" : `${signedPreciseCurrency(investView.maxAmount)}（${investView.maxDate}）`}</>
-          ) : investView.mode === "monthly" ? (
-            <>本月收益·损失（月度）{signedPreciseCurrency(investView.total ?? 0)} · 月度粒度，日粒度自 {INVEST_DAILY_ERA_START_CLIENT} 起</>
-          ) : (
-            <>本月暂无投资收益·损失数据</>
-          )}
-        </p>
+        investView.mode === "daily" ? (
+          <p className="spend-cal__summary">
+            已记录日收益·损失小计 {signedPreciseCurrency(investView.total ?? 0)}（已记录 {investView.dailyCount} 天 · {investView.dailyFirstDate} 至 {investView.dailyLastDate}）{" · "}日均（按已记录 {investView.dailyCount} 天）{investView.average == null ? "—" : signedPreciseCurrency(investView.average)}{" · "}最高单日 {investView.maxAmount == null || investView.maxDate == null ? "—" : `${signedPreciseCurrency(investView.maxAmount)}（${investView.maxDate}）`}
+          </p>
+        ) : investView.mode === "monthly" && investView.monthlyInterval ? (
+          <p className="spend-cal__summary">
+            本月收益·损失 {signedPreciseCurrency(investView.monthlyTotal ?? 0)}（{investIntervalRange(investView.monthlyInterval)} · 完整自然月）
+          </p>
+        ) : investView.mode === "interval" ? (
+          <>
+            {investView.intervals.map((iv) => (
+              <p key={iv.endKey} className="spend-cal__summary">
+                {iv.amount != null ? (
+                  <>区间收益·损失 {signedPreciseCurrency(iv.amount)}（{investIntervalRange(iv)}）· 非完整自然月</>
+                ) : (
+                  <>区间收益待核对（{investIntervalRange(iv)}）{iv.conflict ? "：同日数值冲突" : iv.reason ? `：${iv.reason}` : ""}</>
+                )}
+              </p>
+            ))}
+          </>
+        ) : investView.mode === "pending" ? (
+          <>
+            {investView.intervals.map((iv) => (
+              <p key={iv.endKey} className="spend-cal__summary">
+                该月收益待核对（{investIntervalRange(iv)}）{iv.conflict ? "：同日数值冲突" : iv.reason ? `：${iv.reason}` : ""}
+              </p>
+            ))}
+          </>
+        ) : (
+          <p className="spend-cal__summary">本月暂无投资收益·损失数据</p>
+        )
       ) : flowPayload ? (
         <p className="spend-cal__summary">
           {metric === "income" ? "本月入账合计" : "本月已发生合计"} {currency.format(summary.total)}
@@ -2489,10 +2613,20 @@ function SpendCalendar({ data }: { data: Dashboard }) {
               <p>当日价值变化 {signedPreciseCurrency(selectedInvestDay.valueChange)}</p>
               <p>当日净投入 {signedPreciseCurrency(selectedInvestDay.netFlow)}</p>
             </>
-          ) : investView.monthlyTotal != null && selectedDate < INVEST_DAILY_ERA_START_CLIENT ? (
+          ) : investView.monthlyInterval != null && investView.monthlyTotal != null ? (
             <>
-              <p>该月收益·损失（月度）{signedPreciseCurrency(investView.monthlyTotal)}</p>
+              <p>本月收益·损失（月度）{signedPreciseCurrency(investView.monthlyTotal)} · {investIntervalRange(investView.monthlyInterval)}</p>
               <p>日粒度自 {INVEST_DAILY_ERA_START_CLIENT} 起；此前只有月度值，不摊分到日。</p>
+            </>
+          ) : investView.intervals.length > 0 ? (
+            <>
+              {investView.intervals.map((iv) => (
+                <p key={iv.endKey}>
+                  {iv.amount != null
+                    ? `区间收益·损失 ${signedPreciseCurrency(iv.amount)}（${investIntervalRange(iv)}）· 非完整自然月`
+                    : `区间收益待核对（${investIntervalRange(iv)}）${iv.conflict ? "：同日数值冲突" : iv.reason ? `：${iv.reason}` : ""}`}
+                </p>
+              ))}
             </>
           ) : (
             <p>当日暂无投资收益·损失记录</p>
@@ -2706,15 +2840,17 @@ function DetailTab({
   );
 }
 
-// DAILY-MERGE-001 corrected + FIRE-TAB-001: DashboardView is
-// the state-holding parent shell for the three tabs （总览 /
-// FIRE / 明细）. It owns the tab state (mount-time only,
-// default 「总览」, never persisted), the trend range and
-// the available-cash trial selection, so switching tabs never
-// loses either; every feature keeps exactly one rendering
-// home in exactly one tab.
-function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
-  const [activeTab, setActiveTab] = useState<"overview" | "fire" | "detail">("overview");
+// DAILY-MERGE-001 corrected + FIRE-TAB-001 + TRADING-MERGE-001:
+// DashboardView is the state-holding parent shell for the four
+// tabs （总览 / FIRE / 明细 / 交易）. It owns the tab state
+// (mount-time only, default 「总览」, never persisted), the
+// trend range and the available-cash trial selection, so
+// switching tabs never loses either; every feature keeps
+// exactly one rendering home in exactly one tab. The 交易 tab
+// renders only the trading dataset (getDashboard's optional
+// `trading` field) — none of the finance sections move.
+function DashboardView({ data, refreshFailed, trading }: { data: Dashboard; refreshFailed: boolean; trading: Record<string, unknown> | null }) {
+  const [activeTab, setActiveTab] = useState<"overview" | "fire" | "detail" | "trading">("overview");
   const [range, setRange] = useState<Range>("12m");
   // F1.1: the owner's available-cash trial selection. Page-local
   // state only — never persisted, never sent to the server.
@@ -2804,6 +2940,7 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
         <button type="button" role="tab" aria-selected={activeTab === "overview"} className={activeTab === "overview" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("overview")}>总览</button>
         <button type="button" role="tab" aria-selected={activeTab === "fire"} className={activeTab === "fire" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("fire")}>FIRE</button>
         <button type="button" role="tab" aria-selected={activeTab === "detail"} className={activeTab === "detail" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("detail")}>明细</button>
+        <button type="button" role="tab" aria-selected={activeTab === "trading"} className={activeTab === "trading" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("trading")}>交易</button>
       </div>
       {activeTab === "overview" ? (
         <OverviewTab
@@ -2821,6 +2958,8 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
         />
       ) : activeTab === "fire" ? (
         <FireTab data={data} />
+      ) : activeTab === "trading" ? (
+        <TradingTab trading={trading} />
       ) : (
         <DetailTab
           data={data}
@@ -3538,7 +3677,7 @@ export function App() {
         ) : guestDenied ? (
           <div className="state-screen private-state"><div className="private-state__mark" aria-hidden="true">$</div><h1>财务数据仅所有者可查看</h1><p>此看板包含私人账户与持仓信息，已停止向共享访客展示。</p></div>
         ) : response?.data ? (
-          <DashboardView data={response.data} refreshFailed={status === "error"} />
+          <DashboardView data={response.data} refreshFailed={status === "error"} trading={response.trading ?? null} />
         ) : status === "error" ? (
           <div className="empty-state">
             <div className="empty-state__rule" />

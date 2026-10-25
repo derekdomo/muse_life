@@ -57,6 +57,13 @@
       "when": 1792913552619,
       "tag": "0008_arch_daily_income_and_invest",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792943157168,
+      "tag": "0009_add_trading_state",
+      "breakpoints": true
     }
   ]
 }
