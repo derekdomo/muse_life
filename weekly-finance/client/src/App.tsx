@@ -136,6 +136,246 @@ export function balanceSourceSummary(accounts: Array<{ type: string; live: boole
   return `${liveCount} 个余额账户为同步读取值，${snapshotCount} 个余额账户沿用月度快照值`;
 }
 
+// F-ARCH-001 合成预览演示 (ARCH-DEMO-001): a CLIENT-ONLY synthetic
+// preview of the new-architecture spend model — three coverage
+// scenarios × two as-of dates over a fixed, hard-coded synthetic
+// ledger. No server data, no production amounts, no real
+// transactions: every number below derives from the synthetic
+// ledger alone, and the demo controls never touch any real card.
+// The pure model lives between the ARCH-DEMO-MODEL markers so
+// validate-arch-preview.mjs can extract and run the real code.
+export type ArchDemoScenario = "complete" | "history-unknown" | "current-unknown";
+export type ArchDemoAsOf = "2026-10-15" | "2026-10-23";
+export type ArchDemoCoverage = "covered" | "unknown";
+export type ArchDemoLedgerRow = {
+  id: string;
+  date: string;
+  status: "pending" | "posted";
+  amount: number;
+};
+export type ArchDemoDayFact = {
+  date: string;
+  day: number;
+  amount: number;
+  coverage: ArchDemoCoverage;
+  realZero: boolean;
+};
+export type ArchDemoBaselineMonth = {
+  month: string;
+  coverage: ArchDemoCoverage;
+  dailyFacts: ArchDemoDayFact[];
+};
+export type ArchDemoTransaction = {
+  id: string;
+  bucket: "occurred" | "pending";
+  amount: number;
+  lifecycle: Array<{ date: string; status: "pending" | "posted"; amount: number }>;
+  lifecycleNote: string;
+  statusNote: string;
+};
+export type ArchDemoAnomaly = {
+  caliberNote: string;
+  verdict: "within-candidate" | "exceeds-candidate" | "insufficient";
+  verdictText: string;
+  reason: string | null;
+  adoptedMonths: string[];
+  adoptedMonthsNote: string;
+  comparisonType: string | null;
+  currentProgress: number;
+  baselineProgressMedian: number | null;
+  baselineDailyMedian: number | null;
+  relativeDeviation: number | null;
+  absoluteDeviation: number | null;
+};
+export type ArchDemoPreview = {
+  scenario: ArchDemoScenario;
+  asOfDate: ArchDemoAsOf;
+  occurred: number;
+  pending: number;
+  cumulative: number;
+  storedSubtotal: boolean;
+  currentCoverage: ArchDemoCoverage;
+  transactions: ArchDemoTransaction[];
+  dailyFacts: ArchDemoDayFact[];
+  baselineMonths: ArchDemoBaselineMonth[];
+  anomaly: ArchDemoAnomaly;
+};
+
+// ARCH-DEMO-MODEL-BEGIN
+export const ARCH_DEMO_LEDGER: ArchDemoLedgerRow[] = [
+  { id: "SYN-settled", date: "2026-10-05", status: "posted", amount: 100 },
+  { id: "SYN-p", date: "2026-10-01", status: "pending", amount: 40 },
+  { id: "SYN-p", date: "2026-10-20", status: "posted", amount: 40 },
+];
+for (const demoRow of ARCH_DEMO_LEDGER) Object.freeze(demoRow);
+Object.freeze(ARCH_DEMO_LEDGER);
+
+function archDemoMedian(values: number[]): number {
+  const sorted: number[] = [...values].sort((a, b) => a - b);
+  const mid: number = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid] ?? 0;
+  return ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
+}
+
+function archDemoBaselineMonth(month: string, daysInMonth: number, coverageUnknown: boolean): ArchDemoBaselineMonth {
+  const dailyFacts: ArchDemoDayFact[] = [];
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const amount: number = day === 5 ? 100 : day === 20 ? 40 : 0;
+    dailyFacts.push({
+      date: `${month}-${String(day).padStart(2, "0")}`,
+      day,
+      amount,
+      coverage: coverageUnknown ? "unknown" : "covered",
+      realZero: amount === 0 && !coverageUnknown,
+    });
+  }
+  return { month, coverage: coverageUnknown ? "unknown" : "covered", dailyFacts };
+}
+
+export function buildArchDemoPreview(scenario: ArchDemoScenario, asOfDate: ArchDemoAsOf): ArchDemoPreview {
+  const asOfDay: number = Number(asOfDate.slice(8, 10));
+  const currentCoverage = scenario === "current-unknown" ? "unknown" : "covered";
+  const ids = Array.from(new Set(ARCH_DEMO_LEDGER.map((row) => row.id)));
+  const transactions: ArchDemoTransaction[] = ids.map((id) => {
+    const rows = ARCH_DEMO_LEDGER.filter((row) => row.id === id);
+    const postedRow = rows.find((row) => row.status === "posted" && row.date <= asOfDate);
+    const pendingRow = rows.find((row) => row.status === "pending" && row.date <= asOfDate);
+    const bucket = postedRow ? "occurred" : "pending";
+    const lifecycle = rows.map((row) => ({ date: row.date, status: row.status, amount: row.amount }));
+    let lifecycleNote: string = `单行记录：${rows[0]?.date ?? ""} posted`;
+    if (rows.length > 1) {
+      const firstPending = rows.find((row) => row.status === "pending");
+      const firstPosted = rows.find((row) => row.status === "posted");
+      lifecycleNote = `同一笔交易：${firstPending?.date.slice(5) ?? ""} 待入账 → ${firstPosted?.date.slice(5) ?? ""} 转入已发生`;
+    }
+    const statusNote: string = rows.length > 1
+      ? (postedRow ? "已转入已发生" : "尚未转入已发生")
+      : "已发生（posted）";
+    return {
+      id,
+      bucket,
+      amount: postedRow?.amount ?? pendingRow?.amount ?? 0,
+      lifecycle,
+      lifecycleNote,
+      statusNote,
+    };
+  });
+  const occurred: number = transactions
+    .filter((txn) => txn.bucket === "occurred")
+    .reduce((sum, txn) => sum + txn.amount, 0);
+  const pending: number = transactions
+    .filter((txn) => txn.bucket === "pending")
+    .reduce((sum, txn) => sum + txn.amount, 0);
+  const dailyFacts: ArchDemoDayFact[] = [];
+  for (let day = 1; day <= asOfDay; day += 1) {
+    const date = `2026-10-${String(day).padStart(2, "0")}`;
+    const amount: number = ARCH_DEMO_LEDGER
+      .filter((row) => row.status === "posted" && row.date === date)
+      .reduce((sum, row) => sum + row.amount, 0);
+    dailyFacts.push({
+      date,
+      day,
+      amount,
+      coverage: currentCoverage,
+      realZero: amount === 0 && currentCoverage === "covered",
+    });
+  }
+  const cumulative: number = dailyFacts.reduce((sum, fact) => sum + fact.amount, 0);
+  const baselineMonths: ArchDemoBaselineMonth[] = [
+    archDemoBaselineMonth("2026-07", 31, false),
+    archDemoBaselineMonth("2026-08", 31, false),
+    archDemoBaselineMonth("2026-09", 30, scenario === "history-unknown"),
+  ];
+  const adopted = baselineMonths.filter((entry) => entry.coverage === "covered");
+  const adoptedMonths: string[] = adopted.map((entry) => entry.month);
+  const adoptedLabel: string = `2026-${adoptedMonths.map((month) => month.slice(5)).join("／")}`;
+  const adoptedMonthsNote: string = scenario === "history-unknown"
+    ? `${adoptedLabel}（2026-09 覆盖未知，未采用）`
+    : `${adoptedLabel}（覆盖完整）`;
+  const baselineDailyMedian: number | null = adopted.length > 0
+    ? archDemoMedian(adopted.flatMap((entry) => entry.dailyFacts.map((fact) => fact.amount)))
+    : null;
+  const baselineProgressMedian: number | null = adopted.length > 0
+    ? archDemoMedian(adopted.map((entry) => entry.dailyFacts
+      .filter((fact) => fact.day <= asOfDay)
+      .reduce((sum, fact) => sum + fact.amount, 0)))
+    : null;
+  const absoluteDeviation: number | null = baselineProgressMedian == null
+    ? null
+    : Math.abs(cumulative - baselineProgressMedian);
+  const relativeDeviation: number | null = baselineProgressMedian == null || baselineProgressMedian === 0 || absoluteDeviation == null
+    ? null
+    : absoluteDeviation / Math.abs(baselineProgressMedian);
+  const exceedsCandidate: boolean = relativeDeviation != null
+    && absoluteDeviation != null
+    && baselineDailyMedian != null
+    && relativeDeviation > 0.3
+    && absoluteDeviation > baselineDailyMedian * 7;
+  let anomaly: ArchDemoAnomaly;
+  if (scenario === "history-unknown") {
+    anomaly = {
+      caliberNote: "候选口径（未定案）：相对偏差 >30% 且绝对偏差 > 日中位数×7；不作生产告警",
+      verdict: "insufficient",
+      verdictText: "○ 依据不足：9 月覆盖未知",
+      reason: "依据不足：9 月覆盖未知",
+      adoptedMonths,
+      adoptedMonthsNote,
+      comparisonType: null,
+      currentProgress: cumulative,
+      baselineProgressMedian,
+      baselineDailyMedian,
+      relativeDeviation,
+      absoluteDeviation,
+    };
+  } else if (scenario === "current-unknown") {
+    anomaly = {
+      caliberNote: "候选口径（未定案）：相对偏差 >30% 且绝对偏差 > 日中位数×7；不作生产告警",
+      verdict: "insufficient",
+      verdictText: "○ 依据不足：当前覆盖未知",
+      reason: "依据不足：当前覆盖未知（已存小计不作完整覆盖解读，未知不作 0）",
+      adoptedMonths,
+      adoptedMonthsNote,
+      comparisonType: null,
+      currentProgress: cumulative,
+      baselineProgressMedian,
+      baselineDailyMedian,
+      relativeDeviation,
+      absoluteDeviation,
+    };
+  } else {
+    anomaly = {
+      caliberNote: "候选口径（未定案）：相对偏差 >30% 且绝对偏差 > 日中位数×7；不作生产告警",
+      verdict: exceedsCandidate ? "exceeds-candidate" : "within-candidate",
+      verdictText: exceedsCandidate
+        ? "▲ 候选比较：超出候选口径（月中进度，未定案口径）"
+        : "✓ 候选比较：未超出候选口径（月中进度，未定案口径）",
+      reason: null,
+      adoptedMonths,
+      adoptedMonthsNote,
+      comparisonType: "月中进度",
+      currentProgress: cumulative,
+      baselineProgressMedian,
+      baselineDailyMedian,
+      relativeDeviation,
+      absoluteDeviation,
+    };
+  }
+  return {
+    scenario,
+    asOfDate,
+    occurred,
+    pending,
+    cumulative,
+    storedSubtotal: scenario === "current-unknown",
+    currentCoverage,
+    transactions,
+    dailyFacts,
+    baselineMonths,
+    anomaly,
+  };
+}
+// ARCH-DEMO-MODEL-END
+
 // F0.5/F0.7: the read-only refresh status band. Status and meaning
 // never ride on color alone (the user is color-weak): every state
 // carries a symbol AND a text label, on an Okabe-Ito-safe neutral
@@ -2728,6 +2968,157 @@ function FireTab({ data }: { data: Dashboard }) {
   );
 }
 
+// ARCH-DEMO-001: the synthetic spend preview fold inside the
+// 「明细」 tab. Renders ONLY the pure buildArchDemoPreview
+// model over the hard-coded synthetic ledger — no production
+// data flows in or out, and the demo controls cannot affect
+// the net-worth card or any real figure on the page. Scenario
+// and as-of state are page-local and never persisted.
+const ARCH_DEMO_SCENARIOS: Array<{ key: ArchDemoScenario; label: string }> = [
+  { key: "complete", label: "记录齐全" },
+  { key: "history-unknown", label: "历史覆盖未知" },
+  { key: "current-unknown", label: "当前覆盖未知" },
+];
+const ARCH_DEMO_AS_OF: Array<{ key: ArchDemoAsOf; label: string }> = [
+  { key: "2026-10-15", label: "截至 2026-10-15" },
+  { key: "2026-10-23", label: "截至 2026-10-23" },
+];
+
+function ArchDemoPreviewSection({ foldHint }: { foldHint: ReactNode }) {
+  const [scenario, setScenario] = useState<ArchDemoScenario>("complete");
+  const [asOfDate, setAsOfDate] = useState<ArchDemoAsOf>("2026-10-23");
+  const [expandedTxn, setExpandedTxn] = useState<string | null>(null);
+  const model = buildArchDemoPreview(scenario, asOfDate);
+  const anomaly = model.anomaly;
+  const changeScenario = (next: ArchDemoScenario) => {
+    setScenario(next);
+    setExpandedTxn(null);
+  };
+  return (
+    <details className="arch-demo-fold">
+      <summary>
+        <span>合成预览 · 花销演示（F-ARCH-001）<span className="arch-demo-badge">合成数据 · 非生产</span></span>
+        {foldHint}
+      </summary>
+      <div className="arch-demo">
+        <div className="arch-demo-switch arch-demo-switch--3" role="group" aria-label="演示场景">
+          {ARCH_DEMO_SCENARIOS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={scenario === item.key ? "active" : ""}
+              aria-pressed={scenario === item.key}
+              onClick={() => changeScenario(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="arch-demo-switch arch-demo-switch--2" role="group" aria-label="演示截至日">
+          {ARCH_DEMO_AS_OF.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={asOfDate === item.key ? "active" : ""}
+              aria-pressed={asOfDate === item.key}
+              onClick={() => setAsOfDate(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <section className="arch-demo-card" aria-label="花销演示卡">
+          <h3>花销演示卡（合成）</h3>
+          <div className="arch-demo-row">
+            <span>已发生 spend</span>
+            <b>
+              {currency.format(model.occurred)}
+              {model.storedSubtotal ? <span className="arch-demo-subtotal">已存小计</span> : null}
+            </b>
+          </div>
+          {model.storedSubtotal ? (
+            <p className="arch-demo-note">当前覆盖未知：上方金额为已存小计，未知部分未计入，不把未知当 0。</p>
+          ) : null}
+          <div className="arch-demo-row">
+            <span>待入账交易（未计入已发生）</span>
+            <b>{currency.format(model.pending)}</b>
+          </div>
+          <div className="arch-demo-row">
+            <span>逐日累计（截至所选日）</span>
+            <b>{currency.format(model.cumulative)}</b>
+          </div>
+          <p className="arch-demo-note">截至 {model.asOfDate} · 本卡为合成演示，不构成全账户历史余额重建。</p>
+          <div className="arch-demo-txns">
+            {model.transactions.map((txn) => {
+              const expanded = expandedTxn === txn.id;
+              return (
+                <div className="arch-demo-txn" key={txn.id}>
+                  <button
+                    type="button"
+                    className="arch-demo-txn__toggle"
+                    aria-expanded={expanded}
+                    aria-label={`展开合成交易 ${txn.id} 生命周期`}
+                    onClick={() => setExpandedTxn(expanded ? null : txn.id)}
+                  >
+                    <span>{txn.id} · {txn.bucket === "occurred" ? "已发生" : "待入账"}</span>
+                    <b>{currency.format(txn.amount)}</b>
+                    <span className="fold-hint">{expanded ? "收起" : "展开"}</span>
+                  </button>
+                  {expanded ? (
+                    <div className="arch-demo-txn__detail">
+                      {txn.lifecycle.map((row) => (
+                        <p key={`${row.date}-${row.status}`}>
+                          {row.date} · {row.status === "pending" ? "待入账 pending" : "已入账 posted"} · {currency.format(row.amount)}
+                        </p>
+                      ))}
+                      <p>{txn.lifecycleNote}</p>
+                      <p>{txn.statusNote}</p>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+        <section className="arch-demo-card" aria-label="逐日事实（合成演示）">
+          <h3>逐日事实 · 2026-10-01 至 {model.asOfDate}</h3>
+          <ul className="arch-demo-days">
+            {model.dailyFacts.map((fact) => (
+              <li key={fact.date}>
+                <span>{fact.date}</span>
+                <b>
+                  {fact.coverage === "unknown"
+                    ? `已存 ${currency.format(fact.amount)} · 覆盖未知`
+                    : fact.realZero
+                      ? "0 · 真实 0（已覆盖，无 posted 花销）"
+                      : currency.format(fact.amount)}
+                </b>
+              </li>
+            ))}
+          </ul>
+        </section>
+        <section className="arch-demo-card" aria-label="异常演示卡">
+          <h3>异常演示卡（合成）</h3>
+          <p className="arch-demo-note">{anomaly.caliberNote}</p>
+          <p className="arch-demo-verdict">{anomaly.verdictText}</p>
+          {anomaly.reason ? <p className="arch-demo-note">{anomaly.reason}</p> : null}
+          <p className="arch-demo-note">采用基准月：{anomaly.adoptedMonthsNote}</p>
+          {anomaly.comparisonType ? (
+            <p className="arch-demo-note">
+              比较类型：{anomaly.comparisonType} · 当前进度累计 {currency.format(anomaly.currentProgress)}
+              {anomaly.baselineProgressMedian != null ? ` · 基准月同进度中位数 ${currency.format(anomaly.baselineProgressMedian)}` : ""}
+              {anomaly.absoluteDeviation != null ? ` · 绝对偏差 ${currency.format(anomaly.absoluteDeviation)}` : ""}
+              {anomaly.relativeDeviation != null ? ` · 相对偏差 ${percent.format(anomaly.relativeDeviation)}` : ""}
+              {anomaly.baselineDailyMedian != null ? ` · 基准日中位数 ${currency.format(anomaly.baselineDailyMedian)}` : ""}
+            </p>
+          ) : null}
+        </section>
+        <p className="arch-demo-note">净资产卡不受本演示控件影响，仍显示自身最新已知值与两层日期。</p>
+      </div>
+    </details>
+  );
+}
+
 // 「明细」 tab: daily-spend Calendar first, then the four
 // evidence folds, then the ledger folds （口径与来源说明 /
 // trend + range / monthly records / F-ARCH account rows /
@@ -2762,6 +3153,9 @@ function DetailTab({
   return (
     <>
       <SpendCalendar data={data} />
+      <div className="evidence-layer">
+        <ArchDemoPreviewSection foldHint={foldHint} />
+      </div>
       <div className="evidence-layer">
         <details className="evidence-fold">
           <summary><span>{cashScopeSummaryLine(coverage.cashAmount, coverage.selectedCount, coverage.reason)}</span>{foldHint}</summary>

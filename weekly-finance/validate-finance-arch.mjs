@@ -818,5 +818,63 @@ check("daily days before a gating start are partial, from it on full", dayOf(dai
 check("daily partial days keep their real subtotal", eq(dayOf(dailyCov, "2026-09-01").posted, 10) && eq(dayOf(dailyCov, "2026-09-15").posted, 20));
 check("daily ledger without account keys never claims partial", daily.days.every((d) => d.partial === false) && daily.fullCoverageStart === null);
 
+// =====================================================================
+// DEMO matrix (PM 2026-10-24 07:05 three-scenario / two-date design,
+// F-ARCH-001 synthetic preview demo): one fixed synthetic ledger —
+// SYN-settled posts 100 on 10-05; SYN-p is pending 40 on 10-01 and
+// posts 40 on 10-20 — replayed through buildArchPreview at two asOf
+// dates under three coverage scenarios. Only the known-ness changes
+// between scenarios; amounts never do. Baseline months Jul/Aug/Sep
+// carry the same date facts (day 5 = 100, day 20 = 40, other covered
+// days a real 0) at each month's real length.
+// =====================================================================
+const demoTxns = [
+  { id: "SYN-settled", date: "2026-10-05", amount: -100, status: "posted", kind: "spend" },
+  { id: "SYN-p", date: "2026-10-01", amount: -40, status: "pending", kind: "spend" },
+  { id: "SYN-p", date: "2026-10-20", amount: -40, status: "posted", kind: "spend" },
+];
+const demoTxnsSnapshot = JSON.stringify(demoTxns);
+const demoBaseline = ["2026-07", "2026-08", "2026-09"].map((m) => daysDaily(m, { 5: 100, 20: 40 }));
+const demoCurrentDaily = (() => { const a = Array(31).fill(0); a[4] = 100; a[19] = 40; return a; })();
+const demoPreview = (asOfDate, over = {}) => buildArchPreview({
+  accounts: [], txns: demoTxns, currentMonth: "2026-10", asOfDate,
+  monthSummaries: [], coverageByMonth: { "2026-10": true },
+  baselineDaily: demoBaseline, currentDaily: demoCurrentDaily, ...over,
+});
+const demoLine = (p, key) => p.spendCard.lines.find((l) => l.key === key);
+const demoComplete15 = demoPreview("2026-10-15");
+const demoComplete23 = demoPreview("2026-10-23");
+check("DEMO complete 10-15: posted 100 / pending 40 (SYN-p not yet posted)",
+  eq(demoLine(demoComplete15, "posted").amount, 100) && eq(demoLine(demoComplete15, "pending").amount, 40));
+check("DEMO complete 10-23: SYN-p moved into posted 140 / pending 0",
+  eq(demoLine(demoComplete23, "posted").amount, 140) && eq(demoLine(demoComplete23, "pending").amount, 0));
+check("DEMO complete anomaly adopts Jul/Aug/Sep and stays normal at both dates",
+  demoComplete15.anomalyCard.verdict === "normal" && demoComplete23.anomalyCard.verdict === "normal"
+  && (demoComplete15.anomalyCard.baselineMonths || []).map((x) => x.month).join() === "2026-09,2026-08,2026-07"
+  && demoComplete15.anomalyCard.comparisonKind === "mid-month-progress");
+check("DEMO daily facts truncate at asOf (10-15 has no day-20 fact yet)",
+  (() => { const d = summarizeSpendDaily(demoTxns, { asOf: "2026-10-15", fromDate: "2026-10-01", toDate: "2026-10-15" });
+    return eq(d.totals.posted, 100) && eq(d.totals.pending, 40) && !d.days.some((x) => x.date === "2026-10-20"); })());
+check("DEMO daily facts at 10-23: day 5 = 100, day 20 = 40, other covered days real 0",
+  (() => { const d = summarizeSpendDaily(demoTxns, { asOf: "2026-10-23", fromDate: "2026-10-01", toDate: "2026-10-23" });
+    const day = (dt) => d.days.find((x) => x.date === dt);
+    return eq(day("2026-10-05").posted, 100) && eq(day("2026-10-20").posted, 40)
+      && eq(day("2026-10-06").posted, 0) && eq(d.totals.posted, 140) && eq(d.totals.pending, 0); })());
+const demoHistUnknown = demoPreview("2026-10-15", {
+  baselineDaily: demoBaseline.map((e) => e.month === "2026-09" ? { month: e.month, daily: e.daily } : e),
+});
+check("DEMO history-unknown: amounts unchanged, anomaly insufficient, Sep rejected, only Jul/Aug adopted",
+  eq(demoLine(demoHistUnknown, "posted").amount, 100) && eq(demoLine(demoHistUnknown, "pending").amount, 40)
+  && demoHistUnknown.anomalyCard.verdict === "insufficient"
+  && (demoHistUnknown.anomalyCard.baselineMonths || []).map((x) => x.month).join() === "2026-08,2026-07"
+  && (demoHistUnknown.anomalyCard.rejectedMonths || []).some((x) => x.month === "2026-09"));
+const demoCurrUnknown = demoPreview("2026-10-15", { coverageByMonth: {} });
+check("DEMO current-unknown: stored subtotal kept (100, not 0), coverage unknown, anomaly insufficient",
+  eq(demoLine(demoCurrUnknown, "posted").amount, 100)
+  && demoLine(demoCurrUnknown, "posted").amountBasis !== undefined
+  && demoCurrUnknown.spendCard.coverageStatus === "unknown"
+  && demoCurrUnknown.anomalyCard.verdict === "insufficient");
+check("DEMO preview does not mutate the shared synthetic ledger", JSON.stringify(demoTxns) === demoTxnsSnapshot);
+
 console.log(`validate-finance-arch: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
