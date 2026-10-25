@@ -1712,3 +1712,11 @@
 - 入账定义：外部流入（管线既有 income 分类＋refund），排除自身账户转移与贷款相关流；与花销同窗回填、同分片协议落库、同对账纪律；每日 cron 扩为三写。
 - 投资收益·损失定义：当日投资价值变化 − 当日净投入（沿既有投资收益核对的分离逻辑）。硬约束如实呈现：日粒度仅自 2026-10-24 起（日余额起点），此前只有月度值——历史月份只在月度汇总行呈现并标注，日格不摊分冒充日值。
 - 派工：并入正在执行的构建轮次，在 FIRE 页签之后顺序实施。
+
+## 2026-10-25 01 时 PDT（muse-life-plans-sync：F-ARCH-001 三项所有者直令工件源码回灌）
+
+- 需求：所有者 2026-10-25 00:10–00:17 PT 三项直令（登记见本文件前三条）——OVERVIEW-TRIM-001 总览文字瘦身、趋势月度点补齐、FIRE-TAB-001 FIRE 独立页签、CAL-METRICS-001 Calendar 加「入账／投资收益·损失」指标。三项已由本 chat 构建轮次在工件 space-3（财务总览）上线（构建审计 2026-10-25T07:32Z verdict pass、移动端零溢出），本轮 HEAD 与基线同为 dcf39fe、无新提交，本轮补齐其 EVID 尾巴：工件源码回灌本仓。本条为实现方交付登记（[完成] 仅表示已交付，PM 结论以其评审记录为准）；F-ARCH-001 整条不勾选，余项（F0.6/F1.6 卡片迁移、异常阈值定案）沿原队列。
+- 改了什么：自线上工件逐文件回灌至 weekly-finance/：client/src/App.tsx（总览口径文字下沉明细「口径与来源说明」折叠；净值趋势月度快照虚线＋圆点段与日净值实线段同图、接缝文案标注此前月度／此后日粒度、月度点不插值；页签改三段 总览／FIRE／明细、FIRE 完整面板迁 FIRE 页签主体展开、总览摘要按钮改切页签；Calendar 三段指标切换 花销／入账／投资收益·损失，日格／月汇总／点选下钻随指标切换，投资日格仅日粒度纪元起、此前月份只在月汇总行标月度值）、client/src/theme.css、server/src/actions.ts 与 server/src/schema.ts（arch_daily_income／arch_daily_invest 两表与分片 ingest：入账＝income＋refund、排除自转与贷款流，与花销同分片协议；投资收益＝当日投资价值变化−当日净投入）、drizzle/0008_arch_daily_income_and_invest.sql 与 drizzle/meta/_journal.json、DATA-PLAN.md、validate-design-b1a.mjs、validate-facts-card.mjs、validate-color-vision.mjs，并新增 validate-arch-daily-income.ts、validate-arch-daily-invest.ts。未回灌 app.db、audits、构建缓存等非源码文件；真实金额与个人数据未入仓（线上数据存在性仅以结构计数核实：日入账已发布覆盖 2024-10-25→2026-10-24、日投资收益首日 2026-10-24，金额不入仓）。
+- 验证（仓库实跑，bun 运行、node_modules 临时借用工件目录、跑后移除）：validate-design-b1a 207/207、validate-facts-card 148/148、validate-finance-arch 146/146、validate-refresh-chain 134/134、validate-investment-performance 106/106、validate-arch-dates 81/81、validate-arch-save 51/51、validate-payload 50/50、validate-arch-concurrency 49/49、validate-arch-daily-spend 47/47、validate-arch-daily-spend-chunks 33/33、validate-arch-daily-income 29/29、validate-color-vision 20/20、validate-arch-daily-invest 16/16，另 validate-available-cash、validate-cashflow、validate-monthly-facts、validate-check-progress、validate-holdings 五脚本退出 0；client＋server typecheck 均退出 0。全套零失败。
+- 局限：回灌只对齐仓库与线上源码；所有者视角呈现（总览文字量、FIRE 页签、Calendar 三指标切换手感）仍以本人打开为准，不报已验收。每日 cron 三写扩容由每日刷新链侧负责，本轮未改 cron。
+- 回滚：回退本提交即恢复回灌前仓库状态；线上工件不受影响。

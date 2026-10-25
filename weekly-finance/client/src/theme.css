@@ -244,9 +244,11 @@ main {
 .cash-scope-excluded { color: var(--dim); font-size: 10px; font-weight: 720; white-space: nowrap; }
 
 /* LIFE-DESIGN-001-B1A + DAILY-MERGE-001 (corrected
-   2026-10-24): two tabs (ruling 1) — 总览 / 明细 — with the
-   merged conclusion card, FIRE teaser row and the folded
-   evidence / ledger layers inside the detail tab. */
+   2026-10-24) + FIRE-TAB-001 (2026-10-25): three tabs —
+   总览 / FIRE / 明细 — with the merged conclusion card and
+   FIRE teaser row in the overview tab, the full FIRE panel
+   expanded in the FIRE tab, and the folded evidence /
+   ledger layers inside the detail tab. */
 .fire-teaser button:focus-visible, .evidence-fold > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -299,6 +301,9 @@ main {
   font-weight: 720;
   cursor: pointer;
 }
+.spend-cal__metrics { display: flex; margin: 12px 0 2px; }
+.spend-cal__metrics .range-control { flex: 1; }
+.spend-cal__metrics .range-control button { min-width: 0; padding-left: 6px; padding-right: 6px; }
 .spend-cal__nav { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
 .spend-cal__title { flex: 1; margin: 0; font-size: 18px; letter-spacing: -.02em; text-align: center; white-space: nowrap; }
 .spend-cal__nav-button {
@@ -376,6 +381,22 @@ button.spend-cal__cell { cursor: pointer; }
 }
 .conclusion-card .delta { margin-top: 14px; }
 .conclusion-card .snapshot-compare { margin-top: 14px; }
+.conclusion-card__conclusion {
+  margin: 14px 0 0;
+  font-size: 14px;
+  font-weight: 720;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+.trend-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 0 8px 8px;
+}
+.trend-legend { color: var(--dim); font-size: 10px; font-weight: 650; }
 .fire-teaser {
   display: flex;
   align-items: center;

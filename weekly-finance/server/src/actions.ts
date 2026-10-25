@@ -363,6 +363,88 @@ const archDailySpendSchema = z.object({
 type ArchDailySpend = z.infer<typeof archDailySpendSchema>;
 type ArchDailySpendDay = z.infer<typeof archDailySpendDaySchema>;
 
+// CAL-METRICS-001 daily-INCOME stored payload. The income
+// caliber (owner ruling 2026-10-25 00:17 PT): external inflows
+// only — `income` rows plus `refund` rows (a refund is money
+// back in, counted on the refund's own date under the REFUND
+// source) — while own-account transfers and loan-related
+// flows (transfer / loan_principal / loan_mixed /
+// unmatched_transfer) NEVER count. Written only by
+// ingestArchDailyIncome under the same full/chunk/finalize
+// protocol and the same recompute + read-back gates as daily
+// spend; backfilled over the same window with the same
+// coverage semantics (coverageStart / fullCoverageStart /
+// partial days derive from the income rows' own accounts).
+const archDailyIncomeSourceSchema = z.object({
+  key: z.string(),
+  amount: z.number(),
+});
+
+const archDailyIncomeDaySchema = z.object({
+  date: z.string(),
+  total: z.number(),
+  pending: z.number(),
+  sources: z.array(archDailyIncomeSourceSchema),
+  incomeCount: z.number().int().nonnegative(),
+  pendingCount: z.number().int().nonnegative(),
+  partial: z.boolean(),
+});
+
+const archDailyIncomeSchema = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  kind: z.literal("daily-income"),
+  pulledAt: z.string(),
+  storedAt: z.string(),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  fullCoverageStart: z.string().nullable(),
+  days: z.array(archDailyIncomeDaySchema),
+  totals: z.object({
+    total: z.number(),
+    pending: z.number(),
+  }),
+  counts: z.object({
+    transactions: z.number().int().nonnegative(),
+    conflicts: z.number().int().nonnegative(),
+    unclassified: z.number().int().nonnegative(),
+    excludedTransfer: z.number().int().nonnegative(),
+    excludedLoanPrincipal: z.number().int().nonnegative(),
+  }),
+});
+
+type ArchDailyIncome = z.infer<typeof archDailyIncomeSchema>;
+type ArchDailyIncomeDay = z.infer<typeof archDailyIncomeDaySchema>;
+
+// CAL-METRICS-001 daily investment gain/loss stored payload.
+// pnl = the day's investment-account total value change minus
+// the day's net investment flow (buys / transfers-in positive,
+// sells / transfers-out negative — the same separation the
+// F1.6 monthly reconciliation uses). Daily granularity exists
+// only from INVEST_DAILY_ERA_START: daily investment balances
+// exist only from the arch daily era (2026-10-24). Earlier
+// months remain monthly in the Firance archive; no monthly
+// value is ever split into days.
+export const INVEST_DAILY_ERA_START = "2026-10-24";
+
+const archDailyInvestDaySchema = z.object({
+  date: z.string(),
+  valueChange: z.number(),
+  netFlow: z.number(),
+  pnl: z.number(),
+});
+
+const archDailyInvestSchema = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  kind: z.literal("daily-invest"),
+  pulledAt: z.string(),
+  storedAt: z.string(),
+  days: z.array(archDailyInvestDaySchema),
+});
+
+type ArchDailyInvest = z.infer<typeof archDailyInvestSchema>;
+
 // ---------- Daily spend port (F-ARCH-001, mirrors finance-arch.mjs) ----------
 export type DailySpendTxn = {
   id: string;
@@ -662,6 +744,295 @@ export function pickCurrentDailySpendVersion(
   return best ? { row: best.row, parsed: best.parsed } : null;
 }
 
+// ---------- Daily income port (CAL-METRICS-001) ----------
+// The income mirror of the daily-spend port: the SAME
+// canonicalisation (dedupe identical rows by id, conflicting
+// duplicates named and dropped), the SAME coverage derivation
+// (an account's start is its earliest transaction date; the
+// full-coverage start is the latest start among the accounts
+// that carry counted rows), and the SAME day-filling over the
+// requested window. What differs is only which kinds count:
+// income rows and refund rows are inflows; transfers and
+// loan-principal rows are excluded and counted; loan_mixed /
+// unmatched_transfer rows are unclassified and never counted.
+export type DailyIncomeTxn = {
+  id: string;
+  date: string;
+  amount: number;
+  status: "posted" | "pending";
+  kind: "income" | "refund" | "transfer" | "loan_principal" | "loan_mixed" | "unmatched_transfer";
+  category?: string;
+  account?: string;
+};
+
+export type DailyIncomeResult = {
+  days: ArchDailyIncomeDay[];
+  totals: { total: number; pending: number };
+  conflicts: Array<{ id: string; reason: string }>;
+  unclassified: Array<{ id: string; date: string; kind: string }>;
+  excludedCounts: { transfer: number; loanPrincipal: number };
+  accountStarts: Record<string, string>;
+  fullCoverageStart: string | null;
+  classificationComplete: boolean;
+};
+
+export function summarizeIncomeDailyServer(
+  txns: DailyIncomeTxn[],
+  options: { asOf?: string | null; asOfDate?: string | null; fromDate?: string | null; toDate?: string | null } = {},
+): DailyIncomeResult {
+  const asOf = options.asOf ?? options.asOfDate ?? null;
+  const fromDate = options.fromDate ?? null;
+  const toDate = options.toDate ?? null;
+  const afterAsOf = (row: DailyIncomeTxn) => asOf !== null && row.date > asOf;
+
+  const groups = new Map<string, DailyIncomeTxn[]>();
+  for (const t of txns) {
+    if (afterAsOf(t)) continue;
+    if (!groups.has(t.id)) groups.set(t.id, []);
+    groups.get(t.id)!.push(t);
+  }
+  const canonical = new Map<string, DailyIncomeTxn>();
+  const conflicts: Array<{ id: string; reason: string }> = [];
+  for (const [id, rows] of groups) {
+    const seenKeys = new Set<string>();
+    const uniq: DailyIncomeTxn[] = [];
+    for (const r of rows) {
+      const key = JSON.stringify([r.date, r.amount, r.status, r.kind]);
+      if (!seenKeys.has(key)) { seenKeys.add(key); uniq.push(r); }
+    }
+    const byStatus = new Map<string, DailyIncomeTxn[]>();
+    for (const r of uniq) {
+      if (!byStatus.has(r.status)) byStatus.set(r.status, []);
+      byStatus.get(r.status)!.push(r);
+    }
+    let hasConflict = false;
+    for (const sameStatus of byStatus.values()) if (sameStatus.length > 1) hasConflict = true;
+    if (hasConflict) {
+      conflicts.push({ id, reason: "conflicting-duplicates" });
+      continue;
+    }
+    const chosen = byStatus.get("posted")?.[0] ?? byStatus.get("pending")?.[0] ?? uniq[0];
+    if (chosen) canonical.set(id, chosen);
+  }
+
+  type DayInternal = {
+    date: string;
+    total: number;
+    pending: number;
+    sources: Map<string, number>;
+    incomeCount: number;
+    pendingCount: number;
+  };
+  const dayMap = new Map<string, DayInternal>();
+  const emptyDay = (date: string): DayInternal => ({
+    date, total: 0, pending: 0, sources: new Map(), incomeCount: 0, pendingCount: 0,
+  });
+  const dayFor = (date: string): DayInternal => {
+    if (!dayMap.has(date)) dayMap.set(date, emptyDay(date));
+    return dayMap.get(date)!;
+  };
+  const addSource = (day: DayInternal, key: string, delta: number) => {
+    day.sources.set(key, (day.sources.get(key) ?? 0) + delta);
+  };
+
+  const unclassified: Array<{ id: string; date: string; kind: string }> = [];
+  const excludedCounts = { transfer: 0, loanPrincipal: 0 };
+  let totalInflow = 0;
+  let totalPending = 0;
+  for (const [id, row] of canonical) {
+    if (row.kind === "transfer") { excludedCounts.transfer += 1; continue; }
+    if (row.kind === "loan_principal") { excludedCounts.loanPrincipal += 1; continue; }
+    if (row.kind === "income" || row.kind === "refund") {
+      const amt = Math.abs(row.amount);
+      const source = row.kind === "refund"
+        ? "REFUND"
+        : typeof row.category === "string" && row.category ? row.category : "OTHER_INCOME";
+      if (row.status === "pending") {
+        const day = dayFor(row.date);
+        day.pending += amt;
+        day.pendingCount += 1;
+        totalPending += amt;
+      } else {
+        const day = dayFor(row.date);
+        day.total += amt;
+        day.incomeCount += 1;
+        addSource(day, source, amt);
+        totalInflow += amt;
+      }
+    } else {
+      unclassified.push({ id, date: row.date, kind: row.kind });
+      dayFor(row.date);
+    }
+  }
+
+  const accountStart = new Map<string, string>();
+  for (const t of txns) {
+    if (afterAsOf(t) || typeof t.account !== "string" || !t.account) continue;
+    const cur = accountStart.get(t.account);
+    if (!cur || t.date < cur) {
+      accountStart.set(t.account, t.date);
+    }
+  }
+  const gatingStarts: string[] = [];
+  {
+    const gatingAccounts = new Set<string>();
+    for (const [, row] of canonical) {
+      if ((row.kind === "income" || row.kind === "refund") && row.status === "posted" && typeof row.account === "string" && row.account) {
+        gatingAccounts.add(row.account);
+      }
+    }
+    for (const account of gatingAccounts) {
+      const s = accountStart.get(account);
+      if (s) gatingStarts.push(s);
+    }
+  }
+  const fullCoverageStart = gatingStarts.length ? gatingStarts.reduce((a, b) => (a > b ? a : b)) : null;
+
+  let dates: string[];
+  if (fromDate && toDate && fromDate <= toDate) {
+    dates = [];
+    for (let cur = fromDate; ; cur = nextDateKey(cur)) {
+      dates.push(cur);
+      if (cur === toDate) break;
+    }
+  } else {
+    dates = [...dayMap.keys()].sort();
+  }
+  const days: ArchDailyIncomeDay[] = dates.map((date) => {
+    const day = dayMap.get(date) ?? emptyDay(date);
+    const sources = [...day.sources.entries()]
+      .map(([key, amount]) => ({ key, amount }))
+      .filter((s) => Math.abs(s.amount) > 1e-9)
+      .sort((a, b) => b.amount - a.amount || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return {
+      date,
+      total: day.total,
+      pending: day.pending,
+      sources,
+      incomeCount: day.incomeCount,
+      pendingCount: day.pendingCount,
+      partial: fullCoverageStart !== null && date < fullCoverageStart,
+    };
+  });
+  return {
+    days,
+    totals: { total: totalInflow, pending: totalPending },
+    conflicts,
+    unclassified,
+    excludedCounts,
+    accountStarts: Object.fromEntries([...accountStart.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))),
+    fullCoverageStart,
+    classificationComplete: unclassified.length === 0 && conflicts.length === 0,
+  };
+}
+
+export function incomePayloadsEquivalent(a: ArchDailyIncome, b: ArchDailyIncome): boolean {
+  const numEq = (x: number, y: number) => Math.abs(x - y) < 1e-9;
+  if (
+    a.arch !== b.arch ||
+    a.version !== b.version ||
+    a.kind !== b.kind ||
+    a.pulledAt !== b.pulledAt ||
+    a.coverageStart !== b.coverageStart ||
+    a.throughDate !== b.throughDate ||
+    a.fullCoverageStart !== b.fullCoverageStart
+  ) return false;
+  if (!numEq(a.totals.total, b.totals.total) || !numEq(a.totals.pending, b.totals.pending)) return false;
+  if (
+    a.counts.transactions !== b.counts.transactions ||
+    a.counts.conflicts !== b.counts.conflicts ||
+    a.counts.unclassified !== b.counts.unclassified ||
+    a.counts.excludedTransfer !== b.counts.excludedTransfer ||
+    a.counts.excludedLoanPrincipal !== b.counts.excludedLoanPrincipal
+  ) return false;
+  if (a.days.length !== b.days.length) return false;
+  return a.days.every((day, i) => {
+    const other = b.days[i];
+    if (!other) return false;
+    if (day.date !== other.date || !numEq(day.total, other.total) || !numEq(day.pending, other.pending)) return false;
+    if (day.incomeCount !== other.incomeCount || day.pendingCount !== other.pendingCount || day.partial !== other.partial) return false;
+    if (day.sources.length !== other.sources.length) return false;
+    return day.sources.every((src, j) => {
+      const os = other.sources[j];
+      return os !== undefined && src.key === os.key && numEq(src.amount, os.amount);
+    });
+  });
+}
+
+type DailyIncomeStoredRow = { id: number; payload: string; pulledAt: Date };
+
+function parseDailyIncomeStoredRow(row: DailyIncomeStoredRow): ArchDailyIncome | null {
+  try {
+    const parsed = archDailyIncomeSchema.safeParse(JSON.parse(row.payload));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function dailyIncomeVersionKey(row: DailyIncomeStoredRow, parsed: ArchDailyIncome): number {
+  const ms = Date.parse(parsed.pulledAt);
+  return Number.isFinite(ms) ? ms : row.pulledAt.getTime();
+}
+
+export function pickCurrentDailyIncomeVersion(
+  rows: DailyIncomeStoredRow[],
+): { row: DailyIncomeStoredRow; parsed: ArchDailyIncome } | null {
+  let best: { row: DailyIncomeStoredRow; parsed: ArchDailyIncome; key: number } | null = null;
+  for (const row of rows) {
+    const parsed = parseDailyIncomeStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyIncomeVersionKey(row, parsed);
+    if (!best || key > best.key || (key === best.key && row.id > best.row.id)) {
+      best = { row, parsed, key };
+    }
+  }
+  return best ? { row: best.row, parsed: best.parsed } : null;
+}
+
+// ---------- Daily invest port (CAL-METRICS-001) ----------
+export function investPayloadsEquivalent(a: ArchDailyInvest, b: ArchDailyInvest): boolean {
+  const numEq = (x: number, y: number) => Math.abs(x - y) < 1e-9;
+  if (a.arch !== b.arch || a.version !== b.version || a.kind !== b.kind || a.pulledAt !== b.pulledAt) return false;
+  if (a.days.length !== b.days.length) return false;
+  return a.days.every((day, i) => {
+    const other = b.days[i];
+    if (!other) return false;
+    return day.date === other.date && numEq(day.valueChange, other.valueChange) && numEq(day.netFlow, other.netFlow) && numEq(day.pnl, other.pnl);
+  });
+}
+
+type DailyInvestStoredRow = { id: number; payload: string; pulledAt: Date };
+
+function parseDailyInvestStoredRow(row: DailyInvestStoredRow): ArchDailyInvest | null {
+  try {
+    const parsed = archDailyInvestSchema.safeParse(JSON.parse(row.payload));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function dailyInvestVersionKey(row: DailyInvestStoredRow, parsed: ArchDailyInvest): number {
+  const ms = Date.parse(parsed.pulledAt);
+  return Number.isFinite(ms) ? ms : row.pulledAt.getTime();
+}
+
+export function pickCurrentDailyInvestVersion(
+  rows: DailyInvestStoredRow[],
+): { row: DailyInvestStoredRow; parsed: ArchDailyInvest } | null {
+  let best: { row: DailyInvestStoredRow; parsed: ArchDailyInvest; key: number } | null = null;
+  for (const row of rows) {
+    const parsed = parseDailyInvestStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyInvestVersionKey(row, parsed);
+    if (!best || key > best.key || (key === best.key && row.id > best.row.id)) {
+      best = { row, parsed, key };
+    }
+  }
+  return best ? { row: best.row, parsed: best.parsed } : null;
+}
+
 
 // F-ARCH-001·DATE-1 read-path date eligibility (pure). Stored
 // rows are NEVER rewritten: a legacy row whose asOf is not a
@@ -707,6 +1078,8 @@ const dashboardSchema = z.object({
   // new-architecture figure to overlay (see archNetWorthSchema).
   archNetWorth: archNetWorthSchema.nullable().default(null),
   archDailySpend: archDailySpendSchema.nullable().default(null),
+  archDailyIncome: archDailyIncomeSchema.nullable().default(null),
+  archDailyInvest: archDailyInvestSchema.nullable().default(null),
   archNetWorthSeries: z.array(z.object({ date: z.string(), total: z.number() })).default([]),
   sourceMonth: z.string(),
   months: z.array(monthSchema),
@@ -994,6 +1367,147 @@ function parseDailySpendChunkRow(row: { payload: string }): ArchDailySpendChunk 
 
 function chunkPayloadsEquivalent(a: ArchDailySpendChunk, b: ArchDailySpendChunk): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// CAL-METRICS-001: the income ingest contract — the daily-spend
+// chunk protocol mirrored field for field (full / chunk /
+// finalize legs, batch tiling, declared counts + totals checked
+// against the server recompute at finalize). The transaction
+// kinds are the income caliber's: income + refund count;
+// transfer / loan_principal are excluded; loan_mixed /
+// unmatched_transfer are unclassified.
+const dailyIncomeTxnInputSchema = z.object({
+  id: z.string().min(1).max(200),
+  date: z.string(),
+  amount: z.number().finite(),
+  status: z.enum(["posted", "pending"]),
+  kind: z.enum(["income", "refund", "transfer", "loan_principal", "loan_mixed", "unmatched_transfer"]),
+  category: z.string().max(64).optional(),
+  account: z.string().max(200).optional(),
+});
+
+type DailyIncomeTxnInput = z.infer<typeof dailyIncomeTxnInputSchema>;
+
+const ingestArchDailyIncomeRequest = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  pulledAt: z.string().min(1).max(64),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  fullCoverageStart: z.string().nullable(),
+  mode: z.enum(["full", "chunk", "finalize"]).optional(),
+  batchId: z.string().min(1).max(128).optional(),
+  chunkIndex: z.number().int().nonnegative().optional(),
+  chunkCount: z.number().int().min(1).max(120).optional(),
+  fromDate: z.string().optional(),
+  toDate: z.string().optional(),
+  counts: z
+    .object({
+      transactions: z.number().int().nonnegative(),
+      conflicts: z.number().int().nonnegative().optional(),
+      unclassified: z.number().int().nonnegative().optional(),
+      excludedTransfer: z.number().int().nonnegative().optional(),
+      excludedLoanPrincipal: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
+  totals: z
+    .object({
+      total: z.number(),
+      pending: z.number(),
+    })
+    .optional(),
+  transactions: z.array(dailyIncomeTxnInputSchema).max(20000).optional(),
+  days: z.array(archDailyIncomeDaySchema).optional(),
+});
+
+const ingestArchDailyIncomeResponse = z.object({
+  ok: z.boolean(),
+  issue: z.string().nullable(),
+  days: z.number().int().nonnegative(),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  totalMatches: z.boolean(),
+  readBackVerified: z.boolean(),
+  chunksReceived: z.number().int().nonnegative().default(0),
+  chunksExpected: z.number().int().nonnegative().default(0),
+});
+
+type IngestArchDailyIncomeResult = z.infer<typeof ingestArchDailyIncomeResponse>;
+type IngestArchDailyIncomeArgs = z.infer<typeof ingestArchDailyIncomeRequest>;
+
+function dailyIncomeFailure(
+  issue: string,
+  coverageStart = "",
+  throughDate = "",
+  chunksReceived = 0,
+  chunksExpected = 0,
+): IngestArchDailyIncomeResult {
+  return {
+    ok: false,
+    issue,
+    days: 0,
+    coverageStart,
+    throughDate,
+    totalMatches: false,
+    readBackVerified: false,
+    chunksReceived,
+    chunksExpected,
+  };
+}
+
+const archDailyIncomeChunkSchema = z.object({
+  batchId: z.string(),
+  chunkIndex: z.number().int().nonnegative(),
+  chunkCount: z.number().int().positive(),
+  pulledAt: z.string(),
+  coverageStart: z.string(),
+  throughDate: z.string(),
+  fullCoverageStart: z.string().nullable(),
+  fromDate: z.string(),
+  toDate: z.string(),
+  transactions: z.array(dailyIncomeTxnInputSchema),
+  days: z.array(archDailyIncomeDaySchema),
+});
+
+type ArchDailyIncomeChunk = z.infer<typeof archDailyIncomeChunkSchema>;
+
+function parseDailyIncomeChunkRow(row: { payload: string }): ArchDailyIncomeChunk | null {
+  try {
+    const parsed = archDailyIncomeChunkSchema.safeParse(JSON.parse(row.payload));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function incomeChunkPayloadsEquivalent(a: ArchDailyIncomeChunk, b: ArchDailyIncomeChunk): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// CAL-METRICS-001: the daily-invest ingest contract. No chunk
+// protocol — the payload is one small row per day from
+// 2026-10-24 on; the gates are the SAVE-1 version arbitration
+// plus the server-side identity check pnl == valueChange −
+// netFlow (tolerance 0.01) on every day, the era-start floor,
+// and strictly increasing unique dates.
+const ingestArchDailyInvestRequest = z.object({
+  arch: z.literal("F-ARCH-001"),
+  version: z.literal(1),
+  pulledAt: z.string().min(1).max(64),
+  days: z.array(archDailyInvestDaySchema).min(1).max(800),
+});
+
+const ingestArchDailyInvestResponse = z.object({
+  ok: z.boolean(),
+  issue: z.string().nullable(),
+  days: z.number().int().nonnegative(),
+  readBackVerified: z.boolean(),
+});
+
+type IngestArchDailyInvestResult = z.infer<typeof ingestArchDailyInvestResponse>;
+
+function dailyInvestFailure(issue: string): IngestArchDailyInvestResult {
+  return { ok: false, issue, days: 0, readBackVerified: false };
 }
 
 // Submitted-days vs server-recompute comparison, shared by the
@@ -1465,6 +1979,514 @@ async function finalizeDailySpendBatch(
     chunksReceived: chunkCount,
     chunksExpected: chunkCount,
   };
+}
+
+// CAL-METRICS-001: submitted income days vs the server
+// recompute — the dailyDaysMatch contract mirrored (0.01
+// tolerance on amounts; counts, partial flags and the source
+// set exact).
+function incomeDaysMatch(
+  recomputed: DailyIncomeResult,
+  submittedDays: ArchDailyIncomeDay[],
+  expectedFullCoverageStart?: string | null,
+): boolean {
+  if (expectedFullCoverageStart !== undefined && recomputed.fullCoverageStart !== expectedFullCoverageStart) {
+    return false;
+  }
+  if (submittedDays.length !== recomputed.days.length) return false;
+  for (let i = 0; i < recomputed.days.length; i++) {
+    const rec = recomputed.days[i]!;
+    const sub = submittedDays[i]!;
+    if (rec.date !== sub.date) return false;
+    if (Math.abs(rec.total - sub.total) > 0.01) return false;
+    if (Math.abs(rec.pending - sub.pending) > 0.01) return false;
+    if (rec.incomeCount !== sub.incomeCount) return false;
+    if (rec.pendingCount !== sub.pendingCount) return false;
+    if (rec.partial !== sub.partial) return false;
+    const recMap = new Map(rec.sources.map((s) => [s.key, s.amount] as const));
+    const subMap = new Map(sub.sources.map((s) => [s.key, s.amount] as const));
+    if (recMap.size !== subMap.size) return false;
+    for (const [k, v] of recMap) {
+      const sv = subMap.get(k);
+      if (sv === undefined || Math.abs(v - sv) > 0.01) return false;
+    }
+  }
+  return true;
+}
+
+// The one publish path for a fully recomputed daily-income
+// payload — publishDailySpend mirrored onto arch_daily_income
+// (SAVE-1 arbitration, conditional INSERT, committed-state
+// re-arbitration, exact by-id read-back deep compare).
+async function publishDailyIncome(
+  ctx: Ctx,
+  pulledAtMs: number,
+  payload: ArchDailyIncome,
+): Promise<{ issue: string | null; readBackVerified: boolean }> {
+  const db = ctx.db<typeof schema>();
+  const existingRows = await db.select().from(schema.archDailyIncome);
+  let maxStoredMs = Number.NEGATIVE_INFINITY;
+  const sameVersion: { row: DailyIncomeStoredRow; parsed: ArchDailyIncome }[] = [];
+  for (const row of existingRows) {
+    const parsed = parseDailyIncomeStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyIncomeVersionKey(row, parsed);
+    if (key > maxStoredMs) maxStoredMs = key;
+    if (key === pulledAtMs) sameVersion.push({ row, parsed });
+  }
+  if (pulledAtMs < maxStoredMs) return { issue: "stale_version", readBackVerified: false };
+  let targetRowId: number | null = null;
+  if (sameVersion.length > 0) {
+    const hit = sameVersion.find((candidate) => incomePayloadsEquivalent(candidate.parsed, payload));
+    if (!hit) return { issue: "version_conflict", readBackVerified: false };
+    targetRowId = hit.row.id;
+  }
+  if (targetRowId === null) {
+    const payloadJson = JSON.stringify(payload);
+    const insertedRows = (await db.all(
+      sql`INSERT INTO arch_daily_income (payload, pulled_at, created_at)
+          SELECT ${payloadJson}, ${pulledAtMs}, ${Date.now()}
+          WHERE NOT EXISTS (
+            SELECT 1 FROM arch_daily_income
+            WHERE pulled_at >= ${pulledAtMs} AND json_valid(payload)
+          )
+          RETURNING id`,
+    )) as unknown as Array<{ id?: number } | [number]>;
+    const insertedRow = insertedRows[0];
+    const insertedId = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow?.id;
+    if (insertedId != null) {
+      targetRowId = insertedId;
+    } else {
+      const committedRows = await db.select().from(schema.archDailyIncome);
+      let committedMaxMs = Number.NEGATIVE_INFINITY;
+      const committedSame: { row: DailyIncomeStoredRow; parsed: ArchDailyIncome }[] = [];
+      for (const row of committedRows) {
+        const parsedCommitted = parseDailyIncomeStoredRow(row);
+        if (!parsedCommitted) continue;
+        const key = dailyIncomeVersionKey(row, parsedCommitted);
+        if (key > committedMaxMs) committedMaxMs = key;
+        if (key === pulledAtMs) committedSame.push({ row, parsed: parsedCommitted });
+      }
+      if (pulledAtMs < committedMaxMs) return { issue: "stale_version", readBackVerified: false };
+      const winner = committedSame.find((candidate) => incomePayloadsEquivalent(candidate.parsed, payload));
+      if (winner) {
+        targetRowId = winner.row.id;
+      } else {
+        return { issue: "version_conflict", readBackVerified: false };
+      }
+    }
+  }
+  let readBackVerified = false;
+  if (targetRowId !== null) {
+    const backRows = await db
+      .select()
+      .from(schema.archDailyIncome)
+      .where(eq(schema.archDailyIncome.id, targetRowId))
+      .limit(1);
+    const backRow = backRows[0];
+    if (backRow) {
+      const parsedBack = parseDailyIncomeStoredRow(backRow);
+      readBackVerified = parsedBack !== null && incomePayloadsEquivalent(parsedBack, payload);
+    }
+  }
+  return { issue: readBackVerified ? null : "read_back_mismatch", readBackVerified };
+}
+
+// Chunk leg for income — ingestDailySpendChunk mirrored: a
+// poisoned batch is voided whole; staged rows are invisible
+// to every read path; a clean slice counts as received only
+// after its staged row reads back deep-equal.
+async function ingestDailyIncomeChunk(
+  ctx: Ctx,
+  args: IngestArchDailyIncomeArgs,
+): Promise<IngestArchDailyIncomeResult> {
+  const coverageStart = args.coverageStart ?? "";
+  const throughDate = args.throughDate ?? "";
+  const batchId = args.batchId;
+  const chunkIndex = args.chunkIndex;
+  const chunkCount = args.chunkCount;
+  const fromDate = args.fromDate;
+  const toDate = args.toDate;
+  const txns = args.transactions;
+  const days = args.days;
+  if (
+    !batchId || chunkIndex === undefined || chunkCount === undefined ||
+    !fromDate || !toDate || !txns || !days || chunkIndex >= chunkCount
+  ) {
+    return dailyIncomeFailure("invalid_chunk", coverageStart, throughDate, 0, chunkCount ?? 0);
+  }
+  if (!isValidPulledAt(args.pulledAt)) {
+    return dailyIncomeFailure("invalid_pulled_at", coverageStart, throughDate, 0, chunkCount);
+  }
+  const pulledAtMs = Date.parse(args.pulledAt);
+  if (
+    !isRealDateKey(coverageStart) || !isRealDateKey(throughDate) ||
+    !isRealDateKey(fromDate) || !isRealDateKey(toDate)
+  ) {
+    return dailyIncomeFailure("invalid_date", coverageStart, throughDate, 0, chunkCount);
+  }
+  for (const txn of txns) {
+    if (!isRealDateKey(txn.date)) {
+      return dailyIncomeFailure("invalid_date", coverageStart, throughDate, 0, chunkCount);
+    }
+  }
+  if (coverageStart > throughDate) {
+    return dailyIncomeFailure("invalid_window", coverageStart, throughDate, 0, chunkCount);
+  }
+  if (fromDate < coverageStart || toDate > throughDate || fromDate > toDate) {
+    return dailyIncomeFailure("invalid_chunk_range", coverageStart, throughDate, 0, chunkCount);
+  }
+  const db = ctx.db<typeof schema>();
+  const deleteBatch = async () => {
+    await db.delete(schema.archDailyIncomeChunks).where(eq(schema.archDailyIncomeChunks.batchId, batchId));
+  };
+  const stagedRows = await db
+    .select()
+    .from(schema.archDailyIncomeChunks)
+    .where(eq(schema.archDailyIncomeChunks.batchId, batchId));
+  const staged: ArchDailyIncomeChunk[] = [];
+  for (const row of stagedRows) {
+    const parsed = parseDailyIncomeChunkRow(row);
+    if (parsed) staged.push(parsed);
+  }
+  for (const prior of staged) {
+    if (
+      prior.pulledAt !== args.pulledAt ||
+      prior.coverageStart !== coverageStart ||
+      prior.throughDate !== throughDate ||
+      prior.chunkCount !== chunkCount
+    ) {
+      return dailyIncomeFailure("batch_mismatch", coverageStart, throughDate, staged.length, chunkCount);
+    }
+  }
+  const officialRows = await db.select().from(schema.archDailyIncome);
+  let maxStoredMs = Number.NEGATIVE_INFINITY;
+  for (const row of officialRows) {
+    const parsed = parseDailyIncomeStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyIncomeVersionKey(row, parsed);
+    if (key > maxStoredMs) maxStoredMs = key;
+  }
+  if (pulledAtMs < maxStoredMs) {
+    return dailyIncomeFailure("stale_version", coverageStart, throughDate, staged.length, chunkCount);
+  }
+  const chunkPayload = archDailyIncomeChunkSchema.parse({
+    batchId,
+    chunkIndex,
+    chunkCount,
+    pulledAt: args.pulledAt,
+    coverageStart,
+    throughDate,
+    fullCoverageStart: args.fullCoverageStart,
+    fromDate,
+    toDate,
+    transactions: txns,
+    days,
+  });
+  const sameIndex = staged.find((prior) => prior.chunkIndex === chunkIndex);
+  if (sameIndex) {
+    if (incomeChunkPayloadsEquivalent(sameIndex, chunkPayload)) {
+      const received = new Set(staged.map((prior) => prior.chunkIndex)).size;
+      return {
+        ok: true,
+        issue: null,
+        days: days.length,
+        coverageStart,
+        throughDate,
+        totalMatches: true,
+        readBackVerified: true,
+        chunksReceived: received,
+        chunksExpected: chunkCount,
+      };
+    }
+    await deleteBatch();
+    return dailyIncomeFailure("chunk_conflict", coverageStart, throughDate, 0, chunkCount);
+  }
+  const recomputed = summarizeIncomeDailyServer(txns as DailyIncomeTxn[], { fromDate, toDate });
+  if (!incomeDaysMatch(recomputed, days)) {
+    await deleteBatch();
+    return {
+      ok: false,
+      issue: "daily_mismatch",
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: false,
+      readBackVerified: false,
+      chunksReceived: 0,
+      chunksExpected: chunkCount,
+    };
+  }
+  const inserted = await db
+    .insert(schema.archDailyIncomeChunks)
+    .values({
+      batchId,
+      chunkIndex,
+      chunkCount,
+      pulledAt: new Date(pulledAtMs),
+      fromDate,
+      toDate,
+      payload: JSON.stringify(chunkPayload),
+    })
+    .returning({ id: schema.archDailyIncomeChunks.id });
+  const newRowId = inserted[0]?.id;
+  let readBackVerified = false;
+  if (newRowId != null) {
+    const backRows = await db
+      .select()
+      .from(schema.archDailyIncomeChunks)
+      .where(eq(schema.archDailyIncomeChunks.id, newRowId))
+      .limit(1);
+    const backRow = backRows[0];
+    if (backRow) {
+      const parsedBack = parseDailyIncomeChunkRow(backRow);
+      readBackVerified = parsedBack !== null && incomeChunkPayloadsEquivalent(parsedBack, chunkPayload);
+    }
+  }
+  if (!readBackVerified) {
+    return {
+      ok: false,
+      issue: "read_back_mismatch",
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: true,
+      readBackVerified: false,
+      chunksReceived: staged.length,
+      chunksExpected: chunkCount,
+    };
+  }
+  const received = new Set([...staged.map((prior) => prior.chunkIndex), chunkIndex]).size;
+  return {
+    ok: true,
+    issue: null,
+    days: days.length,
+    coverageStart,
+    throughDate,
+    totalMatches: true,
+    readBackVerified: true,
+    chunksReceived: received,
+    chunksExpected: chunkCount,
+  };
+}
+
+// Finalize leg for income — finalizeDailySpendBatch mirrored:
+// exact tiling, full-window recompute, declared counts/totals
+// must equal the recompute, publish via publishDailyIncome,
+// staged rows deleted only after a successful publish.
+async function finalizeDailyIncomeBatch(
+  ctx: Ctx,
+  args: IngestArchDailyIncomeArgs,
+): Promise<IngestArchDailyIncomeResult> {
+  const coverageStart = args.coverageStart ?? "";
+  const throughDate = args.throughDate ?? "";
+  const batchId = args.batchId;
+  const chunkCount = args.chunkCount;
+  const declaredCounts = args.counts;
+  const declaredTotals = args.totals;
+  if (!batchId || chunkCount === undefined || !declaredCounts || !declaredTotals) {
+    return dailyIncomeFailure("invalid_finalize", coverageStart, throughDate, 0, chunkCount ?? 0);
+  }
+  if (!isValidPulledAt(args.pulledAt)) {
+    return dailyIncomeFailure("invalid_pulled_at", coverageStart, throughDate, 0, chunkCount);
+  }
+  const pulledAtMs = Date.parse(args.pulledAt);
+  if (!isRealDateKey(coverageStart) || !isRealDateKey(throughDate)) {
+    return dailyIncomeFailure("invalid_date", coverageStart, throughDate, 0, chunkCount);
+  }
+  if (coverageStart > throughDate) {
+    return dailyIncomeFailure("invalid_window", coverageStart, throughDate, 0, chunkCount);
+  }
+  const db = ctx.db<typeof schema>();
+  const deleteBatch = async () => {
+    await db.delete(schema.archDailyIncomeChunks).where(eq(schema.archDailyIncomeChunks.batchId, batchId));
+  };
+  const stagedRows = await db
+    .select()
+    .from(schema.archDailyIncomeChunks)
+    .where(eq(schema.archDailyIncomeChunks.batchId, batchId));
+  const byIndex = new Map<number, ArchDailyIncomeChunk>();
+  for (const row of stagedRows) {
+    const parsed = parseDailyIncomeChunkRow(row);
+    if (parsed) byIndex.set(parsed.chunkIndex, parsed);
+  }
+  const complete =
+    byIndex.size === chunkCount &&
+    Array.from({ length: chunkCount }, (_, i) => i).every((i) => byIndex.has(i));
+  if (!complete) {
+    return dailyIncomeFailure("batch_incomplete", coverageStart, throughDate, byIndex.size, chunkCount);
+  }
+  const ordered = Array.from({ length: chunkCount }, (_, i) => byIndex.get(i)!);
+  for (const chunk of ordered) {
+    if (
+      chunk.pulledAt !== args.pulledAt ||
+      chunk.coverageStart !== coverageStart ||
+      chunk.throughDate !== throughDate ||
+      chunk.chunkCount !== chunkCount ||
+      chunk.fullCoverageStart !== args.fullCoverageStart
+    ) {
+      await deleteBatch();
+      return dailyIncomeFailure("batch_mismatch", coverageStart, throughDate, 0, chunkCount);
+    }
+  }
+  let tiles = ordered[0]!.fromDate === coverageStart && ordered[ordered.length - 1]!.toDate === throughDate;
+  for (let i = 1; tiles && i < ordered.length; i++) {
+    if (nextDateKey(ordered[i - 1]!.toDate) !== ordered[i]!.fromDate) tiles = false;
+  }
+  if (!tiles) {
+    return dailyIncomeFailure("batch_incomplete", coverageStart, throughDate, byIndex.size, chunkCount);
+  }
+  const allTxns: DailyIncomeTxnInput[] = ordered.flatMap((chunk) => chunk.transactions);
+  const recomputed = summarizeIncomeDailyServer(allTxns as DailyIncomeTxn[], {
+    fromDate: coverageStart,
+    toDate: throughDate,
+  });
+  const recomputedCounts = {
+    transactions: allTxns.length,
+    conflicts: recomputed.conflicts.length,
+    unclassified: recomputed.unclassified.length,
+    excludedTransfer: recomputed.excludedCounts.transfer,
+    excludedLoanPrincipal: recomputed.excludedCounts.loanPrincipal,
+  };
+  const countsMatch =
+    declaredCounts.transactions === recomputedCounts.transactions &&
+    (declaredCounts.conflicts === undefined || declaredCounts.conflicts === recomputedCounts.conflicts) &&
+    (declaredCounts.unclassified === undefined || declaredCounts.unclassified === recomputedCounts.unclassified) &&
+    (declaredCounts.excludedTransfer === undefined || declaredCounts.excludedTransfer === recomputedCounts.excludedTransfer) &&
+    (declaredCounts.excludedLoanPrincipal === undefined || declaredCounts.excludedLoanPrincipal === recomputedCounts.excludedLoanPrincipal);
+  const totalsMatch =
+    Math.abs(declaredTotals.total - recomputed.totals.total) <= 0.01 &&
+    Math.abs(declaredTotals.pending - recomputed.totals.pending) <= 0.01;
+  if (!countsMatch || !totalsMatch || recomputed.fullCoverageStart !== args.fullCoverageStart) {
+    await deleteBatch();
+    return {
+      ok: false,
+      issue: "finalize_mismatch",
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: false,
+      readBackVerified: false,
+      chunksReceived: 0,
+      chunksExpected: chunkCount,
+    };
+  }
+  const payload: ArchDailyIncome = {
+    arch: "F-ARCH-001",
+    version: 1,
+    kind: "daily-income",
+    pulledAt: args.pulledAt,
+    storedAt: new Date().toISOString(),
+    coverageStart,
+    throughDate,
+    fullCoverageStart: recomputed.fullCoverageStart,
+    days: recomputed.days,
+    totals: recomputed.totals,
+    counts: recomputedCounts,
+  };
+  const published = await publishDailyIncome(ctx, pulledAtMs, payload);
+  if (!published.readBackVerified) {
+    return {
+      ok: false,
+      issue: published.issue,
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: true,
+      readBackVerified: false,
+      chunksReceived: byIndex.size,
+      chunksExpected: chunkCount,
+    };
+  }
+  await deleteBatch();
+  return {
+    ok: true,
+    issue: null,
+    days: payload.days.length,
+    coverageStart,
+    throughDate,
+    totalMatches: true,
+    readBackVerified: true,
+    chunksReceived: chunkCount,
+    chunksExpected: chunkCount,
+  };
+}
+
+// CAL-METRICS-001: the one publish path for a daily-invest
+// payload — SAVE-1 arbitration mirrored from publishDailySpend
+// onto arch_daily_invest.
+async function publishDailyInvest(
+  ctx: Ctx,
+  pulledAtMs: number,
+  payload: ArchDailyInvest,
+): Promise<{ issue: string | null; readBackVerified: boolean }> {
+  const db = ctx.db<typeof schema>();
+  const existingRows = await db.select().from(schema.archDailyInvest);
+  let maxStoredMs = Number.NEGATIVE_INFINITY;
+  const sameVersion: { row: DailyInvestStoredRow; parsed: ArchDailyInvest }[] = [];
+  for (const row of existingRows) {
+    const parsed = parseDailyInvestStoredRow(row);
+    if (!parsed) continue;
+    const key = dailyInvestVersionKey(row, parsed);
+    if (key > maxStoredMs) maxStoredMs = key;
+    if (key === pulledAtMs) sameVersion.push({ row, parsed });
+  }
+  if (pulledAtMs < maxStoredMs) return { issue: "stale_version", readBackVerified: false };
+  let targetRowId: number | null = null;
+  if (sameVersion.length > 0) {
+    const hit = sameVersion.find((candidate) => investPayloadsEquivalent(candidate.parsed, payload));
+    if (!hit) return { issue: "version_conflict", readBackVerified: false };
+    targetRowId = hit.row.id;
+  }
+  if (targetRowId === null) {
+    const payloadJson = JSON.stringify(payload);
+    const insertedRows = (await db.all(
+      sql`INSERT INTO arch_daily_invest (payload, pulled_at, created_at)
+          SELECT ${payloadJson}, ${pulledAtMs}, ${Date.now()}
+          WHERE NOT EXISTS (
+            SELECT 1 FROM arch_daily_invest
+            WHERE pulled_at >= ${pulledAtMs} AND json_valid(payload)
+          )
+          RETURNING id`,
+    )) as unknown as Array<{ id?: number } | [number]>;
+    const insertedRow = insertedRows[0];
+    const insertedId = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow?.id;
+    if (insertedId != null) {
+      targetRowId = insertedId;
+    } else {
+      const committedRows = await db.select().from(schema.archDailyInvest);
+      let committedMaxMs = Number.NEGATIVE_INFINITY;
+      const committedSame: { row: DailyInvestStoredRow; parsed: ArchDailyInvest }[] = [];
+      for (const row of committedRows) {
+        const parsedCommitted = parseDailyInvestStoredRow(row);
+        if (!parsedCommitted) continue;
+        const key = dailyInvestVersionKey(row, parsedCommitted);
+        if (key > committedMaxMs) committedMaxMs = key;
+        if (key === pulledAtMs) committedSame.push({ row, parsed: parsedCommitted });
+      }
+      if (pulledAtMs < committedMaxMs) return { issue: "stale_version", readBackVerified: false };
+      const winner = committedSame.find((candidate) => investPayloadsEquivalent(candidate.parsed, payload));
+      if (winner) {
+        targetRowId = winner.row.id;
+      } else {
+        return { issue: "version_conflict", readBackVerified: false };
+      }
+    }
+  }
+  let readBackVerified = false;
+  if (targetRowId !== null) {
+    const backRows = await db
+      .select()
+      .from(schema.archDailyInvest)
+      .where(eq(schema.archDailyInvest.id, targetRowId))
+      .limit(1);
+    const backRow = backRows[0];
+    if (backRow) {
+      const parsedBack = parseDailyInvestStoredRow(backRow);
+      readBackVerified = parsedBack !== null && investPayloadsEquivalent(parsedBack, payload);
+    }
+  }
+  return { issue: readBackVerified ? null : "read_back_mismatch", readBackVerified };
 }
 
 function archIngestFailure(issue: string): IngestArchNetWorthResult {
@@ -3462,6 +4484,8 @@ function buildDashboard(
     asOf,
     archNetWorth: null,
     archDailySpend: null,
+    archDailyIncome: null,
+    archDailyInvest: null,
     archNetWorthSeries: [],
     sourceMonth: latestRaw.key,
     months,
@@ -3868,6 +4892,31 @@ export const Actions = {
           const currentDaily = pickCurrentDailySpendVersion(dailyRows);
           if (currentDaily) {
             data = { ...data, archDailySpend: currentDaily.parsed };
+          }
+        } catch {
+          // Table may not exist on legacy DBs before migration; keep null.
+        }
+        // CAL-METRICS-001 overlays: daily income + daily
+        // investment gain/loss, same greatest-pulledAt
+        // selection, same legacy-DB tolerance.
+        try {
+          const incomeRows = await ctx.db<typeof schema>()
+            .select()
+            .from(schema.archDailyIncome);
+          const currentIncome = pickCurrentDailyIncomeVersion(incomeRows);
+          if (currentIncome) {
+            data = { ...data, archDailyIncome: currentIncome.parsed };
+          }
+        } catch {
+          // Table may not exist on legacy DBs before migration; keep null.
+        }
+        try {
+          const investRows = await ctx.db<typeof schema>()
+            .select()
+            .from(schema.archDailyInvest);
+          const currentInvest = pickCurrentDailyInvestVersion(investRows);
+          if (currentInvest) {
+            data = { ...data, archDailyInvest: currentInvest.parsed };
           }
         } catch {
           // Table may not exist on legacy DBs before migration; keep null.
@@ -4813,6 +5862,136 @@ export const Actions = {
         chunksReceived: 0,
         chunksExpected: 0,
       };
+    },
+  }),
+
+  // CAL-METRICS-001: the controlled write path for the daily
+  // INCOME figure — ingestArchDailySpend mirrored leg for leg
+  // (full / chunk / finalize under the same write gate, the
+  // same server recompute, the same publish path). Only the
+  // owner or the trusted local sync channel may write; reads
+  // ride getDashboard's owner check.
+  ingestArchDailyIncome: defineAction({
+    request: ingestArchDailyIncomeRequest,
+    response: ingestArchDailyIncomeResponse,
+    async handler(ctx, args): Promise<IngestArchDailyIncomeResult> {
+      if (!isOwnerOrSyncChannel(ctx)) return dailyIncomeFailure("forbidden", args.coverageStart ?? "", args.throughDate ?? "");
+      const mode = args.mode ?? "full";
+      if (mode === "chunk") return ingestDailyIncomeChunk(ctx, args);
+      if (mode === "finalize") return finalizeDailyIncomeBatch(ctx, args);
+      const txns = args.transactions;
+      const submittedDays = args.days;
+      if (!txns || !submittedDays) {
+        return dailyIncomeFailure("invalid_request", args.coverageStart, args.throughDate);
+      }
+      const pulledAtMs = Date.parse(args.pulledAt);
+      if (!Number.isFinite(pulledAtMs) || !/(?:Z|[+-]\d{2}:?\d{2})\s*$/i.test(args.pulledAt)) {
+        return dailyIncomeFailure("invalid_pulled_at", args.coverageStart, args.throughDate);
+      }
+      if (!isRealDateKey(args.coverageStart) || !isRealDateKey(args.throughDate)) {
+        return dailyIncomeFailure("invalid_date", args.coverageStart, args.throughDate);
+      }
+      for (const txn of txns) {
+        if (!isRealDateKey(txn.date)) {
+          return dailyIncomeFailure("invalid_date", args.coverageStart, args.throughDate);
+        }
+      }
+      if (args.coverageStart > args.throughDate) {
+        return dailyIncomeFailure("invalid_window", args.coverageStart, args.throughDate);
+      }
+      const recomputed = summarizeIncomeDailyServer(txns as DailyIncomeTxn[], {
+        fromDate: args.coverageStart,
+        toDate: args.throughDate,
+      });
+      if (!incomeDaysMatch(recomputed, submittedDays, args.fullCoverageStart)) {
+        return {
+          ok: false,
+          issue: "daily_mismatch",
+          days: 0,
+          coverageStart: args.coverageStart,
+          throughDate: args.throughDate,
+          totalMatches: false,
+          readBackVerified: false,
+          chunksReceived: 0,
+          chunksExpected: 0,
+        };
+      }
+      const payload: ArchDailyIncome = {
+        arch: "F-ARCH-001",
+        version: 1,
+        kind: "daily-income",
+        pulledAt: args.pulledAt,
+        storedAt: new Date().toISOString(),
+        coverageStart: args.coverageStart,
+        throughDate: args.throughDate,
+        fullCoverageStart: recomputed.fullCoverageStart,
+        days: recomputed.days,
+        totals: recomputed.totals,
+        counts: {
+          transactions: txns.length,
+          conflicts: recomputed.conflicts.length,
+          unclassified: recomputed.unclassified.length,
+          excludedTransfer: recomputed.excludedCounts.transfer,
+          excludedLoanPrincipal: recomputed.excludedCounts.loanPrincipal,
+        },
+      };
+      const published = await publishDailyIncome(ctx, pulledAtMs, payload);
+      if (published.issue === "stale_version") return dailyIncomeFailure("stale_version", args.coverageStart, args.throughDate);
+      if (published.issue === "version_conflict") return dailyIncomeFailure("version_conflict", args.coverageStart, args.throughDate);
+      return {
+        ok: published.readBackVerified,
+        issue: published.issue,
+        days: payload.days.length,
+        coverageStart: args.coverageStart,
+        throughDate: args.throughDate,
+        totalMatches: true,
+        readBackVerified: published.readBackVerified,
+        chunksReceived: 0,
+        chunksExpected: 0,
+      };
+    },
+  }),
+
+  // CAL-METRICS-001: the controlled write path for the DAILY
+  // investment gain/loss figure. The server does not recompute
+  // market values (it has no Plaid access); its gates are the
+  // identity check pnl == valueChange − netFlow per day
+  // (tolerance 0.01), the era floor (no day before
+  // INVEST_DAILY_ERA_START — earlier months stay monthly and
+  // are never split into days), strictly increasing unique
+  // dates, and SAVE-1 arbitration with exact read-back.
+  ingestArchDailyInvest: defineAction({
+    request: ingestArchDailyInvestRequest,
+    response: ingestArchDailyInvestResponse,
+    async handler(ctx, args): Promise<IngestArchDailyInvestResult> {
+      if (!isOwnerOrSyncChannel(ctx)) return dailyInvestFailure("forbidden");
+      const pulledAtMs = Date.parse(args.pulledAt);
+      if (!Number.isFinite(pulledAtMs) || !/(?:Z|[+-]\d{2}:?\d{2})\s*$/i.test(args.pulledAt)) {
+        return dailyInvestFailure("invalid_pulled_at");
+      }
+      let previousDate = "";
+      for (const day of args.days) {
+        if (!isRealDateKey(day.date)) return dailyInvestFailure("invalid_date");
+        if (day.date < INVEST_DAILY_ERA_START) return dailyInvestFailure("before_daily_era");
+        if (previousDate !== "" && day.date <= previousDate) return dailyInvestFailure("dates_not_increasing");
+        previousDate = day.date;
+        if (Math.abs(day.pnl - (day.valueChange - day.netFlow)) > 0.01) {
+          return dailyInvestFailure("pnl_mismatch");
+        }
+      }
+      const payload: ArchDailyInvest = {
+        arch: "F-ARCH-001",
+        version: 1,
+        kind: "daily-invest",
+        pulledAt: args.pulledAt,
+        storedAt: new Date().toISOString(),
+        days: args.days,
+      };
+      const published = await publishDailyInvest(ctx, pulledAtMs, payload);
+      if (!published.readBackVerified) {
+        return { ok: false, issue: published.issue, days: 0, readBackVerified: false };
+      }
+      return { ok: true, issue: null, days: payload.days.length, readBackVerified: true };
     },
   }),
 } satisfies ActionsModule;

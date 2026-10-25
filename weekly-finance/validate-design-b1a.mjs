@@ -1,7 +1,7 @@
 // LIFE-DESIGN-001-B1A validation, updated for the
 // DAILY-MERGE-001 CORRECTION (owner correction 2026-10-24
 // 21:16 PT): the "merge" is a DATA-CALIBER merge only — the
-// page organisation returns to ruling 1: two tabs, 「总览」
+// page organisation returns to ruling 1: tabs, 「总览」
 // (overview, default) and 「明细」 (detail), tab state kept in
 // mount-time component state only. Daily spend in the detail
 // tab is a TRUE Calendar month grid (weekday header, aligned
@@ -9,12 +9,38 @@
 // buildSpendCalendarMonth / spendCalendarMonthSummary /
 // buildSpendDayDetail — the old per-day LIST fold is gone.
 // Assertions that protect facts (conclusion-card wording,
-// F-ARCH in-place caliber labels, summary-line helpers, fold
+// F-ARCH caliber labels, summary-line helpers, fold
 // defaults, no persistence, no weekly wording in client or
 // server sources, near-7-day aggregates summed only from the
 // daily rows) are kept; the previous single-view assertions
 // (no tablist etc.) were products of the misreading and are
-// replaced by two-tab + Calendar assertions.
+// replaced by tab + Calendar assertions.
+//
+// OVERVIEW-TRIM-001 + NW-TREND-SEAM-001 (owner feedback
+// 2026-10-25 00:10 PT): the overview keeps only numbers,
+// short labels, status symbols and ONE conclusion sentence —
+// the card's caliber / freshness-layer / source paragraphs
+// moved, wording preserved, into the detail tab's
+// 「口径与来源说明」 fold (ConclusionCaliberDetail), and the
+// metric explanatory notes moved with them; the overview
+// text-budget / whitelist assertions live below. The overview
+// net-worth chart's history segment is filled with the SAME
+// months rows the detail tab renders (one point per monthly
+// snapshot, at its snapshot date, its total — no second
+// computation, no interpolation), joined at the seam (the
+// first daily point) to the arch daily points; the seam is
+// annotated in text and the segments differ by line style +
+// markers, never colour alone (buildNetWorthTrend /
+// filterNetWorthTrend behaviour asserted below).
+// FIRE-TAB-001 (owner ruling 2026-10-25 00:16 PT): three
+// tabs — 总览 / FIRE / 明细 — the full FIRE panel expanded
+// as the FIRE tab's main content; the overview one-liner's
+// button just switches tab.
+// CAL-METRICS-001 (owner ruling 2026-10-25 00:17 PT): the
+// Calendar gains the 入账 and 投资收益·损失 metrics next to
+// 花销 (buildInvestMonthView behaviour asserted below:
+// pre-era months are monthly-only and never split into
+// days; gains/losses carry glyph + sign + digits).
 //
 // Behaviour runs against the REAL helpers extracted from
 // client/src/App.tsx (type annotations stripped mechanically,
@@ -60,13 +86,30 @@ if (labelsStart < 0 || labelsEnd < 0) throw new Error("category labels not found
 const categoryLabels = appSrc.slice(labelsStart, labelsEnd)
   .replace("export const", "const")
   .replace(": Record<string, string>", "");
+// The income source label table, sliced verbatim for its helper.
+const incomeLabelsStart = appSrc.indexOf("export const incomeSourceLabels");
+const incomeLabelsEnd = appSrc.indexOf("export function incomeSourceLabel");
+if (incomeLabelsStart < 0 || incomeLabelsEnd < 0) throw new Error("income labels not found");
+const incomeLabels = appSrc.slice(incomeLabelsStart, incomeLabelsEnd)
+  .replace("export const", "const")
+  .replace(": Record<string, string>", "");
 function loadHelpers() {
   const parts = [
     formatters,
     categoryLabels,
+    incomeLabels,
     extractFn(appSrc, "dailyCategoryLabel"),
+    extractFn(appSrc, "incomeSourceLabel"),
     extractFn(appSrc, "trendIndicator"),
     extractFn(appSrc, "signedCurrency"),
+    extractFn(appSrc, "weeklyDeltaView", [["delta: number | null", "delta"], ["netWorth: number", "netWorth"], [": WeeklyDeltaView", ""]]),
+    extractFn(appSrc, "conclusionOneLiner", [["view: WeeklyDeltaView", "view"], ["hasArch: boolean", "hasArch"]]),
+    extractFn(appSrc, "signedCompactCurrency"),
+    extractFn(appSrc, "signedPreciseCurrency"),
+    extractFn(appSrc, "buildNetWorthTrend", [["months: NetWorthTrendMonthLike[]", "months"], ["daily: DailyNetWorthPointLike[]", "daily"], [": NetWorthTrendModel", ""], ["dailyPoints: NetWorthTrendPoint[]", "dailyPoints"], ["monthlyPoints: NetWorthTrendPoint[]", "monthlyPoints"], ["points: NetWorthTrendPoint[]", "points"]]),
+    extractFn(appSrc, "netWorthTrendRangeStart", [["range: Range", "range"]]),
+    extractFn(appSrc, "filterNetWorthTrend", [["model: NetWorthTrendModel", "model"], ["range: Range", "range"], [": NetWorthTrendView", ""]]),
+    extractFn(appSrc, "buildInvestMonthView", [["investDays: InvestDayLike[]", "investDays"], ["monthlyReturns: MonthlyReturnLike[]", "monthlyReturns"], [": InvestMonthView", ""], ["cells: InvestMonthCell[]", "cells"]]),
     extractFn(appSrc, "fireYearsEstimate", [["fire: Dashboard[\"fire\"]", "fire"]]),
     extractFn(appSrc, "fireSummaryLine", [["fire: Dashboard[\"fire\"]", "fire"]]),
     extractFn(appSrc, "distributionSummaryLine", [["live: Dashboard[\"live\"]", "live"]]),
@@ -81,7 +124,7 @@ function loadHelpers() {
     extractFn(appSrc, "shiftSpendCalendarMonth"),
     extractFn(appSrc, "buildSpendDayDetail", [[": SpendDayDetail", ""], ["day: SpendCalendarDayLike | null", "day"]]),
   ];
-  return new Function(`${parts.join("\n")}; return { fireYearsEstimate, fireSummaryLine, distributionSummaryLine, cashScopeSummaryLine, investmentSummaryLine, holdingsSummaryLine, recentDailySpendSummary, recentDailyNetWorthChange, buildSpendCalendarMonth, spendCalendarMonthSummary, spendCalendarMonthBounds, shiftSpendCalendarMonth, buildSpendDayDetail };`)();
+  return new Function(`${parts.join("\n")}; return { fireYearsEstimate, fireSummaryLine, distributionSummaryLine, cashScopeSummaryLine, investmentSummaryLine, holdingsSummaryLine, recentDailySpendSummary, recentDailyNetWorthChange, buildSpendCalendarMonth, spendCalendarMonthSummary, spendCalendarMonthBounds, shiftSpendCalendarMonth, buildSpendDayDetail, weeklyDeltaView, conclusionOneLiner, incomeSourceLabel, signedCompactCurrency, signedPreciseCurrency, buildNetWorthTrend, netWorthTrendRangeStart, filterNetWorthTrend, buildInvestMonthView };`)();
 }
 const H = loadHelpers();
 
@@ -171,6 +214,110 @@ check("7d net worth: short series falls back to its first point",
   H.recentDailyNetWorthChange(nwSeries.slice(5))?.change === 40 && H.recentDailyNetWorthChange(nwSeries.slice(5))?.days === 2);
 check("7d net worth: fewer than two points -> null", H.recentDailyNetWorthChange(nwSeries.slice(0, 1)) === null && H.recentDailyNetWorthChange([]) === null);
 
+// --- OVERVIEW-TRIM-001: the one-line conclusion ---
+const viewUp = H.weeklyDeltaView(5000, 105000);
+check("one-liner: comparable + arch -> 结论 sentence with caliber label, glyph, direction, signed amount",
+  H.conclusionOneLiner(5000, viewUp, true).startsWith("结论：旧同步口径 · 较上次成功快照（日期未留存）增加 ▲ +$5,000"));
+check("one-liner: percent rides in the same sentence", H.conclusionOneLiner(5000, viewUp, true).includes("（+5%）"));
+check("one-liner: no arch -> no old-caliber label", !H.conclusionOneLiner(5000, viewUp, false).includes("旧同步口径"));
+const viewDown = H.weeklyDeltaView(-2500, 100000);
+check("one-liner: decrease carries ▼ + direction word", H.conclusionOneLiner(-2500, viewDown, true).includes("减少 ▼ -$2,500"));
+check("one-liner: flat delta reads 持平", H.conclusionOneLiner(0, H.weeklyDeltaView(0, 100000), true).includes("持平"));
+check("one-liner: no comparable snapshot -> honest 暂无可比快照, never a fabricated 0 change",
+  H.conclusionOneLiner(null, H.weeklyDeltaView(null, 100000), true) === "暂无可比快照");
+
+// --- NW-TREND-SEAM-001: monthly history from the SAME months
+// rows + arch daily points, seam at the first daily date ---
+const trendMonths = [
+  { key: "2024-10-31", total: 900000 },
+  { key: "2024-11-30", total: 950000 },
+  { key: "2025-01-31", total: 990000 },
+  { key: "2026-09-30", total: 1200000 },
+  { key: "2026-10-15", total: 1250000 },
+  { key: "2026-10-26", total: 1300000 },
+];
+const trendDaily = [
+  { date: "2026-10-25", total: 1285000 },
+  { date: "2026-10-24", total: 1280000 },
+];
+const trend = H.buildNetWorthTrend(trendMonths, trendDaily);
+check("trend: seam is the first daily point's date", trend.seamDate === "2026-10-24");
+check("trend: monthly points are exactly the pre-seam snapshots, one per month, at their snapshot dates",
+  JSON.stringify(trend.monthlyPoints.map((p) => p.date)) === JSON.stringify(["2024-10-31", "2024-11-30", "2025-01-31", "2026-09-30", "2026-10-15"]));
+check("trend: monthly point values EQUAL the months rows' totals (same source as 月度记录, never recomputed)",
+  trend.monthlyPoints.every((p) => trendMonths.find((m) => m.key === p.date)?.total === p.total));
+check("trend: a snapshot dated on/after the seam is excluded from the monthly segment (daily owns that range)",
+  !trend.monthlyPoints.some((p) => p.date === "2026-10-26"));
+check("trend: total points = monthly count + daily count exactly (no interpolation, no split, no smoothing points)",
+  trend.points.length === trend.monthlyPoints.length + trend.dailyPoints.length && trend.points.length === 7);
+check("trend: daily points are sorted ascending even when the input is not",
+  trend.dailyPoints[0]?.date === "2026-10-24" && trend.dailyPoints[1]?.date === "2026-10-25");
+check("trend: no daily points -> no seam, every month stays a monthly point",
+  H.buildNetWorthTrend(trendMonths, []).seamDate === null && H.buildNetWorthTrend(trendMonths, []).monthlyPoints.length === 6);
+check("mutation: an interpolating builder would invent points between months — the real one has none between 2024-11-30 and 2025-01-31",
+  !trend.points.some((p) => p.date > "2024-11-30" && p.date < "2025-01-31"));
+check("trend range start: all -> null, year -> Jan 1, 6m/12m counted back from the last point",
+  H.netWorthTrendRangeStart("all", "2026-10-25") === null
+  && H.netWorthTrendRangeStart("year", "2026-10-25") === "2026-01-01"
+  && H.netWorthTrendRangeStart("6m", "2026-10-25") === "2026-04-25"
+  && H.netWorthTrendRangeStart("12m", "2026-10-25") === "2025-10-25");
+const trendAll = H.filterNetWorthTrend(trend, "all");
+check("trend view (all): one row per real point date — 5 monthly + seam + 1 daily = 7 rows",
+  trendAll.rows.length === 7 && trendAll.monthlyCount === 5 && trendAll.dailyCount === 2);
+check("trend view (all): the seam row bridges both segments with the daily point's OWN value (no invented value)",
+  trendAll.rows.find((r) => r.date === "2026-10-24")?.monthly === 1280000
+  && trendAll.rows.find((r) => r.date === "2026-10-24")?.daily === 1280000);
+check("trend view (all): monthly rows carry no daily value and daily rows carry no monthly value",
+  trendAll.rows.find((r) => r.date === "2026-10-15")?.daily === null
+  && trendAll.rows.find((r) => r.date === "2026-10-25")?.monthly === null);
+check("trend view (all): seam is visible when both segments are in range", trendAll.seamVisible === true);
+const trend6m = H.filterNetWorthTrend(trend, "6m");
+check("trend view (6m): window trims old monthly points, seam stays visible",
+  trend6m.monthlyCount === 2 && trend6m.dailyCount === 2 && trend6m.seamVisible === true);
+const trendOldOnly = H.buildNetWorthTrend([{ key: "2024-10-31", total: 900000 }], trendDaily);
+check("trend view (6m, history outside window): no monthly segment, no seam marker",
+  H.filterNetWorthTrend(trendOldOnly, "6m").monthlyCount === 0 && H.filterNetWorthTrend(trendOldOnly, "6m").seamVisible === false);
+
+// --- CAL-METRICS-001: income source labels ---
+check("income label: refunds labelled 退款", H.incomeSourceLabel("REFUND") === "退款");
+check("income label: unknown source keys pass through as-is (never relabelled)", H.incomeSourceLabel("EMPLOYER_ACME") === "EMPLOYER_ACME");
+
+// --- CAL-METRICS-001: investment month view — daily only
+// from the era, monthly never split into days ---
+const investDays = [
+  { date: "2026-10-24", pnl: 1200 },
+  { date: "2026-10-25", pnl: -300 },
+];
+const monthlyReturns = [
+  { key: "2025-03-31", investmentReturn: -4200 },
+  { key: "2026-09-30", investmentReturn: 8100 },
+  { key: "2026-10-31", investmentReturn: null },
+];
+const marView = H.buildInvestMonthView(investDays, monthlyReturns, "2025-03", "2026-10-25", "2026-10-24");
+check("invest: a pre-era month with a monthly figure is monthly mode with the figure as its total",
+  marView.mode === "monthly" && marView.total === -4200 && marView.dailyCount === 0 && marView.monthlyTotal === -4200);
+check("invest: pre-era cells are monthly-only and carry NO amount (the monthly value is never split into days)",
+  marView.cells.every((c) => c.mode !== "daily") && marView.cells.every((c) => c.pnl === null)
+  && marView.cells.find((c) => c.date === "2025-03-15")?.mode === "monthly-only");
+check("invest: weekday alignment matches the spend grid (Mar 1 2025 is a Saturday -> offset 5)",
+  marView.cells[5]?.date === "2025-03-01");
+const octView = H.buildInvestMonthView(investDays, monthlyReturns, "2026-10", "2026-10-25", "2026-10-24");
+check("invest: the era month sums its real daily points (total / average / max day)",
+  octView.mode === "daily" && octView.total === 900 && octView.dailyCount === 2 && octView.average === 450
+  && octView.maxAmount === 1200 && octView.maxDate === "2026-10-24");
+check("invest: daily cells carry their signed pnl", octView.cells.find((c) => c.date === "2026-10-25")?.pnl === -300
+  && octView.cells.find((c) => c.date === "2026-10-24")?.mode === "daily");
+check("invest: a pre-era day inside the era month is NOT monthly-only when the month's figure is unproven (null)",
+  octView.cells.find((c) => c.date === "2026-10-23")?.mode === "none");
+check("invest: future days are future, never data", octView.cells.find((c) => c.date === "2026-10-26")?.mode === "future");
+const sepView = H.buildInvestMonthView(investDays, monthlyReturns, "2026-09", "2026-10-25", "2026-10-24");
+check("invest: the month before the era with a figure is monthly mode", sepView.mode === "monthly" && sepView.total === 8100);
+const junView = H.buildInvestMonthView(investDays, monthlyReturns, "2025-06", "2026-10-25", "2026-10-24");
+check("invest: a month with neither daily points nor a figure is an honest none",
+  junView.mode === "none" && junView.total === null && junView.cells.find((c) => c.date === "2025-06-10")?.mode === "none");
+check("mutation: splitting the March monthly figure across its 31 days would fabricate daily values — every March cell pnl stays null",
+  marView.cells.filter((c) => c.date != null).every((c) => c.pnl === null) && marView.dailyCount === 0);
+
 // --- Calendar helpers: real month-grid behaviour ---
 // Synthetic fixture: October 2026 (Oct 1 2026 is a Thursday, so
 // the Monday-start offset is 3). One zero-spend day, one partial
@@ -242,21 +389,25 @@ check("drill-down: missing day -> hasData false, nothing fabricated",
   H.buildSpendDayDetail(null, null).hasData === false && H.buildSpendDayDetail(null, 500).posted === null
   && H.buildSpendDayDetail(null, 500).hasNetWorth === true);
 
-// --- structure: two tabs restored, single homes, fold defaults ---
+// --- structure: three tabs, single homes, fold defaults ---
 function componentSlice(name) {
   const start = appSrc.indexOf(`function ${name}`);
   if (start < 0) throw new Error(`component not found: ${name}`);
   const end = appSrc.indexOf("\n}\n", start) + 3;
   return appSrc.slice(start, end);
 }
-check("tabs: tablist with two labelled tabs exists",
-  appSrc.includes('role="tablist"') && appSrc.includes('role="tab"') && appSrc.includes(">总览</button>") && appSrc.includes(">明细</button>"));
+check("tabs: tablist with three labelled tabs exists",
+  appSrc.includes('role="tablist"') && appSrc.includes('role="tab"') && appSrc.includes(">总览</button>") && appSrc.includes(">FIRE</button>") && appSrc.includes(">明细</button>"));
+check("tabs: order is 总览 / FIRE / 明细 (FIRE-TAB-001)",
+  appSrc.indexOf(">总览</button>") > -1
+  && appSrc.indexOf(">总览</button>") < appSrc.indexOf(">FIRE</button>")
+  && appSrc.indexOf(">FIRE</button>") < appSrc.indexOf(">明细</button>"));
 check("tabs: tab state is mount-time state in DashboardView, default overview",
-  appSrc.includes('useState<"overview" | "detail">("overview")')
-  && componentSlice("DashboardView").includes('useState<"overview" | "detail">("overview")'));
-check("tabs: OverviewTab and DetailTab components exist and render once each",
-  appSrc.includes("function OverviewTab") && appSrc.includes("function DetailTab")
-  && (appSrc.split("<OverviewTab").length - 1) === 1 && (appSrc.split("<DetailTab").length - 1) === 1);
+  appSrc.includes('useState<"overview" | "fire" | "detail">("overview")')
+  && componentSlice("DashboardView").includes('useState<"overview" | "fire" | "detail">("overview")'));
+check("tabs: OverviewTab, FireTab and DetailTab components exist and render once each",
+  appSrc.includes("function OverviewTab") && appSrc.includes("function FireTab") && appSrc.includes("function DetailTab")
+  && (appSrc.split("<OverviewTab").length - 1) === 1 && (appSrc.split("<FireTab").length - 1) === 1 && (appSrc.split("<DetailTab").length - 1) === 1);
 check("tabs: theme carries the .view-tabs styles", css.includes(".view-tabs") && css.includes(".view-tab.active"));
 check("no weekly wording in client or server sources",
   !appSrc.includes("每周") && !appSrc.includes("本周") && !css.includes("每周") && !serverSrc.includes("每周") && !serverSrc.includes("本周"));
@@ -265,7 +416,7 @@ check("refresh already-running message carries no weekly naming",
 check("no fold/view/tab state is persisted (ruling: reset on every open)",
   !appSrc.includes("localStorage") && !appSrc.includes("sessionStorage"));
 check("no <details> renders open by default", !/<details[^>]*\sopen[\s=>]/.test(appSrc));
-check("all folds default-closed: 4 evidence + 5 ledger = 9 folds (the daily LIST fold is gone)",
+check("all folds default-closed: 4 evidence + 5 ledger = 9 folds in the detail tab (LIST fold gone; FIRE fold moved to its tab; caliber fold added)",
   (appSrc.match(/<details className="evidence-fold/g) ?? []).length === 9);
 check("the rejected per-day LIST is gone (no list fold, no DailySpendSection)",
   !appSrc.includes("本月逐日明细") && !appSrc.includes("daily-days-fold") && !appSrc.includes("function DailySpendSection"));
@@ -307,31 +458,55 @@ check("detail: four evidence fold summaries wired to their helpers",
   && detailTab.includes("investmentSummaryLine(") && detailTab.includes("holdingsSummaryLine("));
 check("detail: monthly trend charts live in the 走势 ledger fold", detailTab.includes("<TrendCharts") && detailTab.includes("走势 — 月度趋势"));
 check("detail: monthly records live in the 月度记录 ledger fold", detailTab.includes("<MonthlyRecords months={data.months} />") && detailTab.includes("月度记录 —"));
-check("detail: full FIRE panel lives in its ledger fold with the anchor id", detailTab.includes("<FireProgress") && detailTab.includes('id="fire-panel"'));
+check("detail: NO FIRE fold remains in the detail tab (FIRE-TAB-001)", !detailTab.includes("fire-panel") && !detailTab.includes("<FireProgress"));
+check("detail: caliber fold carries the moved conclusion-card paragraphs", detailTab.includes("口径与来源说明") && detailTab.includes("<ConclusionCaliberDetail"));
+const fireTab = componentSlice("FireTab");
+check("FIRE tab: the full panel is the tab's main content, expanded (no fold), id kept on the panel root",
+  fireTab.includes("<FireProgress") && fireTab.includes('id="fire-panel"') && !fireTab.includes("<details") && fireTab.includes('title="FIRE 进度"'));
 check("detail: F-ARCH account rows live in their ledger fold", detailTab.includes("<ArchAccountsDetail") && detailTab.includes("总资产账户明细 —"));
 check("detail: snapshot account detail lives in the 账户明细 ledger fold", detailTab.includes("accounts-section") && detailTab.includes('title="账户明细"'));
 const view = componentSlice("DashboardView");
-check("FIRE cross-tab wiring: overview button switches tab, opens fire-panel and scrolls",
-  view.includes("openFirePanel") && view.includes('setActiveTab("detail")')
-  && appSrc.includes('document.getElementById("fire-panel")') && appSrc.includes("panel.open = true") && appSrc.includes("scrollIntoView"));
+check("FIRE cross-tab wiring: overview button simply switches to the FIRE tab (no fold-opening, no scroll)",
+  view.includes("openFireTab") && view.includes('setActiveTab("fire")')
+  && overview.includes("onOpenFireTab") && !appSrc.includes("panel.open = true"));
 check("calendar cross-tab wiring: strip button switches tab and scrolls to the calendar",
   view.includes("viewCalendar") && view.includes('document.getElementById("spend-calendar")'));
 
 // --- Calendar component source wiring ---
 const calSrc = componentSlice("SpendCalendar");
 check("calendar: renders from the production helpers",
-  calSrc.includes("buildSpendCalendarMonth(daily.days, monthKey, todayKey)")
-  && calSrc.includes("spendCalendarMonthSummary(daily.days, monthKey, daily.throughDate)")
+  calSrc.includes("buildSpendCalendarMonth(flowDays, monthKey, todayKey)")
+  && calSrc.includes("spendCalendarMonthSummary(flowDays, monthKey")
   && calSrc.includes("buildSpendDayDetail("));
 check("calendar: default month is the throughDate month",
   calSrc.includes("daily.throughDate.slice(0, 7)"));
 check("calendar: month title + prev/next + back-to-current-month controls",
-  calSrc.includes("年 {model.month} 月") && calSrc.includes('aria-label="前月"')
+  calSrc.includes("年 {viewMonth} 月") && calSrc.includes('aria-label="前月"')
   && calSrc.includes('aria-label="后月"') && calSrc.includes('aria-label="回到本月"') && calSrc.includes("回到本月"));
 check("calendar: navigation bounds disable at coverage start / current month",
   calSrc.includes("spendCalendarMonthBounds(daily.coverageStart, todayKey)")
   && calSrc.includes("monthKey > bounds.minMonth") && calSrc.includes("monthKey < bounds.maxMonth")
   && calSrc.includes("disabled={!canPrev}") && calSrc.includes("disabled={!canNext}"));
+check("calendar metrics: three-way switch with text labels + pressed state (CAL-METRICS-001)",
+  calSrc.includes('aria-label="日历指标切换"') && calSrc.includes('useState<CalendarMetric>("spend")')
+  && calSrc.includes('"花销"') && calSrc.includes('"入账"') && calSrc.includes('"投资收益·损失"')
+  && calSrc.includes("aria-pressed={metric === key}") && calSrc.includes("switchMetric"));
+check("calendar metrics: income reuses the flow grid via the day-shape adapter + its own drill-down",
+  calSrc.includes("posted: day.total") && calSrc.includes("categories: day.sources") && calSrc.includes("入账详情") && calSrc.includes("incomeSourceLabel(src.key)"));
+check("calendar metrics: invest renders from buildInvestMonthView with signed text amounts",
+  calSrc.includes("buildInvestMonthView(investData?.days ?? [], data.months, monthKey, todayKey, INVEST_DAILY_ERA_START_CLIENT)")
+  && calSrc.includes("signedCompactCurrency(cell.pnl ?? 0)") && calSrc.includes('"仅月度"'));
+check("calendar metrics: invest summary separates daily months from monthly-only months",
+  calSrc.includes("本月收益·损失合计") && calSrc.includes("本月收益·损失（月度）") && calSrc.includes("日粒度 · {investView.dailyCount} 天"));
+check("calendar metrics: income summary carries its own total label", calSrc.includes("本月入账合计"));
+check("calendar metrics: one-line caliber notes live in the detail tab, per metric",
+  calSrc.includes("入账口径：外部流入（收入＋退款），排除账户间转移与贷款相关流")
+  && calSrc.includes("投资收益·损失口径：当日投资价值变化 − 当日净投入") && calSrc.includes("不摊分到日"));
+check("calendar metrics: invest drill-down shows the value-change / net-flow / pnl composition",
+  calSrc.includes("当日价值变化") && calSrc.includes("当日净投入") && calSrc.includes("收益·损失 {signedPreciseCurrency(selectedInvestDay.pnl)}"));
+check("calendar metrics: server gates exist for both new figures (chunked income + era-floored invest)",
+  serverSrc.includes("ingestArchDailyIncome") && serverSrc.includes("ingestArchDailyInvest")
+  && serverSrc.includes("arch_daily_income") && serverSrc.includes("arch_daily_invest") && serverSrc.includes("INVEST_DAILY_ERA_START"));
 check("calendar: weekday header is one Mon-Sun row of 7",
   calSrc.includes('["一", "二", "三", "四", "五", "六", "日"]') && css.includes(".spend-cal__weekdays") && css.includes("repeat(7"));
 check("calendar: grid cells render the amount as text (compact) and missing days as a dash",
@@ -365,26 +540,51 @@ check("old standalone cards are gone", !appSrc.includes("function BalanceDeltaCa
 check("holdings summary defaults to Top 5 with a labelled expand",
   appSrc.includes("data.holdings.slice(0, 5)") && appSrc.includes("查看全部 Top 10"));
 
-// --- conclusion card keeps the F-ARCH freshness layers verbatim ---
+// --- OVERVIEW-TRIM-001: the conclusion card carries only
+// numbers, short labels, status symbols and ONE conclusion
+// sentence; every caliber paragraph moved, wording
+// preserved, into the detail tab's ConclusionCaliberDetail. ---
 const card = componentSlice("TotalAssetsConclusionCard");
+const caliber = componentSlice("ConclusionCaliberDetail");
 check("card: F-ARCH total is the headline when present", card.includes("arch ? arch.total : data.live.netWorth"));
-check("card: two freshness layers + coverage line kept",
-  card.includes("archCoverageLine(arch)") && card.includes("archLayerLine(arch.plaidRange") && card.includes("archLayerLine(arch.snapshotRange") && card.includes("Plaid 层拉取于"));
-check("card: archived snapshot compare line kept", card.includes("月度快照 · {data.sourceMonth}（存档口径）") && card.includes("环比"));
-check("card: delta wording unchanged", card.includes("较上次成功快照（日期未留存）") && card.includes("本次未更新"));
+check("card: the delta is exactly one conclusion sentence (conclusionOneLiner), no delta paragraph remains",
+  card.includes("conclusionOneLiner(delta, view, arch != null)") && card.includes("本次未更新"));
+check("card: archived snapshot compare line kept (numbers + 环比 only)", card.includes("月度快照 · {data.sourceMonth}（存档口径）") && card.includes("环比"));
+check("card text budget: at most 5 paragraphs (eyebrow / conclusion / coverage / partial / stale)",
+  (card.match(/<p/g) ?? []).length <= 5);
+check("card whitelist: no caliber / freshness-layer / source paragraph stays on the overview card",
+  !card.includes("主数字口径") && !card.includes("archCoverageLine(") && !card.includes("archLayerLine(")
+  && !card.includes("余额来源：") && !card.includes("旧同步口径净资产") && !card.includes("两次快照的间隔不固定")
+  && !card.includes("● Plaid 同步层") && !card.includes("● 快照层") && !card.includes("不要互相推导"));
+check("caliber fold: the moved paragraphs are preserved verbatim in the detail tab",
+  caliber.includes("主数字口径：混合余额日期的最近已知净值（新架构 F-ARCH-001）")
+  && caliber.includes("archCoverageLine(arch)") && caliber.includes("archLayerLine(arch.plaidRange") && caliber.includes("archLayerLine(arch.snapshotRange")
+  && caliber.includes("● Plaid 同步层") && caliber.includes("● 快照层（Firance 月度快照沿用）"));
+check("caliber fold: metric caliber notes moved here too （储蓄率 / 应急金 / 投资 / 贷款 / 现金）",
+  caliber.includes("{savingsRateNote}") && caliber.includes("{emergencyNote}")
+  && caliber.includes("已融合实时余额") && caliber.includes("按未偿余额显示") && caliber.includes("不含 HSA/债券/退休/信用卡/贷款"));
+check("overview whitelist: metric explanatory notes are gone from the overview tab",
+  !overview.includes("已融合实时余额") && !overview.includes("按未偿余额显示")
+  && !overview.includes("（收入 − 支出）÷ 收入") && !overview.includes("所用月份") && !overview.includes("不含 HSA"));
+check("overview short forms kept: cash metric note is count-only, emergency note is the short form, anomaly strip is label + months + one short clause",
+  overview.includes("现金账户 ${coverage.selectedCount} 个") && overview.includes("emergencyShortNote")
+  && overview.includes("不计入 FIRE 年支出") && !overview.includes("仍保留在月度记录中"));
 
-// --- F-ARCH labeling (PM 2026-10-24): every fact labelled in
-// place with its own caliber. ---
-check("label: headline labelled 混合余额日期的最近已知净值 (new architecture)",
-  card.includes("混合余额日期的最近已知净值（新架构 F-ARCH-001）"));
-check("label: amounts/dates coverage counts + Plaid pull time adjacent to the headline",
+// --- F-ARCH labeling (PM 2026-10-24, locations updated by
+// OVERVIEW-TRIM-001): every fact keeps its caliber label —
+// the headline's caliber statement and the delta's full
+// explanation now live in the caliber fold; the overview
+// keeps the short labels in place. ---
+check("label: headline calibre statement preserved in the caliber fold",
+  caliber.includes("混合余额日期的最近已知净值（新架构 F-ARCH-001）"));
+check("label: amounts/dates coverage counts + Plaid pull time adjacent to the headline (short numeric line stays)",
   card.includes("金额已计入 {arch.amountIncluded}/{arch.amountTotal} 个账户 · 有效余额日期 {arch.validDateCount}/{arch.dateTotal} 个账户 · Plaid 层拉取于 {pulledText}"));
-check("label: delta row labelled 旧同步口径 in place",
-  card.includes("旧同步口径 · 较上次成功快照") && card.includes("旧同步口径 · 较上次成功快照（日期未留存）"));
-check("label: delta note states its denominator is the old caliber and forbids cross-derivation",
-  card.includes("分母同为旧同步净资产") && card.includes("不是上方新架构主数字的变化，两者不要互相推导"));
-check("label: old sync net worth amount is named on the card as the delta's basis",
-  card.includes("旧同步口径净资产 {currency.format(data.live.netWorth)}"));
+check("label: the one-line conclusion carries the 旧同步口径 short label in place",
+  appSrc.includes('const caliber = hasArch ? "旧同步口径 · " : "";') && card.includes("conclusionOneLiner(delta, view, arch != null)"));
+check("label: delta explanation states its denominator is the old caliber and forbids cross-derivation (caliber fold)",
+  caliber.includes("分母同为旧同步净资产") && caliber.includes("不是上方新架构主数字的变化，两者不要互相推导"));
+check("label: old sync net worth amount is named in the caliber fold as the delta's basis",
+  caliber.includes("旧同步口径净资产 {currency.format(data.live.netWorth)}"));
 check("label: delta view is never computed against the arch total (no 95->100 implication)",
   !appSrc.includes("weeklyDeltaView(delta, arch") && !card.includes("arch.total -"));
 check("label: detail view traces back to the old sync net worth",
@@ -392,49 +592,78 @@ check("label: detail view traces back to the old sync net worth",
   && appSrc.includes("旧同步口径 · 较上次成功快照（日期未留存）${trendIndicator(weeklyDelta)}")
   && appSrc.includes("与旧同步口径不要互相推导"));
 
-// --- feature reachability under the two-tab organisation ---
+// --- NW-TREND-SEAM-001 structure: seam annotation, line
+// styles, range control, same-source monthly points ---
+const seriesSrc = componentSlice("NetWorthDailySeries");
+check("trend structure: chart built by the production helpers from the SAME months + the daily series",
+  seriesSrc.includes("buildNetWorthTrend(months, series)") && seriesSrc.includes("filterNetWorthTrend(model, range)")
+  && overview.includes("months={data.months}") && overview.includes("series={data.archNetWorthSeries}"));
+check("trend structure: seam annotation replaces the old note （此前为月度快照； the 不回造 wording is gone)",
+  seriesSrc.includes("起为日粒度；此前为月度快照") && !appSrc.includes("不回造日数据"));
+check("trend structure: segments differ by line style + markers + text legend, never colour alone",
+  seriesSrc.includes('dataKey="monthly"') && seriesSrc.includes('strokeDasharray="6 4"') && seriesSrc.includes("dot={{ r: 3")
+  && seriesSrc.includes('dataKey="daily"') && seriesSrc.includes("月度快照：虚线＋圆点 · 日净值：实线"));
+check("trend structure: seam marked on the chart itself (dashed ReferenceLine + 接缝 label)",
+  seriesSrc.includes("ReferenceLine") && seriesSrc.includes('value: "接缝"') && seriesSrc.includes("view.seamVisible"));
+check("trend structure: range switching lives on the overview chart, default 全部 (full seam visible)",
+  seriesSrc.includes('aria-label="净值趋势时间范围"') && seriesSrc.includes('useState<Range>("all")'));
+
+// --- feature reachability under the three-tab organisation ---
 for (const marker of [
   "立即更新财务数据", "检查进度", "来源台账", "刷新观测",
   "搜索全部持仓", "查看全部持仓", "期间核对明细", "本页试算",
   "月度记录", "账户明细", "总资产账户明细", "走势", "FIRE 进度", "持仓 Top 10",
-  "净值日序列", "日花销", "日花销日历", "查看日历明细", "回到本月", "本月已发生合计",
+  "净值日序列", "日花销", "查看日历明细", "回到本月", "本月已发生合计",
+  "日历指标切换", "入账", "投资收益·损失", "口径与来源说明", "仅月度",
 ]) {
   check(`reachable: ${marker}`, appSrc.includes(marker));
 }
 
 // --- screen estimate (documented height model, 390x844,
-// TWO-TAB model): the page no longer stacks everything in one
-// scroll. Overview default = status band + tab bar + conclusion
-// + metrics + anomaly + FIRE line + daily series + spend strip
-// (target <= 3 screens). Detail default = status band + tab
-// bar + the Calendar + the 9 closed fold summaries. ---
+// THREE-TAB model): the page no longer stacks everything in
+// one scroll. Overview default = status band + tab bar +
+// conclusion + metrics + anomaly + FIRE line + trend chart +
+// spend strip (target <= 3 screens). FIRE tab = status band +
+// tab bar + the expanded panel. Detail default = status
+// band + tab bar + the Calendar + the 9 closed fold
+// summaries. OVERVIEW-TRIM-001 shrinks the conclusion card
+// (paragraphs moved to the caliber fold). ---
 const VIEWPORT_PX = 844;
 const OVERVIEW_BLOCKS = [
   ["状态行（工具行 + 刷新状态带）", 360],
   ["页签条", 52],
-  ["总资产结论卡（三卡合一）", 400],
+  ["总资产结论卡（TRIM 后：大数字 + 一句结论 + 覆盖行 + 快照对比）", 290],
   ["本月关键指标 7 格（2 列 4 行）", 508],
   ["数据异常条（假设存在）", 64],
   ["FIRE 一行摘要", 66],
-  ["净值日序列图", 320],
+  ["净值趋势图（月度段 + 日段 + 接缝注）", 356],
   ["日花销摘要条（近 7 天行 + 覆盖 meta + 日历按钮）", 150],
 ];
 const overviewPx = OVERVIEW_BLOCKS.reduce((sum, [, px]) => sum + px, 0);
 const overviewScreens = overviewPx / VIEWPORT_PX;
 check(`overview tab default height ≈ ${overviewScreens.toFixed(2)} screens <= 3 (R2)`, overviewScreens <= 3);
+const FIRE_BLOCKS = [
+  ["状态行（工具行 + 刷新状态带）", 360],
+  ["页签条", 52],
+  ["FIRE 完整面板（展开呈现：环 + 历史图 + 统计 + 规则行）", 760],
+];
+const firePx = FIRE_BLOCKS.reduce((sum, [, px]) => sum + px, 0);
+const fireScreens = firePx / VIEWPORT_PX;
+check(`FIRE tab default height ≈ ${fireScreens.toFixed(2)} screens <= 3`, fireScreens <= 3);
 const DETAIL_BLOCKS = [
   ["状态行（工具行 + 刷新状态带）", 360],
   ["页签条", 52],
-  ["日花销 Calendar（导航 + 汇总行 + 星期行 + 5 行格子 + 口径注）", 560],
+  ["日历 Calendar（指标切换 + 导航 + 汇总行 + 星期行 + 5 行格子 + 口径注）", 604],
   ["依据层 4 个折叠 summary", 246],
-  ["台账层 5 个折叠 summary（走势/月度记录/FIRE/总资产账户/账户明细）", 305],
+  ["台账层 5 个折叠 summary（口径/走势/月度记录/总资产账户/账户明细）", 305],
 ];
 const detailPx = DETAIL_BLOCKS.reduce((sum, [, px]) => sum + px, 0);
 const detailScreens = detailPx / VIEWPORT_PX;
 check(`detail tab default height ≈ ${detailScreens.toFixed(2)} screens <= 3`, detailScreens <= 3);
-check("height model is a two-tab model (tab bar + Calendar named)",
-  OVERVIEW_BLOCKS.some(([label]) => label.includes("页签")) && DETAIL_BLOCKS.some(([label]) => label.includes("Calendar")));
-console.log(`screen model (two-tab): overview ~${overviewScreens.toFixed(1)} screens (${overviewPx}px), detail ~${detailScreens.toFixed(1)} screens (${detailPx}px) of ${VIEWPORT_PX}px viewport`);
+check("height model is a three-tab model (tab bar + Calendar + FIRE panel named)",
+  OVERVIEW_BLOCKS.some(([label]) => label.includes("页签")) && DETAIL_BLOCKS.some(([label]) => label.includes("Calendar"))
+  && FIRE_BLOCKS.some(([label]) => label.includes("FIRE")));
+console.log(`screen model (three-tab): overview ~${overviewScreens.toFixed(1)} screens (${overviewPx}px), FIRE ~${fireScreens.toFixed(1)} screens (${firePx}px), detail ~${detailScreens.toFixed(1)} screens (${detailPx}px) of ${VIEWPORT_PX}px viewport`);
 
 console.log(`validate-design-b1a: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

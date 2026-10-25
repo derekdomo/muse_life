@@ -103,6 +103,56 @@ export const archDailySpendChunks = sqliteTable("arch_daily_spend_chunks", {
     .$defaultFn(() => new Date()),
 });
 
+// CAL-METRICS-001 (0008): append-only store for the daily
+// INCOME figure （入账： external inflows — income rows +
+// refunds, transfers and loan flows excluded), written solely
+// through the controlled ingestArchDailyIncome action under
+// the same chunk/finalize protocol as daily spend. Same
+// selection rule on read: greatest pulledAt, ties greatest id.
+export const archDailyIncome = sqliteTable("arch_daily_income", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  payload: text("payload").notNull(),
+  pulledAt: integer("pulled_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// CAL-METRICS-001 (0008): staging rows for the chunked income
+// ingest, mirroring arch_daily_spend_chunks exactly — staged
+// chunks are invisible to every read path; only finalize
+// publishes into arch_daily_income.
+export const archDailyIncomeChunks = sqliteTable("arch_daily_income_chunks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  batchId: text("batch_id").notNull(),
+  chunkIndex: integer("chunk_index").notNull(),
+  chunkCount: integer("chunk_count").notNull(),
+  pulledAt: integer("pulled_at", { mode: "timestamp_ms" }).notNull(),
+  fromDate: text("from_date").notNull(),
+  toDate: text("to_date").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// CAL-METRICS-001 (0008): append-only store for the DAILY
+// investment gain/loss figure （投资收益·损失 = day's
+// investment value change − day's net investment flow),
+// written solely through ingestArchDailyInvest under the same
+// SAVE-1 arbitration as arch_net_worth. Daily granularity
+// exists only from 2026-10-24 (the arch daily era); earlier
+// months stay monthly in the Firance archive and are never
+// split into days.
+export const archDailyInvest = sqliteTable("arch_daily_invest", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  payload: text("payload").notNull(),
+  pulledAt: integer("pulled_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const refreshObservations = sqliteTable("refresh_observations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   generation: text("generation"),

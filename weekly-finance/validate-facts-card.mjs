@@ -116,17 +116,31 @@ check("server: two consecutive legal syncs chain the prior", (serverSrc.match(/p
 // asserted at their new location. ---
 check("conclusion card component exists", appSrc.includes("function TotalAssetsConclusionCard"));
 check("card reads live.weeklyDelta via weeklyDeltaView", appSrc.includes("weeklyDeltaView(delta, data.live.netWorth)"));
-check("delta view computed exactly once (def + conclusion card call)", (appSrc.match(/weeklyDeltaView\(/g) ?? []).length === 2);
+check("delta view computed once per rendering home (def + card + caliber detail)",
+  (appSrc.match(/weeklyDeltaView\(/g) ?? []).length === 3);
 const cardStart = appSrc.indexOf("function TotalAssetsConclusionCard");
 const cardEnd = appSrc.indexOf("\n}\n", cardStart) + 3;
 const cardSrc = appSrc.slice(cardStart, cardEnd);
+// OVERVIEW-TRIM-001 (owner feedback 2026-10-25): the card's
+// delta became ONE conclusion sentence built by the exported
+// conclusionOneLiner helper, and the source line moved to the
+// detail tab's ConclusionCaliberDetail — the same facts,
+// asserted at their new homes (the pattern this file used for
+// the B1A card merge).
+const oneLinerStart = appSrc.indexOf("export function conclusionOneLiner");
+const oneLinerEnd = appSrc.indexOf("\n}\n", oneLinerStart) + 3;
+const oneLinerSrc = appSrc.slice(oneLinerStart, oneLinerEnd);
+const caliberStart = appSrc.indexOf("function ConclusionCaliberDetail");
+const caliberEnd = appSrc.indexOf("\n}\n", caliberStart) + 3;
+const caliberSrc = appSrc.slice(caliberStart, caliberEnd);
 check("card headline is 总资产 (F-ARCH figure when present)", cardSrc.includes("总资产 · 新架构（F-ARCH-001）"));
-check("card subtitle: 较上次成功快照（日期未留存）", cardSrc.includes("较上次成功快照（日期未留存）"));
-check("card null state: 暂无可比快照", cardSrc.includes("暂无可比快照"));
+check("card renders the one-line conclusion via conclusionOneLiner", cardSrc.includes("conclusionOneLiner(delta, view, arch != null)"));
+check("one-liner subtitle: 较上次成功快照（日期未留存）", oneLinerSrc.includes("较上次成功快照（日期未留存）"));
+check("card null state: 暂无可比快照", cardSrc.includes("暂无可比快照") && oneLinerSrc.includes("暂无可比快照"));
 check("card stale marker: 本次未更新", cardSrc.includes("本次未更新"));
-check("card source line shows asOf date", cardSrc.includes("数据日期 {asOfText}"));
-check("card source line shows sourceMonth separately", cardSrc.includes("月度快照 {data.sourceMonth}"));
-check("card source line uses balanceSourceSummary(data.accounts)", cardSrc.includes("balanceSourceSummary(data.accounts)"));
+check("caliber detail source line shows asOf date", caliberSrc.includes("数据日期 {asOfText}"));
+check("caliber detail source line shows sourceMonth separately", caliberSrc.includes("月度快照 {data.sourceMonth}"));
+check("caliber detail source line uses balanceSourceSummary(data.accounts)", caliberSrc.includes("balanceSourceSummary(data.accounts)"));
 check("card never claims a fixed week", !/一周|7 天|七天|每周/.test(cardSrc));
 check("card makes no attribution claim", !/市场|投入|消费/.test(cardSrc));
 check("hero delta label matches the card wording", appSrc.includes("较上次成功快照") && !appSrc.includes("较上次周更"));

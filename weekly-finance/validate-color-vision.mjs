@@ -39,10 +39,14 @@ check("theme: old red/green pair is gone",
   !css.includes("--positive: #147457;") && !css.includes("--negative: #c84c54;"));
 
 // --- redundant channels at every color-carried delta ---
-check("conclusion card delta carries glyph (B1A: hero + balance card merged, one delta home)",
-  app.includes("<strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>"));
-check("conclusion card delta carries direction word next to the glyph",
-  app.includes("{view.direction ? <span>{view.direction}</span> : null}"));
+// OVERVIEW-TRIM-001: the card's delta is now the one-line
+// conclusion built by conclusionOneLiner — glyph, signed
+// amount and direction word travel together in that sentence.
+check("conclusion one-liner carries glyph + signed amount (OVERVIEW-TRIM-001: the card's single delta home)",
+  app.includes("conclusionOneLiner(delta, view, arch != null)")
+  && app.includes("${view.direction} ${trendIndicator(delta)} ${signedCurrency(delta)}"));
+check("conclusion one-liner carries direction word next to the glyph",
+  app.includes("view.direction == null") && app.includes("较上次成功快照（日期未留存）${view.direction}"));
 check("snapshot compare delta carries glyph",
   app.includes("`${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`"));
 check("savings rate carries glyph",
@@ -52,7 +56,8 @@ check("savings rate carries glyph",
 check("monthly spend metric has no negative tone",
   app.includes('<Metric label="月支出" value={current.totalSpend == null ? "—" : <span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} note='));
 check("loans metric has no negative tone",
-  app.includes('<Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} note='));
+  app.includes('<Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>}')
+  && !app.includes('<Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} tone="negative"'));
 check("distribution loans row is muted, not danger",
   app.includes('{ label: "贷款", value: live.loans ?? 0, tone: "muted" as const }')
   && !app.includes('{ label: "贷款", value: live.loans ?? 0, tone: "danger" as const }'));
@@ -60,6 +65,24 @@ check("account loan row: neutral class, minus sign and 负债 text label",
   app.includes('isLoan ? " · 负债" : ""')
   && app.includes('<b className="neutral">{isLoan ? `−${currencyPrecise.format(Math.abs(account.value))}`')
   && !app.includes('className={isLoan ? "negative" : "neutral"}'));
+
+// --- CAL-METRICS-001: investment gain/loss never rides on
+// red/green — glyph (▲/▼) + explicit +/- sign + digits. ---
+const fmtStart2 = app.indexOf("const currency = new Intl.NumberFormat");
+const fmtEnd2 = app.indexOf("function monthDate");
+const formatters2 = app.slice(fmtStart2, fmtEnd2);
+function extractSimple(name) {
+  const s = app.indexOf(`export function ${name}`);
+  if (s < 0) throw new Error(`helper not found: ${name}`);
+  const e = app.indexOf("\n}\n", s) + 3;
+  return app.slice(s, e).replace("export function", "function")
+    .replaceAll(": number", "").replaceAll(": string", "");
+}
+const signed = new Function(`${formatters2}\n${extractSimple("signedCompactCurrency")}\n${extractSimple("signedPreciseCurrency")}; return { signedCompactCurrency, signedPreciseCurrency };`)();
+check("invest gain: ▲ + plus sign + amount", signed.signedCompactCurrency(1500).startsWith("▲ +$"));
+check("invest loss: ▼ + minus sign + amount", signed.signedCompactCurrency(-1500).startsWith("▼ −$"));
+check("invest zero: plain $0, no fabricated direction", signed.signedCompactCurrency(0) === "$0");
+check("invest precise loss carries the same redundant channels", signed.signedPreciseCurrency(-25).startsWith("▼ −$"));
 
 console.log(`validate-color-vision: ${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

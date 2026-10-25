@@ -1128,24 +1128,34 @@ function accountTypeLabel(type: Account["type"]): string {
 // LIFE-DESIGN-001-B1A: the three former total-assets cards —
 // the 本次余额差 fact card, the live-net-worth hero and the
 // F-ARCH card — merge into ONE conclusion card at the top of
-// the overview tab (design draft space-3 plan, item 2). Every fact keeps
-// exactly one rendering home (R4): the F-ARCH total is the
-// headline when a stored figure exists (the live net worth
-// otherwise); the vs-last-snapshot delta drops to one line; the
-// F-ARCH labeling rule (PM 2026-10-24): every fact is labelled
-// in place with its own caliber — the headline is the new
-// architecture's 「混合余额日期的最近已知净值」 with its amounts /
-// dates coverage counts and the Plaid pull time adjacent, while
-// the delta line (weeklyDelta, whose percent denominator is the
-// OLD live.netWorth) is labelled 旧同步口径 and must never read
-// as the headline's own change; the old sync net worth stays
-// traceable in the same view's 「总资产账户明细」 ledger fold. This is
-// presentation binding only — no formula changed. The
-// two F-ARCH freshness layers stay as their own lines together
-// with the DATE-1 coverage line; the archived monthly snapshot
-// figure is one small compare line at the bottom. Kept facts
-// keep their wording — only the location pointers that named
-// the old two-tab layout changed （「明细」页签 → 下方折叠）.
+// the overview tab. OVERVIEW-TRIM-001 (owner feedback
+// 2026-10-25 00:10 PT): the overview keeps only numbers,
+// short labels, status symbols and ONE conclusion sentence —
+// every caliber / coverage / source paragraph that used to
+// sit on this card now lives, wording preserved, in the
+// detail tab's 「口径与来源说明」 fold (ConclusionCaliberDetail).
+// What stays here: the headline figure (the F-ARCH total when
+// a stored figure exists, the live net worth otherwise), the
+// one-line conclusion (the snapshot delta, carrying its
+// 旧同步口径 short label when the headline is the arch
+// figure — the delta's percent denominator stays the OLD
+// live.netWorth and is never read as the headline's own
+// change), the amounts/dates coverage counts + Plaid pull
+// time as one short numeric freshness line, the partial /
+// stale status lines in short form, and the archived monthly
+// snapshot compare line (numbers only). Presentation only —
+// no formula changed.
+
+// The card's single conclusion sentence. The glyph, signed
+// amount, percent and direction word all ride on text /
+// numbers / symbols, never on colour alone.
+export function conclusionOneLiner(delta: number | null, view: WeeklyDeltaView, hasArch: boolean): string {
+  if (!view.comparable || delta == null || view.direction == null) return "暂无可比快照";
+  const caliber = hasArch ? "旧同步口径 · " : "";
+  const pct = view.percent != null ? `（${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}）` : "";
+  return `结论：${caliber}较上次成功快照（日期未留存）${view.direction} ${trendIndicator(delta)} ${signedCurrency(delta)}${pct}`;
+}
+
 function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
   const arch = data.archNetWorth;
   const delta = data.live.weeklyDelta;
@@ -1153,6 +1163,48 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
   const current = data.months.at(-1);
   const previous = data.months.at(-2);
   const monthDelta = current && previous ? current.total - previous.total : null;
+  const pulled = arch ? new Date(arch.pulledAt) : null;
+  const pulledText = !arch || !pulled
+    ? ""
+    : Number.isNaN(pulled.getTime())
+      ? arch.pulledAt
+      : `${dateLabel.format(pulled)} ${pulled.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
+  return (
+    <section className="fact-card conclusion-card" aria-label={arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产"}>
+      <p className="eyebrow">{arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产 · 同步读取净资产"}</p>
+      <div className="conclusion-card__value">
+        <strong>{currency.format(arch ? arch.total : data.live.netWorth)}</strong>
+      </div>
+      <p className={`conclusion-card__conclusion ${valueTone(delta)}`}>{conclusionOneLiner(delta, view, arch != null)}</p>
+      {arch ? (
+        <p className="fact-card__note">金额已计入 {arch.amountIncluded}/{arch.amountTotal} 个账户 · 有效余额日期 {arch.validDateCount}/{arch.dateTotal} 个账户 · Plaid 层拉取于 {pulledText}</p>
+      ) : null}
+      {arch?.partial ? (
+        <p className="fact-card__stale">▲ 部分合计 · 有账户缺失（见明细「总资产账户明细」）</p>
+      ) : null}
+      {refreshFailed ? <p className="fact-card__stale">▲ 本次未更新 · 显示上次成功数据</p> : null}
+      {current ? (
+        <div className="snapshot-compare">
+          <span>月度快照 · {data.sourceMonth}（存档口径）</span>
+          <strong>{currency.format(current.total)}</strong>
+          <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`}</small>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+// OVERVIEW-TRIM-001: the detail tab's home for every caliber /
+// coverage / source paragraph the overview card no longer
+// carries flat. Wording is the pre-trim wording verbatim —
+// only the location pointers that named the old layout were
+// adjusted （「明细」页签 → 本页签/下方） — plus the metric
+// caliber notes （储蓄率 / 应急金覆盖 / 投资 / 贷款 /
+// 可动用现金） that used to sit under the overview metrics.
+function ConclusionCaliberDetail({ data, savingsRateNote, emergencyNote }: { data: Dashboard; savingsRateNote: string; emergencyNote: string }) {
+  const arch = data.archNetWorth;
+  const delta = data.live.weeklyDelta;
+  const view = weeklyDeltaView(delta, data.live.netWorth);
   const asOfDate = new Date(data.asOf);
   const asOfText = Number.isNaN(asOfDate.getTime()) ? "未提供" : dateLabel.format(asOfDate);
   const pulled = arch ? new Date(arch.pulledAt) : null;
@@ -1164,30 +1216,9 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
   const plaidHasRows = arch?.rows.some((row) => row.coverage === "plaid") ?? false;
   const snapshotHasRows = arch?.rows.some((row) => row.coverage === "snapshot") ?? false;
   return (
-    <section className="fact-card conclusion-card" aria-label={arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产"}>
-      <p className="eyebrow">{arch ? "总资产 · 新架构（F-ARCH-001）" : "总资产 · 同步读取净资产"}</p>
-      {arch ? <p className="conclusion-card__caliber">主数字口径：混合余额日期的最近已知净值（新架构 F-ARCH-001）</p> : null}
-      <div className="conclusion-card__value">
-        <strong>{currency.format(arch ? arch.total : data.live.netWorth)}</strong>
-      </div>
-      {arch ? (
-        <p className="fact-card__note">金额已计入 {arch.amountIncluded}/{arch.amountTotal} 个账户 · 有效余额日期 {arch.validDateCount}/{arch.dateTotal} 个账户 · Plaid 层拉取于 {pulledText}</p>
-      ) : null}
-      {arch?.partial ? (
-        <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见「明细」页签「总资产账户明细」。</p>
-      ) : null}
-      <div className={`delta ${valueTone(delta)}`}>
-        {view.comparable ? (
-          <>
-            <strong>{trendIndicator(delta)} {signedCurrency(delta)}</strong>
-            {view.percent != null ? <span>{`${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}`}</span> : null}
-            {view.direction ? <span>{view.direction}</span> : null}
-            <span className="delta__label">{arch ? "旧同步口径 · 较上次成功快照" : "较上次成功快照"}</span>
-          </>
-        ) : (
-          <span>暂无可比快照</span>
-        )}
-      </div>
+    <section className="section-block" aria-label="总资产口径与来源说明">
+      <SectionTitle title="口径与来源说明" meta="结论卡与指标口径原文" />
+      {arch ? <p className="fact-card__note">主数字口径：混合余额日期的最近已知净值（新架构 F-ARCH-001）</p> : null}
       <p className="fact-card__note">
         {view.comparable
           ? arch
@@ -1197,7 +1228,9 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
             ? "旧同步口径：首次同步、或上次快照不可用时没有可比对象；下一次成功同步后生成对比。"
             : "首次同步、或上次快照不可用时没有可比对象；下一次成功同步后生成对比。"}
       </p>
-      {refreshFailed ? <p className="fact-card__stale">本次未更新：本次更新未成功，以上仍为上次成功同步的数据，数据日期未推进。</p> : null}
+      {arch?.partial ? (
+        <p className="fact-card__note">有账户缺失，总额为部分合计，缺失项见下方「总资产账户明细」。</p>
+      ) : null}
       {arch ? (
         <>
           <p className="fact-card__note">Plaid 层拉取于 {pulledText}</p>
@@ -1208,20 +1241,16 @@ function TotalAssetsConclusionCard({ data, refreshFailed }: { data: Dashboard; r
           <p className="fact-card__note">
             ● 快照层（Firance 月度快照沿用）：
             {arch.snapshotRange
-              ? `${archLayerLine(arch.snapshotRange, snapshotHasRows)}，逐户日期见「明细」页签「总资产账户明细」`
+              ? `${archLayerLine(arch.snapshotRange, snapshotHasRows)}，逐户日期见下方「总资产账户明细」`
               : archLayerLine(arch.snapshotRange, snapshotHasRows)}
           </p>
         </>
       ) : null}
-      {current ? (
-        <div className="snapshot-compare">
-          <span>月度快照 · {data.sourceMonth}（存档口径）</span>
-          <strong>{currency.format(current.total)}</strong>
-          <small className={valueTone(monthDelta)}>{monthDelta == null ? "暂无可比快照" : `${trendIndicator(monthDelta)} ${signedCurrency(monthDelta)} 环比`}</small>
-        </div>
-      ) : null}
+      <p className="fact-card__note">储蓄率口径：{savingsRateNote}</p>
+      <p className="fact-card__note">应急金覆盖口径：{emergencyNote}</p>
+      <p className="fact-card__note">投资口径：已融合实时余额；贷款口径：按未偿余额显示；可动用现金口径：仅现金类账户，不含 HSA/债券/退休/信用卡/贷款，账户范围与本页试算见上方「可动用现金账户范围」。</p>
       <p className="fact-card__source">数据日期 {asOfText} · 月度快照 {data.sourceMonth} · 余额来源：{balanceSourceSummary(data.accounts)}</p>
-      {arch ? <p className="fact-card__source">旧同步口径净资产 {currency.format(data.live.netWorth)}（旧同步口径变化量的基准，逐项见「明细」页签「总资产账户明细」）；旧月度快照保留在「明细」页签「月度记录」作对账存档。</p> : null}
+      {arch ? <p className="fact-card__source">旧同步口径净资产 {currency.format(data.live.netWorth)}（旧同步口径变化量的基准，逐项见下方「总资产账户明细」）；旧月度快照保留在本页签「月度记录」作对账存档。</p> : null}
     </section>
   );
 }
@@ -1640,12 +1669,14 @@ export function holdingsSummaryLine(data: Dashboard): string {
 // rows); it never meant removing the page organisation. The
 // previous build flattened everything into one page — that
 // was an implementer misreading. Page organisation is
-// restored to the owner-approved ruling 1: two tabs,
-// 「总览」 (overview) and 「明细」 (detail). Tab state is
-// mount-time component state only, default 「总览」, never
-// persisted; every fold still defaults closed and resets on
-// every open. Daily spend presentation changes from a per-day
-// LIST to a true Calendar month grid (see SpendCalendar).
+// restored to the owner-approved ruling 1: tabs, 「总览」
+// (overview) and 「明细」 (detail) — since FIRE-TAB-001
+// (2026-10-25 00:16 PT) three tabs: 总览 / FIRE / 明细.
+// Tab state is mount-time component state only, default
+// 「总览」, never persisted; every fold still defaults
+// closed and resets on every open. Daily spend presentation
+// changes from a per-day LIST to a true Calendar month grid
+// (see SpendCalendar).
 // The only multi-day aggregate numbers are the near-7-day
 // rows summed from the daily rows themselves
 // (recentDailySpendSummary over archDailySpend.days,
@@ -1667,9 +1698,13 @@ export function holdingsSummaryLine(data: Dashboard): string {
 //     -> the four evidence folds in the 「明细」 tab
 //   trend charts + range control -> 「走势」 ledger fold (明细)
 //   monthly records (Firance archive) -> 「月度记录」 fold (明细)
-//   full FIRE panel -> 「FIRE 进度」 ledger fold (id fire-panel,
-//     明细); the overview one-liner's button switches tab,
-//     opens the fold and scrolls to it
+//   full FIRE panel -> its own 「FIRE」 tab (FIRE-TAB-001,
+//     owner ruling 2026-10-25 00:16 PT), expanded as the
+//     tab's main content with id fire-panel on its root; the
+//     overview one-liner's button switches to that tab
+//   conclusion-card caliber paragraphs + metric caliber
+//     notes -> 「口径与来源说明」 ledger fold (明细)
+//     (OVERVIEW-TRIM-001, owner feedback 2026-10-25 00:10 PT)
 //   F-ARCH per-account rows -> 「总资产账户明细」 fold (明细)
 //   snapshot account detail -> 「账户明细」 fold (明细)
 export const dailyCategoryLabels: Record<string, string> = {
@@ -1883,31 +1918,276 @@ export function buildSpendDayDetail(day: SpendCalendarDayLike | null, netWorthTo
   };
 }
 
-function NetWorthDailySeries({ series }: { series: Dashboard["archNetWorthSeries"] }) {
-  const chartData = series.map((point) => ({ ...point, label: point.date }));
-  const firstDate = series[0]?.date ?? "";
+// NW-TREND-SEAM-001 (owner feedback 2026-10-25 00:10 PT):
+// the overview net-worth chart used to start at the first
+// arch daily point (2026-10-24), leaving a one-point chart.
+// The history before the seam is now filled with the EXISTING
+// monthly snapshots — the very same `months` rows the detail
+// tab's 「月度记录」 renders, each month contributing exactly
+// ONE point: its snapshot date (month.key) and its total
+// assets (month.total). No second computation, and monthly
+// values are never interpolated, smoothed or split into
+// pseudo-daily points. The seam is the first daily point's
+// date; monthly snapshots dated on/after the seam are left
+// out (the daily segment owns that range). The two segments
+// are distinguished by line style + markers + text labels,
+// never by colour alone: monthly = dashed line with dots,
+// daily = solid line.
+export type NetWorthTrendMonthLike = { key: string; total: number };
+export type NetWorthTrendPoint = { date: string; total: number; segment: "monthly" | "daily" };
+export type NetWorthTrendModel = {
+  seamDate: string | null;
+  monthlyPoints: NetWorthTrendPoint[];
+  dailyPoints: NetWorthTrendPoint[];
+  points: NetWorthTrendPoint[];
+};
+
+export function buildNetWorthTrend(months: NetWorthTrendMonthLike[], daily: DailyNetWorthPointLike[]): NetWorthTrendModel {
+  const dailyPoints: NetWorthTrendPoint[] = [...daily]
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    .map((point) => ({ date: point.date, total: point.total, segment: "daily" }));
+  const seamDate = dailyPoints[0]?.date ?? null;
+  const monthlyTotals = new Map();
+  for (const month of months) {
+    if (seamDate != null && month.key >= seamDate) continue;
+    monthlyTotals.set(month.key, month.total);
+  }
+  const monthlyPoints: NetWorthTrendPoint[] = [...monthlyTotals.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([date, total]) => ({ date, total, segment: "monthly" }));
+  const points: NetWorthTrendPoint[] = [...monthlyPoints, ...dailyPoints];
+  return { seamDate, monthlyPoints, dailyPoints, points };
+}
+
+// The chart's range window start, counted back from the
+// trend's last point (the same ranges the detail trend uses).
+export function netWorthTrendRangeStart(range: Range, endDate: string): string | null {
+  if (range === "all" || endDate === "") return null;
+  if (range === "year") return `${endDate.slice(0, 4)}-01-01`;
+  const monthsBack = range === "6m" ? 6 : 12;
+  const base = new Date(`${endDate}T00:00:00`);
+  base.setMonth(base.getMonth() - monthsBack);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`;
+}
+
+export type NetWorthTrendView = {
+  rows: Array<{ date: string; label: string; monthly: number | null; daily: number | null }>;
+  monthlyCount: number;
+  dailyCount: number;
+  seamVisible: boolean;
+};
+
+// Rows for the two-line chart: one row per real point date.
+// The seam row (the first daily point) ALSO carries its value
+// in the monthly column — a bridge so the dashed monthly
+// segment visually reaches the seam; it adds no new point and
+// no interpolated value (it is the daily point's own value).
+export function filterNetWorthTrend(model: NetWorthTrendModel, range: Range): NetWorthTrendView {
+  const endDate = model.points.at(-1)?.date ?? "";
+  const start = netWorthTrendRangeStart(range, endDate);
+  const inRange = (date: string) => start == null || date >= start;
+  const monthlyPoints = model.monthlyPoints.filter((point) => inRange(point.date));
+  const dailyPoints = model.dailyPoints.filter((point) => inRange(point.date));
+  const rowsByDate = new Map();
+  for (const point of monthlyPoints) {
+    rowsByDate.set(point.date, { date: point.date, label: point.date, monthly: point.total, daily: null });
+  }
+  for (const point of dailyPoints) {
+    const row = rowsByDate.get(point.date) ?? { date: point.date, label: point.date, monthly: null, daily: null };
+    row.daily = point.total;
+    rowsByDate.set(point.date, row);
+  }
+  const seamPoint = dailyPoints[0];
+  if (seamPoint && monthlyPoints.length > 0) {
+    const seamRow = rowsByDate.get(seamPoint.date);
+    if (seamRow) seamRow.monthly = seamPoint.total;
+  }
+  const rows = [...rowsByDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  return {
+    rows,
+    monthlyCount: monthlyPoints.length,
+    dailyCount: dailyPoints.length,
+    seamVisible: model.seamDate != null && monthlyPoints.length > 0 && dailyPoints.length > 0 && inRange(model.seamDate),
+  };
+}
+
+// CAL-METRICS-001 (owner ruling 2026-10-25 00:17 PT): the
+// Calendar gains two more metrics next to 花销 — 入账
+// (external inflows: income + refunds, transfers and loan
+// flows excluded, stored by ingestArchDailyIncome over the
+// same window) and 投资收益·损失 (daily pnl = value change
+// − net flow, stored by ingestArchDailyInvest). Investment
+// daily granularity exists only from the arch daily era
+// (2026-10-24, the server's INVEST_DAILY_ERA_START); earlier
+// months carry only their monthly F1.6 figure, presented as
+// 月度 and NEVER split into days.
+export const INVEST_DAILY_ERA_START_CLIENT = "2026-10-24";
+
+export const incomeSourceLabels: Record<string, string> = {
+  REFUND: "退款",
+  OTHER_INCOME: "其他收入",
+  INCOME_WAGES: "工资",
+  INCOME_INTEREST_EARNED: "利息收入",
+  INCOME_DIVIDENDS: "股息",
+  INCOME_TAX_REFUND: "退税",
+  INCOME_OTHER_INCOME: "其他收入",
+};
+
+export function incomeSourceLabel(key: string): string {
+  return incomeSourceLabels[key] ?? key;
+}
+
+// Gain/loss presentation: the sign rides on a glyph AND a
+// +/- sign AND the signed digits — never on colour alone
+// (the user is color-weak; red/green is not a channel).
+export function signedCompactCurrency(value: number): string {
+  if (value > 0) return `▲ +${compactCurrency.format(value)}`;
+  if (value < 0) return `▼ −${compactCurrency.format(Math.abs(value))}`;
+  return "$0";
+}
+
+export function signedPreciseCurrency(value: number): string {
+  if (value > 0) return `▲ +${currencyPrecise.format(value)}`;
+  if (value < 0) return `▼ −${currencyPrecise.format(Math.abs(value))}`;
+  return currencyPrecise.format(0);
+}
+
+export type InvestDayLike = { date: string; pnl: number };
+export type MonthlyReturnLike = { key: string; investmentReturn: number | null };
+export type InvestMonthCell = {
+  date: string | null;
+  day: number | null;
+  mode: "blank" | "daily" | "monthly-only" | "none" | "future";
+  pnl: number | null;
+  isToday: boolean;
+  isBlank: boolean;
+};
+export type InvestMonthView = {
+  monthKey: string;
+  year: number;
+  month: number;
+  cells: InvestMonthCell[];
+  mode: "daily" | "monthly" | "none";
+  total: number | null;
+  average: number | null;
+  maxAmount: number | null;
+  maxDate: string | null;
+  dailyCount: number;
+  monthlyTotal: number | null;
+};
+
+// The investment month view: weekday-aligned cells like the
+// spend calendar, but a day is one of — daily (a real daily
+// pnl point), monthly-only (before the daily era and the
+// month carries a monthly figure: the cell states 仅月度 and
+// no amount), none, or future. The monthly figure is used
+// ONLY as the month total in monthly mode; it is never
+// divided across days.
+export function buildInvestMonthView(
+  investDays: InvestDayLike[],
+  monthlyReturns: MonthlyReturnLike[],
+  monthKey: string,
+  todayKey: string,
+  eraStart: string,
+): InvestMonthView {
+  const parts = monthKey.split("-").map(Number);
+  const year = parts[0] ?? 1970;
+  const month = parts[1] ?? 1;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const firstOffset = (new Date(year, month - 1, 1).getDay() + 6) % 7;
+  const byDate = new Map();
+  for (const day of investDays) byDate.set(day.date, day.pnl);
+  const monthlyTotal = monthlyReturns.find((entry) => entry.key.slice(0, 7) === monthKey)?.investmentReturn ?? null;
+  const cells: InvestMonthCell[] = [];
+  for (let i = 0; i < firstOffset; i += 1) {
+    cells.push({ date: null, day: null, mode: "blank", pnl: null, isToday: false, isBlank: true });
+  }
+  let total = 0;
+  let dailyCount = 0;
+  let maxAmount: number | null = null;
+  let maxDate: string | null = null;
+  for (let dayNum = 1; dayNum <= daysInMonth; dayNum += 1) {
+    const date = `${year}-${pad(month)}-${pad(dayNum)}`;
+    const pnl = byDate.get(date) ?? null;
+    const cellMode = date > todayKey
+      ? "future"
+      : pnl != null
+        ? "daily"
+        : date < eraStart && monthlyTotal != null
+          ? "monthly-only"
+          : "none";
+    if (cellMode === "daily" && pnl != null) {
+      total += pnl;
+      dailyCount += 1;
+      if (maxAmount == null || pnl > maxAmount) {
+        maxAmount = pnl;
+        maxDate = date;
+      }
+    }
+    cells.push({ date, day: dayNum, mode: cellMode, pnl: cellMode === "daily" ? pnl : null, isToday: date === todayKey, isBlank: false });
+  }
+  while (cells.length % 7 !== 0) {
+    cells.push({ date: null, day: null, mode: "blank", pnl: null, isToday: false, isBlank: true });
+  }
+  const mode = dailyCount > 0 ? "daily" : monthlyTotal != null ? "monthly" : "none";
+  return {
+    monthKey,
+    year,
+    month,
+    cells,
+    mode,
+    total: mode === "daily" ? total : mode === "monthly" ? monthlyTotal : null,
+    average: mode === "daily" && dailyCount > 0 ? total / dailyCount : null,
+    maxAmount: mode === "daily" ? maxAmount : null,
+    maxDate: mode === "daily" ? maxDate : null,
+    dailyCount,
+    monthlyTotal,
+  };
+}
+
+function NetWorthDailySeries({ months, series }: { months: Dashboard["months"]; series: Dashboard["archNetWorthSeries"] }) {
+  const [range, setRange] = useState<Range>("all");
+  const model = useMemo(() => buildNetWorthTrend(months, series), [months, series]);
+  const view = useMemo(() => filterNetWorthTrend(model, range), [model, range]);
   const recentChange = recentDailyNetWorthChange(series);
+  const seamDate = model.seamDate;
   return (
     <article className="chart-panel chart-panel--wide" style={{ marginBottom: 12 }}>
       <div className="chart-heading"><h3>净值日序列</h3><span>纵轴：万美元</span></div>
+      <div className="trend-control-row">
+        <span className="trend-legend">月度快照：虚线＋圆点 · 日净值：实线</span>
+        <div className="range-control" aria-label="净值趋势时间范围">
+          {(["6m", "12m", "year", "all"] as Range[]).map((item) => (
+            <button key={item} type="button" className={range === item ? "active" : ""} onClick={() => setRange(item)} aria-pressed={range === item}>
+              {item === "6m" ? "6月" : item === "12m" ? "12月" : item === "year" ? "今年" : "全部"}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="chart-frame">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={chartData} margin={{ top: 12, right: 6, left: -20, bottom: 0 }}>
-            <defs>
-              <linearGradient id="netWorthDailyFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.28} />
-                <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
-              </linearGradient>
-            </defs>
+          <ComposedChart data={view.rows} margin={{ top: 12, right: 6, left: -20, bottom: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--grid)" />
             <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={24} />
             <YAxis tickFormatter={(value: number) => (value / 10_000).toFixed(0)} tickLine={false} axisLine={false} width={50} />
             <Tooltip content={<ChartTooltip />} />
-            <Area type="monotone" dataKey="total" name="净资产" stroke="var(--accent)" strokeWidth={2.5} fill="url(#netWorthDailyFill)" dot={false} activeDot={{ r: 4 }} />
-          </AreaChart>
+            {view.seamVisible && seamDate ? (
+              <ReferenceLine x={seamDate} stroke="var(--dim)" strokeDasharray="3 3" label={{ value: "接缝", position: "insideTopLeft", fontSize: 10, fill: "var(--dim)" }} />
+            ) : null}
+            <Line type="linear" dataKey="monthly" name="月度快照" stroke="var(--dim)" strokeWidth={2} strokeDasharray="6 4" dot={{ r: 3, fill: "var(--dim)" }} activeDot={{ r: 4 }} />
+            <Line type="monotone" dataKey="daily" name="日净值" stroke="var(--accent)" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+          </ComposedChart>
         </ResponsiveContainer>
       </div>
-      <p className="fact-card__note" style={{ margin: "8px 8px 4px" }}>日序列自 {firstDate} 起（arch 每日写入）；此前只有月度快照，不回造日数据。</p>
+      <p className="fact-card__note" style={{ margin: "8px 8px 4px" }}>
+        {seamDate && model.monthlyPoints.length > 0
+          ? `${seamDate} 起为日粒度；此前为月度快照（每月一个点）`
+          : seamDate
+            ? `日粒度 · 自 ${seamDate} 起`
+            : "月度快照 · 每月一个点（暂无日粒度点）"}
+      </p>
       {recentChange ? (
         <p className="fact-card__note" style={{ margin: "2px 8px 4px" }}>近 {recentChange.days} 天净值变化 {trendIndicator(recentChange.change)} {signedCurrency(recentChange.change)}（按日净值序列汇总 · {recentChange.startDate} 至 {recentChange.endDate}）</p>
       ) : null}
@@ -1950,60 +2230,182 @@ function DailySpendSummaryStrip({ data, onViewCalendar }: { data: Dashboard; onV
   );
 }
 
-// Detail-tab daily spend: a TRUE Calendar month grid (owner
-// correction 2026-10-24) — weekday header Mon-Sun, date cells
-// aligned to weekday columns with blank padding, the amount
-// as TEXT in every cell (the primary channel, never colour
-// alone), today / selected / partial carried by text and
-// border, a monthly summary row, bounded month navigation and
-// a tap-to-expand day drill-down assembled by
-// buildSpendDayDetail (including that day's net worth).
+// Detail-tab Calendar: a TRUE month grid (owner correction
+// 2026-10-24) — weekday header Mon-Sun, date cells aligned to
+// weekday columns with blank padding, the amount as TEXT in
+// every cell (the primary channel, never colour alone),
+// today / selected / partial carried by text and border, a
+// monthly summary row, bounded month navigation and a
+// tap-to-expand day drill-down. CAL-METRICS-001 adds the
+// metric switch on top: 花销 (daily spend) / 入账 (daily
+// income) / 投资收益·损失 (daily investment pnl, monthly-only
+// before 2026-10-24). Every metric drives the cells, the
+// summary row and the drill-down; the selected state rides
+// on text + border (the range-control active pill), never
+// colour alone.
+type CalendarMetric = "spend" | "income" | "invest";
+
 function SpendCalendar({ data }: { data: Dashboard }) {
   const daily = data.archDailySpend;
+  const incomeData = data.archDailyIncome;
+  const investData = data.archDailyInvest;
   const todayKey = localTodayKey();
+  const [metric, setMetric] = useState<CalendarMetric>("spend");
   const [monthKey, setMonthKey] = useState<string>(() => (daily ? daily.throughDate.slice(0, 7) : todayKey.slice(0, 7)));
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  if (!daily) return null;
-  const bounds = spendCalendarMonthBounds(daily.coverageStart, todayKey);
-  const model = buildSpendCalendarMonth(daily.days, monthKey, todayKey);
-  const summary = spendCalendarMonthSummary(daily.days, monthKey, daily.throughDate);
+  const currentMonthKey = todayKey.slice(0, 7);
+  const spendBounds = daily ? spendCalendarMonthBounds(daily.coverageStart, todayKey) : { minMonth: currentMonthKey, maxMonth: currentMonthKey };
+  const incomeBounds = incomeData ? spendCalendarMonthBounds(incomeData.coverageStart, todayKey) : spendBounds;
+  const investBounds = { minMonth: data.months[0]?.key.slice(0, 7) ?? currentMonthKey, maxMonth: currentMonthKey };
+  const bounds = metric === "spend" ? spendBounds : metric === "income" ? incomeBounds : investBounds;
   const canPrev = monthKey > bounds.minMonth;
   const canNext = monthKey < bounds.maxMonth;
-  const showPartialPeriodNote = daily.fullCoverageStart != null && `${monthKey}-01` < daily.fullCoverageStart;
-  const selectedDay = selectedDate ? daily.days.find((day) => day.date === selectedDate) ?? null : null;
-  const selectedNetWorth = selectedDate ? data.archNetWorthSeries.find((point) => point.date === selectedDate)?.total ?? null : null;
-  const detail = selectedDate ? buildSpendDayDetail(selectedDay, selectedNetWorth) : null;
-  const maxAmount = summary.maxAmount ?? 0;
+  const switchMetric = (next: CalendarMetric) => {
+    setMetric(next);
+    setSelectedDate(null);
+    const nextBounds = next === "spend" ? spendBounds : next === "income" ? incomeBounds : investBounds;
+    setMonthKey((previous) => (previous < nextBounds.minMonth ? nextBounds.minMonth : previous > nextBounds.maxMonth ? nextBounds.maxMonth : previous));
+  };
   const goMonth = (delta: number) => {
-    setMonthKey((previous) => shiftSpendCalendarMonth(previous, delta));
+    setMonthKey((previous) => {
+      const shifted = shiftSpendCalendarMonth(previous, delta);
+      return shifted < bounds.minMonth ? bounds.minMonth : shifted > bounds.maxMonth ? bounds.maxMonth : shifted;
+    });
     setSelectedDate(null);
   };
+
+  // Flow metrics （花销 / 入账） share the grid + summary
+  // machinery: income days are adapted onto the spend day
+  // shape (total -> posted, sources -> categories).
+  const incomeDays: SpendCalendarDayLike[] = (incomeData?.days ?? []).map((day) => ({
+    date: day.date,
+    posted: day.total,
+    pending: day.pending,
+    pendingCount: day.pendingCount,
+    spendCount: day.incomeCount,
+    partial: day.partial,
+    categories: day.sources,
+    unclassified: [],
+  }));
+  const flowDays = metric === "income" ? incomeDays : daily?.days ?? [];
+  const flowPayload = metric === "income" ? incomeData : daily;
+  const model = buildSpendCalendarMonth(flowDays, monthKey, todayKey);
+  const summary = spendCalendarMonthSummary(flowDays, monthKey, flowPayload?.throughDate ?? todayKey);
+  const showPartialPeriodNote = metric !== "invest" && flowPayload?.fullCoverageStart != null && `${monthKey}-01` < flowPayload.fullCoverageStart;
+  const maxAmount = summary.maxAmount ?? 0;
+
+  const investView = buildInvestMonthView(investData?.days ?? [], data.months, monthKey, todayKey, INVEST_DAILY_ERA_START_CLIENT);
+  const viewYear = metric === "invest" ? investView.year : model.year;
+  const viewMonth = metric === "invest" ? investView.month : model.month;
+
+  const selectedFlowDay = selectedDate && metric !== "invest" ? flowDays.find((day) => day.date === selectedDate) ?? null : null;
+  const selectedIncomeDay = selectedDate && metric === "income" ? incomeData?.days.find((day) => day.date === selectedDate) ?? null : null;
+  const selectedInvestDay = selectedDate && metric === "invest" ? investData?.days.find((day) => day.date === selectedDate) ?? null : null;
+  const selectedNetWorth = selectedDate ? data.archNetWorthSeries.find((point) => point.date === selectedDate)?.total ?? null : null;
+  const detail = selectedDate && metric === "spend" ? buildSpendDayDetail(selectedFlowDay, selectedNetWorth) : null;
+
+  const metricLabel = metric === "spend" ? "花销" : metric === "income" ? "入账" : "投资收益·损失";
+  const titleMeta = metric === "invest"
+    ? `日粒度自 ${INVEST_DAILY_ERA_START_CLIENT} · 此前月度`
+    : flowPayload
+      ? `覆盖 ${flowPayload.coverageStart} 至 ${flowPayload.throughDate}`
+      : "暂无数据";
+  const caliberNote = metric === "spend"
+    ? "日花销为 Plaid 交易日流口径；月度记录为 Firance 月度快照，仅作对账存档。"
+    : metric === "income"
+      ? "入账口径：外部流入（收入＋退款），排除账户间转移与贷款相关流；覆盖与花销同窗。"
+      : `投资收益·损失口径：当日投资价值变化 − 当日净投入；日粒度自 ${INVEST_DAILY_ERA_START_CLIENT} 起，此前只有月度值，不摊分到日。`;
+
   return (
-    <section className="section-block spend-cal-section" id="spend-calendar" aria-label="日花销日历">
-      <SectionTitle title="日花销" meta={`覆盖 ${daily.coverageStart} 至 ${daily.throughDate}`} />
+    <section className="section-block spend-cal-section" id="spend-calendar" aria-label="日历（花销 / 入账 / 投资收益·损失）">
+      <SectionTitle title={metric === "spend" ? "日花销" : metricLabel} meta={titleMeta} />
+      <div className="spend-cal__metrics">
+        <div className="range-control" role="group" aria-label="日历指标切换">
+          {([["spend", "花销"], ["income", "入账"], ["invest", "投资收益·损失"]] as Array<[CalendarMetric, string]>).map(([key, label]) => (
+            <button key={key} type="button" className={metric === key ? "active" : ""} onClick={() => switchMetric(key)} aria-pressed={metric === key}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="spend-cal__nav">
         <button type="button" className="spend-cal__nav-button" onClick={() => goMonth(-1)} disabled={!canPrev} aria-label="前月">‹ 前月</button>
-        <h3 className="spend-cal__title">{model.year} 年 {model.month} 月</h3>
+        <h3 className="spend-cal__title">{viewYear} 年 {viewMonth} 月</h3>
         <button type="button" className="spend-cal__nav-button" onClick={() => goMonth(1)} disabled={!canNext} aria-label="后月">后月 ›</button>
-        <button type="button" className="spend-cal__nav-button" onClick={() => { setMonthKey(todayKey.slice(0, 7)); setSelectedDate(null); }} aria-label="回到本月">回到本月</button>
+        <button type="button" className="spend-cal__nav-button" onClick={() => { setMonthKey(currentMonthKey); setSelectedDate(null); }} aria-label="回到本月">回到本月</button>
       </div>
       {showPartialPeriodNote ? (
-        <p className="fact-card__note">部分覆盖期间 · 全覆盖自 {daily.fullCoverageStart}</p>
+        <p className="fact-card__note">部分覆盖期间 · 全覆盖自 {flowPayload?.fullCoverageStart}</p>
       ) : null}
-      <p className="spend-cal__summary">
-        本月已发生合计 {currency.format(summary.total)}
-        {summary.isThroughMonth ? `（截至 ${summary.throughDate}）` : ""}
-        {" · "}日均 {summary.average == null ? "—" : currency.format(summary.average)}
-        {" · "}最高单日 {summary.maxAmount == null || summary.maxDate == null ? "—" : `${currency.format(summary.maxAmount)}（${summary.maxDate}）`}
-      </p>
-      <div className="spend-cal" role="grid" aria-label={`${model.year} 年 ${model.month} 月日花销日历`}>
+      {metric === "invest" ? (
+        <p className="spend-cal__summary">
+          {investView.mode === "daily" ? (
+            <>本月收益·损失合计 {signedPreciseCurrency(investView.total ?? 0)}（日粒度 · {investView.dailyCount} 天）{" · "}日均 {investView.average == null ? "—" : signedPreciseCurrency(investView.average)}{" · "}最高单日 {investView.maxAmount == null || investView.maxDate == null ? "—" : `${signedPreciseCurrency(investView.maxAmount)}（${investView.maxDate}）`}</>
+          ) : investView.mode === "monthly" ? (
+            <>本月收益·损失（月度）{signedPreciseCurrency(investView.total ?? 0)} · 月度粒度，日粒度自 {INVEST_DAILY_ERA_START_CLIENT} 起</>
+          ) : (
+            <>本月暂无投资收益·损失数据</>
+          )}
+        </p>
+      ) : flowPayload ? (
+        <p className="spend-cal__summary">
+          {metric === "income" ? "本月入账合计" : "本月已发生合计"} {currency.format(summary.total)}
+          {summary.isThroughMonth ? `（截至 ${summary.throughDate}）` : ""}
+          {" · "}日均 {summary.average == null ? "—" : currency.format(summary.average)}
+          {" · "}最高单日 {summary.maxAmount == null || summary.maxDate == null ? "—" : `${currency.format(summary.maxAmount)}（${summary.maxDate}）`}
+        </p>
+      ) : (
+        <p className="spend-cal__summary">{metric === "income" ? "暂无入账数据（尚未写入）" : "暂无日花销数据（尚未写入）"}</p>
+      )}
+      <div className="spend-cal" role="grid" aria-label={`${viewYear} 年 ${viewMonth} 月${metricLabel}日历`}>
         <div className="spend-cal__weekdays" aria-hidden="true">
           {["一", "二", "三", "四", "五", "六", "日"].map((label) => (
             <span key={label} className="spend-cal__weekday">{label}</span>
           ))}
         </div>
         <div className="spend-cal__grid">
-          {model.cells.map((cell, index) => {
+          {metric === "invest" ? investView.cells.map((cell, index) => {
+            if (cell.isBlank || cell.date == null || cell.day == null) {
+              return <div key={`blank-${index}`} className="spend-cal__cell spend-cal__cell--blank" aria-hidden="true" />;
+            }
+            const isSelected = selectedDate === cell.date;
+            const amountText = cell.mode === "future" ? "" : cell.mode === "daily" ? signedCompactCurrency(cell.pnl ?? 0) : cell.mode === "monthly-only" ? "仅月度" : "—";
+            const inner = (
+              <>
+                <span className="spend-cal__day">{cell.day}</span>
+                <span className="spend-cal__amount">{amountText}</span>
+                <span className="spend-cal__marks">
+                  {cell.isToday ? <span className="spend-cal__mark">今天</span> : null}
+                  {isSelected ? <span className="spend-cal__mark">已选</span> : null}
+                </span>
+              </>
+            );
+            const className = [
+              "spend-cal__cell",
+              cell.isToday ? "spend-cal__cell--today" : "",
+              isSelected ? "spend-cal__cell--selected" : "",
+              cell.mode === "future" ? "spend-cal__cell--future" : "",
+            ].filter(Boolean).join(" ");
+            if (cell.mode === "daily" || cell.mode === "monthly-only") {
+              return (
+                <button
+                  key={cell.date}
+                  type="button"
+                  className={className}
+                  aria-pressed={isSelected}
+                  aria-label={cell.mode === "daily" ? `${cell.date} 投资收益·损失 ${signedPreciseCurrency(cell.pnl ?? 0)}${cell.isToday ? "，今天" : ""}` : `${cell.date} 仅月度数据${cell.isToday ? "，今天" : ""}`}
+                  onClick={() => setSelectedDate((previous) => (previous === cell.date ? null : cell.date))}
+                >
+                  {inner}
+                </button>
+              );
+            }
+            return (
+              <div key={cell.date} className={className} aria-label={cell.mode === "future" ? `${cell.date} 未来日期` : `${cell.date} 无数据`}>
+                {inner}
+              </div>
+            );
+          }) : model.cells.map((cell, index) => {
             if (cell.isBlank || cell.date == null || cell.day == null) {
               return <div key={`blank-${index}`} className="spend-cal__cell spend-cal__cell--blank" aria-hidden="true" />;
             }
@@ -2038,7 +2440,7 @@ function SpendCalendar({ data }: { data: Dashboard }) {
                   className={className}
                   style={cellStyle}
                   aria-pressed={isSelected}
-                  aria-label={`${cell.date} 花销 ${currency.format(cell.amount ?? 0)}${cell.partial ? "，部分覆盖" : ""}${cell.isToday ? "，今天" : ""}`}
+                  aria-label={`${cell.date} ${metricLabel} ${currency.format(cell.amount ?? 0)}${cell.partial ? "，部分覆盖" : ""}${cell.isToday ? "，今天" : ""}`}
                   onClick={() => setSelectedDate((previous) => (previous === cell.date ? null : cell.date))}
                 >
                   {inner}
@@ -2066,7 +2468,38 @@ function SpendCalendar({ data }: { data: Dashboard }) {
           <p>{detail.hasNetWorth ? `当日净值 ${currency.format(detail.netWorth ?? 0)}` : "当日净值暂无记录"}</p>
         </div>
       ) : null}
-      <p className="fact-card__note" style={{ marginTop: 10 }}>日花销为 Plaid 交易日流口径；月度记录为 Firance 月度快照，仅作对账存档。</p>
+      {metric === "income" && selectedIncomeDay ? (
+        <div className="spend-cal__detail" aria-label="入账详情">
+          <h4>{dateLabel.format(new Date(`${selectedIncomeDay.date}T00:00:00`))}</h4>
+          <p>入账合计 {currencyPrecise.format(selectedIncomeDay.total)} · {selectedIncomeDay.incomeCount} 笔</p>
+          {selectedIncomeDay.pending > 0 ? <p>待入账 {currencyPrecise.format(selectedIncomeDay.pending)} · {selectedIncomeDay.pendingCount} 笔</p> : null}
+          {selectedIncomeDay.sources.length > 0 ? selectedIncomeDay.sources.map((src) => (
+            <p key={src.key}>{incomeSourceLabel(src.key)} · {currencyPrecise.format(src.amount)}</p>
+          )) : <p>当日无入账来源</p>}
+          {selectedIncomeDay.partial ? <p>部分覆盖：当日为部分覆盖，金额可能不完整。</p> : null}
+          <p>{selectedNetWorth != null ? `当日净值 ${currency.format(selectedNetWorth)}` : "当日净值暂无记录"}</p>
+        </div>
+      ) : null}
+      {metric === "invest" && selectedDate ? (
+        <div className="spend-cal__detail" aria-label="投资收益·损失详情">
+          <h4>{dateLabel.format(new Date(`${selectedDate}T00:00:00`))}</h4>
+          {selectedInvestDay ? (
+            <>
+              <p>收益·损失 {signedPreciseCurrency(selectedInvestDay.pnl)}</p>
+              <p>当日价值变化 {signedPreciseCurrency(selectedInvestDay.valueChange)}</p>
+              <p>当日净投入 {signedPreciseCurrency(selectedInvestDay.netFlow)}</p>
+            </>
+          ) : investView.monthlyTotal != null && selectedDate < INVEST_DAILY_ERA_START_CLIENT ? (
+            <>
+              <p>该月收益·损失（月度）{signedPreciseCurrency(investView.monthlyTotal)}</p>
+              <p>日粒度自 {INVEST_DAILY_ERA_START_CLIENT} 起；此前只有月度值，不摊分到日。</p>
+            </>
+          ) : (
+            <p>当日暂无投资收益·损失记录</p>
+          )}
+        </div>
+      ) : null}
+      <p className="fact-card__note" style={{ marginTop: 10 }}>{caliberNote}</p>
     </section>
   );
 }
@@ -2082,26 +2515,24 @@ function OverviewTab({
   refreshFailed,
   current,
   savingsRate,
-  savingsRateNote,
   coverage,
   emergencyMonths,
-  emergencyNote,
+  emergencyShortNote,
   anomalyMonths,
   excludedCashSources,
-  onOpenFirePanel,
+  onOpenFireTab,
   onViewCalendar,
 }: {
   data: Dashboard;
   refreshFailed: boolean;
   current: Month;
   savingsRate: number | null;
-  savingsRateNote: string;
   coverage: ReturnType<typeof emergencyCoverage>;
   emergencyMonths: number | null;
-  emergencyNote: string;
+  emergencyShortNote: string | null;
   anomalyMonths: Month[];
   excludedCashSources: ReadonlySet<string>;
-  onOpenFirePanel: () => void;
+  onOpenFireTab: () => void;
   onViewCalendar: () => void;
 }) {
   return (
@@ -2110,25 +2541,25 @@ function OverviewTab({
       <section className="metric-grid" aria-label="本月关键指标">
         <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />
         <Metric label="月支出" value={current.totalSpend == null ? "—" : <span title={currency.format(current.totalSpend)}>{compactCurrency.format(current.totalSpend)}</span>} note={current.totalSpend == null ? `固定 ${compactCurrency.format(current.fixedSpend)} · 灵活支出待核对` : `固定 ${compactCurrency.format(current.fixedSpend)}`} />
-        <Metric label="储蓄率" value={savingsRate == null ? "—" : <>{trendIndicator(savingsRate)} {percent.format(savingsRate)}</>} tone={valueTone(savingsRate)} note={savingsRateNote} />
-        <Metric label="应急金覆盖" value={emergencyMonths == null ? "—" : `${number.format(emergencyMonths)} 个月`} note={emergencyNote} />
-        <Metric label="投资" value={<span title={currency.format(data.live.investment)}>{compactCurrency.format(data.live.investment)}</span>} note="已融合实时余额" />
-        <Metric label="可动用现金" value={coverage.cashAmount == null ? "—" : <span title={currency.format(coverage.cashAmount)}>{compactCurrency.format(coverage.cashAmount)}</span>} note={coverage.cashAmount == null ? (coverage.reason ?? "现金未提供") : `仅现金类账户 ${coverage.selectedCount} 个 · 不含 HSA/债券/退休/信用卡/贷款${excludedCashSources.size > 0 ? " · 本页试算" : ""}`} />
-        <Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} note="按未偿余额显示" />
+        <Metric label="储蓄率" value={savingsRate == null ? "—" : <>{trendIndicator(savingsRate)} {percent.format(savingsRate)}</>} tone={valueTone(savingsRate)} />
+        <Metric label="应急金覆盖" value={emergencyMonths == null ? "—" : `${number.format(emergencyMonths)} 个月`} note={emergencyShortNote ?? undefined} />
+        <Metric label="投资" value={<span title={currency.format(data.live.investment)}>{compactCurrency.format(data.live.investment)}</span>} />
+        <Metric label="可动用现金" value={coverage.cashAmount == null ? "—" : <span title={currency.format(coverage.cashAmount)}>{compactCurrency.format(coverage.cashAmount)}</span>} note={coverage.cashAmount == null ? (coverage.reason ?? "现金未提供") : `现金账户 ${coverage.selectedCount} 个${excludedCashSources.size > 0 ? " · 本页试算" : ""}`} />
+        <Metric label="贷款" value={<span title={currency.format(data.live.loans ?? 0)}>{compactCurrency.format(data.live.loans ?? 0)}</span>} />
       </section>
       {anomalyMonths.length > 0 ? (
         <div className="data-anomaly" role="note" aria-label="数据异常月份">
           <strong>数据异常</strong>
-          <span>{anomalyMonths.map((month) => monthLabel.format(monthDate(month.key))).join("、")} 仍保留在月度记录中；支出在图表中为断点，不进入 FIRE 年支出。</span>
+          <span>{anomalyMonths.map((month) => monthLabel.format(monthDate(month.key))).join("、")} · 不计入 FIRE 年支出</span>
         </div>
       ) : null}
       <section className="fire-teaser" aria-label="FIRE 进度摘要">
         <p>{fireSummaryLine(data.fire)}</p>
-        <button type="button" onClick={onOpenFirePanel}>查看完整 FIRE 面板</button>
+        <button type="button" onClick={onOpenFireTab}>查看完整 FIRE 面板</button>
       </section>
-      {data.archNetWorthSeries.length > 0 ? (
+      {data.months.length > 0 || data.archNetWorthSeries.length > 0 ? (
         <div style={{ marginTop: 14 }}>
-          <NetWorthDailySeries series={data.archNetWorthSeries} />
+          <NetWorthDailySeries months={data.months} series={data.archNetWorthSeries} />
         </div>
       ) : null}
       <DailySpendSummaryStrip data={data} onViewCalendar={onViewCalendar} />
@@ -2136,10 +2567,26 @@ function OverviewTab({
   );
 }
 
+// FIRE-TAB-001 (owner ruling 2026-10-25 00:16 PT): the full
+// FIRE panel is its own tab (order 总览 / FIRE / 明细),
+// presented expanded as the tab's main content — no fold.
+// Content, caliber and formulas are exactly the panel that
+// used to sit folded in the detail tab; only its location
+// and expansion changed. The fire-panel id stays on the
+// panel's root element for deep links.
+function FireTab({ data }: { data: Dashboard }) {
+  return (
+    <section className="fire-section section-block" id="fire-panel">
+      <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
+      <FireProgress data={data} />
+    </section>
+  );
+}
+
 // 「明细」 tab: daily-spend Calendar first, then the four
-// evidence folds, then the five ledger folds (trend + range /
-// monthly records / full FIRE panel id="fire-panel" / F-ARCH
-// account rows / snapshot account detail).
+// evidence folds, then the ledger folds （口径与来源说明 /
+// trend + range / monthly records / F-ARCH account rows /
+// snapshot account detail).
 function DetailTab({
   data,
   current,
@@ -2151,6 +2598,8 @@ function DetailTab({
   onSetRange,
   accountGroups,
   foldHint,
+  savingsRateNote,
+  emergencyNote,
 }: {
   data: Dashboard;
   current: Month;
@@ -2162,6 +2611,8 @@ function DetailTab({
   onSetRange: (range: Range) => void;
   accountGroups: Array<[string, Account[]]>;
   foldHint: ReactNode;
+  savingsRateNote: string;
+  emergencyNote: string;
 }) {
   return (
     <>
@@ -2191,6 +2642,10 @@ function DetailTab({
       </div>
       <div className="evidence-layer">
         <details className="evidence-fold">
+          <summary><span>口径与来源说明 — 结论卡与指标口径原文</span>{foldHint}</summary>
+          <ConclusionCaliberDetail data={data} savingsRateNote={savingsRateNote} emergencyNote={emergencyNote} />
+        </details>
+        <details className="evidence-fold">
           <summary><span>走势 — 月度趋势 · {data.months.length} 份快照（存档口径）</span>{foldHint}</summary>
           <section className="section-block">
             <div className="section-heading-row">
@@ -2211,13 +2666,6 @@ function DetailTab({
           <section className="section-block">
             <SectionTitle title="月度记录" meta="Firance 月度快照 · 对账存档 · 点按展开" />
             <MonthlyRecords months={data.months} />
-          </section>
-        </details>
-        <details className="evidence-fold" id="fire-panel">
-          <summary><span>FIRE 进度 — {fireSummaryLine(data.fire)}</span>{foldHint}</summary>
-          <section className="fire-section section-block">
-            <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
-            <FireProgress data={data} />
           </section>
         </details>
         {data.archNetWorth ? (
@@ -2258,14 +2706,15 @@ function DetailTab({
   );
 }
 
-// DAILY-MERGE-001 corrected: DashboardView is the state-holding
-// parent shell for the two tabs. It owns the tab state (mount-
-// time only, default 「总览」, never persisted), the trend
-// range and the available-cash trial selection, so switching
-// tabs never loses either; every feature keeps exactly one
-// rendering home in exactly one tab.
+// DAILY-MERGE-001 corrected + FIRE-TAB-001: DashboardView is
+// the state-holding parent shell for the three tabs （总览 /
+// FIRE / 明细）. It owns the tab state (mount-time only,
+// default 「总览」, never persisted), the trend range and
+// the available-cash trial selection, so switching tabs never
+// loses either; every feature keeps exactly one rendering
+// home in exactly one tab.
 function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed: boolean }) {
-  const [activeTab, setActiveTab] = useState<"overview" | "detail">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "fire" | "detail">("overview");
   const [range, setRange] = useState<Range>("12m");
   // F1.1: the owner's available-cash trial selection. Page-local
   // state only — never persisted, never sent to the server.
@@ -2278,13 +2727,11 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
       return next;
     });
   };
-  const openFirePanel = () => {
-    setActiveTab("detail");
-    window.setTimeout(() => {
-      const panel = document.getElementById("fire-panel");
-      if (panel instanceof HTMLDetailsElement) panel.open = true;
-      panel?.scrollIntoView({ block: "start" });
-    }, 80);
+  // FIRE-TAB-001: the overview FIRE one-liner's button now
+  // simply switches to the FIRE tab — the panel is expanded
+  // there, so the old open-the-fold + scroll logic is gone.
+  const openFireTab = () => {
+    setActiveTab("fire");
   };
   const viewCalendar = () => {
     setActiveTab("detail");
@@ -2327,6 +2774,12 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
   const emergencyMonths = coverage.months;
   const emergencyNote = coverage.reason
     ?? `可动用现金 ${currency.format(coverage.cashAmount ?? 0)} ÷ 平均月支出 ${currency.format(spendBasis.averageMonthlySpend ?? 0)}（所用月份 ${spendBasis.usedMonthKeys.join("、")}）${excludedCashSources.size > 0 ? " · 本页试算" : ""}`;
+  // OVERVIEW-TRIM-001: the overview metric keeps only a short
+  // numeric note (the blocked reason, or the monthly-average
+  // spend figure); the full caliber sentence lives in the
+  // detail tab's 「口径与来源说明」 fold via emergencyNote.
+  const emergencyShortNote = coverage.reason
+    ?? (spendBasis.averageMonthlySpend != null ? `月均支出 ${currency.format(spendBasis.averageMonthlySpend)}` : null);
   const anomalyMonths = data.months.filter((month) => month.flexibleSpendAnomaly);
   const foldHint = (
     <>
@@ -2349,6 +2802,7 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
     <>
       <div className="view-tabs" role="tablist" aria-label="财务视图">
         <button type="button" role="tab" aria-selected={activeTab === "overview"} className={activeTab === "overview" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("overview")}>总览</button>
+        <button type="button" role="tab" aria-selected={activeTab === "fire"} className={activeTab === "fire" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("fire")}>FIRE</button>
         <button type="button" role="tab" aria-selected={activeTab === "detail"} className={activeTab === "detail" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("detail")}>明细</button>
       </div>
       {activeTab === "overview" ? (
@@ -2357,15 +2811,16 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
           refreshFailed={refreshFailed}
           current={current}
           savingsRate={savingsRate}
-          savingsRateNote={savingsRateNote}
           coverage={coverage}
           emergencyMonths={emergencyMonths}
-          emergencyNote={emergencyNote}
+          emergencyShortNote={emergencyShortNote}
           anomalyMonths={anomalyMonths}
           excludedCashSources={excludedCashSources}
-          onOpenFirePanel={openFirePanel}
+          onOpenFireTab={openFireTab}
           onViewCalendar={viewCalendar}
         />
+      ) : activeTab === "fire" ? (
+        <FireTab data={data} />
       ) : (
         <DetailTab
           data={data}
@@ -2378,6 +2833,8 @@ function DashboardView({ data, refreshFailed }: { data: Dashboard; refreshFailed
           onSetRange={setRange}
           accountGroups={accountGroups}
           foldHint={foldHint}
+          savingsRateNote={savingsRateNote}
+          emergencyNote={emergencyNote}
         />
       )}
     </>
