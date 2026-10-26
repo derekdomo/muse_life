@@ -1781,3 +1781,12 @@
 - 源码同步核对：weekly-finance/ 与线上工件 space-3 逐文件 diff，除构建产物/缓存与仓库独有文件（F-ARCH-001-SPEC.md、finance-arch.mjs、validate-finance-arch.mjs）外无差异，无未回灌 EVID 尾巴。
 - 本轮未改任何业务代码、未动 cron；修改文件仅 plans.md（本轮登记）与本文件。
 - 回滚：回退本提交即恢复登记前状态。
+
+## 2026-10-25 18 时 PDT（muse-life-plans-sync 18:55 轮次：F-ARCH-001 状态带澄清口径工件源码回灌）
+
+- 基线与增量：基线 c861017＝last_seen 基线，git pull 已最新、无新提交、无新编号条目、无新 PM bug 单（PM 仍按 PAUSE-LIFE-PM-001 暂停）。本轮源码同步核对发现一处未回灌差异（工件文件时间 2026-10-25 18:28 PDT，晚于上一轮核对）：所有者 2026-10-25 澄清原裁定本意为呈现层去掉警告——2026-09 之前的未核实历史月份按已核实对待（assume 正确），主聊天已按直令在工件 space-3 直接修复；仓库仍为上一片的「明示已按裁定忽略」旧口径，本轮补齐该 EVID 回灌尾巴。
+- 改了什么（仅回灌工件已上线口径，仓库侧未新创逻辑）：(1) `weekly-finance/client/src/App.tsx` 状态带历史月份事实——删除 ignoredHistory/ignoredNote 路径，countedHistory 改为只统计 2026-09 及之后、早于上一完整月的未核实月份；2026-09 之前月份不计数、不逐月列名、不出「忽略」提示，无符合项时呈现「较早历史月份完整性均已核实」；注释同步改为澄清口径。(2) `weekly-finance/validate-facts-card.mjs` 两项断言更新为澄清口径（pre-2026-09 按已核实呈现、无警告/无忽略字样/不列名；2026-11 视角下 2026-09 仍计数列名、2026-08 仍按已核实对待）。数据/integrity/FIRE/服务端/schema 均未动；2026-09 本月未被豁免、仍按未核实显示，不变。
+- 验证证据：回灌两文件与线上工件 space-3 逐字一致（diff 无差异）；仓库副本在临时目录借工件依赖实跑 `validate-facts-card.mjs` **149/149** 全过，工件侧同脚本 149/149、`validate-design-b1a.mjs` **235/235**、`validate-check-progress.mjs` **68/68** 全过。除上述两文件外，weekly-finance/ 与工件逐文件 diff 无其他差异（构建产物/缓存与仓库独有文件除外）。
+- F0.7 只读续查（18:57 PDT，遵所有者裁决丙(ii)，未触发任何 run/reset/clear）：经 space-3 `getRefreshObservations`——attempt=2 仍 status=running、diagnosis=awaiting_callback，state.updatedAt 冻结于 2026-10-24T00:55:25Z，距启动约 49 小时；观测行仍仅本代 refresh_started(claimed)＋spawn_attached，无本代回调/终态行、新快照未核实，断点未变，继续只读观察。
+- 队列核对：`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；仍（需用户确认）不变：`CWEB-LEVEL-001` 四参数/路径；`W6.2-PM-IMG` 整批过目；`H4.6` 恢复参考 T；`H-SWIM-PRIV-001` 已提交历史清理范围；`F-ARCH-001` 异常阈值定案。本轮用户可见增量：0 组（线上呈现已由主聊天直修上线，本轮仅仓库回灌对齐）。
+- 修改文件：`weekly-finance/client/src/App.tsx`、`weekly-finance/validate-facts-card.mjs`、`plans.md`（本轮登记）、本文件。回滚：git revert 本提交即恢复旧「忽略」呈现口径（与所有者澄清不符，不建议）。

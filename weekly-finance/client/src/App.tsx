@@ -409,8 +409,10 @@ export function nextRefreshActionText(status: RefreshStatus, hasData: boolean): 
 // stored months and their integrity metadata — never inferred
 // from the refresh asOf. "上一完整月" is the last full calendar
 // month before the viewer's current month; "当月" is by
-// definition still in progress; earlier months whose integrity
-// was never established are named as 历史未核实.
+// definition still in progress; earlier months from 2026-09 on
+// whose integrity was never established are named as 历史未核实
+// (pre-2026-09 history is assumed correct per the owner ruling
+// below and never warned about).
 export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ label: string; text: string }> {
   if (months.length === 0) {
     return [{ label: "月份可用性", text: "尚无月度记录" }];
@@ -439,25 +441,23 @@ export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ labe
       ? `${currentMonth} 仅进行中：快照截至 ${current.snapshotDate || current.key}，月份尚未结束`
       : `${currentMonth} 尚无快照（进行中月份未取得）`,
   });
-  const unverifiedHistory = months.filter(
-    (month) => month.key.slice(0, 7) < previousMonth && month.integrity !== "complete",
-  );
-  // Owner ruling (2026-10-25): unverified history months before
-  // 2026-09 are disregarded — not counted as unverified, not
-  // named month by month, and never described as verified; the
-  // fact states plainly that they were ignored under the ruling.
-  // Unverified history months from 2026-09 on keep the original
+  // Owner ruling (2026-10-25, clarified the same day): unverified
+  // history months before 2026-09 are assumed correct — treated
+  // as verified for display. They are not counted, not named, and
+  // no warning or "ignored" note is shown for them in the status
+  // band. Only unverified history months from 2026-09 on keep the
   // counted-and-named presentation.
-  const ignoredHistory = unverifiedHistory.filter((month) => month.key.slice(0, 7) < "2026-09");
-  const countedHistory = unverifiedHistory.filter((month) => month.key.slice(0, 7) >= "2026-09");
-  const ignoredNote = `${ignoredHistory.length} 个 2026-09 之前的历史月份未核实，已按所有者裁定忽略`;
+  const countedHistory = months.filter(
+    (month) =>
+      month.key.slice(0, 7) < previousMonth &&
+      month.key.slice(0, 7) >= "2026-09" &&
+      month.integrity !== "complete",
+  );
   facts.push({
     label: "历史月份",
     text: countedHistory.length > 0
-      ? `${countedHistory.length} 个历史月份未核实（完整性未提供或部分）：${countedHistory.map((month) => month.key.slice(0, 7)).join("、")}${ignoredHistory.length > 0 ? `；另有${ignoredNote}` : ""}`
-      : ignoredHistory.length > 0
-        ? `${ignoredNote}；2026-09 及之后的历史月份无未核实项`
-        : "较早历史月份完整性均已核实",
+      ? `${countedHistory.length} 个历史月份未核实（完整性未提供或部分）：${countedHistory.map((month) => month.key.slice(0, 7)).join("、")}`
+      : "较早历史月份完整性均已核实",
   });
   return facts;
 }
