@@ -573,7 +573,6 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
   while (cells.length % 7 !== 0) cells.push(null);
 
   const monthRows = realizedDaily.filter((d) => d.date.startsWith(ym));
-  const monthInflow = monthRows.reduce((sum, d) => sum + (d.inflow ?? 0), 0);
   const monthRealized = monthRows.reduce((sum, d) => sum + (d.realized ?? 0), 0);
   const maxAbsRealized = monthRows.reduce(
     (m, d) => Math.max(m, Math.abs(d.realized ?? 0)),
@@ -592,16 +591,16 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
 
   if (realizedDaily.length === 0) {
     return (
-      <Section title="每日进账与已实现日历">
+      <Section title="每日已实现日历">
         <p className="text-sm text-[var(--dim)]">
-          暂无逐日进账与已实现数据（realized_daily），等待下一次数据同步后显示。日历将覆盖每一个自然日，显示当日进账与当日已实现盈亏。
+          暂无逐日已实现数据（realized_daily），等待下一次数据同步后显示。日历将覆盖每一个自然日，显示当日已实现盈亏。
         </p>
       </Section>
     );
   }
 
   return (
-    <Section title="每日进账与已实现日历">
+    <Section title="每日已实现日历">
       <div className="mb-2 flex items-center justify-between">
         <button
           type="button"
@@ -639,9 +638,7 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
           const evs = eventsByDate.get(date) ?? [];
           const dayNum = Number(date.slice(8));
           const isSel = selected === date;
-          const inflow = row?.inflow ?? 0;
           const realized = row?.realized ?? 0;
-          const hasInflow = !!row && inflow > 0;
           const hasRealized = !!row && realized !== 0;
           // Background tint intensity is auxiliary only — meaning is carried by +/− and ▲▼ text.
           const intensity =
@@ -659,10 +656,9 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
               : undefined;
           const ariaParts = [fmtDateFull(date)];
           if (row) {
-            if (hasInflow) ariaParts.push(`进账 ${fmtSigned(inflow)}`);
             if (hasRealized)
               ariaParts.push(`已实现 ${arrow(realized)} ${fmtSigned(realized)}`);
-            if (!hasInflow && !hasRealized) ariaParts.push("进账 0，已实现 0");
+            if (!hasRealized) ariaParts.push("已实现 0");
           } else {
             ariaParts.push("无逐日数据");
           }
@@ -690,14 +686,6 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
                 )}
               </span>
               <span className="mt-auto flex flex-col gap-0.5">
-                {hasInflow && (
-                  <span className="flex flex-col">
-                    <span className="text-[8px] leading-tight text-[var(--dim)]">进账</span>
-                    <span className="font-num text-[9px] leading-tight tracking-tight whitespace-nowrap text-[var(--text)]">
-                      {fmtSignedCompact(inflow)}
-                    </span>
-                  </span>
-                )}
                 {hasRealized && (
                   <span
                     className={`font-num text-[9px] leading-tight font-semibold tracking-tight whitespace-nowrap ${pnlClass(realized)}`}
@@ -705,7 +693,7 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
                     {fmtArrowCompact(realized)}
                   </span>
                 )}
-                {row && !hasInflow && !hasRealized && (
+                {row && !hasRealized && (
                   <span className="font-num text-[10px] text-[var(--dim)]">—</span>
                 )}
               </span>
@@ -715,12 +703,6 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-[var(--surface-alt)] px-3 py-2 text-sm">
-        <span className="text-[var(--dim)]">
-          本月进账合计{" "}
-          <span className="font-num font-semibold text-[var(--text)]">
-            {fmtSigned(monthInflow)}
-          </span>
-        </span>
         <span className="text-[var(--dim)]">
           本月已实现合计 <SignedValue n={monthRealized} />
         </span>
@@ -733,7 +715,7 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
         ◆ = 当天有重要日子（财报 / 宏观 / 期权到期），点日期查看。
       </p>
       <p className="mt-1 text-[11px] leading-relaxed text-[var(--dim)]">
-        进账 = 当日卖出成交回款（期权权利金收入、平仓回款、股票卖出）+ 股息/利息入账，不含转入存款；已实现 = 当日平仓落定的盈亏，成本未知的卖出不计入；无平仓的日子已实现记 0。
+        已实现 = 当日平仓落定的盈亏，成本未知的卖出不计入；无平仓的日子已实现记 0。
       </p>
 
       {selected && (
@@ -742,11 +724,6 @@ function PnlCalendar({ data }: { data: TradingDataset }) {
           {selRow ? (
             <div className="mt-1 space-y-1 text-[var(--dim)]">
               <p>
-                进账{" "}
-                <span className="font-num text-[var(--text)]">
-                  {selRow.inflow > 0 ? fmtSigned(selRow.inflow) : fmtMoney(0)}
-                </span>
-                <span className="mx-1.5">·</span>
                 已实现{" "}
                 {selRow.realized !== 0 ? (
                   <SignedValue n={selRow.realized} />

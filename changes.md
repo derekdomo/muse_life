@@ -1814,3 +1814,11 @@
 - 源码同步核对：weekly-finance/ 与线上工件 space-3 逐文件 diff，除构建产物/缓存与仓库独有文件（F-ARCH-001-SPEC.md、finance-arch.mjs、validate-finance-arch.mjs）外无差异，无未回灌 EVID 尾巴。
 - 本轮未改任何业务代码、未动 cron；修改文件仅 plans.md（本轮登记）与本文件。
 - 回滚：回退本提交即恢复登记前状态。
+
+## 2026-10-25 23 时 PDT（muse-life-plans-sync 23:55 轮次：交易日历去掉进账——工件源码回灌）
+
+- 基线与增量：基线 1253ee1＝last_seen 基线，git pull 已最新、无新提交、无新编号条目、无新 PM bug 单（PM 仍按 PAUSE-LIFE-PM-001 暂停）。本轮源码同步核对发现一处未回灌差异（工件文件时间 2026-10-25 21:31 PDT，晚于上一轮核对）：所有者 2026-10-25 21:31 PDT 拍板「去掉进账，日历只留已实现盈亏」，主聊天已在工件 space-3 直接派修上线，本轮补齐该 EVID 回灌尾巴。
+- 改了什么（仅回灌工件已上线口径，仓库侧未新创逻辑）：`weekly-finance/client/src/TradingTab.tsx` 的 RealizedCalendar 组件——标题由「每日进账与已实现日历」改为「每日已实现日历」（含空态文案），删除 monthInflow 本月进账合计、日格进账行、点选当日详情的进账段与口径小字中的进账定义；只有进账、已实现为 0 的日子按无平仓日显示 —，aria 文案同步只报已实现。数据层未动：realized_daily 的 inflow 字段与服务端推送口径照旧，TradingTab 内累计已实现曲线提示中的进账引用保留，「明细」页签日花销 Calendar 的「入账」指标切换不在本次范围。服务端/schema/迁移/其余页签均未动。
+- 验证证据：回灌文件与线上工件 space-3 逐字一致（diff 无差异）；工件构建审计 2026-10-26T04:32:22Z verdict pass（无控制台错误、移动端无溢出，审计视角为访客拒绝页）；仓库临时副本（借工件 node_modules、跑后移除）client＋server `tsc --noEmit` 均退出 0。除上述文件外，weekly-finance/ 与工件逐文件 diff 无其他差异（构建产物/缓存与仓库独有文件除外）。
+- 队列核对：`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；仍（需用户确认）不变：`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T、`H-SWIM-PRIV-001` 已提交历史清理范围、`F-ARCH-001` 异常阈值定案。本轮用户可见增量：0 组（线上呈现已由主聊天直修上线，本轮仅仓库回灌对齐）。
+- 修改文件：`weekly-finance/client/src/TradingTab.tsx`、`plans.md`（本轮登记）、本文件。回滚：git revert 本提交即恢复日历双数呈现（与所有者 21:31 裁定不符，不建议）。
