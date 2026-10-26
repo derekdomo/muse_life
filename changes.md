@@ -1790,3 +1790,12 @@
 - F0.7 只读续查（18:57 PDT，遵所有者裁决丙(ii)，未触发任何 run/reset/clear）：经 space-3 `getRefreshObservations`——attempt=2 仍 status=running、diagnosis=awaiting_callback，state.updatedAt 冻结于 2026-10-24T00:55:25Z，距启动约 49 小时；观测行仍仅本代 refresh_started(claimed)＋spawn_attached，无本代回调/终态行、新快照未核实，断点未变，继续只读观察。
 - 队列核对：`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；仍（需用户确认）不变：`CWEB-LEVEL-001` 四参数/路径；`W6.2-PM-IMG` 整批过目；`H4.6` 恢复参考 T；`H-SWIM-PRIV-001` 已提交历史清理范围；`F-ARCH-001` 异常阈值定案。本轮用户可见增量：0 组（线上呈现已由主聊天直修上线，本轮仅仓库回灌对齐）。
 - 修改文件：`weekly-finance/client/src/App.tsx`、`weekly-finance/validate-facts-card.mjs`、`plans.md`（本轮登记）、本文件。回滚：git revert 本提交即恢复旧「忽略」呈现口径（与所有者澄清不符，不建议）。
+
+## 2026-10-25 19 时 PDT（muse-life-plans-sync 19:55 轮次：基线核对＋F0.7 只读续查，无新交付）
+
+- 基线与增量：基线 92fe187＝last_seen 基线，git pull 已最新、无新提交、无新编号条目、无新 PM bug 单（PM 仍按 PAUSE-LIFE-PM-001 暂停）。本轮无任务完成、无用户可见增量（0 组）。
+- 队列核对：往轮顺延项逐类复核——`F-ARCH-001` 整条仍不勾选，余项（F0.6/F1.6 其余迁移）为 A 类期间核对/迁移复杂项，本轮未贸然开工、沿原队列保留；`F1.3` P1 可选项（保守/中性两种可编辑假设）口径未定案、沿原队列保留；其余未勾选项或为运行待验（缺 owner/PM 运行证据，不伪造验收）、或为（需用户确认）项：`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目、`H4.6` 恢复参考 T、`H-SWIM-PRIV-001` 已提交历史清理范围、`F-ARCH-001` 异常阈值定案，均不变。
+- F0.7 只读续查（19:57 PDT，遵所有者裁决丙(ii)，未触发任何 run/reset/clear）：经 space-3 `getRefreshObservations` 只读核查——attempt=2 仍 status=running、diagnosis=awaiting_callback，state.updatedAt 冻结于 2026-10-24T00:55:25Z，距启动约 50 小时；观测行仍仅本代 refresh_started(claimed)＋spawn_attached，无本代回调/终态行、新快照未核实，断点（spawn 之后、平台任务执行/回调投递段）未变，继续只读观察。
+- 源码同步核对：weekly-finance/ 与线上工件 space-3 逐文件 diff，除构建产物/缓存与仓库独有文件（F-ARCH-001-SPEC.md、finance-arch.mjs、validate-finance-arch.mjs）外无差异，无未回灌 EVID 尾巴。
+- 本轮未改任何业务代码、未动 cron；修改文件仅 plans.md（本轮登记）与本文件。
+- 回滚：回退本提交即恢复登记前状态。
