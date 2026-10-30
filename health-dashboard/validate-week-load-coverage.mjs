@@ -69,10 +69,11 @@ function extractFunction(source, name) {
 // ------------------------------------------------------- source level
 check('source: the "不影响本周对比" assertion is gone from the client',
   !clientSrc.includes('不影响本周对比'));
-check('source: weekLoad carries previousDetail (previous-week absolutes) and no coverageNote field',
-  clientSrc.includes('previousDetail: string') && !clientSrc.includes('coverageNote'));
-check('source: the hero renders the previous-week absolutes in an expandable details area',
-  clientSrc.includes('<summary className="whoop-load-note">上周同期数据</summary>') && clientSrc.includes('{load.previousDetail}'));
+check('source: weekLoad carries previousDetail (previous-week absolutes); weekLoad itself has no coverageNote (that field legitimately belongs to week-review metrics)',
+  clientSrc.includes('previousDetail: string') && !extractFunction(clientSrc, 'weekLoad').includes('coverageNote'));
+check('source: the load block renders the previous-week absolutes in an expandable details area (combined expand layer)',
+  clientSrc.includes('<summary className="whoop-load-note">负荷依据 · 上周同期数据 · readiness 近 7 天</summary>')
+  && clientSrc.includes('{load.previousDetail}'));
 
 // ------------------------------------------------------- real weekLoad
 function buildWeekLoad(source) {

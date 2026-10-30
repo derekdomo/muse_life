@@ -55,20 +55,38 @@ function extractFunction(source, name) {
 }
 
 // --- source-level wiring ---
+// 2026-10-19 回灌（a45ebce，H-SYNC-DIVERGE-001）：组 schema 已具名为
+// hkWorkoutGroupSchema（字段不变），unifiedDaySchema 仍携带 hkWorkouts。
 check('source: unifiedDaySchema carries hkWorkouts groups',
-  serverSrc.includes('hkWorkouts: z.array(z.object({'));
+  serverSrc.includes('hkWorkouts: z.array(hkWorkoutGroupSchema)')
+  && serverSrc.includes('const hkWorkoutGroupSchema = z.object({')
+  && serverSrc.includes('durationMinutes: z.number().nonnegative().nullable()'));
+// 同上：新建日行仍默认 hkWorkouts: []（行字段现含 workoutSessions/
+// workoutTypes/swimMeters，模式随之对齐）。
 check('source: timeline defaults hkWorkouts to [] on new rows',
-  serverSrc.includes('strengthRoutines: [], hkWorkouts: []'));
+  serverSrc.includes('strengthRoutines: [], workoutSessions: 0, workoutTypes: [], swimMeters: null, hkWorkouts: []'));
+// 同上：聚合仍只读 historyWorkouts（?? [] 冗余守卫随 if (healthSnapshot)
+// 外层守卫移除，行为等价）。
 check('source: aggregation reads historyWorkouts only',
-  serverSrc.includes('for (const workout of healthSnapshot.historyWorkouts ?? [])'));
+  serverSrc.includes('if (healthSnapshot) {')
+  && serverSrc.includes('for (const workout of healthSnapshot.historyWorkouts)'));
 check('source: client label consumed at both timeline render sites',
   (clientSrc.match(/unifiedHkLabel\(day\)/g) ?? []).length === 4,
   `occurrences=${(clientSrc.match(/unifiedHkLabel\(day\)/g) ?? []).length}`);
+// PM 返工交付（2026-10-16 19:18，changes.md:306-307）+ 2026-10-19 回灌：
+// 两处时间线现为 artifact 侧原文形态
+// <p className="unified-note">仅汇总有记录的时长，缺失不按0</p>（仓库侧
+// 旧的「运动时长说明：…」+ .empty-inline 变体已被回灌替换）。
 check('source: known-duration note visible at both timeline render sites',
-  (clientSrc.match(/运动时长说明：仅汇总有记录的时长，缺失不按0/g) ?? []).length === 2,
-  `occurrences=${(clientSrc.match(/运动时长说明：仅汇总有记录的时长，缺失不按0/g) ?? []).length}`);
+  (clientSrc.match(/<p className="unified-note">仅汇总有记录的时长，缺失不按0<\/p>/g) ?? []).length === 2,
+  `occurrences=${(clientSrc.match(/<p className="unified-note">仅汇总有记录的时长，缺失不按0<\/p>/g) ?? []).length}`);
+// 「已知小计≠总数」禁令只归 unifiedHkLabel 的时长段（PM 2026-10-16
+// 17:50 返工判据）。swimWeekSummary 的 `共 X 米` 仅在其全已知分支出现
+// （H-SWIM-VIS-001，plans.md:197 / changes.md:1459），是合法的全量总和——
+// 故断言收窄到 unifiedHkLabel 本函数体，不再对全文件禁 `· 共 ${`。
+const unifiedHkLabelSrc = extractFunction(clientSrc, 'unifiedHkLabel');
 check('source: label never renders an unconditional 共 X 分 total',
-  !clientSrc.includes('· 共 ${'));
+  !unifiedHkLabelSrc.includes('共 ${') && unifiedHkLabelSrc.includes('已知时长 ${')); 
 
 // --- real server function ---
 function buildTimeline(src) {
@@ -177,7 +195,9 @@ check('mutation setup: null-guard variant differs', nullGuardSrc !== serverSrc);
 check('mutation: dropping the null guard turns unknown duration into fake 0',
   buildTimeline(nullGuardSrc)(nullDur, null)[0].hkWorkouts[0].durationMinutes === 0);
 
-const sortSrc = serverSrc.replace('.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))', '.sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0))');
+// 类型组排序现为 .sort(([a], [b]) => a.localeCompare(b))（回灌形态）。
+// 变异反转比较器方向。
+const sortSrc = serverSrc.replace('.sort(([a], [b]) => a.localeCompare(b))', '.sort(([a], [b]) => b.localeCompare(a))');
 check('mutation setup: sort variant differs', sortSrc !== serverSrc);
 check('mutation: reversed type sort flips group order',
   buildTimeline(sortSrc)(mixed, null)[0].hkWorkouts[0].type === 'Swimming');

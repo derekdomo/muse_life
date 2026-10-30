@@ -37,11 +37,11 @@ function extractFunction(source, name) {
 }
 
 check('source: WhoopHero renders the source strip before the scores',
-  clientSrc.includes('whoop-source-strip') && clientSrc.indexOf('whoop-source-strip') < clientSrc.indexOf('whoop-scores'));
+  clientSrc.includes('whoop-source-bar') && clientSrc.indexOf('whoop-source-bar') < clientSrc.indexOf('whoop-scores'));
 check('source: data status panel carries the scroll target id',
   clientSrc.includes('id="data-status-panel"'));
 check('source: hero action scrolls to the data status panel, no guessed cross-artifact URL',
-  clientSrc.includes('getElementById("data-status-panel")') && !/space-6|workout-log.*https?:|https?:.*workout/.test(clientSrc));
+  clientSrc.includes('scrollToId("data-status-panel")') && !/https?:\/\/[^\s"'`]*?(?:workout|space-6)[^\s"'`]*?/i.test(clientSrc));
 
 const FN_NAMES = ['updatedLabel', 'freshnessLabel', 'heroSourceStatus'];
 function buildFns(src) {
@@ -80,8 +80,8 @@ const rd = (date = '2026-10-14') => ({ date });
 }
 {
   const r = heroSourceStatus(snap, null, status(row('fresh'), row('fresh')));
-  check('readiness missing: line says 恢复参考缺失 and action retries health sync even when sources look fresh',
-    r.dataDateLine.includes('恢复参考缺失') && r.action.kind === 'sync-health' && r.action.label === '重新同步健康数据');
+  check('readiness missing: data date line stands alone (the missing reference is named in the conclusion layer, not merged here), action retries health sync even when sources look fresh',
+    r.dataDateLine === '数据日期 2026-10-14（最近完整日）' && r.action.kind === 'sync-health' && r.action.label === '重新同步健康数据');
 }
 {
   const r = heroSourceStatus(snap, rd(), null);
@@ -123,13 +123,16 @@ const rd = (date = '2026-10-14') => ({ date });
   const partial = { dataDate: '2026-10-14', coverageIncomplete: true };
   const rp = heroSourceStatus(partial, rd(), status(row('fresh'), row('fresh')));
   check('partial coverage with fresh timestamps: coverage gap is visible on the first layer, action unchanged',
-    rp.coverageLine === '健康数据覆盖不完整：还没同步完（更新时间新鲜不代表覆盖完整）' && rp.action.kind === 'view-status');
+    rp.coverageLine === '覆盖不完整' && rp.action.kind === 'view-status');
   const rf = heroSourceStatus(snap, rd(), status(row('fresh'), row('fresh')));
   check('complete coverage: no coverage line',
     rf.coverageLine === null);
 }
 check('source: coverage line renders inside the strip before the primary action',
-  clientSrc.includes('whoop-source-coverage') && clientSrc.indexOf('whoop-source-coverage') > clientSrc.indexOf('hero.strengthLine') && clientSrc.indexOf('whoop-source-coverage') < clientSrc.indexOf('heroActionBusy ? "同步中…"'));
+  clientSrc.includes('whoop-source-coverage')
+  && clientSrc.indexOf('whoop-source-bar') < clientSrc.indexOf('whoop-source-coverage')
+  && clientSrc.indexOf('whoop-source-coverage') < clientSrc.indexOf('whoop-scores')
+  && clientSrc.indexOf('whoop-source-coverage') < clientSrc.indexOf('whoop-source-action'));
 {
   const r = heroSourceStatus(snap, rd(), status(row('today'), row('stale')));
   check('health today + strength stale: action syncs strength',
@@ -138,26 +141,26 @@ check('source: coverage line renders inside the strip before the primary action'
 
 // ------------------------------------------------------------ mutation sensitivity
 {
-  const noReadinessGate = buildFns(clientSrc.replace('readiness === null || healthBad', 'healthBad'));
+  const noReadinessGate = buildFns(clientSrc.replace('readiness === null || healthStale', 'healthStale'));
   const input = [snap, null, status(row('fresh'), row('fresh'))];
   check('mutation: dropping the readiness-null gate flips missing-readiness action to view-status',
     heroSourceStatus(...input).action.kind === 'sync-health' && noReadinessGate.heroSourceStatus(...input).action.kind === 'view-status');
 
   const strengthFirst = buildFns(clientSrc.replace(
-    'const action: { kind: HeroActionKind; label: string } = readiness === null || healthBad',
-    'const action: { kind: HeroActionKind; label: string } = strengthBad ? { kind: "sync-strength", label: "同步训练记录" } : readiness === null || healthBad',
+    'const action: HeroSourceStatus["action"] = readiness === null || healthStale',
+    'const action: HeroSourceStatus["action"] = strengthStale ? { kind: "sync-strength", label: "同步训练记录" } : readiness === null || healthStale',
   ));
   const both = [snap, rd(), status(row('stale'), row('missing'))];
   check('mutation: letting strength outrank health flips both-bad action to sync-strength',
     heroSourceStatus(...both).action.kind === 'sync-health' && strengthFirst.heroSourceStatus(...both).action.kind === 'sync-strength');
 
-  const noDetail = buildFns(clientSrc.replace('if (row.freshness === "missing") return row.detail ? row.detail : "尚未同步";', 'if (row.freshness === "missing") return "尚未同步";'));
+  const noDetail = buildFns(clientSrc.replace('if (source.freshness === "missing") return source.detail ? source.detail : "尚未同步";', 'if (source.freshness === "missing") return "尚未同步";'));
   const corruptStrength = freshnessFor('strength', '训练记录', null, null, '训练快照损坏，等待重新同步');
   const cInput = [snap, rd(), status(row('fresh'), corruptStrength)];
   check('mutation: dropping the detail passthrough rewrites the corrupt line back to 尚未同步',
     heroSourceStatus(...cInput).strengthLine === '训练快照损坏，等待重新同步' && noDetail.heroSourceStatus(...cInput).strengthLine === '尚未同步');
 
-  const noCoverage = buildFns(clientSrc.replace('snapshot.coverageIncomplete ? "健康数据覆盖不完整', 'false ? "健康数据覆盖不完整'));
+  const noCoverage = buildFns(clientSrc.replace('snapshot.coverageIncomplete\n    ? "覆盖不完整"', 'false\n    ? "覆盖不完整"'));
   const pInput = [{ dataDate: '2026-10-14', coverageIncomplete: true }, rd(), status(row('fresh'), row('fresh'))];
   check('mutation: dropping the coverageIncomplete gate hides the partial-coverage line',
     heroSourceStatus(...pInput).coverageLine !== null && noCoverage.heroSourceStatus(...pInput).coverageLine === null);

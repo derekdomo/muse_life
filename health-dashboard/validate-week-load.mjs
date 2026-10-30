@@ -7,10 +7,11 @@
 // volumeInDisplayUnit / weekLoad) extracted verbatim from
 // health-dashboard/client/src/App.tsx (now backfilled from the published
 // artifact, space-4) over synthetic data only. Pure Node, no deps.
-// It also executes two source mutations (removing the coverageComplete gate
-// and removing the low-readiness red gate) and asserts the mutated function
-// changes the verdict — proving the assertions below are sensitive to those
-// gates rather than vacuous.
+// It also executes three source mutations (removing the coverageComplete gate,
+// removing the low-readiness red gate, and removing the same-day overlap
+// ambiguity gate) and asserts the mutated function changes the verdict —
+// proving the assertions below are sensitive to those gates rather than
+// vacuous.
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -45,19 +46,19 @@ function extractFunction(source, name) {
 check('source: WeekLoad carries structured facts (sufficient/reasons/windows/pcts)',
   clientSrc.includes('sufficient: boolean;') && clientSrc.includes('sessionsChangePct: number | null;')
   && clientSrc.includes('durationChangePct: number | null;') && clientSrc.includes('volumeChangePct: number | null;'));
-check('source: consumer WhoopHero renders weekLoad verdict + detail',
+check('source: consumer WeekLoadBlock renders weekLoad verdict + detail',
   clientSrc.includes('const load = weekLoad(snapshot, readiness);')
   && clientSrc.includes('<div className={`whoop-load whoop-${load.band}`}>')
   && clientSrc.includes('{load.verdict}') && clientSrc.includes('{load.detail}'));
-check('source: WeekLoad carries window ranges + readinessTrend, WhoopHero renders the trend',
-  clientSrc.includes('readinessTrend: ReadinessTrendPoint[];')
-  && clientSrc.includes('currentWindow: { start: string; end: string }')
-  && clientSrc.includes('load.readinessTrend.map')
-  && clientSrc.includes('当前接口仅返回单日恢复参考，历史未提供，其余日期为缺口，不复制今日值'));
+check('source: WeekLoad no longer synthesizes readinessTrend — the 7-day readiness trend is consumed from the server readinessHistory archive and rendered with honest gaps',
+  !extractFunction(clientSrc, 'weekLoad').includes('readinessTrend')
+  && clientSrc.includes('readinessHistory.map((point)')
+  && clientSrc.includes('不复制今日值'));
 check('source: no date-based HK strength dedup remains in weekLoad',
   !extractFunction(clientSrc, 'weekLoad').includes('strengthDates.has(session.date)'));
-check('source: no exerciseMinutes aggregation remains in weekLoad',
-  !extractFunction(clientSrc, 'weekLoad').includes('exerciseMinutes'));
+check('source: exerciseMinutes in weekLoad feeds per-day raw facts (dayFacts) + previous-week absolutes only — the legacy whole-week exerciseMinutes comparison metric is gone',
+  extractFunction(clientSrc, 'weekLoad').includes('dayFacts: WeekDayFact[]')
+  && extractFunction(clientSrc, 'weekLoad').includes('exerciseMinutes: daily?.exerciseMinutes ?? null'));
 
 const FN_NAMES = ['mondayOf', 'shiftDateStr', 'percentBand', 'recoveryScore', 'volumeLabel', 'volumeInDisplayUnit', 'dateLabel', 'weekLoad'];
 function buildWeekLoad(src) {
@@ -88,6 +89,11 @@ function snapshot(over = {}) {
     coverageIncomplete: false,
     historyDaily: daily([...PREV, ...CUR]),
     historyWorkouts: [hk('2026-10-13', 30), hk('2026-10-06', 30)],
+    historySleeps: [
+      { date: '2026-10-12', totalHours: 8 },
+      { date: '2026-10-13', totalHours: 7.5 },
+      { date: '2026-10-13', totalHours: 7 }, // same-date duplicate: latest (.at(-1)) wins
+    ],
     strengthTraining: {
       updatedAt: '2026-10-14T00:00:00.000Z',
       displayUnit: 'lb',
@@ -113,19 +119,20 @@ const readiness = (over = {}) => ({
     && r.sessionsChangePct === 0 && r.durationChangePct === 0 && r.volumeChangePct === 0);
   check('normal tier: sufficient + green verdict',
     r.sufficient === true && r.band === 'green' && r.verdict.includes('状态稳定'));
-  check('detail reconciles both windows + strength volume',
-    r.detail.includes('训练 2 次') && r.detail.includes('上周同期') && r.detail.includes('容量 1,000 lb'));
-  check('visible: both window date ranges shown (current 10/12–10/14, previous 10/5–10/7)',
-    r.detail.includes('本周（10/12–10/14）') && r.detail.includes('上周同期（10/5–10/7）')
-    && r.currentWindow.start === '2026-10-12' && r.currentWindow.end === '2026-10-14'
-    && r.previousWindow.start === '2026-10-05' && r.previousWindow.end === '2026-10-07');
-  check('visible: all three change pcts in detail (sessions/duration/volume) + previous volume with unit',
-    r.detail.includes('次数较上周同期 0%') && r.detail.includes('时长较上周同期 0%')
-    && r.detail.includes('容量较上周同期 0%') && r.detail.includes('上周同期 1 次 · 容量 1,000 lb'));
-  check('readinessTrend: 7 consecutive dates ending at readiness.date, only that date carries the score',
-    r.readinessTrend.length === 7 && r.readinessTrend[0].date === '2026-10-09'
-    && r.readinessTrend[6].date === '2026-10-15' && r.readinessTrend[6].score === 8
-    && r.readinessTrend.slice(0, 6).every((point) => point.score === null));
+  check('detail: compact first-screen line (this week + percentages) + strength volume',
+    r.detail.includes('本周 2 次') && r.detail.includes('较上周') && r.detail.includes('容量 1,000 lb'));
+  check('visible: window ranges moved to the expandable previousDetail; no structured window fields on the result',
+    !('currentWindow' in r) && !('previousWindow' in r)
+    && r.previousDetail.includes('上周同期（10/5–10/7）') && !r.detail.includes('上周同期（'));
+  check('visible: all three change pcts in detail (sessions/duration/volume) + previous volume with unit in previousDetail',
+    r.detail.includes('次数 0%') && r.detail.includes('时长 0%')
+    && r.detail.includes('容量 0%') && r.previousDetail.includes('容量 1,000 lb'));
+  check('dayFacts: 7 consecutive dates ending at dataDate — per-day exerciseMinutes from the daily row, sleepHours from the latest same-date sleep row, missing days stay null (never 0, never copied)',
+    r.dayFacts.length === 7 && r.dayFacts[0].date === '2026-10-08' && r.dayFacts[6].date === '2026-10-14'
+    && r.dayFacts.filter((f) => ['2026-10-12', '2026-10-13', '2026-10-14'].includes(f.date)).every((f) => f.exerciseMinutes === 30)
+    && r.dayFacts.filter((f) => ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11'].includes(f.date)).every((f) => f.exerciseMinutes === null && f.steps === null && f.sessions === 0 && f.sleepHours === null)
+    && r.dayFacts.find((f) => f.date === '2026-10-12').sleepHours === 8
+    && r.dayFacts.find((f) => f.date === '2026-10-13').sleepHours === 7);
 }
 
 // Cross-source ambiguity (PM 2026-10-16 05:45): an HK strength session on
@@ -144,13 +151,15 @@ const readiness = (over = {}) => ({
   const r = weekLoad(snap, readiness());
   check('ambiguity: same-day HK strength + strength record -> insufficient, reason names the date',
     r.sufficient === false && r.band === 'slate'
-    && r.reasons.some((x) => x.includes('重复归属未确认') && x.includes('2026-10-12'))
+    && r.reasons.some((x) => x.includes('归属未确认') && x.includes('10/12'))
     && r.sessionsChangePct === null && r.durationChangePct === null && r.volumeChangePct === null);
   check('ambiguity: both sources kept (strength 2 + HK 2 = 4 sessions, duration 175, volume 1500)',
     r.current.strengthSessions === 2 && r.current.healthKitSessions === 2
     && r.current.sessions === 4 && r.current.durationMinutes === 175 && r.current.strengthVolume === 1500);
   check('ambiguity: detail keeps both-source facts and the reason',
-    r.detail.includes('HealthKit 2 次') && r.detail.includes('重复归属未确认'));
+    r.detail.includes('本周已知 4 次') && r.detail.includes('力量 2 次')
+    && r.detail.includes('容量 1,500 lb') && r.detail.includes('未比较')
+    && r.detail.includes('归属未确认'));
 }
 // PM's exact synthetic case: strength record 60m on a day, HK has one
 // plausibly-duplicate 60m strength session AND one independent 90m
@@ -167,7 +176,7 @@ const readiness = (over = {}) => ({
   const r = weekLoad(snap, readiness());
   check('ambiguity (PM case): independent HK strength session is not silently deleted',
     r.sufficient === false && r.current.sessions === 3 && r.current.durationMinutes === 210
-    && r.reasons.some((x) => x.includes('重复归属未确认')));
+    && r.reasons.some((x) => x.includes('归属未确认')));
   const moved = snapshot({
     historyWorkouts: [hk('2026-10-13', 60, 'Traditional Strength Training'), hk('2026-10-14', 90, 'Traditional Strength Training'), hk('2026-10-06', 30)],
     strengthTraining: {
@@ -185,12 +194,12 @@ const readiness = (over = {}) => ({
   check('no overlap at all: sufficient, HK strength session counted (sessions 2, duration 150)',
     r3.sufficient === true && r3.current.sessions === 2 && r3.current.durationMinutes === 150);
 }
-// readinessTrend without readiness: dated gaps only, ending dataDate + 1.
+// dayFacts are readiness-independent: dated facts only, ending dataDate.
 {
   const r = weekLoad(snapshot(), null);
-  check('readinessTrend: null readiness -> 7 dated gaps ending 2026-10-15, no copied score',
-    r.readinessTrend.length === 7 && r.readinessTrend[6].date === '2026-10-15'
-    && r.readinessTrend.every((point) => point.score === null));
+  check('dayFacts: null readiness -> same 7 dated facts ending 2026-10-14, no fabrication',
+    r.dayFacts.length === 7 && r.dayFacts[6].date === '2026-10-14'
+    && r.dayFacts.every((f) => f.exerciseMinutes === null || typeof f.exerciseMinutes === 'number'));
 }
 
 // Unit conversion per session into displayUnit.
@@ -222,9 +231,9 @@ const readiness = (over = {}) => ({
     },
   });
   const r = weekLoad(snap, readiness());
-  check('previous zero: sufficient, pcts null, detail says 不算百分比',
+  check('previous zero: sufficient, pcts null, detail says 无基数 (no invented percentage)',
     r.sufficient === true && r.sessionsChangePct === null && r.durationChangePct === null
-    && r.volumeChangePct === null && r.detail.includes('不算百分比'));
+    && r.volumeChangePct === null && r.detail.includes('无基数'));
 }
 
 // ------------------------------------------------------------ three tiers
@@ -261,7 +270,7 @@ function expectInsufficient(name, snap, reasonPart) {
     && r.durationChangePct === null && r.volumeChangePct === null
     && r.reasons.some((x) => x.includes(reasonPart)), r.reasons.join('; '));
 }
-expectInsufficient('coverageIncomplete flag', snapshot({ coverageIncomplete: true }), '还没同步完');
+expectInsufficient('coverageIncomplete flag', snapshot({ coverageIncomplete: true }), '无法确认本周对比');
 expectInsufficient('missing one daily row in previous window',
   snapshot({ historyDaily: daily([...PREV.slice(1), ...CUR]) }), '每日记录缺 2026-10-05');
 expectInsufficient('duplicated daily row',
@@ -308,7 +317,7 @@ expectInsufficient('strength session without duration',
   check('mutation: removing low-readiness gate flips score 1.5 case from red to green',
     weekLoad(snapshot(), readiness({ score: 1.5 })).band === 'red'
     && noLowScore(snapshot(), readiness({ score: 1.5 })).band === 'green');
-  const noAmbiguity = buildWeekLoad(clientSrc.replace('addReason(`重复归属未确认', 'void(`重复归属未确认'));
+  const noAmbiguity = buildWeekLoad(clientSrc.replace('addReason(`${dateLabel(date)} 两处力量记录归属未确认`', 'void(`两处力量记录归属未确认`'));
   const ambSnap = snapshot({
     historyWorkouts: [hk('2026-10-12', 45, 'Traditional Strength Training'), hk('2026-10-06', 30)],
   });

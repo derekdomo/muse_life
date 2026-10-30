@@ -1,16 +1,25 @@
-// H-UI-001 (rework) validation.
-// PM 2026-10-15 23:38: the Whoop home showed 50 for missing sleep (the
-// server radar defaults the sleep dimension to 5 when both sleep
-// components are missing) and the 0-21 strain score counted missing
-// items as 0 and could splice a different date's daily row with
-// dataDate's steps. This script runs the REAL production functions
+// H-UI-001 (rework) validation, synced to the TRIMP era.
+// User decision 2026-10-17 ("按学术来"): the daily load score is
+// Banister TRIMP (1991) — duration × ΔHR × 0.64·e^(1.92·ΔHR) summed
+// over the day's sessions, shown on a 0–21 saturating map banded by
+// WHOOP's published ranges (轻 0–9 / 中 10–13 / 高 14–17 / 全力 18–21).
+// The PM 2026-10-15 neutral downgrade ("负荷评分公式未经审定") is
+// superseded: strainScore now returns a computable score when the
+// day's sessions carry duration + average HR, resting HR and HRmax
+// are known, and stays honest (computable: false, missingReason named)
+// when any input is missing. Sessions are filtered to dataDate only
+// (no cross-date splice); a session missing duration or average HR is
+// skipped and named in the detail, never scored as zero load.
+// This script runs the REAL production functions
 // (actualSleepHours / numberLabel / percentBand / hasSleepSession /
-// sleepScore / strainScore) extracted verbatim from
+// sleepScore / strainScore, plus dateLabel used by strainScore's
+// honesty notes) extracted verbatim from
 // health-dashboard/client/src/App.tsx over synthetic data only.
 // Pure Node, no deps. It also executes three source mutations
-// (removing the sleep-session gate, restoring the cross-date strain
-// fallback, removing the strain missing-item gate) and asserts the
-// mutated functions change the outcome — proving sensitivity.
+// (removing the sleep-session gate, restoring a cross-date session
+// fallback, restoring a scored return on the missing-input path) and
+// asserts the mutated functions change the outcome — proving
+// sensitivity.
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -41,18 +50,21 @@ function extractFunction(source, name) {
   return source.slice(idx, bodyEnd + 1);
 }
 
-check('source: WhoopHero driver hides missing sleep (hasSleepSession gate)',
-  clientSrc.includes('hasSleepSession(snapshot) ? `${sleepHours.toFixed(1)} h` : "—"'));
-check('source: strain note states unreviewed-formula downgrade',
-  clientSrc.includes('负荷评分公式未经审定'));
-check('source: readiness trend note states single-day interface, no stored history claim',
-  clientSrc.includes('当前接口仅返回单日恢复参考，历史未提供'));
-check('source: strain ring has no /21 suffix',
-  clientSrc.includes('score={strain} suffix=""'));
-check('source: no 0-21 strain formula or band labels remain',
-  !clientSrc.includes('负荷较轻') && !clientSrc.includes('负荷过高') && !clientSrc.includes('/ 21'));
+check('source: hero sleep ring hides missing sleep (hasSleepSession gate in sleepScore)',
+  clientSrc.includes('<ScoreRing label="睡眠" score={sleep} suffix="%"')
+  && extractFunction(clientSrc, 'sleepScore').includes('if (!hasSleepSession(snapshot))'));
+check('source: strain note states the Banister TRIMP caliber, no unreviewed-formula downgrade',
+  clientSrc.includes('负荷口径 · Banister TRIMP') && clientSrc.includes('0–21 分为饱和映射 21×(1 − e^(−TRIMP/150))')
+  && !clientSrc.includes('负荷评分公式未经审定'));
+check('source: readiness trend note states archive-based history, never copies today\'s value',
+  clientSrc.includes('readiness 近 7 天：有存档的日期显示当日分数') && clientSrc.includes('不复制今日值'));
+check('source: strain ring carries the /21 suffix when computable',
+  clientSrc.includes('score={strain} suffix="/ 21"'));
+check('source: 0-21 strain formula and band labels are the TRIMP-era wording (轻/中/高/全力)',
+  clientSrc.includes('轻负荷') && clientSrc.includes('中等负荷') && clientSrc.includes('高负荷') && clientSrc.includes('全力以赴')
+  && clientSrc.includes('/ 21'));
 
-const FN_NAMES = ['numberLabel', 'actualSleepHours', 'percentBand', 'hasSleepSession', 'sleepScore', 'strainScore'];
+const FN_NAMES = ['numberLabel', 'actualSleepHours', 'percentBand', 'hasSleepSession', 'sleepScore', 'strainScore', 'dateLabel'];
 function buildFns(src) {
   const code = FN_NAMES.map((n) => extractFunction(src, n)).join('\n');
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { hasSleepSession, sleepScore, strainScore };`)();
@@ -75,8 +87,10 @@ function snapshot(over = {}) {
     dataDate: '2026-10-14',
     sleep: sleepPresent,
     historySleeps: [],
-    historyDaily: [{ date: '2026-10-14', exerciseMinutes: 60, activeKcal: 300 }],
+    historyDaily: [{ date: '2026-10-14', exerciseMinutes: 60, activeKcal: 300, restingHr: 60, hrMax: 190 }],
+    historyWorkouts: [],
     steps: { value: 6000 },
+    restingHr: { value: 60 },
     ...over,
   };
 }
@@ -128,37 +142,64 @@ function readiness(over = {}) {
     r3.pct === null && r3.detail.includes('昨晚睡眠未记录'));
 }
 
-// ------------------------------------------------------------ strainScore
+// ------------------------------------------------------------ strainScore (Banister TRIMP)
 {
-  const r = strainScore(snapshot({ historyDaily: [{ date: '2026-10-13', exerciseMinutes: 60, activeKcal: 300 }] }));
-  check('strain: no row on dataDate -> neutral 评分未确认, no cross-date splice',
-    r.pct === null && r.display === '—' && r.band === 'slate' && r.bandLabel === '评分未确认' && r.detail.includes('活动记录缺失'));
+  // Only dataDate's own sessions count: a session on another day is
+  // never spliced in, and missing inputs are never treated as zero
+  // load — the score is honest about what it could score.
+  const r = strainScore(snapshot({ historyWorkouts: [{ date: '2026-10-13', durationMinutes: 30, averageHr: 150 }] }));
+  check('strain: session on another day is not spliced in (dataDate filter)',
+    r.computable === true && r.scoredSessions === 0 && r.totalSessions === 0 && r.trimp === 0
+    && r.detail.includes('TRIMP 0') && r.detail.includes('0 次运动'));
 }
 {
-  const r = strainScore(snapshot({ historyDaily: [{ date: '2026-10-14', exerciseMinutes: null, activeKcal: 300 }] }));
-  check('strain: exercise null -> neutral, detail names 运动时长缺失 and keeps known facts',
-    r.pct === null && r.bandLabel === '评分未确认' && r.detail.includes('运动时长缺失') && r.detail.includes('活动 300 kcal'));
-  const r2 = strainScore(snapshot({ historyDaily: [{ date: '2026-10-14', exerciseMinutes: 30, activeKcal: null }] }));
-  check('strain: kcal null -> neutral naming 活动能量缺失',
-    r2.pct === null && r2.bandLabel === '评分未确认' && r2.detail.includes('活动能量缺失'));
-  const r3 = strainScore(snapshot({ steps: { value: null } }));
-  check('strain: steps null -> neutral naming 步数缺失',
-    r3.pct === null && r3.bandLabel === '评分未确认' && r3.detail.includes('步数缺失'));
+  // 30 min at 150 bpm, resting 60, HRmax 190:
+  // ΔHR = 90/130, TRIMP = 30 × ΔHR × 0.64·e^(1.92·ΔHR) ≈ 50.2,
+  // value = 21×(1−e^(−TRIMP/150)) ≈ 6.0 → 轻负荷. The zero-duration
+  // session is scored (a real zero is a fact, not missing data).
+  const r = strainScore(snapshot({
+    historyWorkouts: [
+      { date: '2026-10-14', durationMinutes: 30, averageHr: 150 },
+      { date: '2026-10-14', durationMinutes: 0, averageHr: 150 },
+    ],
+  }));
+  check('strain: complete session data computes a TRIMP score with /21 banding, real zeros scored',
+    r.computable === true && r.missingReason === null
+    && r.display === '6.0' && r.bandLabel === '轻负荷' && r.band === 'blue' && r.pct === 29
+    && r.scoredSessions === 2 && r.totalSessions === 2
+    && r.detail.includes('TRIMP 50') && r.detail.includes('2 次运动'));
+  const mixed = strainScore(snapshot({
+    historyWorkouts: [
+      { date: '2026-10-14', durationMinutes: 30, averageHr: 150 },
+      { date: '2026-10-14', durationMinutes: null, averageHr: 150 },
+    ],
+  }));
+  check('strain: session missing duration/avgHr is skipped and named in the detail, never scored as zero',
+    mixed.computable === true && mixed.scoredSessions === 1 && mixed.totalSessions === 2
+    && mixed.detail.includes('TRIMP 50 · 1 次运动') && mixed.detail.includes('另 1 次缺心率/时长未计入'));
 }
 {
   const r = strainScore(snapshot({
-    historyDaily: [{ date: '2026-10-14', exerciseMinutes: 0, activeKcal: 0 }],
-    steps: { value: 0 },
+    historyWorkouts: [{ date: '2026-10-14', durationMinutes: null, averageHr: 150 }],
   }));
-  check('strain: all three truly zero -> still neutral (no 0.0 score), facts show real zeros',
-    r.pct === null && r.display === '—' && r.band === 'slate' && r.bandLabel === '评分未确认'
-    && r.detail.includes('运动 0 分钟') && r.detail.includes('活动 0 kcal'));
+  check('strain: sessions without scorable HR data -> not computable, names the missing input',
+    r.computable === false && r.pct === null && r.display === '—' && r.band === 'slate' && r.bandLabel === '数据不足'
+    && r.detail.includes('缺平均心率或时长') && r.missingReason === '运动缺心率或时长');
 }
 {
-  const r = strainScore(snapshot());
-  check('strain: complete data 60min/300kcal/6000 steps -> still neutral, facts preserved, no numeric score',
-    r.pct === null && r.display === '—' && r.bandLabel === '评分未确认'
-    && r.detail.includes('运动 60 分钟') && r.detail.includes('活动 300 kcal'));
+  const r = strainScore(snapshot({
+    historyDaily: [{ date: '2026-10-14', exerciseMinutes: 60, activeKcal: 300, restingHr: null, hrMax: 190 }],
+    restingHr: { value: null },
+  }));
+  check('strain: resting HR missing -> not computable, names 静息心率缺失',
+    r.computable === false && r.pct === null && r.display === '—' && r.bandLabel === '数据不足'
+    && r.detail.includes('静息心率缺失') && r.missingReason === '静息心率缺失');
+  const r2 = strainScore(snapshot({
+    historyDaily: [{ date: '2026-10-14', exerciseMinutes: 60, activeKcal: 300, restingHr: 60 }],
+  }));
+  check('strain: HRmax missing -> 待同步, never fabricates a max',
+    r2.computable === false && r2.pct === null && r2.bandLabel === '待同步'
+    && r2.detail.includes('最高心率未同步') && r2.missingReason === '最高心率未同步');
 }
 
 // ------------------------------------------------------------ mutation sensitivity
@@ -170,19 +211,23 @@ function readiness(over = {}) {
     sleepScore(snap, rd).pct === null && noSessionGate.sleepScore(snap, rd).pct === 80);
 
   const withFallback = buildFns(clientSrc.replace(
-    '.find((daily) => daily.date === snapshot.dataDate)',
-    '.find((daily) => daily.date === snapshot.dataDate) ?? snapshot.historyDaily[snapshot.historyDaily.length - 1]',
+    'snapshot.historyWorkouts.filter((workout) => workout.date === date)',
+    'snapshot.historyWorkouts',
   ));
-  const otherDay = snapshot({ historyDaily: [{ date: '2026-10-13', exerciseMinutes: 60, activeKcal: 300 }] });
-  check('mutation: restoring cross-date fallback flips no-row detail from 缺失 to spliced facts',
-    strainScore(otherDay).detail.includes('活动记录缺失') && withFallback.strainScore(otherDay).detail.includes('运动 60 分钟'));
+  const otherDay = snapshot({ historyWorkouts: [{ date: '2026-10-13', durationMinutes: 30, averageHr: 150 }] });
+  check('mutation: restoring a cross-date session fallback scores the other day\'s session',
+    strainScore(otherDay).scoredSessions === 0 && withFallback.strainScore(otherDay).scoredSessions === 1);
 
   const scored = buildFns(clientSrc.replace(
-    'return { ...neutral, detail: missing ? `${present} · ${missing}` : present };',
-    'return { pct: 50, display: "10.5", band: "green", bandLabel: "负荷适中", detail: present };',
+    'pct: null, display: "—", band: "slate", bandLabel, detail, missingReason,',
+    'pct: 50, display: "10.5", band: "green", bandLabel: "负荷适中", detail, missingReason,',
   ));
-  check('mutation: restoring a scored strain return flips complete case to a numeric score',
-    strainScore(snapshot()).pct === null && scored.strainScore(snapshot()).pct === 50);
+  const restMissing = snapshot({
+    historyDaily: [{ date: '2026-10-14', exerciseMinutes: 60, activeKcal: 300, restingHr: null, hrMax: 190 }],
+    restingHr: { value: null },
+  });
+  check('mutation: restoring a scored strain return flips the missing-resting case to a numeric score',
+    strainScore(restMissing).pct === null && scored.strainScore(restMissing).pct === 50);
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

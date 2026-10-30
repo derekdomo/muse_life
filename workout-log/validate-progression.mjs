@@ -108,7 +108,9 @@ function buildFrom(src, fnNames, constNames) {
 const server = buildFrom(serverSrc, ['progressionDecision', 'convertWeight', 'selectPreviousSetsByExercise', 'selectComparableHistory'], ['LB_TO_KG']);
 const client = buildFrom(clientSrc, ['progressionDecision', 'convertWeightValue'], ['LB_TO_KG']);
 const clientReview = buildFrom(clientSrc,
-  ['progressionDecision', 'convertWeightValue', 'groupSets', 'targetRange', 'recommendationFromCandidate', 'reviewRecommendation'], ['LB_TO_KG']);
+  // W2.3: reviewRecommendation now returns { text, basis } and calls the
+  // new recommendationBasis (which uses formatDate) — extract both.
+  ['progressionDecision', 'convertWeightValue', 'groupSets', 'targetRange', 'recommendationFromCandidate', 'formatDate', 'recommendationBasis', 'reviewRecommendation'], ['LB_TO_KG']);
 
 // --- source wiring ---
 check('source: server prefill calls progressionDecision', serverSrc.includes('const decision = progressionDecision({'));
@@ -131,8 +133,11 @@ check('source: server history window is the routine\'s 20 most recent completed 
   /loadRoutineRecentCompleted[\s\S]*?\.limit\(20\)/.test(serverSrc) && serverSrc.includes('recentCompleted.slice(0, 20)'));
 check('source: client history window matches (getDashboard recent_limit = 20)',
   clientSrc.includes('api.getDashboard({ recent_limit: 20 })'));
+// W4.3-D1 backfill: the plan templates replaced the ROUTINES constant,
+// so the prefill-side call now passes templates[routine] keys; both ends
+// still derive from the single selectComparableHistory raw selection.
 check('source: single raw selection feeds both ends (W1-CONSISTENCY-001 cross-window)',
-  serverSrc.includes('selectComparableHistory(recentCompleted, ROUTINES[routine].map((exercise) => exercise.key))')
+  serverSrc.includes('selectComparableHistory(recentCompleted, templates[routine].map((exercise) => exercise.key))')
   && serverSrc.includes('selectComparableHistory(recentCompleted, exerciseKeys)'));
 check('source: getDashboard ships comparable_history from that selection',
   serverSrc.includes('comparable_history: await loadComparableHistory(ctx)')
@@ -224,7 +229,7 @@ const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
   const clientText = clientReview.reviewRecommendation(benchReview, [
     clientWorkout('lb', []),
     clientWorkout('lb', olderBench),
-  ]);
+  ]).text;
   check('W1-CONSISTENCY: client recommendation agrees (increase to 105lb)',
     clientText.includes('下次增至 105lb'), clientText);
 }
@@ -238,7 +243,7 @@ const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
   check('W1-CONSISTENCY: extra uncompleted set keeps planned at the recorded count (hold, not increase)',
     history.length === 5 && decision.action === 'hold' && decision.suggestedWeight === 100,
     JSON.stringify(decision));
-  const clientText = clientReview.reviewRecommendation(benchReview, [clientWorkout('lb', sets)]);
+  const clientText = clientReview.reviewRecommendation(benchReview, [clientWorkout('lb', sets)]).text;
   check('W1-CONSISTENCY: client agrees on the extra-uncompleted-set case (hold 100lb)',
     clientText.includes('少完成 1 组，下次保持 100lb'), clientText);
 }
@@ -253,7 +258,7 @@ const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
     converted === true && history.every((s) => s.weight === 99));
   check('W1-CONSISTENCY: server verdict on the converted record is increase to 104',
     decision.action === 'increase' && decision.suggestedWeight === 104, JSON.stringify(decision));
-  const clientText = clientReview.reviewRecommendation(benchReview, [clientWorkout('kg', kgSets)]);
+  const clientText = clientReview.reviewRecommendation(benchReview, [clientWorkout('kg', kgSets)]).text;
   check('W1-CONSISTENCY: client agrees on the cross-unit case (increase to 104lb)',
     clientText.includes('下次增至 104lb'), clientText);
 }
@@ -268,7 +273,7 @@ const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
   check('W1-CONSISTENCY: the 21st workout is outside the server window (no history adopted)',
     history.length === 0 && decision.action === 'none');
   const clientText = clientReview.reviewRecommendation(benchReview,
-    Array.from({ length: 20 }, () => clientWorkout('lb', [])));
+    Array.from({ length: 20 }, () => clientWorkout('lb', []))).text;
   check('W1-CONSISTENCY: client agrees beyond the window (no comparable record)',
     clientText.includes('暂不做重量建议'), clientText);
 }
@@ -335,12 +340,14 @@ const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
       })),
     })),
   ];
-  const legacyText = clientReview.reviewRecommendation(benchReview, globalRecent);
+  const legacyText = clientReview.reviewRecommendation(benchReview, globalRecent).text;
   check('W1-CONSISTENCY cross-window: legacy global scan alone still finds no candidate (the original conflict)',
     legacyText.includes('暂不做重量建议'), legacyText);
-  const fixedText = clientReview.reviewRecommendation(benchReview, globalRecent, comparableHistory);
+  const fixedResult = clientReview.reviewRecommendation(benchReview, globalRecent, comparableHistory);
   check('W1-CONSISTENCY cross-window: client prefers comparable_history and agrees with the server (increase to 105lb)',
-    fixedText.includes('下次增至 105lb'), fixedText);
+    fixedResult.text.includes('下次增至 105lb'), fixedResult.text);
+  check('W2.3: the client result carries the source basis line',
+    fixedResult.basis === '依据：lb 记录', String(fixedResult.basis));
 
   // An exercise with NO comparable_history entry still falls back to
   // the recent_workouts scan (older-server compatibility path intact).
@@ -353,7 +360,7 @@ const benchReview = { key: 'barbell-bench', name: '杠铃卧推', unit: 'lb' };
     })),
   };
   const benchOnlyHistory = comparableHistory.filter((entry) => entry.exercise_key === 'barbell-bench');
-  const fallbackText = clientReview.reviewRecommendation(ohpReview, [ohpWorkout], benchOnlyHistory);
+  const fallbackText = clientReview.reviewRecommendation(ohpReview, [ohpWorkout], benchOnlyHistory).text;
   check('W1-CONSISTENCY cross-window: entry-less exercise falls back to the recent_workouts scan (increase to 65lb)',
     fallbackText.includes('下次增至 65lb'), fallbackText);
 }

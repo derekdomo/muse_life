@@ -4,6 +4,9 @@
 // client/src/App.tsx over synthetic snapshots only, plus source-level
 // wiring assertions for the status bar / hidden card body / focus
 // attributes, and theme.css presence checks. Pure Node, no deps.
+// (The former exerciseHeadInfo pure function was inlined into the
+// headInfoByKey construction loop by the W4.3-D1 source backfill;
+// it is now extracted from that loop and wrapped as buildHeadInfo.)
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 
@@ -39,12 +42,28 @@ function loadFunction(name, mutate) {
   const js = stripTypeScriptTypes(text, { mode: "transform" });
   return new Function(`${js}; return ${name};`)();
 }
+// exerciseHeadInfo was inlined into the headInfoByKey construction
+// loop (W4.3-D1 backfill): extract that loop verbatim and wrap it as a
+// pure (setSnapshots, exerciseGroups) -> Record<key, headInfo> function.
+function loadHeadInfoBuilder() {
+  const anchor = "const headInfoByKey: Record<string, ExerciseHeadInfo> = {};";
+  const anchorIdx = clientSrc.indexOf(anchor);
+  if (anchorIdx < 0) throw new Error("headInfoByKey construction not found");
+  const forIdx = clientSrc.indexOf("for (const group of exerciseGroups)", anchorIdx);
+  if (forIdx < 0) throw new Error("headInfoByKey loop not found");
+  const bodyOpen = clientSrc.indexOf("{", forIdx);
+  const bodyEnd = matchDelim(clientSrc, bodyOpen, "{", "}");
+  const loopText = clientSrc.slice(anchorIdx, bodyEnd + 1);
+  const text = "function buildHeadInfo(setSnapshots, exerciseGroups) { " + loopText + " return headInfoByKey; }";
+  const js = stripTypeScriptTypes(text, { mode: "transform" });
+  return new Function(`${js}; return buildHeadInfo;`)();
+}
 
 const aggregateSaveStates = loadFunction("aggregateSaveStates");
 const resolveCurrentExerciseKey = loadFunction("resolveCurrentExerciseKey");
 const buildFocusOrder = loadFunction("buildFocusOrder");
 const nextFocusTarget = loadFunction("nextFocusTarget");
-const exerciseHeadInfo = loadFunction("exerciseHeadInfo");
+const buildHeadInfo = loadHeadInfoBuilder();
 
 const snap = (status, blocked = false, exerciseKey = "bench", id = 1) => ({ id, exerciseKey, status, blocked });
 const clean = { pendingAdds: 0, finishing: false };
@@ -103,27 +122,36 @@ check("focus: last field -> finish", t?.kind === "finish");
 t = nextFocusTarget(order, { exerciseKey: "nope", setId: 99, field: "weight" });
 check("focus: unknown field -> null", t === null);
 
-// --- exerciseHeadInfo ---
-let h = exerciseHeadInfo(3, [snap("error")]);
-check("head: error text + doneCount passthrough", h.doneCount === 3 && h.statusText === "有 1 组保存失败" && h.statusKind === "error");
-h = exerciseHeadInfo(1, [snap("saved", true)]);
+// --- headInfoByKey (the inlined exerciseHeadInfo) ---
+// doneCount is now derived from the snapshots' own completed flags,
+// and entries are keyed per exercise group.
+const cs = (s, completed) => ({ ...s, completed });
+const G = [{ key: "bench" }];
+const head = (snaps) => buildHeadInfo(snaps, G).bench;
+let h = head([cs(snap("error"), true), cs(snap("saved"), true), cs(snap("saved"), true)]);
+check("head: error text + doneCount derived", h.doneCount === 3 && h.statusText === "有 1 组保存失败" && h.statusKind === "error");
+h = head([cs(snap("saved", true), true)]);
 check("head: single blocked -> 需补次数", h.statusText === "需补次数" && h.statusKind === "blocked");
-h = exerciseHeadInfo(0, [snap("saved", true, "bench", 1), snap("saved", true, "bench", 2)]);
+h = head([cs(snap("saved", true, "bench", 1), false), cs(snap("saved", true, "bench", 2), false)]);
 check("head: two blocked -> 2 组需补次数", h.statusText === "2 组需补次数");
-h = exerciseHeadInfo(2, [snap("dirty")]);
+h = head([cs(snap("dirty"), true), cs(snap("dirty"), true)]);
 check("head: dirty -> 有未保存修改", h.statusText === "有未保存修改" && h.statusKind === "dirty");
-h = exerciseHeadInfo(2, [snap("saving")]);
+h = head([cs(snap("saving"), true), cs(snap("saving"), true)]);
 check("head: saving -> 保存中…", h.statusText === "保存中…" && h.statusKind === "saving");
-h = exerciseHeadInfo(2, [snap("saved")]);
+h = head([cs(snap("saved"), true), cs(snap("saved"), true)]);
 check("head: clean -> no status text", h.statusText === null && h.statusKind === null);
+const multi = buildHeadInfo(
+  [cs(snap("error", false, "bench", 1), true), cs(snap("saved", false, "row", 2), true)],
+  [{ key: "bench" }, { key: "row" }]);
+check("head: entries keyed per exercise group", multi.bench.statusKind === "error" && multi.row.statusKind === null && multi.row.doneCount === 1);
 
 // --- wiring (real source) ---
-check("wiring: status bar with separate completion count", clientSrc.includes('className="workout-status-bar"') && clientSrc.includes("已完成 {doneCount} / {total} 组"));
-check("wiring: 查看 button only rendered for error/blocked kinds", clientSrc.includes('aggregate.kind === "error" || aggregate.kind === "blocked"'));
+check("wiring: status bar with separate completion count", clientSrc.includes('workout-status-bar') && clientSrc.includes("已完成 {doneCount} / {total} 组"));
+check("wiring: 查看 button only rendered for error/blocked kinds", clientSrc.includes('saveAggregate.kind === "error" || saveAggregate.kind === "blocked"'));
 check("wiring: card body hidden, rows stay mounted", clientSrc.includes('className="exercise-body" hidden={!expanded}'));
 check("wiring: focus attributes + finish ref", clientSrc.includes("data-focus-set={set.id}") && clientSrc.includes("finishButtonRef"));
 check("wiring: cancel finish restores pre-finish focus", clientSrc.includes("preFinishFocusRef") && clientSrc.includes("function cancelFinish()") && clientSrc.includes("onClick={cancelFinish}"));
-check("wiring: timer anchors to resolved current exercise", clientSrc.includes("resolveCurrentExerciseKey(") && clientSrc.includes("exercise.key === currentExercise.key"));
+check("wiring: timer anchors to resolved current exercise", clientSrc.includes("resolveCurrentExerciseKey(") && clientSrc.includes("exercise.key === currentKey"));
 check("css: D1 selectors present", themeCss.includes(".workout-status-bar") && themeCss.includes(".save-aggregate") && themeCss.includes(".exercise-body[hidden]") && themeCss.includes(".exercise-head-status"));
 
 // --- mutation sensitivity: break the error filter, error case must flip ---

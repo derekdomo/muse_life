@@ -55,10 +55,16 @@ check('source: empty state for the all-workouts list',
   clientSrc.includes('近30天没有 HealthKit 运动记录。'));
 check('source: HistoryView consumes allWorkoutsList(snapshot.historyWorkouts)',
   clientSrc.includes('allWorkoutsList(snapshot.historyWorkouts)'));
+// H-SYNC-DIVERGE-001 (2026-10-18 回灌)：源码自 2026-10-16 起演进——
+// 距离渲染现为 null→「—」/0→「0 米」显式三目链（两处 record-row 共用）。
 check('source: distance null renders —, zero renders 0 米',
-  clientSrc.includes('workout.distanceMeters === null ? "—" : `${numberLabel(workout.distanceMeters)} 米`'));
-check('source: type shown verbatim from the record',
-  clientSrc.includes('<span>{workout.type}</span>'));
+  clientSrc.includes('workout.distanceMeters === null ? "—" : workout.distanceMeters === 0 ? "0 米" : `${numberLabel(workout.distanceMeters)} 米`'));
+// H-SYNC-DIVERGE-001 (2026-10-18 回灌)：HealthKit 原文英文代码已改走
+// workoutTypeLabel 中文标签映射（a45ebce，线上已批准行为）；未知类型
+// 保持原文（不猜标签）。断言新接线 + verbatim 回退，而非旧的原文直显。
+check('source: type rendered via workoutTypeLabel (Chinese labels, verbatim fallback)',
+  clientSrc.includes('{workoutTypeLabel(workout.type)}')
+  && clientSrc.includes('WORKOUT_TYPE_LABELS[type.toLowerCase()] ?? type'));
 
 function buildFn(src) {
   const code = extractFunction(src, 'allWorkoutsList');
@@ -107,14 +113,16 @@ allWorkoutsList(mixed);
 check('input array is not mutated', mixed.map((w) => w.id).join(',') === before);
 
 // --- mutation sensitivity (executed, not just described) ---
-const ascSrc = clientSrc.replace('a.date < b.date ? 1 : -1', 'a.date < b.date ? -1 : 1');
+// 源码 allWorkoutsList 现为 [...historyWorkouts].sort + localeCompare（两轮
+// 回灌后的形态）。变异逐字对准新模式。
+const ascSrc = clientSrc.replaceAll('b.date.localeCompare(a.date)', 'a.date.localeCompare(b.date)');
 check('mutation setup: ascending-sort variant differs from source', ascSrc !== clientSrc);
 const ascOut = buildFn(ascSrc)(mixed);
 check('mutation: ascending sort flips the produced order',
   ascOut.map((w) => w.date).join(',') === '2026-10-10,2026-10-11,2026-10-12,2026-10-12');
 
-const swimOnlySrc = clientSrc.replace('return historyWorkouts.slice().sort(',
-  'return historyWorkouts.filter((w) => w.type.toLowerCase().includes("swim")).slice().sort(');
+const swimOnlySrc = clientSrc.replace('return [...historyWorkouts].sort(',
+  'return [...historyWorkouts].filter((w) => w.type.toLowerCase().includes("swim")).sort(');
 check('mutation setup: swim-only variant differs from source', swimOnlySrc !== clientSrc);
 const swimOnlyOut = buildFn(swimOnlySrc)(mixed);
 check('mutation: swim-only filter drops non-swim records',

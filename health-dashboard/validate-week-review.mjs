@@ -88,11 +88,23 @@ check('source: rolling-window vs natural-week note is present verbatim',
   clientSrc.includes('健康复盘用滚动完整 7 天，与训练记录的自然周窗口不同，不直接同窗比较。'));
 check('source: the cannot-judge line is present verbatim',
   clientSrc.includes('无法判断：现有数据未达到生成洞察的门槛。'));
-check('source: panel is rendered on the today page inside the hero',
-  clientSrc.includes('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />'));
-check('source: panel renders after the load verdict block and the seven-day facts strip',
-  clientSrc.indexOf('whoop-load') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />')
-  && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') < clientSrc.indexOf('<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={onViewTraining} />'));
+// H-VALID-MAINT-001 (2026-10-24): the two placement checks below
+// asserted the pre-B1B today-page position. Owner ruling
+// LIFE-DESIGN-001-B1B ③ moved the full panel to the history page;
+// they are replaced by equivalent assertions on the NEW structure
+// (panel in HistoryView, absent from TodayView), not deleted.
+const todaySliceStart = clientSrc.indexOf('function TodayView(');
+const historySliceStart = clientSrc.indexOf('function HistoryView(');
+const todaySlice = clientSrc.slice(todaySliceStart, clientSrc.indexOf('function RecentWorkouts(', todaySliceStart));
+const historySlice = clientSrc.slice(historySliceStart, clientSrc.indexOf('const GAME_CATEGORY_META', historySliceStart));
+const historyPanelJsx = '<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed ?? false} onViewTraining={onViewTraining} />';
+check('source: panel is rendered on the history page (B1B move), not on the today page',
+  historySlice.includes(historyPanelJsx) && !todaySlice.includes('<WeekReviewPanel'));
+check('source: panel is the first block on the history page, and today reaches it via the hero entry',
+  historySlice.indexOf(historyPanelJsx) > -1
+  && historySlice.indexOf(historyPanelJsx) < historySlice.indexOf('<DataStatusPanel')
+  && historySlice.indexOf(historyPanelJsx) < historySlice.indexOf('history-section history-fold')
+  && clientSrc.includes('onGoToWeekReview={() => goToHistoryPanel("week-review-panel")}'));
 check('source: weekReview never touches readiness (formula untouched)',
   !/readiness/i.test(extractFunction(clientSrc, 'weekReview')));
 
@@ -272,10 +284,20 @@ const fixture1 = {
   ];
   const r = weekReview(dailyRows(), sleepRows(flatSleeps(LAST14, 7.5)), workouts, DATA_DATE);
   const w = metric(r, 'workouts');
-  check('workouts: sessions counted per window (review 3, comparison 1, baseline 5 incl. comparison week)',
-    w.reviewValue === 3 && w.comparisonValue === 1 && w.baselineValue === 5);
-  check('workouts: coverage counts distinct days (2/7 in review) and diff is a count difference',
-    w.reviewN === 2 && w.coverageNote.includes('2/7') && w.diff === 2 && w.diffText === '增加 2 次');
+  // Criterion changed by H3.1 total-qualification P1 (PM re-review
+  // 2026-10-23 07:13): a stored count may stand as a TOTAL only with
+  // explicit coverageIncomplete === false AND a window proven covered
+  // end to end by the workout records themselves. This fixture is a
+  // legacy 4-argument call (completeness unknown), so the per-window
+  // session counts stay stored facts in the notes (已存 N 次，完整性未
+  // 确认） while the values stay null and the diff is not computed.
+  check('workouts: sessions counted per window as stored facts (review 3, comparison 1, baseline 5 incl. comparison week), values null without total qualification',
+    w.reviewValue === null && w.comparisonValue === null && w.baselineValue === null
+    && w.reviewN === 2 && w.comparisonN === 1 && w.baselineN === 5
+    && w.baselineNote === '基线窗内已存 5 次，完整性未确认（来源完整性未确认）'
+    && w.coverageNote === '已存 3 次，完整性未确认');
+  check('workouts: without total qualification the diff is not computed (no fabricated direction)',
+    w.diff === null && w.diffSymbol === '—' && w.diffText === '无法比较');
 }
 
 // ------------------------------------------- (8) cap of 3, magnitude order
@@ -494,19 +516,23 @@ check('source: panel labels the HealthKit count with its source and the strength
   const r30 = weekReview(daily30, flat, workouts30, DATA_DATE, { coverageIncomplete: false });
   const w30 = metric(r30, 'workouts');
   check('range: 30-day stored span keeps the stored baseline count as a fact but labels it 已存， never a 28-day total, and not sufficient',
-    w30.baselineValue === 2 && w30.baselineSufficient === false
-    && w30.baselineNote === '基线窗内已存 2 次，完整性未确认（来源查询范围未覆盖基线窗全程）');
+    w30.baselineValue === null && w30.baselineSufficient === false
+    && w30.baselineNote === '基线窗内已存 2 次，完整性未确认（查询范围未覆盖窗口全程）');
   const r30zero = weekReview(daily30, flat, [{ date: '2026-10-20' }], DATA_DATE, { coverageIncomplete: false });
   const w30zero = metric(r30zero, 'workouts');
   // Criterion changed by PM re-review 2026-10-23 03:59 (H3.1
-  // source-separated proof): the only stored workout is 2026-10-20,
-  // which postdates the comparison window's start too — under
-  // per-source proof the comparison 0 is unproven as well (the daily
-  // rows' 30-day span can no longer testify for it). The stored
-  // review count of 1 stands as a fact.
-  check('range: a stored baseline 0 outside the workouts-proven range is unknown (null), the comparison 0 is likewise unproven, the stored review count stands',
+  // source-separated proof) plus the 07:13 total-qualification: the
+  // only stored workout is 2026-10-20, which postdates the comparison
+  // window's start too — under per-source proof the comparison 0 is
+  // unproven as well (the daily rows' 30-day span can no longer
+  // testify for it). The stored review count of 1 stands as a stored
+  // fact in the coverage note （已存 1 次，完整性未确认）, while the
+  // value stays null without total qualification.
+  check('range: a stored baseline 0 outside the workouts-proven range is unknown (null), the comparison 0 is likewise unproven, the stored review count stands as a stored fact in the note',
     w30zero.baselineValue === null && w30zero.baselineSufficient === false
-    && w30zero.comparisonValue === null && w30zero.reviewValue === 1);
+    && w30zero.comparisonValue === null && w30zero.reviewValue === null
+    && w30zero.coverageNote === '已存 1 次，完整性未确认'
+    && w30zero.baselineNote === '快照内 0 次，完整性未确认（查询范围未覆盖窗口全程）');
   // Full 35-day stored span OF WORKOUTS THEMSELVES (earliest stored
   // workout on the baseline window's first day): the original total
   // wording is unchanged.
@@ -533,8 +559,9 @@ check('source: panel labels the HealthKit count with its source and the strength
   ];
   const wCap = metric(weekReview(dailyRows(), flat, workouts100, DATA_DATE, { coverageIncomplete: false }), 'workouts');
   check('range: a 100-row stored workout list is treated as possibly truncated — stored baseline count kept, total unproven, not sufficient',
-    wCap.baselineValue === 3 && wCap.baselineSufficient === false
-    && wCap.baselineNote.includes('完整性未确认') && !wCap.baselineNote.includes('基线窗 28 天共'));
+    wCap.baselineValue === null && wCap.baselineSufficient === false
+    && wCap.baselineNote.includes('完整性未确认') && wCap.baselineNote.includes('100 条上限')
+    && !wCap.baselineNote.includes('基线窗 28 天共'));
 }
 {
   const flat = sleepRows(flatSleeps(LAST14, 7.5));
@@ -586,7 +613,7 @@ check('source: panel rules text covers comparison/baseline-side single-day anoma
   const oneWorkout = [{ date: '2026-10-05' }];
   const wa = metric(weekReview(dailyRows(), flat, oneWorkout, DATA_DATE, { coverageIncomplete: false }), 'workouts');
   check('per-source (a): daily 35d + a single baseline-window workout -> baseline is the stored count, not a 28-day total, not sufficient',
-    wa.baselineValue === 1 && wa.baselineSufficient === false
+    wa.baselineValue === null && wa.baselineSufficient === false
     && wa.baselineNote !== null && wa.baselineNote.includes('已存 1 次，完整性未确认')
     && !wa.baselineNote.includes('基线窗 28 天共'));
   check('per-source (a): the review window, which the stored workout predates and coverage completes, keeps its provable true 0',
@@ -597,7 +624,7 @@ check('source: panel rules text covers comparison/baseline-side single-day anoma
   const twoWorkouts = [{ date: '2026-09-25' }, { date: '2026-10-05' }];
   const wa2 = metric(weekReview(dailyRows(), flat, twoWorkouts, DATA_DATE, { coverageIncomplete: false }), 'workouts');
   check('per-source (a): an earlier in-window workout changes the stored baseline count 1 -> 2, still unproven',
-    wa2.baselineValue === 2 && wa2.baselineSufficient === false
+    wa2.baselineValue === null && wa2.baselineSufficient === false
     && wa2.baselineNote !== null && wa2.baselineNote.includes('已存 2 次，完整性未确认'));
   // Only a workout ON/BEFORE the baseline start proves the window:
   // the total wording and sufficiency return.
@@ -611,7 +638,7 @@ check('source: panel rules text covers comparison/baseline-side single-day anoma
   // postdates the review start).
   const reviewOnly = metric(weekReview(dailyRows(), flat, [{ date: '2026-10-20' }], DATA_DATE, { coverageIncomplete: false }), 'workouts');
   check('per-source: a lone review-window workout labels the review count 已存 1 次，完整性未确认',
-    reviewOnly.reviewValue === 1 && reviewOnly.coverageNote === '已存 1 次，完整性未确认');
+    reviewOnly.reviewValue === null && reviewOnly.coverageNote === '已存 1 次，完整性未确认');
   // Source check: the range proof reads historyWorkouts only — the
   // daily rows are never consulted for the workout range start.
   const weekReviewSrc = extractFunction(clientSrc, 'weekReview');

@@ -10,6 +10,10 @@
 // only in the private runtime and is not recorded in this repository.
 // Shape: 4 swim days in historyDaily, 12 historyWorkouts of which 7
 // swimming, and exactly 2 swims inside the trailing 7-day window.
+// H-SWIM-VIS-001 partial（2026-10-24 11 时交付，changes.md:1501）：
+// swimInfoByDate 的日期取「每日距离行 ∪ 游泳 session 日期」并集——
+// 仅 session 有泳而日距离为 null 的日期也给次数入口与「距离 —」呈现，
+// 不造合计。因此 per-day 映射为 7 个日期（含 3 个纯 session 日期）。
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -107,14 +111,19 @@ const windowDates = ['2027-03-05', '2027-03-06', '2027-03-07', '2027-03-08', '20
 
 // -------------------------------------------- per-day reconciliation
 const byDate = swimInfoByDate(historyDaily, historyWorkouts);
-check('per-day: exactly the 4 synthetic swim dates are present',
-  [...byDate.keys()].sort().join(',') === '2027-03-03,2027-03-04,2027-03-09,2027-03-11',
+// 7 日期 = 4 个每日距离行日期 ∪ 3 个纯 session 日期（partial 语义下
+// session-only 日期不丢、只给次数入口）。
+check('per-day: daily-meters dates ∪ session dates are present (7 synthetic dates)',
+  [...byDate.keys()].sort().join(',') === '2027-02-14,2027-02-19,2027-02-24,2027-03-03,2027-03-04,2027-03-09,2027-03-11',
   [...byDate.keys()].sort().join(','));
 const expected = {
-  '2027-03-03': { meters: 425, minutes: 15 },
-  '2027-03-04': { meters: 510, minutes: 24 },
-  '2027-03-09': { meters: 380, minutes: 13 },
-  '2027-03-11': { meters: 640, minutes: 27 },
+  '2027-02-14': { meters: null, minutes: 16, label: '游泳 1 次', detail: '游泳 1 次 · 距离 — · 16 分' },
+  '2027-02-19': { meters: null, minutes: 21, label: '游泳 1 次', detail: '游泳 1 次 · 距离 — · 21 分' },
+  '2027-02-24': { meters: null, minutes: 15, label: '游泳 1 次', detail: '游泳 1 次 · 距离 — · 15 分' },
+  '2027-03-03': { meters: 425, minutes: 15, label: '游泳 425 米', detail: '游泳 425 米 · 15 分' },
+  '2027-03-04': { meters: 510, minutes: 24, label: '游泳 510 米', detail: '游泳 510 米 · 24 分' },
+  '2027-03-09': { meters: 380, minutes: 13, label: '游泳 380 米', detail: '游泳 380 米 · 13 分' },
+  '2027-03-11': { meters: 640, minutes: 27, label: '游泳 640 米', detail: '游泳 640 米 · 27 分' },
 };
 for (const [date, exp] of Object.entries(expected)) {
   const info = byDate.get(date);
@@ -122,10 +131,10 @@ for (const [date, exp] of Object.entries(expected)) {
     info !== undefined && info.meters === exp.meters && info.minutes === exp.minutes,
     JSON.stringify(info));
   check(`per-day ${date}: cell label`,
-    info !== undefined && swimDayLabel(info) === `游泳 ${exp.meters} 米`,
+    info !== undefined && swimDayLabel(info) === exp.label,
     info ? swimDayLabel(info) : 'missing');
   check(`per-day ${date}: detail text`,
-    info !== undefined && swimDayDetail(info) === `游泳 ${exp.meters} 米 · ${exp.minutes} 分`,
+    info !== undefined && swimDayDetail(info) === exp.detail,
     info ? swimDayDetail(info) : 'missing');
 }
 check('per-day: swimMeters null day absent', !byDate.has('2027-03-08'));
@@ -154,15 +163,18 @@ const noDuration = swimInfoByDate(
 );
 check('edge: unknown duration -> minutes null',
   noDuration.get('2027-03-11')?.minutes === null);
-check('edge: unknown duration -> detail says 时长未知',
-  swimDayDetail(noDuration.get('2027-03-11')) === '游泳 640 米 · 时长未知',
+// partial 语义（2026-10-24 11 时交付）：未知时长仍标明有效记录数。
+check('edge: unknown duration -> detail says 时长未知（共 N 次）',
+  swimDayDetail(noDuration.get('2027-03-11')) === '游泳 640 米 · 时长未知（共 1 次）',
   swimDayDetail(noDuration.get('2027-03-11')));
 const noDistanceWeek = swimWeekSummary(
   [{ id: 'y1', date: '2027-03-09', type: 'swimming', distanceMeters: null, durationMinutes: 18 }],
   windowDates,
 );
-check('edge: no known distance -> label omits the meters segment',
-  noDistanceWeek.count === 1 && noDistanceWeek.metersKnown === false && noDistanceWeek.label === '近7天游泳 1 次',
+// partial 语义（2026-10-24 11 时交付）：窗口内无已知距离时只给次数＋
+// 「距离未知」，不编造 0 米合计。
+check('edge: no known distance -> label marks 距离未知 (no invented total)',
+  noDistanceWeek.count === 1 && noDistanceWeek.metersKnown === false && noDistanceWeek.label === '近7天游泳 1 次 · 距离未知',
   noDistanceWeek.label);
 check('edge: empty window -> empty label',
   swimWeekSummary(historyWorkouts, []).label === '');

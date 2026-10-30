@@ -4,9 +4,10 @@
 // client/src/App.tsx (MUSCLE_MAP, MUSCLE_MAP_VERSION, groupSets,
 // muscleReceiptFacts) over synthetic data only, plus source wiring
 // checks for the guide dialog and receipt UI:
-//  - map integrity: exactly the 30 stable keys of MUSCLE-MAP.md v1,
-//    primary/secondary identical to the document, incl. both calf
-//    keys mapped (primary 小腿） and the empty-secondary entries;
+//  - map integrity: the 31 stable keys (MUSCLE-MAP.md v1's 30 plus the
+//    W-HOMEB-001 lateral-lunge addition), primary/secondary identical
+//    to the document, incl. both calf keys mapped (primary 小腿） and
+//    the empty-secondary entries;
 //  - duplicate attribution: one exercise's completed sets count under
 //    EACH of its muscle groups, primary and secondary alike, so the
 //    per-group counts exceed the workout's completed-set total;
@@ -114,14 +115,15 @@ const sameList = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]
     'single-leg-balance': [['小腿', '臀大肌'], ['核心']],
     'home-bulgarian-split-squat': [['股四头肌', '臀大肌'], ['小腿', '核心']],
     'bench-step-up': [['股四头肌', '臀大肌'], ['小腿']],
+    'lateral-lunge': [['股四头肌', '臀大肌'], ['核心']], // W-HOMEB-001 (2026-10-24): 侧向弓步
     'home-calf-raise': [['小腿'], []],
     'wall-sit': [['股四头肌'], ['臀大肌']],
     'dead-bug': [['核心'], []],
     'side-plank': [['腹斜肌', '核心'], ['臀大肌']],
   };
   const keys = Object.keys(MUSCLE_MAP);
-  check('M0 map: exactly 30 mapped keys', keys.length === 30, `${keys.length} keys`);
-  check('M0 map: key set matches MUSCLE-MAP.md v1 exactly',
+  check('M0 map: exactly 31 mapped keys (30 of v1 + lateral-lunge from W-HOMEB-001)', keys.length === 31, `${keys.length} keys`);
+  check('M0 map: key set matches MUSCLE-MAP.md v1 + the W-HOMEB-001 lateral-lunge addition',
     sameList([...keys].sort(), Object.keys(expected).sort()));
   const mismatches = Object.entries(expected).filter(([key, [p, s]]) => {
     const entry = MUSCLE_MAP[key];

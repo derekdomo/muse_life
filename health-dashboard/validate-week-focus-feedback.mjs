@@ -1137,9 +1137,10 @@ check('dual: source — the basis card renders the live line while heading/basis
   check('fresh: saved/failed without any source timestamp stay honest (no fabricated time)',
     refreshPhaseLabel({ phase: 'saved', healthUpdatedAt: null, strengthUpdatedAt: null }) === '已保存新版本'
     && refreshPhaseLabel({ phase: 'failed', healthUpdatedAt: null, strengthUpdatedAt: null }) === '同步未完成，仍显示上次成功的数据');
-  check('fresh: source — the phase line renders beside the dashboard sync control, outside any fold',
-    clientSrc.includes('className="refresh-phase"') && clientSrc.includes('refreshPhaseLabel({')
-    && clientSrc.indexOf('className="refresh-phase"') > clientSrc.indexOf('aria-label="同步 Apple 健康和训练记录"'));
+  check('fresh: source — the sync-attempt stage rows render per-source inside the hero freshness bar beside the sync control, outside any fold (PHASE-1 replaced the legacy single phase line)',
+    clientSrc.includes('className="whoop-source-attempt"') && clientSrc.includes('syncAttemptSourceLabel(')
+    && clientSrc.indexOf('className="whoop-source-attempt"') > clientSrc.indexOf('className="whoop-source-lines"')
+    && clientSrc.indexOf('className="whoop-source-attempt"') < clientSrc.indexOf('className="whoop-source-action"'));
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

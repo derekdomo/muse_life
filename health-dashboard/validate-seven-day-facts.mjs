@@ -58,12 +58,16 @@ check('source: strip renders once in TodayView below the hero (H-UI-002 sunk lay
   && clientSrc.indexOf('<SevenDayFacts snapshot={snapshot} />') > clientSrc.indexOf('<WhoopHero'));
 check('source: default metric is exerciseMinutes',
   clientSrc.includes('useState<SevenDayMetricKey>("exerciseMinutes")'));
+const sevenFactsComponentSrc = extractFunction(clientSrc, 'SevenDayFacts');
 check('source: copy states raw facts, not a readiness/recovery score',
-  clientSrc.includes('逐日原始记录，不是恢复或负荷评分'));
+  sevenFactsComponentSrc.includes('seven-facts-grid')
+  && sevenFactsComponentSrc.includes('原值')
+  && !/readiness/i.test(sevenFactsComponentSrc)
+  && !/评分/.test(sevenFactsComponentSrc));
 check('source: day detail honestly reports the missing per-day source/timestamp fields',
-  clientSrc.includes('该日记录未单独标注来源') && clientSrc.includes('该日记录未单独记录'));
+  clientSrc.includes('Apple 健康 · 快照更新于') && clientSrc.includes('来源 · 更新'));
 check('source: coverage-incomplete note is rendered from the facts result, no new sync path',
-  clientSrc.includes('来源覆盖不完整：健康数据还没同步完') && clientSrc.includes('facts.coverageIncomplete'));
+  clientSrc.includes('来源覆盖不完整，缺口如实标注。') && clientSrc.includes('facts.coverageIncomplete'));
 check('source: no sleep metric is offered anywhere in the facts function',
   !/totalHours|sleep/i.test(extractFunction(clientSrc, 'sevenDayFacts')));
 check('source: caller passes the LA today computed by laTodayDateString',
@@ -155,16 +159,18 @@ const DATES = ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11', '2026-10-
 {
   const r = sevenDayFacts(base, '2026-02-30', false, 'steps');
   check('invalid dataDate (nonexistent calendar day): boundary note, no window presented',
-    r.boundaryOk === false && r.days.length === 0 && r.covered === 0 && r.boundaryNote.includes('日期边界未满足'));
+    r.boundaryOk === false && r.days.length === 0 && r.covered === 0
+    && r.boundaryNote.includes('不合法') && r.boundaryNote.includes('近 7 天窗口无法确定'));
   const r2 = sevenDayFacts(base, '14/10/2026', false, 'steps');
   check('invalid dataDate (wrong format): boundary note, no window',
-    r2.boundaryOk === false && r2.days.length === 0 && r2.boundaryNote.includes('日期边界未满足'));
+    r2.boundaryOk === false && r2.days.length === 0
+    && r2.boundaryNote.includes('不合法') && r2.boundaryNote.includes('近 7 天窗口无法确定'));
 }
 {
   const noEnd = base.filter((entry) => entry.date !== '2026-10-14');
   const r = sevenDayFacts(noEnd, '2026-10-14', false, 'exerciseMinutes');
   check('dataDate day itself incomplete (no row): boundary note shown, window still ends at dataDate with a gap',
-    r.boundaryOk === false && r.boundaryNote.includes('日期边界未满足')
+    r.boundaryOk === false && r.boundaryNote.includes('当天尚无每日记录') && r.boundaryNote.includes('不作完整趋势')
     && r.days.length === 7 && r.days[6].date === '2026-10-14' && r.days[6].value === null && r.covered === 4);
 }
 {
@@ -182,9 +188,9 @@ const DATES = ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11', '2026-10-
   // while the raw per-day values stay visible.
   const r = sevenDayFacts(base, '2026-10-14', false, 'exerciseMinutes', '2026-10-14');
   check('LA today with a row: boundary unsatisfied (day still in progress)',
-    r.boundaryOk === false && r.boundaryNote.includes('日期边界未满足')
-    && r.boundaryNote.includes('数据日期为今天') && r.boundaryNote.includes('当天尚未结束')
-    && r.boundaryNote.includes('未完整数据') && r.boundaryNote.includes('不作为完整趋势'));
+    r.boundaryOk === false && r.boundaryNote.includes('数据日期为今天')
+    && r.boundaryNote.includes('当天尚未结束') && r.boundaryNote.includes('未完整数据')
+    && r.boundaryNote.includes('不作为完整趋势'));
   check('LA today with a row: raw values still presented, not hidden',
     r.days.length === 7 && r.days[6].date === '2026-10-14' && r.days[6].value === 60 && r.covered === 5);
 }
@@ -221,7 +227,8 @@ const DATES = ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11', '2026-10-
   // An unusable todayLa can never prove the day ended.
   const rb = sevenDayFacts(base, '2026-10-14', false, 'steps', 'not-a-date');
   check('invalid todayLa: boundary unsatisfied, never silently complete',
-    rb.boundaryOk === false && rb.boundaryNote.includes('日期边界未满足'));
+    rb.boundaryOk === false && rb.boundaryNote.includes('无法确认数据日期是否已结束')
+    && rb.boundaryNote.includes('不作为完整趋势'));
 }
 
 // ------------------------------------------------------------ LA calendar edges

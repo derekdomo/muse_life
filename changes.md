@@ -2600,3 +2600,18 @@
 - 进度面板核对：「Life 进度」（slug life）存在、无构建在跑、条目状态与仓库现状（plans.md 评审记录、changes.md、main HEAD 3c94f67）无变化，本轮不改。
 - 本轮未改任何业务代码、未动 cron；修改文件仅 plans.md（本轮登记）与本文件。
 - 回滚：回退本提交即恢复登记前状态。
+
+## 2026-10-30 07 时 PDT（muse-life-plans-sync 07:55 轮次：EVID 尾巴——15 个滞后验证脚本逐项同步完成）
+
+- 基线与增量：基线 ebce652＝last_seen 基线，git pull 已最新（Already up to date）、HEAD 与基线一致、无新提交、无新编号条目、无新 PM bug 单（PM 仍按 PAUSE-LIFE-PM-001 暂停）。本轮无新编号任务交付、无用户可见增量（0 组新线上功能）。
+- 本轮实质工作（按队列规则「不空转」推进证据尾巴）：承接 06:55 轮次登记的 EVID 尾巴——17 个断言滞后的 validate-*.mjs（其后复核发现 validate-source、validate-routine-archive 在当前 HEAD 已自愈通过，实际待修 15 个）。4 个并行子任务分批逐项核对源码行为与 plans.md/changes.md 交付登记的一致性后同步脚本断言，未发现真实产品 bug；实现方独立复核全部 diff 并用本机 node 重跑确认。
+  - 批 A（health-dashboard）：validate-all-workouts 20/20（距离 null/0 渲染、类型原文展示断言同步）；validate-unified-hk 34/34（hkWorkouts 具名 hkWorkoutGroupSchema 重构 a45ebce/H-SYNC-DIVERGE-001、「已知时长 X 分」+ unified-note 说明文案 PM 2026-10-16 19:18 返工）；validate-swim-vis 42/42（H-SWIM-VIS-001 partial，per-day 并集 7 日期）；validate-steps-display 10/10（H-UI-002 迁移：stepSummary 已删，改断言 steps Kpi detail 表达式 + stepSummary 不得复现守卫）。
+  - 批 B（health-dashboard）：validate-hero-status 20/20（whoop-source-strip→bar、scrollToId、readiness/healthStale 命名与文案演进）；validate-seven-day-facts 52/52；validate-week-review 103/103；validate-whoop-scores 22/22（用户 2026-10-17「按学术来」Banister TRIMP 时代：负荷口径文案、/21 后缀、轻/中/高/全力档位标签，旧「公式未经审定」降级已取代）。
+  - 批 C（health-dashboard）：validate-week-load 47/47（window ranges + readinessTrend、exerciseMinutes 聚合移除，另修复 <anonymous>:174 合成数据崩溃）；validate-week-load-coverage 21/21（previousDetail 上周绝对值、无 coverageNote）；validate-week-focus-feedback 196/196（fresh 段 phase line 位置断言同步）。
+  - 批 D（workout-log）：validate-d1 36/36（W4.3-D1 回填：exerciseHeadInfo 内联进 headInfoByKey 循环，改抽 loop 包 buildHeadInfo；saveAggregate/exercise.key===currentKey 更名同步）；validate-finish 98/98（history 读取仍在统一 cleanup try 内，改匹配 loadPreviousCompletedSets( 调用头）；validate-muscle-receipt 30/30（第 31 键 lateral-lunge 为 W-HOMEB-001 2026-10-24 合法新增）；validate-progression 58/58（W1-CONSISTENCY 重构后 progressionDecision 抽取修复）。
+  - 修改文件：仅 15 个 validate-*.mjs（共约 +380/−190 行），业务代码（client/src、server/src 等）零改动；断言覆盖度不降（旧断言同步到新模式，未删减）。
+- 全仓复跑（本机 node，65 个脚本）：全绿 46、已知环境限制 19（缺 @hatch/space-sdk 8、typescript 8、zod 1、@libsql/client 2、drizzle-orm 1（含 validate-rewards 41/42 其唯一失败为 drizzle-orm harness 缺失）、直接 import .tsx 1）、真实断言失败 0。06:55 轮次的 17 个断言失败已全部清零。
+- 队列核对：`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；其余未勾选项或为运行待验（缺 owner/PM 运行证据，不伪造验收）、或为（需用户确认）项；`W-HOMEB-002` 定于 2026-11-16 自动执行、本轮未到执行日。
+- 进度面板核对：「Life 进度」（slug life）存在、无构建在跑、条目状态与仓库现状（plans.md 评审记录、changes.md、main HEAD）无变化，本轮不改。
+- 本轮未动 cron；修改文件为 15 个验证脚本 + plans.md（本轮登记）与本文件。
+- 回滚：回退本提交即恢复登记前状态。
