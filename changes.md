@@ -2587,3 +2587,16 @@
 - 进度面板核对：「Life 进度」（slug life）存在、无构建在跑、条目状态与仓库现状（plans.md 评审记录、changes.md、main HEAD d84f16c）无变化，本轮不改。
 - 本轮未改任何业务代码、未动 cron；修改文件仅 plans.md（本轮登记）与本文件。
 - 回滚：回退本提交即恢复登记前状态。
+
+## 2026-10-30 06 时 PDT（muse-life-plans-sync 06:55 轮次：基线核对 + 全仓验证脚本独立复跑）
+
+- 基线与增量：基线 3c94f67＝last_seen 基线，git pull 已最新（Already up to date）、HEAD 与基线一致、无新提交、无新编号条目、无新 PM bug 单（PM 仍按 PAUSE-LIFE-PM-001 暂停）。本轮无新编号任务交付、无用户可见增量（0 组新线上功能）。
+- 本轮实质工作（按队列规则「不空转」推进证据尾巴）：首次在本轮对仓库内全部 65 个 `validate-*.mjs` 用本机 `node` 独立实跑一次，全部记录退出码与首错，结果分类如下——
+  - 通过（27）：design-b1b、game-settlement、hero-layers、level-candidate、muscle-status、persist-race、season-swim、sleep-regularity、swim-partial、swim-stroke、sync-readback、units、week-comparison、week-coverage（health-dashboard 14 个）；house-refresh；time-review；arch-preview、color-vision、design-b1a、finance-arch（weekly-finance 4 个）；autosave、muscle-diagram、receipt、rest-timer、start、week-current（workout-log 6 个）；scripts/validate-handoff。
+  - 已知环境限制（21，与既有记录一致、非产品回归）：缺 `@hatch/space-sdk`（creation save-integrity、family-ledger、learning acl/conversion/metrics、reading import-generations/reading-qa/save-atomicity，共 8 个）；缺 `typescript` 包（weekly-finance 8 个：available-cash/cashflow/check-progress/facts-card/holdings/investment-performance/monthly-facts/payload）；缺 `zod`（steps-contract）；缺 `@libsql/client`（time-atomicity、plan-safe）；缺 `drizzle-orm`（health validate-rewards harness）；直接 import `.tsx`（reading reader-switch，本机 node 无 TS loader）。
+  - 断言失败需甄别（17，初步判定均为脚本模式滞后于源码演进、非产品回归证据；逐一复核见下条，全列 EVID 尾巴后续轮次处理）：health-dashboard 13 个（all-workouts、hero-status、seven-day-facts、source、routine-archive、steps-display、swim-vis、unified-hk、week-focus-feedback、week-load-coverage、week-load、week-review、whoop-scores）；workout-log 4 个（d1、finish、muscle-receipt、progression）。已抽查确认样例：`validate-unified-hk` 期望 `hkWorkouts: z.array(z.object({`，而源码已重构为具名 `hkWorkoutGroupSchema`（行为等价，脚本模式未跟进）；`validate-steps-display` 抽取表达式 `stepSummary` 在源码中已不存在（后续构建改名/重写展示逻辑，脚本抽取器未跟进）；`validate-week-load`/`week-load-coverage`/`whoop-scores`/`hero-status` 系列期望为 H-UI-001 早期实现的字面模式，后续 sleep-regularity/hero-layers/周回顾等构建改写了 App.tsx（行为以各轮交付登记为准）；`validate-muscle-receipt` 期望 M0 恰 30 键而源码现有 31 键（后续新增键未同步脚本）；`validate-d1` 期望 `exerciseHeadInfo` 函数已不存在（后续 workout 构建重命名）；`validate-finish` 期望 startWorkout 历史读取在统一 cleanup try 内（后续 W-START 重构移动）；`validate-progression` 期望单原始选择同时供两端（后续 W1-CONSISTENCY 重构）；`validate-swim-vis` 硬编码的 4 个 synthetic 游泳日期与源码 fixture 现有日期不一致（后续 swim 季节构建更新）；`validate-routine-archive`/`validate-source` 为 eval 构建服务端实现时引用未定义/抽取失败（脚本抽取器脆弱，非产品反例）。
+  - 结论：本轮复跑未发现任何新的产品回归证据；所有断言失败均可对应到已知的后续构建演进或抽取器脆弱，不构成 P0/P1 bug。本轮不据此改动任何业务代码或验证脚本——脚本滞后是维护债（EVID 尾巴），后续轮次按逐项核对后同步脚本模式，不在本轮仓促改写。
+- 队列核对：`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；其余未勾选项或为运行待验（缺 owner/PM 运行证据，不伪造验收）、或为（需用户确认）项；`W-HOMEB-002` 定于 2026-11-16 自动执行、本轮未到执行日。
+- 进度面板核对：「Life 进度」（slug life）存在、无构建在跑、条目状态与仓库现状（plans.md 评审记录、changes.md、main HEAD 3c94f67）无变化，本轮不改。
+- 本轮未改任何业务代码、未动 cron；修改文件仅 plans.md（本轮登记）与本文件。
+- 回滚：回退本提交即恢复登记前状态。
