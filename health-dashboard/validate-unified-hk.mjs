@@ -86,7 +86,7 @@ check('source: known-duration note visible at both timeline render sites',
 // 故断言收窄到 unifiedHkLabel 本函数体，不再对全文件禁 `· 共 ${`。
 const unifiedHkLabelSrc = extractFunction(clientSrc, 'unifiedHkLabel');
 check('source: label never renders an unconditional 共 X 分 total',
-  !unifiedHkLabelSrc.includes('共 ${') && unifiedHkLabelSrc.includes('已知时长 ${')); 
+  !unifiedHkLabelSrc.includes('共 ${') && unifiedHkLabelSrc.includes('已知时长 ${'));
 
 // --- real server function ---
 function buildTimeline(src) {

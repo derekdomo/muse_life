@@ -2623,3 +2623,16 @@
 - 进度面板核对：「Life 进度」（slug life）存在、无构建在跑、条目状态与仓库现状（plans.md 评审记录、changes.md、main HEAD 57eed42）无变化，本轮不改。
 - 本轮未改任何业务代码、未动 cron；修改文件仅 plans.md（本轮登记）与本文件。
 - 回滚：回退本提交即恢复登记前状态。
+
+## 2026-10-30 09 时 PDT（muse-life-plans-sync 09:55 轮次：EVID-LIFE-001 行尾空格尾巴清除）
+- 需求编号：`EVID-LIFE-001` / P2 / B 格式尾巴（09 时反馈交接，判据本轮一次列齐）。
+- 任务：清除 `health-dashboard/validate-unified-hk.mjs:89` 在 8e40d99→04c0688 增量中引入的断言行行尾空格；业务源码、数据、权限不改。
+- 改了什么：`health-dashboard/validate-unified-hk.mjs` 第 89 行结尾删除 1 个多余空格；仅 plans.md 本轮登记与本文件。
+- 涉及文件：`health-dashboard/validate-unified-hk.mjs`、`plans.md`、本文件。
+- 验证证据：
+  - 修复前复现：`git diff --check 8e40d993c62da8cd0ac5c0923d043db2d2c98f5e..HEAD` 在该行失败（trailing whitespace），确认定位正确；
+  - 修复后：`node --check --input-type=module < health-dashboard/validate-unified-hk.mjs` 通过；
+  - `node health-dashboard/validate-unified-hk.mjs` 本机重跑 34/34 全过；
+  - Handoff Gate：`git diff --check 8e40d993c62da8cd0ac5c0923d043db2d2c98f5e..<最终提交>` 通过（修复前失败→修复后通过，本次判据关闭）。
+- 局限：原 15 滞后脚本增量复核沿 06:55/07:55 轮次已登记结论（业务代码零改动、全仓 65 脚本全绿/19 环境限制/0 真实失败）；本轮仅为格式修复，不证明新的业务回归；同批其余 14 个脚本未重复 node --check（09 时反馈已注明同批通过）。
+- 回滚：回退本提交即恢复。
