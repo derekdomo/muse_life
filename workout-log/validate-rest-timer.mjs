@@ -72,11 +72,14 @@ check('source: completion toggle starts the timer only when fresh and unblocked'
   clientSrc.includes('if (next.completed && !setSaveBlocked(') && clientSrc.includes('onCompleted?.()'));
 check('source: panel renders only while a deadline exists',
   clientSrc.includes('restTimer.endsAt != null ? (') && clientSrc.includes('<RestTimerPanel timer={restTimer}'));
-check('source: panel lives in the current exercise block via timerSlot, with a below-stack fallback',
-  clientSrc.includes('const currentKey = resolveCurrentExerciseKey(')
-  && clientSrc.includes('timerSlot={currentKey != null && exercise.key === currentKey ? restTimerUi : undefined}')
-  && clientSrc.includes('{timerSlot}')
-  && clientSrc.includes('currentKey == null ? <div className="rest-timer-fallback">{restTimerUi}</div>'));
+// W-TRAIN-FLOW-001 (2026-11-01, user-approved) moved the timer panel out of
+// the old timerSlot injection into the guided rest card; the timerSlot prop
+// is now dead wiring (nothing passes it). Assert the new approved wiring.
+check('source: panel lives in the guided rest card, shown only while a deadline exists',
+  clientSrc.includes('{guidedPhase === "rest" ? (')
+  && clientSrc.includes('aria-label="休息"')
+  && clientSrc.includes('restTimer.endsAt != null ? (')
+  && clientSrc.includes('<RestTimerPanel timer={restTimer}')); 
 check('source: completing a set auto-starts only when autoEnabled',
   clientSrc.includes('shouldAutoStartRest(state) ? startRestTimer(state, Date.now()) : state'));
 check('source: auto toggle is a 44px aria-pressed button that never calls a data action',
