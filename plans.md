@@ -1,5 +1,7 @@
 # Plans
 
+> **2026-11-01 08:00 PDT 本 chat 直派**：「训练记录」9 个纯文字动作的教学视频内嵌为动图演示（用户原话「训练的动图你按之前GPT给的补一下」）——本条已由本 chat 直接派 builder 实现中（artifact.edit space-6），同步轮次勿重复接单。
+
 ## 所有者最新决定：仅暂停 Life PM，双向改进继续（PAUSE-LIFE-PM-001）
 
 **2026-10-24 15:08 PDT更正。** 所有者最新明确指示：「错了，Life 和Firance双向改进还继续」。据此，只有 Codex 的 `muse-life-pm`（三小时兜底评审）保持 PAUSED，停止本侧定期 PM 复验与产品推进，直到所有者明确恢复；`life-firance`（每日双向改进）已恢复 ACTIVE，继续原计划中的 Life × Firance 比较、Firance 改进及向 Life 提交具体需求。此前将双向改进一并暂停的范围已撤回，以本条最新决定为准。
