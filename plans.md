@@ -3502,3 +3502,29 @@ W4.3-D1 queuedAt=2026-10-18T01:07:00Z、Muse原10-19，父W4.3旧P1上限10-20/W
 - **实现方登记 2026-10-31 18 时 PDT（muse-life-plans-sync 18:55 轮次，基线＝HEAD 3fcdf80，git pull 已最新、无新提交、无新编号条目/新 PM bug 单，PM 仍按 PAUSE-LIFE-PM-001 暂停）**：本轮无交付、用户可见增量 0 组。队列核对：`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；`F0.5` P0（服务端逐源 coverage/最后成功台账本体）仍属原 Muse 负责、PM 暂停期间不虚构交付；其余未勾选项（103 条 `[ ]`，本轮复核无新增）或为运行待验（缺 owner/PM 运行证据，不伪造验收）、或为（需用户确认）项；`W-HOMEB-002` 定于 2026-11-16 自动执行、本轮未到执行日。「Life 进度」面板（slug life）存在、无构建在跑、与仓库现状一致、本轮不改。`F0.7` 已按所有者裁决彻底关闭，本轮不再续查。仍（需用户确认）不变：`CWEB-LEVEL-001` 四参数/路径；`W6.2-PM-IMG` 整批过目；`H4.6` 恢复参考 T；`H-SWIM-PRIV-001` 已提交历史清理范围；`F-ARCH-001` 异常阈值定案。此登记仅为实现方记录，PM 结论以其评审记录为准。
 
 - **实现方登记 2026-10-31 19 时 PDT（muse-life-plans-sync 19:55 轮次，基线＝HEAD a3288be，git pull 已最新、无新提交、无新编号条目/新 PM bug 单，PM 仍按 PAUSE-LIFE-PM-001 暂停）**：本轮无交付、用户可见增量 0 组。队列核对：`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；`F0.5` P0（服务端逐源 coverage/最后成功台账本体）仍属原 Muse 负责、PM 暂停期间不虚构交付；其余未勾选项（103 条 `[ ]`，本轮复核无新增）或为运行待验（缺 owner/PM 运行证据，不伪造验收）、或为（需用户确认）项；`W-HOMEB-002` 定于 2026-11-16 自动执行、本轮未到执行日。「Life 进度」面板（slug life）存在、无构建在跑、与仓库现状一致、本轮不改。`F0.7` 已按所有者裁决彻底关闭，本轮不再续查。仍（需用户确认）不变：`CWEB-LEVEL-001` 四参数/路径；`W6.2-PM-IMG` 整批过目；`H4.6` 恢复参考 T；`H-SWIM-PRIV-001` 已提交历史清理范围；`F-ARCH-001` 异常阈值定案。此登记仅为实现方记录，PM 结论以其评审记录为准。
+
+## 2026-11-01 Life × Firance 每日增量反馈（独立日任务，三小时 PM 暂停状态不变）
+
+- **范围与进展**：独立读取 `71a81e7` → `157c60d`（25 提交）并整合并发 `418410a`。本轮确认收到 `bc8554c` 回灌的 `F-ARCH-001·INCR-1` 源码、schema、验证脚本与平台版本声明；space-3 已上线是 Muse 的交付登记，本任务没有平台/真实账本/所有者实测。交易方向只登记已有来源变化，不审计或操作交易/账户通道。`F0.5` 服务端逐源 coverage/最后成功台账本体仍 P0/Muse/原 2026-10-18 未交；`F-ARCH-001` / `F0.6` / `F1.6` 其余迁移仍沿 P1/Muse/原 2026-10-25 18:00 首片期限，不能由本次增量协议交付代为关闭。阈值待定仅阻相应决策；`F1.3` 假设口径仍待定。`F0.7` 按 owner 裁决彻底关闭，不续查、不触发、不重问。
+- **比较与本地落地**：借鉴 Life `W2.2` 按视图恢复滚动位置的通用交互，Firance 已在隔离副本修复 Money → 编辑/新增 → 保存/取消的滚动上下文：表单从顶端打开，返回恢复原 Money 的容器滚动位置，既有时间范围和依据展开保持。仅使用当前路由历史上下文，不新增持久化或财务写入。旧构建先复现；新实际 Electron 临时 profile/synthetic 16 项通过，既有返回 11 项、保存 15 项及 smoke 通过；lint、78 单元、snapshot parser、Vite 通过。1360/900 宽截图已查看；既有宽表横向滚动不声称已修复或手机实测。本任务实际交付用户可见增量 1 组，新增独立方向/同义需求 0。
+
+### `F-ARCH-001·INCR-1` 追加返工：完整性与尾段证据（P0 / A 类 / Muse）
+
+**用户问题与比较证据**：金额合计对得上，不能证明每一天都有完整来源。Firance 现行已验证行为保留缺失/真 0、来源日期与整段投入核实的独立判据（`financialOverview` / `investmentPerformance`）；不能用总额相等将缺失变为已核实。本次不照搬其公式，只要求 Life 已声明的 `fullCoverageStart`、逐日 `partial` 与真实已提交日范围一致。
+
+**源码复现，均为明确 synthetic**：`weekly-finance/server/src/actions.ts` 的 `ingestDailySpendIncremental` / `ingestDailyIncomeIncremental` 两路均复现下述问题。公共 action 的 owner gate 后直接分派到这些 helper；`getDashboard` 返回当前 parsed payload；客户端日历与日详情直接读 `day.partial`，没有另行按全局起点矫正。
+
+1. **全覆盖起点变化，未重送旧日的 partial 留旧值**：基线 coverage=`2026-10-20`..`2026-10-24`，synthetic 账户 A 只有 10-20 一条 posted（支出 -50 / 收入 +50）。基线生产汇总的 `fullCoverageStart=10-20`，各日 partial=false。新全窗口加账户 B 的 10-26 posted（支出 -20 / 收入 +20）；真实 `summarize*DailyServer` 全窗重算得 `fullCoverageStart=10-26`。发标准 10-23..10-26 delta、真实 slice 重算 days、按全窗起点标 partial，expectedTotals 取真实全窗汇总。两 helper 均返回 ok 并进入 publish 边界；合并总额与完整重算一致、顶层起点正确，但未重送 10-20/21/22 仍 partial=false，完整重算这三日均为 true。日历格/日详情因此缺少“部分”提示；月度总说明不能代替逐日一致性。
+2. **新增尾段未提交，仍推进截止日并补 0**：同一基线，不加新交易，输入 days/transactions 只覆盖 10-23..10-24，却声明 throughDate=10-26，expectedTotals 等于基线全窗总额。两 helper 均返回 ok、newThroughDate=10-26，并在 publish payload 中构造未提交的 10-25/26 为 0、partial=false。服务端只比较已送片的最小/最大日与总额，没有要求新扩展尾段有逐日证据。总额门禁无法检测缺失尾段的日分布；worker 当前约定发到新截止日不能替代服务端验证。
+
+**本轮验证层级**：独立提取实际 TS 生产 helper、两种汇总、日期验证、day matcher、当前版本选择器，去 TS 后运行，34 项控制通过（含两路正常显式 0 尾段、金额合计、stale_base/daily_mismatch/incremental_mismatch/非法日拒绝且不进入 publish，以及上述两反例）。内存只读行适配；stored safeParse 透传、publish 为捕获边界。因此这证明真实 helper 到写边界的行为，**不是** SDK/Zod/Drizzle/SQL/完整公共 action/线上或 owner 验证。既有 37 项 Bun/SQLite 是 Muse 登记，本环境缺 Bun 和 app 依赖，未冒称独立复跑。Firance 没有同 hash 无关公式复测。
+
+**具体范围、责任与目标**：沿原 `F-ARCH-001·INCR-1` 返工，不建立新系统、不扩大来源/写权限、不改原始账本。责任 Muse，优先级 P0（财务完整性/归档）；本次新发现目标 2026-11-01 18:00 PST，原 F-ARCH/F0.6/F1.6 迁移期限仍保留，不用新返工日期重置旧逾期。健康/训练原重点继续，其余已交付财务分项不重开。
+
+**一次列齐的验证判据**：
+- [ ] 两路都处理全局 fullCoverageStart 的合法变化：重派整窗或可靠重算全部合并日的 partial；新账户起点前移/后移、无变化、合法 null 语义均与完整重算一致。不可只改新片、顶层或月说明；零/负值/退款/待核对计数保留。
+- [ ] 截止日推进时，旧 throughDate 后至新 throughDate 的每一天都有可验证的显式 delta 日覆盖；缺尾段/尾段起点断档拒绝且不写入/推进。完整显式 0 尾段应通过；旧窗口内更早的修正和 worker 的 2 天重叠仍可用，不强制只有这一种重叠宽度。无需扩大本次工作为任意缺失来源修补。
+- [ ] 用上述两组合成 fixture 对两公共 action 跑真实 schema + handler + 内存 SQL/迁移：修前敏感、修后通过，坏请求生产 payload/行数/throughDate 字节不变；合法新账户、真 0、pending→posted、负值/退款与当前 full/chunk/finalize 兼容，SAVE-1 仲裁/读回守卫保持。补充针对起点变化和尾段覆盖的变异敏感性。
+- [ ] getDashboard → 日历格/日详情独立核对 partial/缺失标签与来源截止日，保存 exact command/count、源码 revision、builder plan→build→audit→submit 及工件生效证据到 changes。所有者打开确认单列，不由构建或本轮反馈代替；不等 PM 验收继续实现。
+
+**交接事实与度量**：本条仅为已复现的返工入队，尚无本轮 Muse 接单/修复或工件生效证据。当前工具无 Muse builder/直接消息入口，最近 50 聊天没有可辨认 Muse LIFE 执行目标；以远端 plans 为实际交接，未即时通知，不向 PM/无关聊天发送。队列缺统一 actualStartedAt，无法计算中位等待时长；本轮可见增量 1，不把需求文档计为产品交付。
