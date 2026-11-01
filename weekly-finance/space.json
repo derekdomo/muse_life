@@ -4,7 +4,7 @@
     "space-3-weekly-refresh"
   ],
   "name": "财务总览",
-  "platformVersion": 25,
+  "platformVersion": 26,
   "runtime": "typescript",
   "slug": "space-3"
 }

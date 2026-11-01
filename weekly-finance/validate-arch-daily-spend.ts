@@ -92,7 +92,7 @@ function buildRequest(txns: any[], overrides: any = {}) {
 
 function checkResponseShape(name: string, res: any) {
   const keys = Object.keys(res).sort();
-  const expected = ["chunksExpected", "chunksReceived", "coverageStart", "days", "issue", "ok", "readBackVerified", "throughDate", "totalMatches"].sort();
+  const expected = ["chunksExpected", "chunksReceived", "coverageStart", "days", "daysMerged", "issue", "newThroughDate", "ok", "readBackVerified", "throughDate", "totalMatches"].sort();
   check(`${name}: response keys exactly counts/dates/booleans only`, JSON.stringify(keys) === JSON.stringify(expected));
   check(`${name}: response has no amount/total/posted/pending fields`, !("amount" in res) && !("total" in res) && !("posted" in res) && !("pending" in res) && !("totals" in res));
 }

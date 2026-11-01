@@ -1271,7 +1271,29 @@ const ingestArchDailySpendRequest = z.object({
   coverageStart: z.string(),
   throughDate: z.string(),
   fullCoverageStart: z.string().nullable(),
-  mode: z.enum(["full", "chunk", "finalize"]).optional(),
+  mode: z.enum(["full", "chunk", "finalize", "incremental"]).optional(),
+  // Incremental leg (F-ARCH-001·INCR-1): the production
+  // throughDate this delta was computed against, and the
+  // worker's full-window totals/counts for the post-merge
+  // window. The server rejects when baseThroughDate no longer
+  // equals the stored throughDate (stale_base — the caller
+  // falls back to the chunk protocol), verifies every sent day
+  // against a recompute of the sent transactions, merges by
+  // date, and only publishes when the merged window's totals
+  // (recomputed from the merged day rows) match expectedTotals.
+  baseThroughDate: z.string().optional(),
+  expectedTotals: z
+    .object({
+      posted: z.number(),
+      pending: z.number(),
+      transactions: z.number().int().nonnegative(),
+      conflicts: z.number().int().nonnegative(),
+      unappliedRefunds: z.number().int().nonnegative().optional(),
+      unclassified: z.number().int().nonnegative(),
+      excludedTransfer: z.number().int().nonnegative(),
+      excludedLoanPrincipal: z.number().int().nonnegative(),
+    })
+    .optional(),
   batchId: z.string().min(1).max(128).optional(),
   chunkIndex: z.number().int().nonnegative().optional(),
   chunkCount: z.number().int().min(1).max(120).optional(),
@@ -1311,6 +1333,11 @@ const ingestArchDailySpendResponse = z.object({
   // caller can resume an interrupted batch without guessing.
   chunksReceived: z.number().int().nonnegative().default(0),
   chunksExpected: z.number().int().nonnegative().default(0),
+  // Incremental leg result fields: the production throughDate
+  // after a successful merge, and how many day rows the delta
+  // upserted. Other legs keep the null / 0 defaults.
+  newThroughDate: z.string().nullable().default(null),
+  daysMerged: z.number().int().nonnegative().default(0),
 });
 
 type IngestArchDailySpendResult = z.infer<typeof ingestArchDailySpendResponse>;
@@ -1333,6 +1360,8 @@ function dailySpendFailure(
     readBackVerified: false,
     chunksReceived,
     chunksExpected,
+    newThroughDate: null,
+    daysMerged: 0,
   };
 }
 
@@ -1395,7 +1424,21 @@ const ingestArchDailyIncomeRequest = z.object({
   coverageStart: z.string(),
   throughDate: z.string(),
   fullCoverageStart: z.string().nullable(),
-  mode: z.enum(["full", "chunk", "finalize"]).optional(),
+  mode: z.enum(["full", "chunk", "finalize", "incremental"]).optional(),
+  // Incremental leg (F-ARCH-001·INCR-1) — see the daily-spend
+  // request for the contract; total replaces posted here.
+  baseThroughDate: z.string().optional(),
+  expectedTotals: z
+    .object({
+      total: z.number(),
+      pending: z.number(),
+      transactions: z.number().int().nonnegative(),
+      conflicts: z.number().int().nonnegative(),
+      unclassified: z.number().int().nonnegative(),
+      excludedTransfer: z.number().int().nonnegative(),
+      excludedLoanPrincipal: z.number().int().nonnegative(),
+    })
+    .optional(),
   batchId: z.string().min(1).max(128).optional(),
   chunkIndex: z.number().int().nonnegative().optional(),
   chunkCount: z.number().int().min(1).max(120).optional(),
@@ -1430,6 +1473,8 @@ const ingestArchDailyIncomeResponse = z.object({
   readBackVerified: z.boolean(),
   chunksReceived: z.number().int().nonnegative().default(0),
   chunksExpected: z.number().int().nonnegative().default(0),
+  newThroughDate: z.string().nullable().default(null),
+  daysMerged: z.number().int().nonnegative().default(0),
 });
 
 type IngestArchDailyIncomeResult = z.infer<typeof ingestArchDailyIncomeResponse>;
@@ -1452,6 +1497,8 @@ function dailyIncomeFailure(
     readBackVerified: false,
     chunksReceived,
     chunksExpected,
+    newThroughDate: null,
+    daysMerged: 0,
   };
 }
 
@@ -1752,6 +1799,8 @@ async function ingestDailySpendChunk(
         readBackVerified: true,
         chunksReceived: received,
         chunksExpected: chunkCount,
+        newThroughDate: null,
+        daysMerged: 0,
       };
     }
     await deleteBatch();
@@ -1772,6 +1821,8 @@ async function ingestDailySpendChunk(
       readBackVerified: false,
       chunksReceived: 0,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   const inserted = await db
@@ -1811,6 +1862,8 @@ async function ingestDailySpendChunk(
       readBackVerified: false,
       chunksReceived: staged.length,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   const received = new Set([...staged.map((prior) => prior.chunkIndex), chunkIndex]).size;
@@ -1824,6 +1877,8 @@ async function ingestDailySpendChunk(
     readBackVerified: true,
     chunksReceived: received,
     chunksExpected: chunkCount,
+    newThroughDate: null,
+    daysMerged: 0,
   };
 }
 
@@ -1938,6 +1993,8 @@ async function finalizeDailySpendBatch(
       readBackVerified: false,
       chunksReceived: 0,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   const payload: ArchDailySpend = {
@@ -1965,6 +2022,8 @@ async function finalizeDailySpendBatch(
       readBackVerified: false,
       chunksReceived: byIndex.size,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   await deleteBatch();
@@ -1978,6 +2037,192 @@ async function finalizeDailySpendBatch(
     readBackVerified: true,
     chunksReceived: chunkCount,
     chunksExpected: chunkCount,
+    newThroughDate: null,
+    daysMerged: 0,
+  };
+}
+
+// Incremental leg (F-ARCH-001·INCR-1, owner-approved
+// 2026-10-31): the daily refresh no longer re-sends the whole
+// window. The caller sends only the changed date segment — by
+// worker convention (baseThroughDate-2, new throughDate], a
+// 2-day overlap so pending→posted flips are re-sent — plus the
+// raw transactions for exactly those dates and the worker's
+// full-window expectedTotals. The server, atomically (any
+// rejection publishes nothing and the stored version is kept
+// verbatim):
+//  a. requires baseThroughDate == the stored throughDate,
+//     else stale_base (the caller falls back to chunk/full);
+//  b. recomputes every sent day from the sent transactions
+//     (slice-local recompute, partial flags re-derived from
+//     the envelope's full-window fullCoverageStart) and
+//     requires an exact match within 0.01 — daily_mismatch;
+//  c. upserts the recomputed days into the stored sequence
+//     by date (a resent day replaces the stored one whole);
+//  d. recomputes the merged window's totals from the merged
+//     day rows (posted/pending sums; unclassified = the sum
+//     of the days' unclassified id lists — the only counts
+//     derivable from day rows) and requires them to match
+//     expectedTotals — incremental_mismatch. The remaining
+//     counts (transactions / conflicts / excluded*) cannot
+//     be re-derived from day aggregates, so they are stored
+//     from the worker's declared full-window counts, exactly
+//     as finalize stores declared counts after its checks;
+//  e. publishes through the shared publishDailySpend path
+//     (SAVE-1 arbitration + exact read-back), advancing
+//     throughDate to the envelope's throughDate.
+async function ingestDailySpendIncremental(
+  ctx: Ctx,
+  args: IngestArchDailySpendArgs,
+): Promise<IngestArchDailySpendResult> {
+  const coverageStart = args.coverageStart ?? "";
+  const throughDate = args.throughDate ?? "";
+  const baseThroughDate = args.baseThroughDate;
+  const expected = args.expectedTotals;
+  const txns = args.transactions;
+  const days = args.days;
+  if (!baseThroughDate || !expected || !txns || !days || days.length === 0) {
+    return dailySpendFailure("invalid_incremental", coverageStart, throughDate);
+  }
+  if (!isValidPulledAt(args.pulledAt)) {
+    return dailySpendFailure("invalid_pulled_at", coverageStart, throughDate);
+  }
+  const pulledAtMs = Date.parse(args.pulledAt);
+  if (
+    !isRealDateKey(coverageStart) || !isRealDateKey(throughDate) ||
+    !isRealDateKey(baseThroughDate)
+  ) {
+    return dailySpendFailure("invalid_date", coverageStart, throughDate);
+  }
+  for (const txn of txns) {
+    if (!isRealDateKey(txn.date)) {
+      return dailySpendFailure("invalid_date", coverageStart, throughDate);
+    }
+  }
+  for (const day of days) {
+    if (!isRealDateKey(day.date)) {
+      return dailySpendFailure("invalid_date", coverageStart, throughDate);
+    }
+  }
+  if (coverageStart > throughDate || baseThroughDate < coverageStart || baseThroughDate > throughDate) {
+    return dailySpendFailure("invalid_window", coverageStart, throughDate);
+  }
+  const sortedDays = [...days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  for (let i = 0; i < sortedDays.length; i++) {
+    const date = sortedDays[i]!.date;
+    if (date < coverageStart || date > throughDate) {
+      return dailySpendFailure("invalid_window", coverageStart, throughDate);
+    }
+    if (i > 0 && date === sortedDays[i - 1]!.date) {
+      return dailySpendFailure("invalid_incremental", coverageStart, throughDate);
+    }
+  }
+  const db = ctx.db<typeof schema>();
+  const storedRows = await db.select().from(schema.archDailySpend);
+  const current = pickCurrentDailySpendVersion(storedRows);
+  if (!current) {
+    return dailySpendFailure("no_base", coverageStart, throughDate);
+  }
+  if (current.parsed.throughDate !== baseThroughDate) {
+    return dailySpendFailure("stale_base", coverageStart, throughDate);
+  }
+  if (current.parsed.coverageStart !== coverageStart) {
+    return dailySpendFailure("coverage_mismatch", coverageStart, throughDate);
+  }
+  const deltaFrom = sortedDays[0]!.date;
+  const deltaTo = sortedDays[sortedDays.length - 1]!.date;
+  for (const txn of txns) {
+    if (txn.date < deltaFrom || txn.date > deltaTo) {
+      return dailySpendFailure("invalid_incremental", coverageStart, throughDate);
+    }
+  }
+  const slice = summarizeSpendDailyServer(txns as DailySpendTxn[], { fromDate: deltaFrom, toDate: deltaTo });
+  const fcs = args.fullCoverageStart;
+  const recomputedDays: ArchDailySpendDay[] = slice.days.map((day) => ({
+    ...day,
+    partial: fcs !== null && day.date < fcs,
+  }));
+  if (!dailyDaysMatch({ ...slice, days: recomputedDays }, sortedDays)) {
+    return dailySpendFailure("daily_mismatch", coverageStart, throughDate);
+  }
+  const byDate = new Map<string, ArchDailySpendDay>(
+    current.parsed.days.map((day) => [day.date, day] as const),
+  );
+  for (const day of recomputedDays) byDate.set(day.date, day);
+  const mergedDays: ArchDailySpendDay[] = [];
+  for (let cur = coverageStart; ; cur = nextDateKey(cur)) {
+    mergedDays.push(
+      byDate.get(cur) ?? {
+        date: cur,
+        posted: 0,
+        pending: 0,
+        categories: [],
+        spendCount: 0,
+        pendingCount: 0,
+        unclassified: [],
+        partial: fcs !== null && cur < fcs,
+      },
+    );
+    if (cur === throughDate) break;
+  }
+  const mergedPosted = mergedDays.reduce((sum, day) => sum + day.posted, 0);
+  const mergedPending = mergedDays.reduce((sum, day) => sum + day.pending, 0);
+  const mergedUnclassified = mergedDays.reduce((sum, day) => sum + day.unclassified.length, 0);
+  if (
+    Math.abs(mergedPosted - expected.posted) > 0.01 ||
+    Math.abs(mergedPending - expected.pending) > 0.01 ||
+    mergedUnclassified !== expected.unclassified
+  ) {
+    return dailySpendFailure("incremental_mismatch", coverageStart, throughDate);
+  }
+  const payload: ArchDailySpend = {
+    arch: "F-ARCH-001",
+    version: 1,
+    kind: "daily-spend",
+    pulledAt: args.pulledAt,
+    storedAt: new Date().toISOString(),
+    coverageStart,
+    throughDate,
+    fullCoverageStart: fcs,
+    days: mergedDays,
+    totals: { posted: mergedPosted, pending: mergedPending },
+    counts: {
+      transactions: expected.transactions,
+      conflicts: expected.conflicts,
+      unappliedRefunds: expected.unappliedRefunds ?? current.parsed.counts.unappliedRefunds,
+      unclassified: expected.unclassified,
+      excludedTransfer: expected.excludedTransfer,
+      excludedLoanPrincipal: expected.excludedLoanPrincipal,
+    },
+  };
+  const published = await publishDailySpend(ctx, pulledAtMs, payload);
+  if (!published.readBackVerified) {
+    return {
+      ok: false,
+      issue: published.issue,
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: true,
+      readBackVerified: false,
+      chunksReceived: 0,
+      chunksExpected: 0,
+      newThroughDate: null,
+      daysMerged: 0,
+    };
+  }
+  return {
+    ok: true,
+    issue: null,
+    days: mergedDays.length,
+    coverageStart,
+    throughDate,
+    totalMatches: true,
+    readBackVerified: true,
+    chunksReceived: 0,
+    chunksExpected: 0,
+    newThroughDate: throughDate,
+    daysMerged: recomputedDays.length,
   };
 }
 
@@ -2197,6 +2442,8 @@ async function ingestDailyIncomeChunk(
         readBackVerified: true,
         chunksReceived: received,
         chunksExpected: chunkCount,
+        newThroughDate: null,
+        daysMerged: 0,
       };
     }
     await deleteBatch();
@@ -2215,6 +2462,8 @@ async function ingestDailyIncomeChunk(
       readBackVerified: false,
       chunksReceived: 0,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   const inserted = await db
@@ -2254,6 +2503,8 @@ async function ingestDailyIncomeChunk(
       readBackVerified: false,
       chunksReceived: staged.length,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   const received = new Set([...staged.map((prior) => prior.chunkIndex), chunkIndex]).size;
@@ -2267,6 +2518,8 @@ async function ingestDailyIncomeChunk(
     readBackVerified: true,
     chunksReceived: received,
     chunksExpected: chunkCount,
+    newThroughDate: null,
+    daysMerged: 0,
   };
 }
 
@@ -2369,6 +2622,8 @@ async function finalizeDailyIncomeBatch(
       readBackVerified: false,
       chunksReceived: 0,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   const payload: ArchDailyIncome = {
@@ -2396,6 +2651,8 @@ async function finalizeDailyIncomeBatch(
       readBackVerified: false,
       chunksReceived: byIndex.size,
       chunksExpected: chunkCount,
+      newThroughDate: null,
+      daysMerged: 0,
     };
   }
   await deleteBatch();
@@ -2409,6 +2666,169 @@ async function finalizeDailyIncomeBatch(
     readBackVerified: true,
     chunksReceived: chunkCount,
     chunksExpected: chunkCount,
+    newThroughDate: null,
+    daysMerged: 0,
+  };
+}
+
+// Incremental leg for income (F-ARCH-001·INCR-1) —
+// ingestDailySpendIncremental mirrored: stale_base gate,
+// slice-local per-day recompute (partial re-derived from the
+// envelope fullCoverageStart), date upsert merge, merged
+// totals (total/pending sums over the merged day rows)
+// checked against expectedTotals, publish via
+// publishDailyIncome. Income day rows carry no unclassified
+// id list, so no count is derivable from the merged days;
+// the counts are stored from the worker's declared
+// full-window counts after the totals check passes.
+async function ingestDailyIncomeIncremental(
+  ctx: Ctx,
+  args: IngestArchDailyIncomeArgs,
+): Promise<IngestArchDailyIncomeResult> {
+  const coverageStart = args.coverageStart ?? "";
+  const throughDate = args.throughDate ?? "";
+  const baseThroughDate = args.baseThroughDate;
+  const expected = args.expectedTotals;
+  const txns = args.transactions;
+  const days = args.days;
+  if (!baseThroughDate || !expected || !txns || !days || days.length === 0) {
+    return dailyIncomeFailure("invalid_incremental", coverageStart, throughDate);
+  }
+  if (!isValidPulledAt(args.pulledAt)) {
+    return dailyIncomeFailure("invalid_pulled_at", coverageStart, throughDate);
+  }
+  const pulledAtMs = Date.parse(args.pulledAt);
+  if (
+    !isRealDateKey(coverageStart) || !isRealDateKey(throughDate) ||
+    !isRealDateKey(baseThroughDate)
+  ) {
+    return dailyIncomeFailure("invalid_date", coverageStart, throughDate);
+  }
+  for (const txn of txns) {
+    if (!isRealDateKey(txn.date)) {
+      return dailyIncomeFailure("invalid_date", coverageStart, throughDate);
+    }
+  }
+  for (const day of days) {
+    if (!isRealDateKey(day.date)) {
+      return dailyIncomeFailure("invalid_date", coverageStart, throughDate);
+    }
+  }
+  if (coverageStart > throughDate || baseThroughDate < coverageStart || baseThroughDate > throughDate) {
+    return dailyIncomeFailure("invalid_window", coverageStart, throughDate);
+  }
+  const sortedDays = [...days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  for (let i = 0; i < sortedDays.length; i++) {
+    const date = sortedDays[i]!.date;
+    if (date < coverageStart || date > throughDate) {
+      return dailyIncomeFailure("invalid_window", coverageStart, throughDate);
+    }
+    if (i > 0 && date === sortedDays[i - 1]!.date) {
+      return dailyIncomeFailure("invalid_incremental", coverageStart, throughDate);
+    }
+  }
+  const db = ctx.db<typeof schema>();
+  const storedRows = await db.select().from(schema.archDailyIncome);
+  const current = pickCurrentDailyIncomeVersion(storedRows);
+  if (!current) {
+    return dailyIncomeFailure("no_base", coverageStart, throughDate);
+  }
+  if (current.parsed.throughDate !== baseThroughDate) {
+    return dailyIncomeFailure("stale_base", coverageStart, throughDate);
+  }
+  if (current.parsed.coverageStart !== coverageStart) {
+    return dailyIncomeFailure("coverage_mismatch", coverageStart, throughDate);
+  }
+  const deltaFrom = sortedDays[0]!.date;
+  const deltaTo = sortedDays[sortedDays.length - 1]!.date;
+  for (const txn of txns) {
+    if (txn.date < deltaFrom || txn.date > deltaTo) {
+      return dailyIncomeFailure("invalid_incremental", coverageStart, throughDate);
+    }
+  }
+  const slice = summarizeIncomeDailyServer(txns as DailyIncomeTxn[], { fromDate: deltaFrom, toDate: deltaTo });
+  const fcs = args.fullCoverageStart;
+  const recomputedDays: ArchDailyIncomeDay[] = slice.days.map((day) => ({
+    ...day,
+    partial: fcs !== null && day.date < fcs,
+  }));
+  if (!incomeDaysMatch({ ...slice, days: recomputedDays }, sortedDays)) {
+    return dailyIncomeFailure("daily_mismatch", coverageStart, throughDate);
+  }
+  const byDate = new Map<string, ArchDailyIncomeDay>(
+    current.parsed.days.map((day) => [day.date, day] as const),
+  );
+  for (const day of recomputedDays) byDate.set(day.date, day);
+  const mergedDays: ArchDailyIncomeDay[] = [];
+  for (let cur = coverageStart; ; cur = nextDateKey(cur)) {
+    mergedDays.push(
+      byDate.get(cur) ?? {
+        date: cur,
+        total: 0,
+        pending: 0,
+        sources: [],
+        incomeCount: 0,
+        pendingCount: 0,
+        partial: fcs !== null && cur < fcs,
+      },
+    );
+    if (cur === throughDate) break;
+  }
+  const mergedTotal = mergedDays.reduce((sum, day) => sum + day.total, 0);
+  const mergedPending = mergedDays.reduce((sum, day) => sum + day.pending, 0);
+  if (
+    Math.abs(mergedTotal - expected.total) > 0.01 ||
+    Math.abs(mergedPending - expected.pending) > 0.01
+  ) {
+    return dailyIncomeFailure("incremental_mismatch", coverageStart, throughDate);
+  }
+  const payload: ArchDailyIncome = {
+    arch: "F-ARCH-001",
+    version: 1,
+    kind: "daily-income",
+    pulledAt: args.pulledAt,
+    storedAt: new Date().toISOString(),
+    coverageStart,
+    throughDate,
+    fullCoverageStart: fcs,
+    days: mergedDays,
+    totals: { total: mergedTotal, pending: mergedPending },
+    counts: {
+      transactions: expected.transactions,
+      conflicts: expected.conflicts,
+      unclassified: expected.unclassified,
+      excludedTransfer: expected.excludedTransfer,
+      excludedLoanPrincipal: expected.excludedLoanPrincipal,
+    },
+  };
+  const published = await publishDailyIncome(ctx, pulledAtMs, payload);
+  if (!published.readBackVerified) {
+    return {
+      ok: false,
+      issue: published.issue,
+      days: 0,
+      coverageStart,
+      throughDate,
+      totalMatches: true,
+      readBackVerified: false,
+      chunksReceived: 0,
+      chunksExpected: 0,
+      newThroughDate: null,
+      daysMerged: 0,
+    };
+  }
+  return {
+    ok: true,
+    issue: null,
+    days: mergedDays.length,
+    coverageStart,
+    throughDate,
+    totalMatches: true,
+    readBackVerified: true,
+    chunksReceived: 0,
+    chunksExpected: 0,
+    newThroughDate: throughDate,
+    daysMerged: recomputedDays.length,
   };
 }
 
@@ -4859,6 +5279,15 @@ const getTradingSummaryResponse = z.object({
   positions_count: z.number(),
 });
 
+const ingestTradingDataFromUrlResponse = z.object({
+  ok: z.boolean(),
+  journal_count: z.number(),
+  closed_count: z.number(),
+  positions_count: z.number(),
+  current_total: z.number().nullable(),
+  generated_at: z.string().nullable(),
+});
+
 function emptyTradingDataset(): Record<string, unknown> {
   const now = new Date();
   const iso = now.toISOString();
@@ -4921,6 +5350,7 @@ async function writeTradingDataset(
 
 export const Actions = {
   getDashboard: defineAction({
+    description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner.",
     request: z.object({}),
     response: z.object({
       access: z.enum(["owner", "guest_denied"]),
@@ -5074,6 +5504,7 @@ export const Actions = {
   }),
 
   refreshFinanceData: defineAction({
+    description: "Start a background refresh that re-reads the Firance snapshots and Plaid data and saves them via ingestFinanceData.",
     request: z.object({}),
     response: refreshResponse,
     async handler(ctx): Promise<z.infer<typeof refreshResponse>> {
@@ -5260,6 +5691,7 @@ export const Actions = {
   }),
 
   ingestFinanceData: defineAction({
+    description: "Save callback for the finance refresh task; stores the recomputed dashboard payload when the generation and freshness gates pass.",
     request: z.discriminatedUnion("success", [
       z.object({
         success: z.literal(false),
@@ -5588,6 +6020,7 @@ export const Actions = {
   // a flood of other generations' late events can never push the
   // current attempt's evidence out of the diagnosis.
   getRefreshObservations: defineAction({
+    description: "Read the refresh status summary and the recent refresh-chain observation stream with its diagnosis (owner only).",
     request: z.object({}),
     response: refreshObservationsResponse,
     async handler(ctx): Promise<z.infer<typeof refreshObservationsResponse>> {
@@ -5691,6 +6124,7 @@ export const Actions = {
   // back. The response carries counts and booleans only — never
   // an amount.
   ingestArchNetWorth: defineAction({
+    description: "Ingest the F-ARCH-001 total-assets figure: server recomputes the total from per-account balances and stores it only on an exact match with read-back verification.",
     request: ingestArchNetWorthRequest,
     response: ingestArchNetWorthResponse,
     async handler(ctx, args): Promise<IngestArchNetWorthResult> {
@@ -5891,6 +6325,7 @@ export const Actions = {
   }),
 
   ingestArchDailySpend: defineAction({
+    description: "Ingest the F-ARCH-001 daily-spend dataset via full, chunk, finalize or incremental mode, with server recompute and read-back verification on every publish.",
     request: ingestArchDailySpendRequest,
     response: ingestArchDailySpendResponse,
     async handler(ctx, args): Promise<IngestArchDailySpendResult> {
@@ -5902,6 +6337,7 @@ export const Actions = {
       const mode = args.mode ?? "full";
       if (mode === "chunk") return ingestDailySpendChunk(ctx, args);
       if (mode === "finalize") return finalizeDailySpendBatch(ctx, args);
+      if (mode === "incremental") return ingestDailySpendIncremental(ctx, args);
       const txns = args.transactions;
       const submittedDays = args.days;
       if (!txns || !submittedDays) {
@@ -5940,6 +6376,8 @@ export const Actions = {
           readBackVerified: false,
           chunksReceived: 0,
           chunksExpected: 0,
+          newThroughDate: null,
+          daysMerged: 0,
         };
       }
       const payload: ArchDailySpend = {
@@ -5975,6 +6413,8 @@ export const Actions = {
         readBackVerified: published.readBackVerified,
         chunksReceived: 0,
         chunksExpected: 0,
+        newThroughDate: null,
+        daysMerged: 0,
       };
     },
   }),
@@ -5986,6 +6426,7 @@ export const Actions = {
   // owner or the trusted local sync channel may write; reads
   // ride getDashboard's owner check.
   ingestArchDailyIncome: defineAction({
+    description: "Ingest the F-ARCH-001 daily-income dataset via full, chunk, finalize or incremental mode, with server recompute and read-back verification on every publish.",
     request: ingestArchDailyIncomeRequest,
     response: ingestArchDailyIncomeResponse,
     async handler(ctx, args): Promise<IngestArchDailyIncomeResult> {
@@ -5993,6 +6434,7 @@ export const Actions = {
       const mode = args.mode ?? "full";
       if (mode === "chunk") return ingestDailyIncomeChunk(ctx, args);
       if (mode === "finalize") return finalizeDailyIncomeBatch(ctx, args);
+      if (mode === "incremental") return ingestDailyIncomeIncremental(ctx, args);
       const txns = args.transactions;
       const submittedDays = args.days;
       if (!txns || !submittedDays) {
@@ -6028,6 +6470,8 @@ export const Actions = {
           readBackVerified: false,
           chunksReceived: 0,
           chunksExpected: 0,
+          newThroughDate: null,
+          daysMerged: 0,
         };
       }
       const payload: ArchDailyIncome = {
@@ -6062,6 +6506,8 @@ export const Actions = {
         readBackVerified: published.readBackVerified,
         chunksReceived: 0,
         chunksExpected: 0,
+        newThroughDate: null,
+        daysMerged: 0,
       };
     },
   }),
@@ -6075,6 +6521,7 @@ export const Actions = {
   // are never split into days), strictly increasing unique
   // dates, and SAVE-1 arbitration with exact read-back.
   ingestArchDailyInvest: defineAction({
+    description: "Ingest the daily investment gain/loss series (from 2026-10-24 on), gated by the per-day pnl identity check and read-back verification.",
     request: ingestArchDailyInvestRequest,
     response: ingestArchDailyInvestResponse,
     async handler(ctx, args): Promise<IngestArchDailyInvestResult> {
@@ -6115,6 +6562,7 @@ export const Actions = {
   // append action below (the core push carries journal: []).
   // Same write gate as the other ingest paths.
   saveTradingData: defineAction({
+    description: "Replace the stored trading dataset wholesale with a new pipeline push (journal rides as an empty array).",
     request: z.object({ dataset: z.record(z.string(), z.unknown()) }),
     response: saveTradingDataResponse,
     async handler(ctx, args): Promise<z.infer<typeof saveTradingDataResponse>> {
@@ -6136,6 +6584,7 @@ export const Actions = {
   // dataset stored yet, an empty one is created first so the
   // append always lands.
   appendTradingJournal: defineAction({
+    description: "Append rows to the stored trading dataset's journal tail, creating an empty dataset first when none exists.",
     request: z.object({
       rows: z.array(z.record(z.string(), z.unknown())),
     }),
@@ -6164,6 +6613,7 @@ export const Actions = {
   // TRADING-MERGE-001: counts-only read-back so the pusher can
   // verify a push's integrity without downloading the dataset.
   getTradingSummary: defineAction({
+    description: "Read counts-only summary of the stored trading dataset (generated_at, current total, journal/closed/positions counts).",
     request: z.object({}),
     response: getTradingSummaryResponse,
     async handler(ctx): Promise<z.infer<typeof getTradingSummaryResponse>> {
@@ -6193,6 +6643,90 @@ export const Actions = {
         journal_count: tradingArrayLength(dataset["journal"]),
         closed_count: tradingArrayLength(dataset["closed_trades"]),
         positions_count: tradingArrayLength(dataset["positions"]),
+      };
+    },
+  }),
+
+  // ingestTradingDataFromUrl: fetch a board_data.json document
+  // from a public URL server-side and replace the stored trading
+  // dataset wholesale with it — journal included, exactly as if
+  // the full dataset had been pushed through saveTradingData.
+  // Same write gate as the other trading ingest paths; on any
+  // fetch/parse failure the stored dataset is left untouched and
+  // the counts come back zeroed with ok: false.
+  ingestTradingDataFromUrl: defineAction({
+    description: "Fetch a board_data.json document from a public URL and replace the stored trading dataset with it.",
+    request: z.object({ url: z.string().min(1) }),
+    response: ingestTradingDataFromUrlResponse,
+    async handler(ctx, args): Promise<z.infer<typeof ingestTradingDataFromUrlResponse>> {
+      const failure: z.infer<typeof ingestTradingDataFromUrlResponse> = {
+        ok: false,
+        journal_count: 0,
+        closed_count: 0,
+        positions_count: 0,
+        current_total: null,
+        generated_at: null,
+      };
+      if (!isOwnerOrSyncChannel(ctx)) return failure;
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(args.url);
+      } catch {
+        return failure;
+      }
+      if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+        return failure;
+      }
+      // Public URLs only: refuse loopback / private / link-local
+      // hosts so this fetch can never be aimed at internal services.
+      const host = parsedUrl.hostname.toLowerCase();
+      if (
+        host === "localhost" ||
+        host.endsWith(".local") ||
+        host === "::1" ||
+        host === "0.0.0.0" ||
+        /^127\./.test(host) ||
+        /^10\./.test(host) ||
+        /^192\.168\./.test(host) ||
+        /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+        /^169\.254\./.test(host)
+      ) {
+        return failure;
+      }
+      let parsed: unknown;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
+      try {
+        const response = await fetch(parsedUrl, {
+          signal: controller.signal,
+          headers: { accept: "application/json" },
+          redirect: "follow",
+        });
+        if (!response.ok) return failure;
+        parsed = await response.json();
+      } catch {
+        return failure;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return failure;
+      }
+      const dataset = parsed as Record<string, unknown>;
+      await writeTradingDataset(ctx, dataset);
+      ctx.invalidateQueries();
+      const generatedAt = dataset["generated_at"];
+      const currentTotal = dataset["current_total"];
+      return {
+        ok: true,
+        journal_count: tradingArrayLength(dataset["journal"]),
+        closed_count: tradingArrayLength(dataset["closed_trades"]),
+        positions_count: tradingArrayLength(dataset["positions"]),
+        current_total:
+          typeof currentTotal === "number" && Number.isFinite(currentTotal)
+            ? currentTotal
+            : null,
+        generated_at: typeof generatedAt === "string" ? generatedAt : null,
       };
     },
   }),
