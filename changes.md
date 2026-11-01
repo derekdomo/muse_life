@@ -3046,4 +3046,12 @@
 - 约束：不改 W3.2 引擎决策语义与 W1.2 规则、无 schema 变更（加法字段优先、不落盘）、不破坏 W3.1–W3.4 导出/签名；色弱规则；口径页面公开标注。要求交付：新增 validate-deload-advisory.mjs（真实函数断言＋≥3 项变异实跑：删连续两次门槛、删信号门槛、删确认门控均须翻转）＋既有回归全过＋构建审计 pass＋隐私扫描零命中（合成数据）。
 - 安全：getDashboard 无身份只读为用户 2026-10-17 亲自批准的 L0.1 例外，维持现状不扩大；不提交 app.db/.env/密钥/个人数据。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，不勾选。W5.2（配重计算器与热身组生成）顺延在 W3.5 交付之后。
 - plans.md：`W3.5` 条已登记派工；W5.2 条已有一项 owner 顺位确认（09:56），无需重复标注。
-- 本轮未动 cron；修改文件：plans.md（W3.5 派工登记）、本文件。回滚：revert 本提交即恢复派工前状态（线上 space-6 不受影响）。
+## 2026-11-01 12 时 PST（muse-life-plans-sync 10:55 轮次续：W3.5 构建回传交付回灌）
+- 交付：space-6 builder 12:04 PST 回传构建成功（10:55 PST 派工）——`W3.5` 停滞检测与保守调整建议已在 artifact（space-6）上线：服务端新增纯函数模块 `server/src/deload-advisory.ts`（无 import，`evaluateDeloadAdvisory`/`selectDeloadSessions` 导出）；Gate A——同动作最近三次 session 的完成率或总容量（按场次单位换算，W3.2/W3.3 同口径）连续两次严格走低（双门槛不可混、平步不算、单次状态差永不触发）；Gate B——最近一次 session 任一信号：高 RPE（sessionRpe≥9）、低 RIR（任一工作组 RIR≤1）、疼痛标记（painFlags 非空）、低 readiness（<2，H-LOAD-001 红档）；两门槛均成立才出建议。`getDashboard` 加法字段 `deload_advisory`（周复盘）与 `receipt_deload_advisory`（训练结束回执），两处建议卡呈现触发事实（下降数值、信号与数字）、保守建议（降重一档/减组/恢复日）与「确认采纳」「忽略」入口——只展示、不写数据、不自动改计划；本 app 不存 readiness 数据，readiness 走 getDashboard 可选入参，缺失时该信号不触发、不编造。口径页面公开标注；色弱规则（▼符号＋文字＋数字）。
+- 实现：不动 schema、无 migration、不改 W3.2 引擎决策语义与 W3.1–W3.4 既有导出/签名。构建方如实记录：回执路径初版曾有组数据按 set id 分组的 bug（每动作只选到 1 次会话），已修复并加接线断言锁定；W3.4 验证器禁止客户端出现 "DELOAD" 字样，客户端常量改名为 ADVISORY_SESSION_LABELS 而非放宽旧断言。
+- 回灌（线上 `~/workspace/ts-spaces/space-6` → 本仓 `workout-log/`）：server/src/deload-advisory.ts（新）、validate-deload-advisory.mjs（新）、server/src/actions.ts、client/src/App.tsx、client/src/theme.css、DATA-PLAN.md（W3.5 章节）；diff 核验全部为 W3.5-only 变更。**未覆盖**：drizzle/0007·0008（既有换行格式化差异，仓库保留原版）、bun.lock、app.db、构建产物。
+- 仓库验证（本机实跑，合成数据）：validate-deload-advisory 36/36（含 3 项变异实跑全部敏感：删连续两次门槛、删信号门槛、删确认门控）；既有回归 rir-rpe 103、progression 43、progression-engine 35、receipt 37、week-current 59、week-frequency 16、action-trends 15、autosave 69、rest-timer 48——0 失败。隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+- 安全：getDashboard 无身份只读通道即用户 2026-10-17 亲自批准的 L0.1 例外，W3.5 只在其后加两个只读字段、未改门禁、维持现状、不重开。
+- plans.md `W3.5` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。W5.2（配重计算器与热身组生成）为下一顺位，留待后续轮次。
+- 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准。
+- 本轮未动 cron；修改文件：plans.md（W3.5 交付登记）、workout-log 回灌 6 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-6 已上线版本不受影响）。

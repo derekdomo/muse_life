@@ -818,6 +818,30 @@ type ActionTrendEntry = NonNullable<Dashboard["action_trends"]>[number];
 type WeekFrequencyData = NonNullable<Dashboard["week_frequency"]>;
 type WeekFrequencyEntry = WeekFrequencyData["exercises"][number];
 type WeekFrequencyCell = WeekFrequencyEntry["weeks"][number];
+// W3.5: server-computed conservative adjustment / recovery
+// advisories (deload_advisory for the weekly review,
+// receipt_deload_advisory for the completion receipt) — one
+// structural shape for the card; the client renders them and
+// derives no verdict of its own.
+type DeloadAdvisoryCardData = {
+  routine?: string;
+  exercise_key: string;
+  exercise_name: string;
+  unit: Unit;
+  suggested: boolean;
+  declines: { metric: "completion_rate" | "volume"; values: [number, number, number] }[];
+  signals: { kind: string; detail: string; value: number | null }[];
+  session_metrics: {
+    completed_at: string | null;
+    completion_rate: number | null;
+    volume: number | null;
+    best_set_volume: number | null;
+  }[];
+  suggestion: string | null;
+  reason: string;
+  requires_confirmation: boolean;
+  advisory_version: number;
+};
 
 const CONFIDENCE_LABELS: Record<ProgressionAdviceEntry["confidence"], string> = {
   high: "高",
@@ -1262,7 +1286,14 @@ function ThisWeekSection({ plan, workouts, weekSummaries, focus }: {
   );
 }
 
-function WeeklyReview({ workouts, progressionAdvice }: { workouts: Workout[]; progressionAdvice?: ProgressionAdviceEntry[] }) {
+function WeeklyReview({ workouts, progressionAdvice, deloadAdvisory }: {
+  workouts: Workout[];
+  progressionAdvice?: ProgressionAdviceEntry[];
+  // W3.5 (additive): server-computed conservative adjustment /
+  // recovery advisories, rendered as suggestion cards under the
+  // review — the progression_advice consumption point.
+  deloadAdvisory?: DeloadAdvisoryCardData[];
+}) {
   const { start, end } = previousCompleteWeek();
   const priorStart = new Date(start);
   priorStart.setDate(priorStart.getDate() - 7);
@@ -1290,6 +1321,8 @@ function WeeklyReview({ workouts, progressionAdvice }: { workouts: Workout[]; pr
         </div>
         <span>{week.length} 次 · {sets} 组</span>
       </div>
+
+      <DeloadAdvisoryCards advisories={deloadAdvisory} />
 
       <details className="review-evidence">
         <summary>查看依据{reviews.length > 0 ? <span>{reviews.length} 个动作 · 含负荷建议</span> : <span>含负荷建议</span>}</summary>
@@ -1340,6 +1373,95 @@ function WeeklyReview({ workouts, progressionAdvice }: { workouts: Workout[]; pr
         </div>
       </details>
     </section>
+  );
+}
+
+// --- W3.5: conservative adjustment / recovery advisory cards ---
+// Rendered ONLY from the server's deload advisories
+// (deload_advisory at the weekly review, receipt_deload_advisory
+// on the completion receipt): an entry renders as a card only when
+// advisory.suggested is true — the server has already judged both
+// gates (two consecutive declines + a strain signal). The card
+// states the triggering facts with numbers, offers the
+// conservative suggestion, and is display-only: 确认采纳 records
+// nothing but the user's own acknowledgement in this view, 忽略
+// dismisses the card, and neither path changes any plan, template
+// or weight. Meaning rides on the ▼ symbol + text + numbers,
+// never on colour alone.
+const ADVISORY_SESSION_LABELS = ["最近一次", "上一次", "再上一次"];
+
+function DeloadAdvisoryCards({ advisories }: { advisories?: DeloadAdvisoryCardData[] }) {
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
+  const [confirmed, setConfirmed] = useState<ReadonlySet<string>>(new Set());
+  const visible = (advisories ?? []).filter((advisory) => advisory.suggested);
+  if (visible.length === 0) return null;
+  const cardKey = (advisory: DeloadAdvisoryCardData) => `${advisory.routine ?? ""}:${advisory.exercise_key}`;
+  return (
+    <div className="deload-cards">
+      {visible.map((advisory) => {
+        const key = cardKey(advisory);
+        if (dismissed.has(key)) return null;
+        const isConfirmed = confirmed.has(key);
+        return (
+          <article className="deload-card" key={key} aria-label={`保守调整建议：${advisory.exercise_name}`}>
+            <h3 className="deload-card-title">
+              <span aria-hidden="true">▼</span> 保守调整建议 · {advisory.exercise_name}
+            </h3>
+            <p className="deload-card-rule">
+              口径：同一动作最近三次记录中，完成率或总容量连续两次走低，且同时出现高 RPE（≥ 9）、低 RIR（≤ 1）、疼痛标记或低 readiness（&lt; 2）之一时才建议；单次状态差不触发。建议版本 v{advisory.advisory_version}。
+            </p>
+            <ul className="deload-card-facts">
+              {advisory.declines.map((decline) => (
+                <li key={decline.metric}>
+                  {decline.metric === "completion_rate"
+                    ? `完成率连续走低：${decline.values.map((value) => `${Math.round(value * 100)}%`).join(" → ")}（由早到晚）`
+                    : `总容量连续走低：${decline.values.map((value) => `${value}`).join(" → ")} ${advisory.unit}（由早到晚）`}
+                </li>
+              ))}
+              {advisory.session_metrics.map((metrics, index) => (
+                <li key={`${key}-session-${index}`}>
+                  {ADVISORY_SESSION_LABELS[index] ?? `第 ${index + 1} 次`}
+                  {metrics.completed_at ? ` · ${formatDate(metrics.completed_at)}` : ""}
+                  {metrics.completion_rate != null ? ` · 完成率 ${Math.round(metrics.completion_rate * 100)}%` : ""}
+                  {metrics.volume != null ? ` · 总容量 ${metrics.volume} ${advisory.unit}` : ""}
+                  {metrics.best_set_volume != null ? ` · ★ 最佳组 ${metrics.best_set_volume} ${advisory.unit}` : ""}
+                </li>
+              ))}
+              {advisory.signals.map((signal) => (
+                <li key={signal.kind}>信号：{signal.detail}</li>
+              ))}
+            </ul>
+            <p className="deload-card-reason">{advisory.reason}</p>
+            {advisory.suggestion ? <p className="deload-card-suggestion">建议：{advisory.suggestion}</p> : null}
+            <p className="deload-card-note">
+              只展示建议，不会自动修改任何训练计划；点「确认采纳」只是记下你已确认（本页状态，不写入计划），下次训练时请按建议手动调整；点「忽略」关闭这张卡。
+            </p>
+            {isConfirmed ? (
+              <p className="deload-card-confirmed" role="status">✓ 已确认采纳（计划未自动修改）</p>
+            ) : null}
+            <div className="deload-card-actions">
+              {!isConfirmed ? (
+                <button
+                  type="button"
+                  className="deload-card-confirm"
+                  aria-label={`确认采纳 ${advisory.exercise_name} 的保守调整建议`}
+                  onClick={() => setConfirmed((prev) => new Set(prev).add(key))}
+                >
+                  确认采纳
+                </button>
+              ) : null}
+              <button
+                type="button"
+                aria-label={`忽略 ${advisory.exercise_name} 的保守调整建议`}
+                onClick={() => setDismissed((prev) => new Set(prev).add(key))}
+              >
+                忽略
+              </button>
+            </div>
+          </article>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1451,6 +1573,7 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
           </li>
         ))}
       </ul>
+      <DeloadAdvisoryCards advisories={query.data?.receipt_deload_advisory} />
       <div className="receipt-muscles">
         <h3>本次训练肌群事实</h3>
         {muscleFacts.primary.length === 0 && muscleFacts.secondary.length === 0 && muscleFacts.unmapped.length === 0 ? (
@@ -3992,10 +4115,13 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, weekSummaries, progressionAdvice, actionTrends, weekFrequency, receiptId, onCloseReceipt }: {
+function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory, actionTrends, weekFrequency, receiptId, onCloseReceipt }: {
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
   progressionAdvice?: ProgressionAdviceEntry[];
+  // W3.5 (additive): server-computed deload advisories for the
+  // weekly review's suggestion cards; absent on older responses.
+  deloadAdvisory?: DeloadAdvisoryCardData[];
   // W3.3 (additive): server-computed per-exercise trends for the
   // history area; absent on older cached responses.
   actionTrends?: ActionTrendEntry[];
@@ -4095,7 +4221,7 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, actionTrends, w
 
       <ThisWeekSection plan={planData} workouts={recent} weekSummaries={weekSummaries} focus={historyFocus} />
 
-      <WeeklyReview workouts={recent} progressionAdvice={progressionAdvice} />
+      <WeeklyReview workouts={recent} progressionAdvice={progressionAdvice} deloadAdvisory={deloadAdvisory} />
 
       <History workouts={earlierWorkouts} focus={historyFocus} />
 
@@ -4168,6 +4294,7 @@ export function App() {
           recent={dashboard.data.recent_workouts}
           weekSummaries={dashboard.data.week_summaries}
           progressionAdvice={dashboard.data.progression_advice}
+          deloadAdvisory={dashboard.data.deload_advisory}
           actionTrends={dashboard.data.action_trends}
           weekFrequency={dashboard.data.week_frequency}
           receiptId={receiptId}

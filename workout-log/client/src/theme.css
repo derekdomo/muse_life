@@ -160,6 +160,25 @@ button.current-week-row { cursor: pointer; font: inherit; font-size: 12px; }
 .receipt-muscle-list li span:last-child { color: var(--dim); overflow-wrap: anywhere; }
 .receipt-muscles-empty, .receipt-muscles-unmapped { margin: 6px 0 0; color: var(--dim); font-size: 12px; line-height: 1.55; }
 .receipt-muscles-note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+
+/* W3.5: conservative adjustment / recovery advisory cards. The
+   card carries its own surface + text tokens so it reads the same
+   inside the dark weekly-review block and the light receipt card;
+   meaning is carried by the ▼ symbol, headings and numbers. */
+.deload-cards { display: grid; gap: 10px; margin-top: 14px; }
+.receipt-card .deload-cards { margin: 6px 0 4px; }
+.deload-card { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
+.deload-card-title { margin: 0; font-size: 14px; font-weight: 850; }
+.deload-card-rule { margin: 8px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.deload-card-facts { list-style: none; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--border); display: grid; gap: 4px; }
+.deload-card-facts li { font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.deload-card-reason { margin: 10px 0 0; font-size: 12px; line-height: 1.6; }
+.deload-card-suggestion { margin: 8px 0 0; font-size: 13px; font-weight: 800; line-height: 1.55; }
+.deload-card-note { margin: 8px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.deload-card-confirmed { margin: 10px 0 0; font-size: 12px; font-weight: 800; }
+.deload-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.deload-card-actions button { min-height: 44px; padding: 0 16px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 800; cursor: pointer; }
+.deload-card-actions .deload-card-confirm { background: var(--text); color: var(--bg); border-color: var(--text); }
 .guide-muscles p { margin: 0; color: var(--text); font-size: 13px; line-height: 1.55; }
 .guide-muscles p + p { margin-top: 4px; color: var(--dim); }
 .guide-muscles-toggle { width: 100%; min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0; border: 0; background: transparent; color: var(--text); font-size: 12px; font-weight: 700; text-align: left; cursor: pointer; }

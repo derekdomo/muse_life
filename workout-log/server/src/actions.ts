@@ -16,6 +16,10 @@ import {
   type WeekFrequencyScheduleEntry,
   type WeekFrequencyWorkout,
 } from "./week-frequency";
+import {
+  evaluateDeloadAdvisory,
+  type DeloadSession,
+} from "./deload-advisory";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -323,6 +327,62 @@ const weekFrequencyResponse = z.object({
   frequency_version: z.number(),
 });
 
+// W3.5 (additive): one exercise's conservative adjustment /
+// recovery advisory, computed by the pure module in
+// server/src/deload-advisory.ts. Display only: suggested is true
+// ONLY when the performance declined in two consecutive steps
+// across the three most recent sessions AND at least one strain
+// signal fired (high RPE / low RIR / pain flags / low readiness).
+// requires_confirmation is always true — an advisory never changes
+// a plan, a template or a weight by itself.
+const deloadSessionMetricsResponse = z.object({
+  completed_at: z.string().nullable(),
+  completion_rate: z.number().nullable(),
+  volume: z.number().nullable(),
+  best_set_volume: z.number().nullable(),
+});
+const deloadDeclineResponse = z.object({
+  metric: z.enum(["completion_rate", "volume"]),
+  // Oldest session first: [oldest, middle, latest], strictly
+  // decreasing by construction.
+  values: z.tuple([z.number(), z.number(), z.number()]),
+});
+const deloadSignalResponse = z.object({
+  kind: z.enum(["high_rpe", "low_rir", "pain", "low_readiness"]),
+  detail: z.string(),
+  value: z.number().nullable(),
+});
+const deloadAdvisoryEntryResponse = z.object({
+  routine: routineSchema,
+  exercise_key: z.string(),
+  exercise_name: z.string(),
+  unit: unitSchema,
+  suggested: z.boolean(),
+  declines: z.array(deloadDeclineResponse),
+  signals: z.array(deloadSignalResponse),
+  session_metrics: z.array(deloadSessionMetricsResponse),
+  suggestion: z.string().nullable(),
+  reason: z.string(),
+  requires_confirmation: z.boolean(),
+  advisory_version: z.number(),
+});
+// W3.5 (additive): the same advisory for one exercise of the
+// completion-receipt workout, judged on that workout plus its two
+// most recent earlier comparable sessions.
+const receiptDeloadAdvisoryEntryResponse = z.object({
+  exercise_key: z.string(),
+  exercise_name: z.string(),
+  unit: unitSchema,
+  suggested: z.boolean(),
+  declines: z.array(deloadDeclineResponse),
+  signals: z.array(deloadSignalResponse),
+  session_metrics: z.array(deloadSessionMetricsResponse),
+  suggestion: z.string().nullable(),
+  reason: z.string(),
+  requires_confirmation: z.boolean(),
+  advisory_version: z.number(),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
@@ -342,6 +402,13 @@ const dashboardResponse = z.object({
   // 4 complete weeks plus the weekly state judgement, computed by
   // buildWeekFrequency. Existing consumers ignore the field.
   week_frequency: weekFrequencyResponse.optional(),
+  // W3.5 (additive, optional): per-exercise conservative
+  // adjustment / recovery advisories for the weekly review's
+  // progression_advice consumption point, computed by
+  // evaluateDeloadAdvisory over each exercise's three most recent
+  // sessions. Display only — nothing here changes a plan.
+  // Existing consumers （健康看板 sync) ignore the field.
+  deload_advisory: z.array(deloadAdvisoryEntryResponse).optional(),
   // W4.3-D1 (additive, optional): present ONLY when the caller passed
   // receipt_workout_id — the completed workout read back by that exact
   // id for the completion receipt. Null when the id is unknown or the
@@ -355,6 +422,10 @@ const dashboardResponse = z.object({
   // receipt (same condition as receipt_previous) — the engine's
   // per-exercise advice for the receipt workout itself.
   receipt_advice: z.array(receiptAdviceEntryResponse).optional(),
+  // W3.5 (additive, optional): present ONLY alongside a located
+  // receipt (same condition as receipt_advice) — the conservative
+  // adjustment / recovery advisory per exercise of that workout.
+  receipt_deload_advisory: z.array(receiptDeloadAdvisoryEntryResponse).optional(),
 });
 
 const planExerciseResponse = z.object({
@@ -1326,6 +1397,79 @@ export function selectProgressionSessions(
   });
 }
 
+// W3.5: the deload advisory's input selection — per exercise, the
+// THREE most recent sessions inside the same per-routine 20-workout
+// window selectProgressionSessions reads (most recent first). A
+// session keeps its source unit and values (the advisory module
+// converts), that workout's decoded pain flags and session RPE, its
+// completion time, and every set's stored RIR. Pure and
+// self-contained so validation scripts can run it verbatim.
+export type DeloadSessionSelection = {
+  exerciseKey: string;
+  exerciseName: string;
+  sessions: {
+    unit: "lb" | "kg";
+    plannedSets: number;
+    sourceCompletedAt: string | null;
+    painFlags: string[];
+    sessionRpe: number | null;
+    sets: { setNumber: number; weight: number | null; reps: number | null; rir: number | null; completed: boolean }[];
+  }[];
+};
+
+export function selectDeloadSessions(
+  recentCompleted: {
+    unit: "lb" | "kg";
+    completedAt?: string | null;
+    painFlags?: string[];
+    sessionRpe?: number | null;
+    sets: ComparableSetLike[];
+  }[],
+  exerciseKeys: string[],
+): DeloadSessionSelection[] {
+  const windowed = recentCompleted.slice(0, 20);
+  return exerciseKeys.map((exerciseKey) => {
+    const sessions: DeloadSessionSelection["sessions"] = [];
+    let exerciseName = "";
+    for (const workout of windowed) {
+      if (sessions.length >= 3) break;
+      const sets = workout.sets.filter((set) => set.exerciseKey === exerciseKey);
+      if (sets.length === 0) continue;
+      const first = sets[0];
+      if (!first) continue;
+      if (!exerciseName) exerciseName = first.exerciseName ?? "";
+      sessions.push({
+        unit: workout.unit,
+        plannedSets: sets.length,
+        sourceCompletedAt: workout.completedAt ?? null,
+        painFlags: workout.painFlags ?? [],
+        sessionRpe: workout.sessionRpe ?? null,
+        sets: sets.map((set) => ({
+          setNumber: set.setNumber,
+          weight: set.weight,
+          reps: set.reps,
+          rir: set.rir ?? null,
+          completed: set.completed,
+        })),
+      });
+    }
+    return { exerciseKey, exerciseName, sessions };
+  });
+}
+
+// Map one selection's raw sessions onto the advisory module's
+// input shape.
+function toDeloadSessions(selection: DeloadSessionSelection): DeloadSession[] {
+  return selection.sessions.map((session) => ({
+    unit: session.unit,
+    plannedSets: session.plannedSets,
+    sets: session.sets,
+    painFlags: session.painFlags,
+    sessionRpe: session.sessionRpe,
+    completedAt: session.sourceCompletedAt,
+  }));
+}
+
 // Map one selection's raw sessions onto the engine's input shape.
 function toEngineSessions(selection: ProgressionSessionSelection): ProgressionEngineSession[] {
   return selection.sessions.map((session) => ({
@@ -1474,6 +1618,60 @@ async function loadProgressionAdvice(
         reason: advice.reason,
         confidence: advice.confidence,
         engine_version: advice.engineVersion,
+      });
+    }
+  }
+  return entries;
+}
+
+// W3.5: the weekly review's conservative adjustment / recovery
+// advisories — one entry per plan exercise that has at least one
+// session (same per-routine window as loadProgressionAdvice),
+// judged by the pure evaluateDeloadAdvisory over the exercise's
+// three most recent sessions. The suggestion is expressed in the
+// most recent session's own unit. Display only: this loader writes
+// nothing and no advisory ever changes a plan. readinessScore is
+// the caller's latest readiness reading when it has one; this
+// artifact stores none, so callers pass null and the readiness
+// signal simply cannot fire (it is never invented here).
+async function loadDeloadAdvisories(
+  ctx: Ctx,
+  readinessScore: number | null,
+): Promise<z.infer<typeof deloadAdvisoryEntryResponse>[]> {
+  const entries: z.infer<typeof deloadAdvisoryEntryResponse>[] = [];
+  const templates = await loadPlanTemplates(ctx);
+  for (const routine of ROUTINE_KEYS) {
+    const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
+    const selections = selectDeloadSessions(
+      recentCompleted,
+      templates[routine].map((exercise) => exercise.key),
+    );
+    for (const selection of selections) {
+      const latest = selection.sessions[0];
+      if (!latest) continue;
+      const advisory = evaluateDeloadAdvisory({
+        sessions: toDeloadSessions(selection),
+        readinessScore,
+        unit: latest.unit,
+      });
+      entries.push({
+        routine,
+        exercise_key: selection.exerciseKey,
+        exercise_name: selection.exerciseName,
+        unit: latest.unit,
+        suggested: advisory.suggested,
+        declines: advisory.declines,
+        signals: advisory.signals,
+        session_metrics: advisory.sessionMetrics.map((metrics) => ({
+          completed_at: metrics.completedAt,
+          completion_rate: metrics.completionRate,
+          volume: metrics.volume,
+          best_set_volume: metrics.bestSetVolume,
+        })),
+        suggestion: advisory.suggestion,
+        reason: advisory.reason,
+        requires_confirmation: advisory.requiresConfirmation,
+        advisory_version: advisory.advisoryVersion,
       });
     }
   }
@@ -1932,6 +2130,136 @@ async function loadReceiptAdvice(
   return entries;
 }
 
+// W3.5: the completion receipt's conservative adjustment / recovery
+// advisory, one entry per exercise of the receipt workout (in the
+// workout's own order). The judged window is the receipt workout
+// ITSELF plus the exercise's two most recent earlier comparable
+// sessions — the same strictly-earlier, same-routine, 20-workout
+// candidate window loadReceiptAdvice reads, re-selected here at
+// three sessions deep by selectDeloadSessions over a candidate
+// list headed by the receipt workout itself. Display only: this
+// loader writes nothing.
+async function loadReceiptDeloadAdvisories(
+  ctx: Ctx,
+  receipt: z.infer<typeof workoutResponse>,
+  readinessScore: number | null,
+): Promise<z.infer<typeof receiptDeloadAdvisoryEntryResponse>[]> {
+  const exerciseKeys = [...new Set(receipt.sets.map((set) => set.exercise_key))];
+  if (!receipt.completed_at || exerciseKeys.length === 0) return [];
+  const db = ctx.db<typeof schema>();
+  const completedAtMs = new Date(receipt.completed_at).getTime();
+  const rows = await db
+    .select({
+      id: schema.workouts.id,
+      unit: schema.workouts.unit,
+      completedAt: schema.workouts.completedAt,
+      painFlags: schema.workouts.painFlags,
+      sessionRpe: schema.workouts.sessionRpe,
+    })
+    .from(schema.workouts)
+    .where(
+      and(
+        eq(schema.workouts.routine, receipt.routine),
+        isNotNull(schema.workouts.completedAt),
+        ne(schema.workouts.id, receipt.id),
+      ),
+    )
+    .orderBy(desc(schema.workouts.completedAt), desc(schema.workouts.id))
+    .limit(40);
+  const earlier: { id: number; unit: "lb" | "kg"; completedAt: Date; painFlags: string | null; sessionRpe: number | null }[] = [];
+  for (const row of rows) {
+    if (!row.completedAt) continue;
+    const ms = row.completedAt.getTime();
+    if (ms < completedAtMs || (ms === completedAtMs && row.id < receipt.id)) {
+      earlier.push({ id: row.id, unit: row.unit, completedAt: row.completedAt, painFlags: row.painFlags, sessionRpe: row.sessionRpe });
+      if (earlier.length >= 20) break;
+    }
+  }
+  const setRows = earlier.length
+    ? await db
+        .select()
+        .from(schema.workoutSets)
+        .where(inArray(schema.workoutSets.workoutId, earlier.map((row) => row.id)))
+        .orderBy(asc(schema.workoutSets.id))
+    : [];
+  const setsByWorkout = new Map<number, ComparableSetLike[]>();
+  for (const row of setRows) {
+    const list = setsByWorkout.get(row.workoutId) ?? [];
+    list.push({
+      exerciseKey: row.exerciseKey,
+      setNumber: row.setNumber,
+      targetReps: row.targetReps,
+      weight: row.weight,
+      reps: row.reps,
+      completed: row.completed,
+      rir: row.rir,
+      exerciseName: row.exerciseName,
+    });
+    setsByWorkout.set(row.workoutId, list);
+  }
+  // Candidate list, most recent first: the receipt workout itself,
+  // then the strictly-earlier workouts of the same routine.
+  const candidates: {
+    unit: "lb" | "kg";
+    completedAt: string | null;
+    painFlags: string[];
+    sessionRpe: number | null;
+    sets: ComparableSetLike[];
+  }[] = [
+    {
+      unit: receipt.unit,
+      completedAt: receipt.completed_at,
+      painFlags: receipt.pain_flags,
+      sessionRpe: receipt.session_rpe,
+      sets: receipt.sets.map((set) => ({
+        exerciseKey: set.exercise_key,
+        setNumber: set.set_number,
+        targetReps: set.target_reps,
+        weight: set.weight,
+        reps: set.reps,
+        completed: set.completed,
+        rir: set.rir,
+        exerciseName: set.exercise_name,
+      })),
+    },
+    ...earlier.map((row) => ({
+      unit: row.unit,
+      completedAt: row.completedAt.toISOString(),
+      painFlags: decodePainFlags(row.painFlags),
+      sessionRpe: row.sessionRpe,
+      sets: setsByWorkout.get(row.id) ?? [],
+    })),
+  ];
+  const selections = selectDeloadSessions(candidates, exerciseKeys);
+  const entries: z.infer<typeof receiptDeloadAdvisoryEntryResponse>[] = [];
+  for (const selection of selections) {
+    const advisory = evaluateDeloadAdvisory({
+      sessions: toDeloadSessions(selection),
+      readinessScore,
+      unit: receipt.unit,
+    });
+    entries.push({
+      exercise_key: selection.exerciseKey,
+      exercise_name: selection.exerciseName,
+      unit: receipt.unit,
+      suggested: advisory.suggested,
+      declines: advisory.declines,
+      signals: advisory.signals,
+      session_metrics: advisory.sessionMetrics.map((metrics) => ({
+        completed_at: metrics.completedAt,
+        completion_rate: metrics.completionRate,
+        volume: metrics.volume,
+        best_set_volume: metrics.bestSetVolume,
+      })),
+      suggestion: advisory.suggestion,
+      reason: advisory.reason,
+      requires_confirmation: advisory.requiresConfirmation,
+      advisory_version: advisory.advisoryVersion,
+    });
+  }
+  return entries;
+}
+
 export const Actions = {
   getDashboard: defineAction({
     description: "Read the workout dashboard: the active workout, recent completed workouts, week summaries, comparable history, and optionally one completion receipt read back by id.",
@@ -1941,6 +2269,13 @@ export const Actions = {
       // just completed, to read back by id for the completion
       // receipt. Omitted by every existing caller.
       receipt_workout_id: z.number().int().positive().optional(),
+      // W3.5 (additive, optional): the caller's latest readiness
+      // score, fed to the deload advisory's low-readiness signal
+      // (low = score < 2, the H-LOAD-001 red band). This artifact
+      // stores no readiness data, so existing callers omit it and
+      // that signal simply cannot fire; it is never defaulted or
+      // invented server-side.
+      readiness_score: z.number().min(0).max(10).optional(),
     }),
     response: dashboardResponse,
     async handler(ctx, args): Promise<z.infer<typeof dashboardResponse>> {
@@ -2038,6 +2373,12 @@ export const Actions = {
       let receiptAdviceFields: {
         receipt_advice: z.infer<typeof receiptAdviceEntryResponse>[];
       } | null = null;
+      // W3.5 (additive): the receipt workout's deload advisories,
+      // computed only when that workout was actually located above —
+      // same condition as receipt_advice.
+      let receiptDeloadFields: {
+        receipt_deload_advisory: z.infer<typeof receiptDeloadAdvisoryEntryResponse>[];
+      } | null = null;
       if (args.receipt_workout_id != null) {
         const located = await loadWorkout(ctx, args.receipt_workout_id);
         if (located && located.completed_at != null) {
@@ -2046,6 +2387,7 @@ export const Actions = {
             receipt_previous: await loadReceiptPrevious(ctx, located),
           };
           receiptAdviceFields = { receipt_advice: await loadReceiptAdvice(ctx, located) };
+          receiptDeloadFields = { receipt_deload_advisory: await loadReceiptDeloadAdvisories(ctx, located, args.readiness_score ?? null) };
         } else {
           receiptFields = { receipt: null, receipt_previous: [] };
         }
@@ -2059,8 +2401,10 @@ export const Actions = {
         progression_advice: await loadProgressionAdvice(ctx),
         action_trends: await loadActionTrends(ctx),
         week_frequency: await loadWeekFrequency(ctx, now),
+        deload_advisory: await loadDeloadAdvisories(ctx, args.readiness_score ?? null),
         ...(receiptFields ?? {}),
         ...(receiptAdviceFields ?? {}),
+        ...(receiptDeloadFields ?? {}),
       };
     },
   }),

@@ -472,3 +472,122 @@ alone, in the same expandable per-exercise rows as W3.3.
   viewer-less sync channel remains the owner's L0.1 exception of
   2026-10-17; W3.4 only added a read-only field behind the same
   gate and did not widen it.
+
+## Conservative adjustment / recovery advisory (W3.5, added 2026-11-01)
+
+Per-exercise stall detection with a deload hint, additive and
+display-only — no schema change, no migration, no stored data
+rewritten, and no plan, template or weight is ever changed by an
+advisory. The judgement is the pure module
+`server/src/deload-advisory.ts` (no imports), fed per exercise by
+`selectDeloadSessions` — the THREE most recent sessions in the
+same per-routine 20-workout window the W3.2 selectors read, with
+each source workout's pain flags / session RPE and every set's
+stored RIR. `getDashboard` additively returns `deload_advisory`
+(weekly review, at the `progression_advice` consumption point)
+and, only alongside a located receipt, `receipt_deload_advisory`
+(the receipt workout itself plus its two most recent earlier
+comparable sessions, same strictly-earlier same-routine window as
+`loadReceiptAdvice`). Existing consumers （健康看板 sync) ignore
+both fields; the forbidden response is unchanged.
+
+The rule (publicly stated on every card): an advisory is raised
+ONLY when both gates hold. Gate A — performance declined in TWO
+consecutive steps across the three most recent sessions, judged
+per metric: completion rate (completed / planned sets) OR total
+volume (weight × reps over completed sets with both recorded,
+converted into the output unit via LB_TO_KG with 0.5 rounding)
+must walk strictly down across BOTH steps; metrics are never
+mixed across steps, a flat step is not a decline, and a single
+bad session never fires. Session metrics are real computations —
+a session with no weighed completed set has a null volume (never
+a guessed 0), and the best set ignores bodyweight (recorded 0),
+exactly as W3.2/W3.3 judge loads. Gate B — at least one strain
+signal on the most recent session: session RPE ≥ 9, any completed
+working set with RIR ≤ 1, a non-empty painFlags list on the
+source workout, or a low latest readiness score (< 2, the
+H-LOAD-001 red band). This artifact stores NO readiness data:
+`getDashboard` accepts an additive optional `readiness_score`
+from a caller that has one, and when none is supplied the
+readiness signal simply cannot fire — it is never defaulted or
+invented.
+
+Presentation: suggestion cards at exactly two points — the
+completion receipt and the weekly review — and only for entries
+the server marked suggested. Each card names the triggering
+facts (which metric declined across which two steps, with the
+three values oldest → latest; each session's date, completion
+rate, volume and best set; the signal that fired, with its
+number), the module's reason verbatim, and a conservative
+suggestion (drop one weight step or one set, or take a recovery
+day; with pain, the recovery day leads and the wording says to
+stop and seek professional advice if it persists). Every card
+carries ▼ + text + numbers, never colour alone, states the rule
+and the display-only boundary in public wording, and offers
+「确认采纳」 / 「忽略」: confirmation is an in-view acknowledgement
+only (the pure `canRecordDeloadAdvisory` gate requires
+suggested + requiresConfirmation + an explicit user confirm),
+dismissal hides the card, and neither writes anything — the
+W3.2 engine's decisions, the W1.2 rule and every existing export
+and signature are untouched.
+
+### A-class evidence (W3.5)
+
+- `validate-deload-advisory.mjs` (new, node): evaluates the REAL
+  module verbatim over synthetic data only — a behavioral suite
+  of 26 assertions (fires via each of the four signals with the
+  decline values carried oldest-first; gate A failures: single
+  decline in either step, flat middle step, mixed-metric decline,
+  improving performance, two sessions only, none; gate B
+  failures: no signal, RPE 8, RIR 2, an uncompleted set's RIR 0,
+  readiness exactly 2, a signal on an older session only; the
+  single-bad-day case with every signal present; the
+  confirmation gate in all three directions) plus metric
+  computations (completion rate, volume with bodyweight adding
+  0, best set ignoring 0 / unrecorded, kg→lb conversion before
+  multiplying, null volume when nothing weighed), a volume-only
+  decline, fourth-session exclusion, 3 selection checks against
+  the real `selectDeloadSessions`, and 18 wiring checks (both
+  dashboard fields, the optional readiness request field, the
+  receipt loader's workout-id set grouping, both client display
+  points, no plan-writing call inside the card) — 36 checks
+  total, all passing.
+- Mutation sensitivity, actually executed: 3 mutants of the
+  module source (two-decline gate weakened to one decline;
+  signal gate forced true; user-confirmation gate forced true)
+  each flip their corresponding cases (3 / 8 / 1 suite
+  assertions), proving the suite is not vacuous.
+- Live spot-check on the sandbox copy of the data (read-only
+  `getDashboard` invocations): per-session volumes and best sets
+  of the weekly advisories were hand-verified against the stored
+  sets they derive from and matched; the receipt path returned
+  the same three sessions per exercise as the weekly path (an
+  initial grouping bug there — sets keyed by set id instead of
+  workout id — was caught by this check, fixed, and locked by a
+  wiring assertion); with a caller-supplied readiness score of 1
+  exactly one exercise whose volume walked down across both
+  steps was suggested, and bodyweight-only exercises reported
+  null volumes and no suggestion. The actual values are
+  deliberately NOT recorded here — validators use synthetic
+  fixtures only; privacy scan of the new/changed files: zero
+  hits.
+- Full regression re-run 2026-11-01, all green:
+  `validate-deload-advisory (node): 36 passed, 0 failed`;
+  `validate-week-frequency (node): 16 passed, 0 failed`;
+  `validate-action-trends (node): 15 passed, 0 failed`;
+  `validate-progression-engine (node): 35 passed, 0 failed`;
+  `validate-receipt (node): 37 passed, 0 failed`;
+  `validate-rir-rpe (node): 103 passed, 0 failed`;
+  `validate-start (node): 66 passed, 0 failed`;
+  `validate-week-current (node): 59 passed, 0 failed`;
+  `validate-muscle-receipt (node): 30 passed, 0 failed`;
+  `validate-muscle-diagram (node): 36 passed, 0 failed`;
+  `validate-scroll-restore (node): 26 passed, 0 failed`;
+  `validate-video-embed (node): 32 passed, 0 failed`;
+  `validate-plan-safe (bun): 226 passed, 0 failed`.
+  Total: 717 checks, 0 failures.
+- Standing disclosure (unchanged by this round): `getDashboard`'s
+  viewer-less sync channel remains the owner's L0.1 exception of
+  2026-10-17; W3.5 only added read-only fields behind the same
+  gate (plus the optional caller-supplied readiness input) and
+  did not widen it.
