@@ -152,6 +152,155 @@ screen after a workout always begins at the top. Verified by
 cross-workout isolation, clear semantics, hostile/unavailable
 storage, and source wiring).
 
+## Single server progression engine (W3.2, added 2026-11-01)
+
+One server module — `server/src/progression-engine.ts`, pure and
+import-free — is now the ONLY progressive-overload rule. It replaced
+the two parallel implementations (server `progressionDecision` for
+the startWorkout prefill, client `progressionDecision` copy +
+`reviewRecommendation` for the weekly review / receipt). All three
+consumers go through it:
+
+- **Prefill**: `startWorkout` feeds the engine each exercise's two
+  most recent sessions (`selectProgressionSessions` over the same
+  per-routine 20-workout window as W1-CONSISTENCY-001) and builds the
+  new workout's sets from the verdict.
+- **Completion receipt （训练结束总结）**: `getDashboard` with
+  `receipt_workout_id` additionally returns `receipt_advice` — the
+  engine judging the receipt workout ITSELF (its sets + stored RIR,
+  its own pain flags / session RPE), with the most recent earlier
+  comparable session as the second input (`selectReceiptSessions`,
+  same key-only candidate rule as `selectReceiptPrevious`).
+- **Weekly review**: `getDashboard` returns `progression_advice`
+  aligned with `comparable_history`; the client only formats the
+  verdict (decision, suggested weight converted for display, engine
+  reason, basis line + 置信度 + 引擎版本）. The client defines no
+  progression rule anymore.
+
+Engine contract: input = up to two sessions of the same exercise
+(each: unit, planned set count, per-set weight/reps/RIR/completed,
+the source workout's pain flags and session RPE) + target rep range
++ output unit. Output per exercise = decision ∈ {increase, hold,
+reduce, insufficient} + suggested weight/reps + completion rate +
+reason + confidence (high/medium/low) + `engineVersion`
+(`PROGRESSION_ENGINE_VERSION = 1`, carried in every advice entry —
+no persisted column was needed, so no migration). Base semantics are
+the verified W1.2 rule verbatim (all planned sets done and every
+completed set at the cap → +5 lb / +2.5 kg, reps to the range floor;
+not all done → hold; a completed set below the floor → one step
+down, floor 0; no comparable record — empty / nothing completed /
+reps missing / no weighed completed set — → insufficient, and a
+bodyweight set is never a 0 load). Layered on top, never replacing
+the base: pain flags hold back an increase and are named in the
+reason; RIR and session RPE feed reason + confidence only (never
+the decision; missing RIR changes nothing); the second session
+moves confidence (agreement up, contradiction down). Cross-unit:
+session weights are converted into the output unit inside the
+engine (LB_TO_KG = 0.45359237, 0.5 rounding — the engine's constant
+is asserted equal to the server's long-standing one).
+
+Bodyweight ruling (audit fix, same round): a recorded weight of 0
+is bodyweight, never a comparable load — the home routines logged
+bodyweight work as 0, and the first audit capture showed those
+exercises receiving "+5 lb" increase suggestions on a 0 base,
+contrary to rule 4. The engine counts a set as weighed only with a
+real positive weight; a 0-weight set defeats the increase like any
+unweighed set and an all-0 session is insufficient. This is the one
+deliberate verdict change versus the old W1 copy (which treated 0
+as weighed); it is asserted in the engine suite and the adapter
+parity checks.
+
+Compatibility: the exported server `progressionDecision` survives
+as a thin adapter over the engine with identical signature and
+verdicts for its whole historical input domain (single session, no
+extras; engine "insufficient" maps back to "none") except the
+weight-0 reclassification above; the internal
+`loadPreviousCompletedSets` helper was removed (its only caller was
+the prefill). `getDashboard`'s existing fields are unchanged —
+`progression_advice` / `receipt_advice` are additive optionals, so
+the 健康看板 sync consumer is unaffected. No schema change, no
+migration, no stored data rewritten; rollback = revert the source
+files of this round (engine module is additive; consumers fall back
+to nothing user-visible beyond losing the advice fields).
+
+### A-class evidence (W3.2)
+
+- `validate-progression-engine.mjs` (new, node): evaluates the REAL
+  engine file verbatim over synthetic data only — the behavioral
+  suite runs 36 assertions inside one harness check (four verdicts,
+  both hold kinds, reduce floor 0 in both units, all insufficient
+  shapes, pain hold-back + naming on all three verdicts, RIR
+  high/low effects on reason + confidence, RIR decision-invariance
+  across 4 scenarios, two-session agreement/contradiction, session
+  RPE cap, cross-unit equality both directions, version carriage,
+  absent-field = recorded-null equivalence) — plus 8 adapter-parity
+  checks against the preserved `progressionDecision`, 5 selection
+  checks (`selectProgressionSessions` / `selectReceiptSessions`),
+  11 wiring checks （三处消费接线 + client holds no rule), 35 checks
+  total, all passing.
+- Mutation sensitivity, actually executed: 4 mutants of the engine
+  source (lb increment 5→6; pain guard disabled; cap comparison
+  `>=`→`>`; RIR headroom threshold 2→99) each make the behavioral
+  suite fail (1–10 assertions), proving the suite is not vacuous.
+- Live spot-check on the sandbox copy of the data (read-only
+  `getDashboard` invocations): engine verdicts for every comparable
+  exercise and one full receipt were hand-verified against the
+  stored sets they derive from (increase at the cap, hold mid-range,
+  reduce with a contradictory previous session at low confidence,
+  insufficient for bodyweight) and all matched the W1.2 semantics.
+  The actual values are deliberately NOT recorded here or anywhere
+  else in this round's files — validators use synthetic fixtures
+  only; privacy scan: no personal training data in the new/changed
+  files.
+- Regression suite (each under its established runner): node —
+  validate-progression-engine 35/35, validate-receipt 37/37 (updated
+  to feed `receiptExerciseLines` real engine advice instead of the
+  deleted client rule), validate-rir-rpe 103/103 (the W3.1
+  "progression never reads rir" assertions updated to the W3.2
+  contract: RIR bounded to reason/confidence in the one engine),
+  validate-start 66/66, validate-muscle-diagram 36/36,
+  validate-scroll-restore 26/26; bun — validate-plan-safe 226/226.
+- Two stale assertions from earlier rounds, fixed in this round at
+  the first audit's direction (assertions only — no product code
+  changed for either): validate-week-current's History-focus wiring
+  check named an inline `onOpenWorkout={...}` prop from a superseded
+  layout; it now asserts the current wiring (ThisWeekSection session
+  rows are `<details id={history-workout-<id>}>` and the focus state
+  opens that row in place) — 59/59. validate-muscle-receipt expected
+  the 30 MUSCLE-MAP.md v1 keys; the shipped map has included
+  lateral-lunge since W-HOMEB-001 (2026-10-24), so the expected set
+  now includes it (31 keys) — 30/30. After these fixes and the
+  weight-0 engine fix, the FULL regression suite is green.
+- Full regression run log, re-run after ALL fixes above (engine
+  weight-0 fix + the two stale-assertion fixes), 2026-11-01:
+  `validate-progression-engine (node): 35 passed, 0 failed`;
+  `validate-receipt (node): 37 passed, 0 failed`;
+  `validate-rir-rpe (node): 103 passed, 0 failed`;
+  `validate-start (node): 66 passed, 0 failed`;
+  `validate-week-current (node): 59 passed, 0 failed`;
+  `validate-muscle-receipt (node): 30 passed, 0 failed`;
+  `validate-muscle-diagram (node): 36 passed, 0 failed`;
+  `validate-scroll-restore (node): 26 passed, 0 failed`;
+  `validate-plan-safe (bun): 226 passed, 0 failed`.
+  Total: 618 checks, 0 failures — the whole suite is green.
+- Standing disclosure (not a defect of this round): the security
+  review flags `getDashboard`'s `isOwnerOrSyncChannel` gate as
+  high. That gate is the owner's own L0.1 exception, decided
+  2026-10-17 and recorded in the "Cross-artifact sync read" section
+  above: the 健康看板 sync travels the daemon's internal channel
+  with no browser viewer, the owner accepted the residual risk, and
+  the exception is to be re-reviewed when the platform offers a
+  verifiable service identity. W3.2 did not change the gate; it only
+  added two read-only advice fields behind it. Restoring a strict
+  owner-only gate would break the approved sync, so the gate stands
+  by the owner's decision.
+- Limitation: the startWorkout prefill path cannot be exercised
+  through the sandbox action channel (write actions are owner-only
+  and the channel carries no owner viewer); it is covered by the
+  engine/selection validators, validate-start's wiring checks, the
+  typechecked build, and the identical engine path proven live via
+  getDashboard.
+
 ## Muscle diagram (W6.2, added 2026-10-20)
 
 The guide dialog's front/back muscle diagram is hand-drawn SVG line

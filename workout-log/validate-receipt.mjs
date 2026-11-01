@@ -1,9 +1,13 @@
 // W4.3-D1 validation — completion receipt （训练完成回执）.
 // Runs the REAL production pure functions extracted verbatim from
-// client/src/App.tsx (groupSets, targetRange, progressionDecision,
-// receiptReadPhase, receiptExerciseLines) and server/src/actions.ts
+// client/src/App.tsx (groupSets, targetRange, receiptReadPhase,
+// receiptExerciseLines) and server/src/actions.ts
 // (selectReceiptPrevious), over synthetic data only, plus source
-// wiring checks for the parts that need the live action channel:
+// wiring checks for the parts that need the live action channel.
+// W3.2: the suggestion verdicts come from the REAL server
+// progression engine (server/src/progression-engine.ts), fed the
+// synthetic workout exactly as loadReceiptAdvice feeds it — the
+// client function only phrases the engine's advice:
 //  - full completion -> totals with zero incomplete, W1 increase
 //    suggestion derived from the just-finished record itself;
 //  - ending with uncompleted sets -> they are counted as uncompleted
@@ -63,12 +67,47 @@ function extractFunction(source, name) {
   const bodyEnd = matchDelim(source, bodyStart, '{', '}');
   return source.slice(idx, bodyEnd + 1);
 }
-const CLIENT_FN = ['groupSets', 'targetRange', 'progressionDecision', 'receiptReadPhase', 'receiptExerciseLines'];
+const CLIENT_FN = ['groupSets', 'targetRange', 'receiptReadPhase', 'receiptExerciseLines'];
 function buildClient(src) {
   const code = CLIENT_FN.map((n) => extractFunction(src, n)).join('\n');
   return new Function(`${stripTypeScriptTypes(code)}\nreturn { ${CLIENT_FN.join(', ')} };`)();
 }
 const C = buildClient(clientSrc);
+const engineSrc = readFileSync(new URL('./server/src/progression-engine.ts', import.meta.url), 'utf8');
+const ENG = new Function(
+  `${stripTypeScriptTypes(engineSrc).replace(/^export /gm, '')}\nreturn { evaluateProgression, PROGRESSION_ENGINE_VERSION };`,
+)();
+// Mirror of loadReceiptAdvice's per-exercise engine call over THIS
+// workout alone (the scenarios' previous entries carry counts only,
+// and a second session never changes the suggestion text).
+function buildAdvice(workout) {
+  return C.groupSets(workout.sets).map((exercise) => {
+    const { min, max } = C.targetRange(exercise.target);
+    const advice = ENG.evaluateProgression({
+      sessions: [{
+        unit: workout.unit,
+        plannedSets: exercise.sets.length,
+        sets: exercise.sets.map((s) => ({ weight: s.weight, reps: s.reps, rir: s.rir ?? null, completed: s.completed })),
+        painFlags: workout.pain_flags ?? [],
+        sessionRpe: workout.session_rpe ?? null,
+      }],
+      targetMin: min,
+      targetMax: max,
+      unit: workout.unit,
+    });
+    return {
+      exercise_key: exercise.key,
+      decision: advice.decision,
+      suggested_weight: advice.suggestedWeight,
+      suggested_reps: advice.suggestedReps,
+      completion_rate: advice.completionRate,
+      reason: advice.reason,
+      confidence: advice.confidence,
+      engine_version: advice.engineVersion,
+    };
+  });
+}
+const lines = (workout, previous) => C.receiptExerciseLines(workout, previous, buildAdvice(workout));
 const S = new Function(
   `${stripTypeScriptTypes(extractFunction(serverSrc, 'selectReceiptPrevious'))}\nreturn { selectReceiptPrevious };`,
 )();
@@ -102,16 +141,16 @@ const setsOf = (workoutId, key, name, target, list) =>
   const previous = [
     { exercise_key: 'barbell-bench', source_completed_at: '2026-10-13T02:00:00.000Z', completed_sets: 3, total_sets: 4 },
   ];
-  const lines = C.receiptExerciseLines(workout, previous);
-  const bench = lines.find((l) => l.key === 'barbell-bench');
+  const receiptLines = lines(workout, previous);
+  const bench = receiptLines.find((l) => l.key === 'barbell-bench');
   check('S1 full: bench counts are 4/4 with 0 incomplete',
     bench.completedSets === 4 && bench.totalSets === 4 && bench.incompleteSets === 0);
-  check('S1 full: all sets at the rep cap -> W1 increase suggestion from this record',
+  check('S1 full: all sets at the rep cap -> engine increase suggestion from this record',
     bench.suggestion === '下次增至 105lb', bench.suggestion);
   check('S1 full: previous comparable is attached by key with its source date',
     bench.previous !== null && bench.previous.completedSets === 3 && bench.previous.totalSets === 4
     && bench.previous.sourceDate === '2026-10-13T02:00:00.000Z');
-  const dips = lines.find((l) => l.key === 'dips');
+  const dips = receiptLines.find((l) => l.key === 'dips');
   check('S1 full: bodyweight exercise (no weighed set) -> 数据不足， never an invented weight',
     dips.suggestion === '数据不足', dips.suggestion);
   check('S1 full: exercise missing from previous entries -> previous null （暂无可比记录）',
@@ -123,10 +162,10 @@ const setsOf = (workoutId, key, name, target, list) =>
   const workout = mkWorkout(102, 'legs', 'lb', [
     ...setsOf(102, 'back-squat', '深蹲', '6–8', [[140, 6, true], [140, 6, true], [140, 6, true], [140, null, false]]),
   ]);
-  const [squat] = C.receiptExerciseLines(workout, []);
+  const [squat] = lines(workout, []);
   check('S2 incomplete: counts are 3/4 with exactly 1 uncompleted',
     squat.completedSets === 3 && squat.totalSets === 4 && squat.incompleteSets === 1);
-  check('S2 incomplete: the uncompleted set is NOT zero-filled into a reduce verdict — W1 holds the weight',
+  check('S2 incomplete: the uncompleted set is NOT zero-filled into a reduce verdict — the engine holds the weight',
     squat.suggestion === '下次维持 140lb，先完成全部 4 组', squat.suggestion);
   check('S2 incomplete: empty previous list -> previous null', squat.previous === null);
 }
@@ -136,13 +175,13 @@ const setsOf = (workoutId, key, name, target, list) =>
   const zeroWorkout = mkWorkout(103, 'pull', 'lb', [
     ...setsOf(103, 'face-pull', '面拉', '12–15', [[20, 0, true], [20, 0, true], [20, 0, true]]),
   ]);
-  const [zeroLine] = C.receiptExerciseLines(zeroWorkout, undefined);
-  check('S2b true zero: recorded 0 reps is real data -> W1 reduce verdict applies',
+  const [zeroLine] = lines(zeroWorkout, undefined);
+  check('S2b true zero: recorded 0 reps is real data -> engine reduce verdict applies',
     zeroLine.suggestion === '下次降至 15lb', zeroLine.suggestion);
   const missingWorkout = mkWorkout(104, 'pull', 'lb', [
     ...setsOf(104, 'face-pull', '面拉', '12–15', [[20, null, true], [20, 12, true], [20, 12, true]]),
   ]);
-  const [missingLine] = C.receiptExerciseLines(missingWorkout, undefined);
+  const [missingLine] = lines(missingWorkout, undefined);
   check('S2c missing: a completed set with reps missing -> 数据不足， not treated as 0',
     missingLine.suggestion === '数据不足', missingLine.suggestion);
   check('S2c missing: undefined previous argument -> previous null', missingLine.previous === null);
@@ -170,7 +209,7 @@ const setsOf = (workoutId, key, name, target, list) =>
   const previous = [
     { exercise_key: 'weighted-dips', source_completed_at: '2026-10-13T02:00:00.000Z', completed_sets: 3, total_sets: 3 },
   ];
-  const [line] = C.receiptExerciseLines(workout, previous);
+  const [line] = lines(workout, previous);
   check('S4 client: a previous entry under a different key does not match the same-named exercise',
     line.previous === null);
   const serverEntries = S.selectReceiptPrevious(
@@ -245,6 +284,9 @@ const setsOf = (workoutId, key, name, target, list) =>
     receiptSlice.includes('训练已结束，正在读取记录') && receiptSlice.includes('记录暂未读出'));
   check('wiring(client): retry re-reads ONLY — no completeWorkout anywhere in the receipt component',
     receiptSlice.includes('query.refetch()') && !receiptSlice.includes('completeWorkout'));
+  check('wiring(client): the receipt phrases the server engine advice (W3.2 single source)',
+    receiptSlice.includes('query.data?.receipt_advice')
+    && !clientSrc.includes('function progressionDecision'));
   check('wiring(client): receipt shows 暂无可比记录 and 数据不足 states',
     receiptSlice.includes('暂无可比记录') && clientSrc.includes('"数据不足"'));
   check('wiring(client): finish button is disabled while finishing (duplicate-complete guard)',

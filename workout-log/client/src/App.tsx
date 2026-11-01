@@ -697,56 +697,11 @@ function targetRange(target: string) {
   return { min: first, max: values[1] ?? first };
 }
 
-// W1.1–W1.4: the single progressive-overload rule — a line-for-line copy
-// of progressionDecision in server/src/actions.ts (same name, signature
-// and logic), so the start-of-workout prefill and this weekly review can
-// never disagree about the "next time" suggestion again. Pure: no IO.
-export function progressionDecision(input: {
-  plannedSets: number;
-  sets: { weight: number | null; reps: number | null; completed: boolean }[];
-  targetMin: number;
-  targetMax: number;
-  unit: "lb" | "kg";
-}): { action: "increase" | "hold" | "reduce" | "none"; suggestedWeight: number | null; suggestedReps: number | null } {
-  const none: { action: "none"; suggestedWeight: null; suggestedReps: null } = {
-    action: "none",
-    suggestedWeight: null,
-    suggestedReps: null,
-  };
-  if (input.sets.length === 0 || input.plannedSets <= 0) return none;
-  const completed = input.sets.filter((set) => set.completed);
-  if (completed.length === 0) return none;
-  const weightedWeights = completed
-    .map((set) => set.weight)
-    .filter((weight): weight is number => weight != null);
-  // W1.4: bodyweight / unmeasured sets (weight null) never stand in as a
-  // comparable load of 0 — with no weighed completed set there is no
-  // weight suggestion at all.
-  if (weightedWeights.length === 0) return none;
-  const base = Math.max(...weightedWeights);
-  const increment = input.unit === "lb" ? 5 : 2.5;
-  if (completed.length < input.plannedSets) {
-    // Not all planned sets were done: hold the weight; per-set reps are
-    // carried over by the caller (suggestedReps null = carry over).
-    return { action: "hold", suggestedWeight: base, suggestedReps: null };
-  }
-  if (completed.some((set) => set.reps == null)) return none;
-  if (completed.every((set) => set.weight != null && set.reps != null && set.reps >= input.targetMax)) {
-    return {
-      action: "increase",
-      suggestedWeight: Math.round((base + increment) * 2) / 2,
-      suggestedReps: input.targetMin,
-    };
-  }
-  if (completed.some((set) => set.reps != null && set.reps < input.targetMin)) {
-    return {
-      action: "reduce",
-      suggestedWeight: Math.max(0, Math.round((base - increment) * 2) / 2),
-      suggestedReps: null,
-    };
-  }
-  return { action: "hold", suggestedWeight: base, suggestedReps: null };
-}
+// W3.2: the client no longer carries a progression rule of its own.
+// The single server progression engine (server/src/progression-
+// engine.ts) computes every verdict; getDashboard returns them as
+// progression_advice (weekly review) and receipt_advice (completion
+// receipt), and this file only formats those verdicts for display.
 
 // W1.3: same conversion constant and rounding as the server.
 export const LB_TO_KG = 0.45359237;
@@ -848,61 +803,47 @@ function weightTrend(review: ExerciseReview) {
   return `${weightText} · 平均次数${repDelta === 0 ? "持平" : `较前一周${repDelta > 0 ? "+" : ""}${repDelta}`}`;
 }
 
-type ComparableHistoryEntry = NonNullable<Dashboard["comparable_history"]>[number];
 type ReceiptPreviousEntry = NonNullable<Dashboard["receipt_previous"]>[number];
+// W3.2: server-computed progression advice — the single server
+// engine's verdicts, carried by getDashboard. The client formats
+// them; it never derives a progression verdict itself.
+type ProgressionAdviceEntry = NonNullable<Dashboard["progression_advice"]>[number];
+type ReceiptAdviceEntry = NonNullable<Dashboard["receipt_advice"]>[number];
 
-// Shared tail of reviewRecommendation: given ONE comparable candidate
-// (target string, source unit, and ALL of the exercise's sets from the
-// source workout — completed and uncompleted alike), convert its
-// weights into the review unit and run the same progressionDecision
-// the server prefill uses, then phrase the verdict. Both candidate
-// sources (comparable_history and the recent_workouts fallback) feed
-// through here so the wording and the rule can never drift apart.
-function recommendationFromCandidate(
+const CONFIDENCE_LABELS: Record<ProgressionAdviceEntry["confidence"], string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
+// W3.2: phrase ONE server-engine verdict for the weekly review. The
+// decision, suggested weight, reason and confidence all come from
+// progression_advice; this function only formats them, converting
+// the suggested weight into the review unit for display when the
+// source record was kept in the other unit.
+function recommendationFromAdvice(
   review: ExerciseReview,
-  candidate: {
-    target: string;
-    unit: Unit;
-    sets: { weight: number | null; reps: number | null; completed: boolean }[];
-  },
+  advice: ProgressionAdviceEntry,
 ) {
-  const { min, max } = targetRange(candidate.target);
-  const unitConverted = candidate.unit !== review.unit;
-  const sets = candidate.sets.map((set) => ({
-    weight: set.weight == null
-      ? null
-      : unitConverted
-        ? convertWeightValue(set.weight, candidate.unit, review.unit)
-        : set.weight,
-    reps: set.reps,
-    completed: set.completed,
-  }));
-  const planned = candidate.sets.length;
-  const decision = progressionDecision({
-    plannedSets: planned,
-    sets,
-    targetMin: min,
-    targetMax: max,
-    unit: review.unit,
-  });
-  if (decision.action === "increase") {
-    return `${review.name}：上次全部 ${planned} 组完成且都达到次数上限 ${max}，下次增至 ${decision.suggestedWeight}${review.unit}`;
+  const suggested = advice.suggested_weight == null
+    ? null
+    : advice.unit !== review.unit
+      ? convertWeightValue(advice.suggested_weight, advice.unit, review.unit)
+      : advice.suggested_weight;
+  if (advice.decision === "increase" && suggested != null) {
+    return `${review.name}：${advice.reason}，下次增至 ${suggested}${review.unit}`;
   }
-  if (decision.action === "reduce") {
-    return `${review.name}：上次有组低于目标下限 ${min}，下次降至 ${decision.suggestedWeight}${review.unit}，先回到目标区间`;
+  if (advice.decision === "reduce" && suggested != null) {
+    return `${review.name}：${advice.reason}，下次降至 ${suggested}${review.unit}`;
   }
-  if (decision.action === "hold") {
-    const completedCount = sets.filter((set) => set.completed).length;
-    if (completedCount < planned) {
-      return `${review.name}：上次少完成 ${planned - completedCount} 组，下次保持 ${decision.suggestedWeight}${review.unit}`;
-    }
-    return `${review.name}：上次未全部达到次数上限，下次保持 ${decision.suggestedWeight}${review.unit}`;
+  if (advice.decision === "hold" && suggested != null) {
+    return `${review.name}：${advice.reason}，下次保持 ${suggested}${review.unit}`;
   }
-  return `${review.name}：上次没有可比重量记录，暂不做重量建议`;
+  return `${review.name}：数据不足，暂不做重量建议（${advice.reason}）`;
 }
 
-// W2.3: the basis line under each W1 suggestion — the date and unit
-// of the record the suggestion actually derives from (the comparable
+// W2.3: the basis line under each suggestion — the date and unit of
+// the record the suggestion actually derives from (the comparable
 // source workout), with the existing 已换算 marker when that source's
 // unit differs from the review unit and its weights were converted.
 function recommendationBasis(sourceCompletedAt: string | null, sourceUnit: Unit, reviewUnit: Unit) {
@@ -915,52 +856,26 @@ function recommendationBasis(sourceCompletedAt: string | null, sourceUnit: Unit,
 
 function reviewRecommendation(
   review: ExerciseReview,
-  workouts: Workout[],
-  comparableHistory?: ComparableHistoryEntry[],
+  progressionAdvice?: ProgressionAdviceEntry[],
 ): { text: string; basis: string | null } {
-  // W1: the "next time" suggestion is decided by this exercise's most
-  // recent comparable workout, fed through the same progressionDecision
-  // the server prefill uses. The week-over-week evidence above stays
-  // display-only and no longer derives a second, conflicting verdict.
-  // W1-CONSISTENCY-001 (cross-window fix): the candidate comes FIRST
-  // from comparable_history — the server's per-routine selection, the
-  // exact candidate startWorkout's prefill judges — because
-  // recent_workouts is a GLOBAL window (all routines mixed): a
-  // comparable record can rank beyond the global 20 while still
-  // inside its own routine's 20, and the old scan then reported "no
-  // comparable record" while the prefill suggested a weight. Only
-  // when comparable_history is absent (older server) does the scan
-  // below run, unchanged.
-  const historyEntry = comparableHistory?.find((entry) => entry.exercise_key === review.key);
-  if (historyEntry) {
-    return {
-      text: recommendationFromCandidate(review, {
-        target: historyEntry.target,
-        unit: historyEntry.unit,
-        sets: historyEntry.sets,
-      }),
-      // W2.3: the date comes from the source workout's own completion
-      // time (server-passed source_completed_at), never from the
-      // review week or from "today".
-      basis: recommendationBasis(historyEntry.source_completed_at, historyEntry.unit, review.unit),
-    };
+  // W3.2: the verdict is the server engine's, looked up by exercise
+  // key in progression_advice — the same per-routine selection the
+  // startWorkout prefill judges (W1-CONSISTENCY-001), now computed
+  // once on the server. The week-over-week evidence above stays
+  // display-only. No advice entry means the server had no comparable
+  // session for this exercise; the line says 数据不足 instead of the
+  // client deriving a verdict from the recent-workouts scan.
+  const advice = progressionAdvice?.find((entry) => entry.exercise_key === review.key);
+  if (!advice) {
+    return { text: `${review.name}：数据不足，暂不做重量建议`, basis: null };
   }
-  let comparable: { workout: Workout; exercise: ReturnType<typeof groupSets>[number] } | null = null;
-  for (const workout of workouts) {
-    const exercise = groupSets(workout.sets).find((group) => group.key === review.key);
-    if (exercise) {
-      comparable = { workout, exercise };
-      break;
-    }
-  }
-  if (!comparable) return { text: `${review.name}：上次没有可比重量记录，暂不做重量建议`, basis: null };
   return {
-    text: recommendationFromCandidate(review, {
-      target: comparable.exercise.target,
-      unit: comparable.workout.unit,
-      sets: comparable.exercise.sets,
-    }),
-    basis: recommendationBasis(comparable.workout.completed_at, comparable.workout.unit, review.unit),
+    text: recommendationFromAdvice(review, advice),
+    // W2.3: the date comes from the source workout's own completion
+    // time (server-passed source_completed_at), never from the
+    // review week or from "today". W3.2 appends the engine's
+    // confidence and version so the verdict stays traceable.
+    basis: `${recommendationBasis(advice.source_completed_at, advice.unit, review.unit)} · 置信度 ${CONFIDENCE_LABELS[advice.confidence]} · 引擎 v${advice.engine_version}`,
   };
 }
 
@@ -974,10 +889,11 @@ function reviewRecommendation(
 // selectReceiptPrevious); a missing entry renders as 暂无可比记录.
 // Counts come straight from the stored sets: uncompleted sets are
 // counted as uncompleted, never zero-filled, and a real 0 completed
-// count stays 0. The next-time suggestion runs the SAME W1
-// progressionDecision (above) over THIS workout's own sets — no new
-// thresholds, no readiness input — and when the rule has no reliable
-// input (its "none" verdict) the line honestly reads 数据不足.
+// count stays 0. The next-time suggestion is the server progression
+// engine's verdict for THIS workout (getDashboard's receipt_advice,
+// W3.2) — the client only phrases it, and when the engine had no
+// reliable input (its "insufficient" verdict, or no advice entry)
+// the line honestly reads 数据不足.
 export type ReceiptExerciseLine = {
   key: string;
   name: string;
@@ -986,33 +902,30 @@ export type ReceiptExerciseLine = {
   incompleteSets: number;
   previous: { sourceDate: string; completedSets: number; totalSets: number } | null;
   suggestion: string;
+  // W3.2: the engine's own reason behind the suggestion; null only
+  // when the server sent no advice entry for the exercise at all.
+  suggestionReason: string | null;
 };
 
 export function receiptExerciseLines(
   workout: Workout,
   previous: ReceiptPreviousEntry[] | undefined,
+  advice?: ReceiptAdviceEntry[],
 ) {
   const lines: ReceiptExerciseLine[] = groupSets(workout.sets).map((exercise) => {
     const completedSets = exercise.sets.filter((set) => set.completed).length;
     const totalSets = exercise.sets.length;
     const entry = previous?.find((item) => item.exercise_key === exercise.key) ?? null;
-    const { min, max } = targetRange(exercise.target);
-    const decision = progressionDecision({
-      plannedSets: totalSets,
-      sets: exercise.sets,
-      targetMin: min,
-      targetMax: max,
-      unit: workout.unit,
-    });
+    const adviceEntry = advice?.find((item) => item.exercise_key === exercise.key) ?? null;
     let suggestion: string;
-    if (decision.action === "increase") {
-      suggestion = `下次增至 ${decision.suggestedWeight}${workout.unit}`;
-    } else if (decision.action === "reduce") {
-      suggestion = `下次降至 ${decision.suggestedWeight}${workout.unit}`;
-    } else if (decision.action === "hold") {
+    if (adviceEntry?.decision === "increase" && adviceEntry.suggested_weight != null) {
+      suggestion = `下次增至 ${adviceEntry.suggested_weight}${workout.unit}`;
+    } else if (adviceEntry?.decision === "reduce" && adviceEntry.suggested_weight != null) {
+      suggestion = `下次降至 ${adviceEntry.suggested_weight}${workout.unit}`;
+    } else if (adviceEntry?.decision === "hold" && adviceEntry.suggested_weight != null) {
       suggestion = completedSets < totalSets
-        ? `下次维持 ${decision.suggestedWeight}${workout.unit}，先完成全部 ${totalSets} 组`
-        : `下次维持 ${decision.suggestedWeight}${workout.unit}`;
+        ? `下次维持 ${adviceEntry.suggested_weight}${workout.unit}，先完成全部 ${totalSets} 组`
+        : `下次维持 ${adviceEntry.suggested_weight}${workout.unit}`;
     } else {
       suggestion = "数据不足";
     }
@@ -1026,6 +939,7 @@ export function receiptExerciseLines(
         ? { sourceDate: entry.source_completed_at, completedSets: entry.completed_sets, totalSets: entry.total_sets }
         : null,
       suggestion,
+      suggestionReason: adviceEntry?.reason ?? null,
     };
   });
   return lines;
@@ -1339,7 +1253,7 @@ function ThisWeekSection({ plan, workouts, weekSummaries, focus }: {
   );
 }
 
-function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; comparableHistory?: ComparableHistoryEntry[] }) {
+function WeeklyReview({ workouts, progressionAdvice }: { workouts: Workout[]; progressionAdvice?: ProgressionAdviceEntry[] }) {
   const { start, end } = previousCompleteWeek();
   const priorStart = new Date(start);
   priorStart.setDate(priorStart.getDate() - 7);
@@ -1352,7 +1266,7 @@ function WeeklyReview({ workouts, comparableHistory }: { workouts: Workout[]; co
   );
   const missing = GYM_ROUTINES.filter((routine) => !routines.has(routine));
   const reviews = exerciseReviews(week, priorWeek);
-  const recommendations = reviews.map((review) => reviewRecommendation(review, workouts, comparableHistory));
+  const recommendations = reviews.map((review) => reviewRecommendation(review, progressionAdvice));
   const endInclusive = new Date(end);
   endInclusive.setDate(endInclusive.getDate() - 1);
 
@@ -1478,7 +1392,7 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
   }
 
   const workout = receipt;
-  const lines = receiptExerciseLines(workout, query.data?.receipt_previous);
+  const lines = receiptExerciseLines(workout, query.data?.receipt_previous, query.data?.receipt_advice);
   const muscleFacts = muscleReceiptFacts(workout);
   const doneTotal = completedCount(workout);
   const totalSets = workout.sets.length;
@@ -1524,6 +1438,7 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
                 : "暂无可比记录"}
             </span>
             <span className="receipt-suggestion">建议：{line.suggestion}</span>
+            {line.suggestionReason ? <span className="receipt-suggestion-reason">{line.suggestionReason}</span> : null}
           </li>
         ))}
       </ul>
@@ -3890,10 +3805,10 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCloseReceipt }: {
+function StartScreen({ recent, weekSummaries, progressionAdvice, receiptId, onCloseReceipt }: {
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
-  comparableHistory?: ComparableHistoryEntry[];
+  progressionAdvice?: ProgressionAdviceEntry[];
   // W4.3-D1: the workoutId this session just finished, or null. The
   // receipt renders non-blockingly at the top of the start page.
   receiptId: number | null;
@@ -3987,7 +3902,7 @@ function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCl
 
       <ThisWeekSection plan={planData} workouts={recent} weekSummaries={weekSummaries} focus={historyFocus} />
 
-      <WeeklyReview workouts={recent} comparableHistory={comparableHistory} />
+      <WeeklyReview workouts={recent} progressionAdvice={progressionAdvice} />
 
       <History workouts={earlierWorkouts} focus={historyFocus} />
 
@@ -4055,7 +3970,7 @@ export function App() {
         <StartScreen
           recent={dashboard.data.recent_workouts}
           weekSummaries={dashboard.data.week_summaries}
-          comparableHistory={dashboard.data.comparable_history}
+          progressionAdvice={dashboard.data.progression_advice}
           receiptId={receiptId}
           onCloseReceipt={() => setReceiptId(null)}
         />

@@ -250,22 +250,24 @@ function mkWorkout(id, routine, startedIso, completedIso, totalSets, completedSe
     && !reviewSlice.includes('本周 {review.completed}'));
   check('copy: the adjustments block is titled 下次训练参考 (no 下周调整 left)',
     reviewSlice.includes('下次训练参考') && !clientSrc.includes('下周调整'));
-  check('basis: comparable_history path cites source_completed_at, fallback cites the workout completed_at',
-    clientSrc.includes('recommendationBasis(historyEntry.source_completed_at, historyEntry.unit, review.unit)')
-    && clientSrc.includes('recommendationBasis(comparable.workout.completed_at, comparable.workout.unit, review.unit)'));
+  // W3.2: the suggestion is the server engine's advice; its basis
+  // line cites the advice's own source record (source_completed_at +
+  // unit), and the verdict text carries the engine's reason.
+  check('basis: the engine advice path cites its source_completed_at and unit',
+    clientSrc.includes('recommendationBasis(advice.source_completed_at, advice.unit, review.unit)')
+    && clientSrc.includes('recommendationFromAdvice(review, advice)'));
   check('basis: line format is 依据：{date} · {unit} 记录 with the 已换算 marker on unit mismatch',
     clientSrc.includes('`依据：${parts.join(" · ")}`') && clientSrc.includes('parts.push("已换算")'));
-  // Wiring assertion migrated for LIFE-DESIGN-001-B2B (2026-10-24): the old
-  // WeekCurrentSummary onOpenWorkout binding was retired when 本周进行中 and
-  // 本周安排 merged into ThisWeekSection; the History-focus mechanism itself
-  // is unchanged — a record control still sets historyFocus with an
-  // incrementing n, and both start-page lists (ThisWeekSection for this
-  // week's sessions, History for earlier ones) receive that focus and expand
-  // the target row in place. Assert the new binding sites, not the old prop.
-  check('wiring: each session row on the start page opens its record through the History focus',
-    clientSrc.includes('onViewRecord={(id) => setHistoryFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }))}')
-    && clientSrc.includes('<ThisWeekSection plan={planData} workouts={recent} weekSummaries={weekSummaries} focus={historyFocus} />')
-    && clientSrc.includes('<History workouts={earlierWorkouts} focus={historyFocus} />'));
+  // Layout note (updated W3.2): the start page's session rows are
+  // no longer a CurrentWeekProgress prop wiring — ThisWeekSection
+  // renders each session as a <details> row carrying the shared
+  // history-workout-<id> anchor, and the History focus state opens
+  // and scrolls to that exact row. Assert THAT wiring.
+  check('wiring: each session row on the start page is a details row keyed by the shared history anchor',
+    clientSrc.includes('id={`history-workout-${workout.id}`}'));
+  check('wiring: the History focus opens the focused session row in place',
+    clientSrc.includes('document.getElementById(`history-workout-${focus.id}`)')
+    && clientSrc.includes('el.open = true'));
   check('title: the layer is titled 本周进行中 with the Monday..today range',
     clientSrc.includes('`本周进行中 · ${compactDate(summary.start)}–${compactDate(summary.today)}`'));
   // Totals assertion updated for the W2.3 P1 fix: the header line now

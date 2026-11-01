@@ -19,8 +19,9 @@
 //  - any pain flag yields exactly the one conservative reminder
 //    copy (lower the intensity, watch the form) — no diagnosis
 //    wording anywhere in it;
-//  - NULL RIR participates in no calculation: neither the client
-//    nor the server progressionDecision source mentions rir;
+//  - RIR's influence is bounded (W3.2): it feeds only the single
+//    server engine's reason/confidence, never its decision, and
+//    the client holds no progression rule at all;
 //  - wiring: migration 0009 adds exactly the four columns, the
 //    schema declares them, updateSet / completeWorkout validate
 //    and persist them, and loadWorkout passes them back out.
@@ -149,11 +150,40 @@ check('every client flag has a Chinese label', C.PAIN_FLAG_OPTIONS.every((o) => 
 check('painFlagLabel resolves a known key', C.painFlagLabel('knee') === '膝部疼痛');
 check('painFlagLabel falls back to the raw key', C.painFlagLabel('mystery') === 'mystery');
 
-// --- NULL RIR participates in no calculation ---
-const clientProgression = extractFunction(clientSrc, 'progressionDecision');
-const serverProgression = extractFunction(serverSrc, 'progressionDecision');
-check('client progressionDecision never reads rir', !/rir/i.test(clientProgression));
-check('server progressionDecision never reads rir', !/rir/i.test(serverProgression));
+// --- RIR's role after W3.2: reason + confidence only, one engine ---
+// W3.1's rule was "NULL RIR participates in no calculation". W3.2
+// supersedes the shape, not the spirit: RIR is now an input of the
+// single server progression engine, where it may colour the reason
+// and the confidence but NEVER the decision or the suggested weight,
+// and a missing RIR changes nothing. The week volume summary still
+// never reads it, and the client holds no progression rule at all.
+check('client defines no progression rule of its own (W3.2 single server engine)',
+  !clientSrc.includes('function progressionDecision'));
+check('server progressionDecision delegates to the engine',
+  extractFunction(serverSrc, 'progressionDecision').includes('evaluateProgression({'));
+{
+  const engineSrc = readFileSync(new URL('./server/src/progression-engine.ts', import.meta.url), 'utf8');
+  const ENG = new Function(
+    `${stripTypeScriptTypes(engineSrc).replace(/^export /gm, '')}\nreturn { evaluateProgression };`,
+  )();
+  const st = (weight, reps, rir = null, completed = true) => ({ weight, reps, rir, completed });
+  const scenarios = [
+    [st(100, 8), st(100, 8), st(100, 8), st(100, 8)],
+    [st(100, 7), st(100, 7), st(100, 7), st(100, 7)],
+    [st(100, 8), st(100, 5)],
+  ];
+  scenarios.forEach((sets, i) => {
+    const base = ENG.evaluateProgression({
+      sessions: [{ unit: 'lb', plannedSets: sets.length, sets }], targetMin: 6, targetMax: 8, unit: 'lb',
+    });
+    const withRir = ENG.evaluateProgression({
+      sessions: [{ unit: 'lb', plannedSets: sets.length, sets: sets.map((s) => ({ ...s, rir: 0 })) }],
+      targetMin: 6, targetMax: 8, unit: 'lb',
+    });
+    check(`engine scenario ${i + 1}: recorded RIR never changes the decision or suggested weight`,
+      withRir.decision === base.decision && withRir.suggestedWeight === base.suggestedWeight);
+  });
+}
 const weekSummary = extractFunction(serverSrc, 'summarizeWeekSummaries');
 check('week volume summary never reads rir', !/rir/i.test(weekSummary));
 

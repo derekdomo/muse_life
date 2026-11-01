@@ -2,6 +2,10 @@ import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk"
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
+import {
+  evaluateProgression,
+  type ProgressionEngineSession,
+} from "./progression-engine";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -201,12 +205,50 @@ const receiptPreviousEntryResponse = z.object({
   total_sets: z.number(),
 });
 
+// W3.2 (additive): the single server progression engine's advice
+// for one comparable-history exercise, consumed by the weekly
+// review. decision is the engine's four-way verdict; reason and
+// confidence are the engine's own wording; engine_version traces the
+// advice to the rule version that produced it. suggested_weight is
+// expressed in the entry's unit (the most recent session's unit).
+const progressionAdviceEntryResponse = z.object({
+  routine: routineSchema,
+  exercise_key: z.string(),
+  unit: unitSchema,
+  source_completed_at: z.string().nullable(),
+  decision: z.enum(["increase", "hold", "reduce", "insufficient"]),
+  suggested_weight: z.number().nullable(),
+  suggested_reps: z.number().nullable(),
+  completion_rate: z.number().nullable(),
+  reason: z.string(),
+  confidence: z.enum(["high", "medium", "low"]),
+  engine_version: z.number(),
+});
+
+// W3.2 (additive): the same engine's advice for one exercise of the
+// completion-receipt workout, judged on that workout itself.
+// suggested_weight is in the receipt workout's own unit.
+const receiptAdviceEntryResponse = z.object({
+  exercise_key: z.string(),
+  decision: z.enum(["increase", "hold", "reduce", "insufficient"]),
+  suggested_weight: z.number().nullable(),
+  suggested_reps: z.number().nullable(),
+  completion_rate: z.number().nullable(),
+  reason: z.string(),
+  confidence: z.enum(["high", "medium", "low"]),
+  engine_version: z.number(),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
   recent_workouts: z.array(workoutResponse),
   week_summaries: z.array(weekSummaryResponse),
   comparable_history: z.array(comparableHistoryEntryResponse).optional(),
+  // W3.2 (additive, optional): engine advice aligned with
+  // comparable_history for the weekly review. The client formats it;
+  // it never computes a progression verdict itself anymore.
+  progression_advice: z.array(progressionAdviceEntryResponse).optional(),
   // W4.3-D1 (additive, optional): present ONLY when the caller passed
   // receipt_workout_id — the completed workout read back by that exact
   // id for the completion receipt. Null when the id is unknown or the
@@ -216,6 +258,10 @@ const dashboardResponse = z.object({
   // before, and may ignore both.
   receipt: workoutResponse.nullable().optional(),
   receipt_previous: z.array(receiptPreviousEntryResponse).optional(),
+  // W3.2 (additive, optional): present ONLY alongside a located
+  // receipt (same condition as receipt_previous) — the engine's
+  // per-exercise advice for the receipt workout itself.
+  receipt_advice: z.array(receiptAdviceEntryResponse).optional(),
 });
 
 const planExerciseResponse = z.object({
@@ -976,10 +1022,18 @@ function targetRepRange(target: string) {
   return { min: first, max: values[1] ?? first };
 }
 
-// W1.1–W1.4: the single progressive-overload rule, shared verbatim with
-// the client (WeeklyReview). Pure: no IO, no side effects. `sets` is one
-// exercise's sets from its most recent comparable workout; plannedSets is
-// that workout's planned set count for the exercise.
+// W3.2: progressionDecision is now a thin adapter over the single
+// server progression engine (server/src/progression-engine.ts). Its
+// exported signature is unchanged and its verdicts match the
+// historical rule for every input — with ONE deliberate W3.2
+// reclassification (brief rule 4): a recorded weight of 0 is
+// bodyweight, never a comparable 0 load, so an all-0 session now
+// answers "none" where the old copy suggested +5 on a 0 base. A
+// single session with no recorded extras is exactly the engine's
+// base path, with the engine's "insufficient" mapped back to this
+// function's historical "none". New consumers (prefill, receipt,
+// weekly review) call evaluateProgression directly with the full
+// input (two sessions, RIR, pain, RPE).
 export function progressionDecision(input: {
   plannedSets: number;
   sets: { weight: number | null; reps: number | null; completed: boolean }[];
@@ -987,44 +1041,24 @@ export function progressionDecision(input: {
   targetMax: number;
   unit: "lb" | "kg";
 }): { action: "increase" | "hold" | "reduce" | "none"; suggestedWeight: number | null; suggestedReps: number | null } {
-  const none: { action: "none"; suggestedWeight: null; suggestedReps: null } = {
-    action: "none",
-    suggestedWeight: null,
-    suggestedReps: null,
-  };
-  if (input.sets.length === 0 || input.plannedSets <= 0) return none;
-  const completed = input.sets.filter((set) => set.completed);
-  if (completed.length === 0) return none;
-  const weightedWeights = completed
-    .map((set) => set.weight)
-    .filter((weight): weight is number => weight != null);
-  // W1.4: bodyweight / unmeasured sets (weight null) never stand in as a
-  // comparable load of 0 — with no weighed completed set there is no
-  // weight suggestion at all.
-  if (weightedWeights.length === 0) return none;
-  const base = Math.max(...weightedWeights);
-  const increment = input.unit === "lb" ? 5 : 2.5;
-  if (completed.length < input.plannedSets) {
-    // Not all planned sets were done: hold the weight; per-set reps are
-    // carried over by the caller (suggestedReps null = carry over).
-    return { action: "hold", suggestedWeight: base, suggestedReps: null };
+  const advice = evaluateProgression({
+    sessions: [
+      {
+        unit: input.unit,
+        plannedSets: input.plannedSets,
+        sets: input.sets.map((set) => ({ weight: set.weight, reps: set.reps, rir: null, completed: set.completed })),
+        painFlags: [],
+        sessionRpe: null,
+      },
+    ],
+    targetMin: input.targetMin,
+    targetMax: input.targetMax,
+    unit: input.unit,
+  });
+  if (advice.decision === "insufficient") {
+    return { action: "none", suggestedWeight: null, suggestedReps: null };
   }
-  if (completed.some((set) => set.reps == null)) return none;
-  if (completed.every((set) => set.weight != null && set.reps != null && set.reps >= input.targetMax)) {
-    return {
-      action: "increase",
-      suggestedWeight: Math.round((base + increment) * 2) / 2,
-      suggestedReps: input.targetMin,
-    };
-  }
-  if (completed.some((set) => set.reps != null && set.reps < input.targetMin)) {
-    return {
-      action: "reduce",
-      suggestedWeight: Math.max(0, Math.round((base - increment) * 2) / 2),
-      suggestedReps: null,
-    };
-  }
-  return { action: "hold", suggestedWeight: base, suggestedReps: null };
+  return { action: advice.decision, suggestedWeight: advice.suggestedWeight, suggestedReps: advice.suggestedReps };
 }
 
 // W1.3: cross-unit comparability. Weights from a workout recorded in the
@@ -1044,6 +1078,11 @@ export type PreviousSetLike = {
   weight: number | null;
   reps: number | null;
   completed: boolean;
+  // W3.2 (additive, optional): the stored per-set RIR (W3.1), passed
+  // through only by loaders that select it; absent means the caller
+  // did not load it, which the progression engine treats exactly
+  // like a recorded null (not recorded).
+  rir?: number | null;
 };
 
 // W1-CONSISTENCY-001 (cross-window fix): the ONE raw comparable-history
@@ -1103,11 +1142,13 @@ export function selectComparableHistory(
   return entries;
 }
 
-// W1-CONSISTENCY-001: the prefill view of the same raw selection —
+// W1-CONSISTENCY-001: the converted view of the same raw selection —
 // when a contributing workout's unit differs from the target unit, its
 // weights are converted per source workout (LB_TO_KG, 0.5 rounding);
 // `converted` is true when any source actually used for a returned
-// exercise was converted.
+// exercise was converted. (W3.2: the startWorkout prefill now feeds
+// the progression engine via selectProgressionSessions instead; this
+// exported view is retained unchanged for compatibility.)
 export function selectPreviousSetsByExercise(
   recentCompleted: { unit: "lb" | "kg"; sets: ComparableSetLike[] }[],
   exerciseKeys: string[],
@@ -1129,10 +1170,75 @@ export function selectPreviousSetsByExercise(
   return { byExercise, converted };
 }
 
-type PreviousComparable = {
-  byExercise: Record<string, PreviousSetLike[]>;
-  converted: boolean;
+// W3.2: the progression engine's input selection — per exercise, the
+// TWO most recent sessions inside the same per-routine 20-workout
+// window selectComparableHistory reads (most recent first). A session
+// keeps its source unit and values (the engine converts), carries the
+// exercise's target string from that workout, that workout's decoded
+// pain flags and session RPE, and every set's stored RIR. Pure and
+// self-contained so validation scripts can run it verbatim.
+export type ProgressionSessionSelection = {
+  exerciseKey: string;
+  sessions: {
+    unit: "lb" | "kg";
+    plannedSets: number;
+    target: string;
+    sourceCompletedAt: string | null;
+    painFlags: string[];
+    sessionRpe: number | null;
+    sets: { setNumber: number; weight: number | null; reps: number | null; rir: number | null; completed: boolean }[];
+  }[];
 };
+
+export function selectProgressionSessions(
+  recentCompleted: {
+    unit: "lb" | "kg";
+    completedAt?: string | null;
+    painFlags?: string[];
+    sessionRpe?: number | null;
+    sets: ComparableSetLike[];
+  }[],
+  exerciseKeys: string[],
+): ProgressionSessionSelection[] {
+  const windowed = recentCompleted.slice(0, 20);
+  return exerciseKeys.map((exerciseKey) => {
+    const sessions: ProgressionSessionSelection["sessions"] = [];
+    for (const workout of windowed) {
+      if (sessions.length >= 2) break;
+      const sets = workout.sets.filter((set) => set.exerciseKey === exerciseKey);
+      if (sets.length === 0) continue;
+      const first = sets[0];
+      if (!first) continue;
+      sessions.push({
+        unit: workout.unit,
+        plannedSets: sets.length,
+        target: first.targetReps,
+        sourceCompletedAt: workout.completedAt ?? null,
+        painFlags: workout.painFlags ?? [],
+        sessionRpe: workout.sessionRpe ?? null,
+        sets: sets.map((set) => ({
+          setNumber: set.setNumber,
+          weight: set.weight,
+          reps: set.reps,
+          rir: set.rir ?? null,
+          completed: set.completed,
+        })),
+      });
+    }
+    return { exerciseKey, sessions };
+  });
+}
+
+// Map one selection's raw sessions onto the engine's input shape.
+function toEngineSessions(selection: ProgressionSessionSelection): ProgressionEngineSession[] {
+  return selection.sessions.map((session) => ({
+    unit: session.unit,
+    plannedSets: session.plannedSets,
+    sets: session.sets,
+    painFlags: session.painFlags,
+    sessionRpe: session.sessionRpe,
+  }));
+}
 
 // W1.3 + W1-CONSISTENCY-001: load ONE routine's 20 most recent
 // completed workouts (any unit) with all their sets, in the raw shape
@@ -1142,10 +1248,25 @@ type PreviousComparable = {
 async function loadRoutineRecentCompleted(
   ctx: Ctx,
   routine: z.infer<typeof routineSchema>,
-): Promise<{ unit: "lb" | "kg"; completedAt: string | null; sets: ComparableSetLike[] }[]> {
+): Promise<{
+  unit: "lb" | "kg";
+  completedAt: string | null;
+  // W3.2 (additive): the source workout's W3.1 self-report, decoded —
+  // the progression engine's pain / RPE inputs. Older consumers of
+  // this loader ignore both fields.
+  painFlags: string[];
+  sessionRpe: number | null;
+  sets: ComparableSetLike[];
+}[]> {
   const db = ctx.db<typeof schema>();
   const rows = await db
-    .select({ id: schema.workouts.id, unit: schema.workouts.unit, completedAt: schema.workouts.completedAt })
+    .select({
+      id: schema.workouts.id,
+      unit: schema.workouts.unit,
+      completedAt: schema.workouts.completedAt,
+      painFlags: schema.workouts.painFlags,
+      sessionRpe: schema.workouts.sessionRpe,
+    })
     .from(schema.workouts)
     .where(and(eq(schema.workouts.routine, routine), isNotNull(schema.workouts.completedAt)))
     .orderBy(desc(schema.workouts.completedAt))
@@ -1166,6 +1287,7 @@ async function loadRoutineRecentCompleted(
       weight: row.weight,
       reps: row.reps,
       completed: row.completed,
+      rir: row.rir,
     });
     setsByWorkout.set(row.workoutId, list);
   }
@@ -1174,18 +1296,10 @@ async function loadRoutineRecentCompleted(
     // W2.3: the source workout's completion time, passed through so
     // selectComparableHistory can stamp it onto the dashboard entry.
     completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+    painFlags: decodePainFlags(row.painFlags),
+    sessionRpe: row.sessionRpe,
     sets: setsByWorkout.get(row.id) ?? [],
   }));
-}
-
-async function loadPreviousCompletedSets(
-  ctx: Ctx,
-  routine: z.infer<typeof routineSchema>,
-  unit: z.infer<typeof unitSchema>,
-  exerciseKeys: string[],
-): Promise<PreviousComparable> {
-  const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
-  return selectPreviousSetsByExercise(recentCompleted, exerciseKeys, unit);
 }
 
 // W1-CONSISTENCY-001: the dashboard view of the same raw selection,
@@ -1216,6 +1330,52 @@ async function loadComparableHistory(
           reps: set.reps,
           completed: set.completed,
         })),
+      });
+    }
+  }
+  return entries;
+}
+
+// W3.2: the weekly review's engine advice — one entry per comparable
+// history entry (same per-routine selection, same order), computed by
+// the single server progression engine over that exercise's two most
+// recent sessions. The suggestion is expressed in the most recent
+// session's own unit (the entry's unit field); the client converts
+// for display only. Exercises with no session get no entry, exactly
+// like comparable_history.
+async function loadProgressionAdvice(
+  ctx: Ctx,
+): Promise<z.infer<typeof progressionAdviceEntryResponse>[]> {
+  const entries: z.infer<typeof progressionAdviceEntryResponse>[] = [];
+  const templates = await loadPlanTemplates(ctx);
+  for (const routine of ROUTINE_KEYS) {
+    const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
+    const selections = selectProgressionSessions(
+      recentCompleted,
+      templates[routine].map((exercise) => exercise.key),
+    );
+    for (const selection of selections) {
+      const latest = selection.sessions[0];
+      if (!latest) continue;
+      const { min, max } = targetRepRange(latest.target);
+      const advice = evaluateProgression({
+        sessions: toEngineSessions(selection),
+        targetMin: min,
+        targetMax: max,
+        unit: latest.unit,
+      });
+      entries.push({
+        routine,
+        exercise_key: selection.exerciseKey,
+        unit: latest.unit,
+        source_completed_at: latest.sourceCompletedAt,
+        decision: advice.decision,
+        suggested_weight: advice.suggestedWeight,
+        suggested_reps: advice.suggestedReps,
+        completion_rate: advice.completionRate,
+        reason: advice.reason,
+        confidence: advice.confidence,
+        engine_version: advice.engineVersion,
       });
     }
   }
@@ -1253,6 +1413,69 @@ export function selectReceiptPrevious(
     }
   }
   return entries;
+}
+
+// W3.2: the receipt advice's previous-session selection — the same
+// key-only, most-recent-earlier-candidate rule as
+// selectReceiptPrevious, but returning that candidate's FULL session
+// (unit, target, pain flags, session RPE, and every set with its
+// stored RIR) so the progression engine can judge the receipt
+// workout's performance against it. Pure; candidates arrive most
+// recent first. An exercise absent from every candidate gets a null
+// session (the engine then judges the receipt session alone).
+export type ReceiptSessionSelection = {
+  exerciseKey: string;
+  session: {
+    unit: "lb" | "kg";
+    plannedSets: number;
+    target: string;
+    painFlags: string[];
+    sessionRpe: number | null;
+    sets: { weight: number | null; reps: number | null; rir: number | null; completed: boolean }[];
+  } | null;
+};
+
+export function selectReceiptSessions(
+  candidates: {
+    unit: "lb" | "kg";
+    painFlags: string[];
+    sessionRpe: number | null;
+    sets: {
+      exerciseKey: string;
+      targetReps: string;
+      weight: number | null;
+      reps: number | null;
+      rir: number | null;
+      completed: boolean;
+    }[];
+  }[],
+  exerciseKeys: string[],
+): ReceiptSessionSelection[] {
+  return exerciseKeys.map((exerciseKey) => {
+    for (const candidate of candidates) {
+      const sets = candidate.sets.filter((set) => set.exerciseKey === exerciseKey);
+      if (sets.length === 0) continue;
+      const first = sets[0];
+      if (!first) continue;
+      return {
+        exerciseKey,
+        session: {
+          unit: candidate.unit,
+          plannedSets: sets.length,
+          target: first.targetReps,
+          painFlags: candidate.painFlags,
+          sessionRpe: candidate.sessionRpe,
+          sets: sets.map((set) => ({
+            weight: set.weight,
+            reps: set.reps,
+            rir: set.rir,
+            completed: set.completed,
+          })),
+        },
+      };
+    }
+    return { exerciseKey, session: null };
+  });
 }
 
 // W4.3-D1: load the receipt workout's previous-comparable candidates —
@@ -1310,6 +1533,143 @@ async function loadReceiptPrevious(
   }));
   const exerciseKeys = [...new Set(receipt.sets.map((set) => set.exercise_key))];
   return selectReceiptPrevious(candidates, exerciseKeys);
+}
+
+// W3.2: the completion receipt's engine advice, one entry per
+// exercise of the receipt workout (in the workout's own order). The
+// judged session is the receipt workout ITSELF (its sets with their
+// stored RIR, its own pain flags and session RPE); the second
+// session is the same most-recent-earlier comparable candidate
+// loadReceiptPrevious counts, loaded here with its full sets. The
+// candidate window mirrors loadReceiptPrevious exactly: same
+// routine, finished strictly before the receipt workout in
+// (completed_at, id) order, capped at 20.
+async function loadReceiptAdvice(
+  ctx: Ctx,
+  receipt: z.infer<typeof workoutResponse>,
+): Promise<z.infer<typeof receiptAdviceEntryResponse>[]> {
+  const exerciseKeys = [...new Set(receipt.sets.map((set) => set.exercise_key))];
+  if (!receipt.completed_at || exerciseKeys.length === 0) return [];
+  const db = ctx.db<typeof schema>();
+  const completedAtMs = new Date(receipt.completed_at).getTime();
+  const rows = await db
+    .select({
+      id: schema.workouts.id,
+      unit: schema.workouts.unit,
+      completedAt: schema.workouts.completedAt,
+      painFlags: schema.workouts.painFlags,
+      sessionRpe: schema.workouts.sessionRpe,
+    })
+    .from(schema.workouts)
+    .where(
+      and(
+        eq(schema.workouts.routine, receipt.routine),
+        isNotNull(schema.workouts.completedAt),
+        ne(schema.workouts.id, receipt.id),
+      ),
+    )
+    .orderBy(desc(schema.workouts.completedAt), desc(schema.workouts.id))
+    .limit(40);
+  const earlier: { id: number; unit: "lb" | "kg"; painFlags: string | null; sessionRpe: number | null }[] = [];
+  for (const row of rows) {
+    if (!row.completedAt) continue;
+    const ms = row.completedAt.getTime();
+    if (ms < completedAtMs || (ms === completedAtMs && row.id < receipt.id)) {
+      earlier.push({ id: row.id, unit: row.unit, painFlags: row.painFlags, sessionRpe: row.sessionRpe });
+      if (earlier.length >= 20) break;
+    }
+  }
+  const setRows = earlier.length
+    ? await db
+        .select({
+          workoutId: schema.workoutSets.workoutId,
+          exerciseKey: schema.workoutSets.exerciseKey,
+          targetReps: schema.workoutSets.targetReps,
+          weight: schema.workoutSets.weight,
+          reps: schema.workoutSets.reps,
+          rir: schema.workoutSets.rir,
+          completed: schema.workoutSets.completed,
+        })
+        .from(schema.workoutSets)
+        .where(inArray(schema.workoutSets.workoutId, earlier.map((row) => row.id)))
+    : [];
+  const setsByWorkout = new Map<number, {
+    exerciseKey: string;
+    targetReps: string;
+    weight: number | null;
+    reps: number | null;
+    rir: number | null;
+    completed: boolean;
+  }[]>();
+  for (const row of setRows) {
+    const list = setsByWorkout.get(row.workoutId) ?? [];
+    list.push({
+      exerciseKey: row.exerciseKey,
+      targetReps: row.targetReps,
+      weight: row.weight,
+      reps: row.reps,
+      rir: row.rir,
+      completed: row.completed,
+    });
+    setsByWorkout.set(row.workoutId, list);
+  }
+  const candidates = earlier.map((row) => ({
+    unit: row.unit,
+    painFlags: decodePainFlags(row.painFlags),
+    sessionRpe: row.sessionRpe,
+    sets: setsByWorkout.get(row.id) ?? [],
+  }));
+  const previousByKey = new Map(
+    selectReceiptSessions(candidates, exerciseKeys).map((entry) => [entry.exerciseKey, entry.session]),
+  );
+  const entries: z.infer<typeof receiptAdviceEntryResponse>[] = [];
+  for (const key of exerciseKeys) {
+    const ownSets = receipt.sets.filter((set) => set.exercise_key === key);
+    const first = ownSets[0];
+    if (!first) continue;
+    const { min, max } = targetRepRange(first.target_reps);
+    const sessions: ProgressionEngineSession[] = [
+      {
+        unit: receipt.unit,
+        plannedSets: ownSets.length,
+        sets: ownSets.map((set) => ({
+          weight: set.weight,
+          reps: set.reps,
+          rir: set.rir,
+          completed: set.completed,
+        })),
+        painFlags: receipt.pain_flags,
+        sessionRpe: receipt.session_rpe,
+      },
+    ];
+    const previous = previousByKey.get(key) ?? null;
+    if (previous) {
+      sessions.push({
+        unit: previous.unit,
+        plannedSets: previous.plannedSets,
+        sets: previous.sets,
+        painFlags: previous.painFlags,
+        sessionRpe: previous.sessionRpe,
+      });
+    }
+    const advice = evaluateProgression({
+      sessions,
+      targetMin: min,
+      targetMax: max,
+      unit: receipt.unit,
+    });
+    entries.push({
+      exercise_key: key,
+      decision: advice.decision,
+      suggested_weight: advice.suggestedWeight,
+      suggested_reps: advice.suggestedReps,
+      completion_rate: advice.completionRate,
+      reason: advice.reason,
+      confidence: advice.confidence,
+      engine_version: advice.engineVersion,
+    });
+  }
+  return entries;
 }
 
 export const Actions = {
@@ -1411,6 +1771,13 @@ export const Actions = {
         receipt: z.infer<typeof workoutResponse> | null;
         receipt_previous: z.infer<typeof receiptPreviousEntryResponse>[];
       } | null = null;
+      // W3.2 (additive): the engine's advice for the receipt workout,
+      // computed only when that workout was actually located above —
+      // an unknown/uncompleted id gets no advice, never a substitute
+      // record's verdict.
+      let receiptAdviceFields: {
+        receipt_advice: z.infer<typeof receiptAdviceEntryResponse>[];
+      } | null = null;
       if (args.receipt_workout_id != null) {
         const located = await loadWorkout(ctx, args.receipt_workout_id);
         if (located && located.completed_at != null) {
@@ -1418,6 +1785,7 @@ export const Actions = {
             receipt: located,
             receipt_previous: await loadReceiptPrevious(ctx, located),
           };
+          receiptAdviceFields = { receipt_advice: await loadReceiptAdvice(ctx, located) };
         } else {
           receiptFields = { receipt: null, receipt_previous: [] };
         }
@@ -1428,7 +1796,9 @@ export const Actions = {
         recent_workouts: recentWorkouts,
         week_summaries: weekSummaries,
         comparable_history: await loadComparableHistory(ctx),
+        progression_advice: await loadProgressionAdvice(ctx),
         ...(receiptFields ?? {}),
+        ...(receiptAdviceFields ?? {}),
       };
     },
   }),
@@ -1503,39 +1873,47 @@ export const Actions = {
       await ensurePlanSeeded(ctx);
       const templates = await loadPlanTemplates(ctx);
       const template = templates[args.routine];
-      const previous = await loadPreviousCompletedSets(
-        ctx,
-        args.routine,
-        args.unit,
+      // W3.2: the prefill verdict comes from the single server
+      // progression engine, fed with the exercise's two most recent
+      // sessions (the W1-CONSISTENCY-001 window) including their
+      // stored RIR, pain flags and session RPE. The engine converts
+      // source-unit weights into the new workout's unit itself, so
+      // the judged base is the same one the weekly review cites.
+      const recentCompleted = await loadRoutineRecentCompleted(ctx, args.routine);
+      const selections = selectProgressionSessions(
+        recentCompleted,
         template.map((exercise) => exercise.key),
       );
+      const selectionByKey = new Map(selections.map((selection) => [selection.exerciseKey, selection]));
+      const prefillConverted = selections.some((selection) => {
+        const latest = selection.sessions[0];
+        return latest != null && latest.unit !== args.unit;
+      });
       const values = template.flatMap((exercise) => {
-        const history = previous.byExercise[exercise.key] ?? [];
+        const selection = selectionByKey.get(exercise.key);
+        const latestSession = selection?.sessions[0];
+        // The most recent session's sets, for per-set rep carry-over
+        // (reps are never unit-converted).
+        const history = latestSession?.sets ?? [];
         const { min: targetMin, max: targetMax } = targetRepRange(exercise.target);
-        // W1.2: prefill comes from the same progressionDecision the
-        // weekly review uses — one rule, one verdict for "next time".
-        const decision = progressionDecision({
-          // W1-CONSISTENCY-001: planned is the exercise's actual set
-          // count in that previous workout (history length — all
-          // sets, completed or not), exactly as the weekly review
-          // computes it. Only with no history does the template
-          // count apply.
-          plannedSets: history.length > 0 ? history.length : exercise.sets,
-          sets: history,
-          targetMin,
-          targetMax,
-          unit: args.unit,
-        });
+        const advice = selection && selection.sessions.length > 0
+          ? evaluateProgression({
+              sessions: toEngineSessions(selection),
+              targetMin,
+              targetMax,
+              unit: args.unit,
+            })
+          : null;
 
         return Array.from({ length: exercise.sets }, (_, index) => {
           const prior = history.find((set) => set.setNumber === index + 1) ?? history[index] ?? history[history.length - 1];
           let suggestedWeight: number | null = null;
           let suggestedReps: number | null = null;
-          if (decision.action === "increase") {
-            suggestedWeight = decision.suggestedWeight;
-            suggestedReps = decision.suggestedReps;
-          } else if (decision.action === "hold" || decision.action === "reduce") {
-            suggestedWeight = decision.suggestedWeight;
+          if (advice?.decision === "increase") {
+            suggestedWeight = advice.suggestedWeight;
+            suggestedReps = advice.suggestedReps;
+          } else if (advice?.decision === "hold" || advice?.decision === "reduce") {
+            suggestedWeight = advice.suggestedWeight;
             suggestedReps = prior ? prior.reps : null;
           }
           return {
@@ -1750,7 +2128,7 @@ export const Actions = {
         ctx.invalidateQueries();
         return {
           forbidden: false,
-          workout: previous.converted ? { ...workout, prefill_unit_converted: true } : workout,
+          workout: prefillConverted ? { ...workout, prefill_unit_converted: true } : workout,
         };
       }
       } catch (error) {

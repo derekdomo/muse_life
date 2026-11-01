@@ -152,14 +152,16 @@ check('server: startWorkout yield deletes only its own still-initializing row',
   && serverSrc.indexOf('isNull(schema.workouts.completedAt),', serverSrc.indexOf('startWorkout: defineAction')) > -1);
 {
   const startSlice = serverSrc.slice(serverSrc.indexOf('startWorkout: defineAction'));
-  // W4.3-D1 backfill moved the history read onto plan-template keys and
-  // wrapped the call across lines; the read still runs inside the
-  // unified cleanup try, so match the call head, not the old
-  // single-line `loadPreviousCompletedSets(ctx` literal.
+  // W3.2: the prefill history read is now loadRoutineRecentCompleted +
+  // selectProgressionSessions (loadPreviousCompletedSets was removed, its
+  // only caller was the prefill); the W-START-001 contract — the read
+  // runs inside the unified cleanup try — is unchanged, so assert the
+  // new call chain, not the deleted helper name.
   check('server: startWorkout history read runs INSIDE the unified cleanup try (W-START-001)',
     startSlice.indexOf('try {') > -1
-    && startSlice.indexOf('try {') < startSlice.indexOf('loadPreviousCompletedSets(')
-    && startSlice.indexOf('loadPreviousCompletedSets(') < startSlice.indexOf('catch (error)'));
+    && startSlice.indexOf('try {') < startSlice.indexOf('loadRoutineRecentCompleted(ctx, args.routine)')
+    && startSlice.indexOf('loadRoutineRecentCompleted(ctx, args.routine)') < startSlice.indexOf('selectProgressionSessions(')
+    && startSlice.indexOf('selectProgressionSessions(') < startSlice.indexOf('catch (error)'));
   check('server: startWorkout unified catch cleans up its own initializing row and rethrows as-is',
     /catch \(error\) \{[\s\S]*?cleanupOwnInitializing\(\)[\s\S]*?throw error/.test(startSlice));
   check('server: cleanup deletes only a still-initializing, never-completed own row (visible/completed never deleted)',
