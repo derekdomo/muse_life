@@ -3013,3 +3013,22 @@
 - plans.md `W3.4` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。W3.5（连续两次下降＋高 RPE/低 RIR/疼痛/低 readiness 才建议保守调整）为下一顺位，留待后续轮次。
 - 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner、无进行中训练，owner 视角实机以本人打开为准；W3.4 的 App.tsx 回灌曾因视频内嵌 hunks 并存而走外科手术式合并、已用逐字节一致校验。
 - 本轮未动 cron；修改文件：plans.md（W3.4 交付登记）、workout-log 回灌 5 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-6 已上线版本不受影响）。
+
+## 2026-11-01 10 时 PST（muse-life-plans-sync 09:55 轮次：F-ARCH-001·INCR-1 追加返工实现＋验证）
+- 需求编号：`F-ARCH-001·INCR-1` 追加返工「完整性与尾段证据」（P0 / A 类 / Muse，目标 2026-11-01 18:00 PST），源自 2026-11-01 独立日任务 PM 反馈（本轮 git pull 新到 plans.md 两节：W6.2-LOCAL-DEMO-002 与该返工单）。
+- 任务：修复 `ingestDailySpendIncremental` / `ingestDailyIncomeIncremental` 两处已复现缺陷——(1) fullCoverageStart 变化时未重送旧日的 partial 留旧值（与全窗重算不一致）；(2) 截止日推进声明了未提交的尾段天，服务端用合成 0 日冒充证据并推进 throughDate。
+- 改了什么（`weekly-finance/server/src/actions.ts`）：
+  - 新增 `incremental_tail_gap` 拒绝：(baseThroughDate, throughDate] 内任一日期无显式提交日行即拒写；显式 0 日、2 天重叠、旧窗更早修正照常允许。
+  - 合并后按信封 fullCoverageStart 对全部合并日重算 partial（`partial = fcs !== null && date < fcs` 纯函数语义），未重送的旧存储日不再保留上一版 fcs 的过期标志。
+  - 两函数协议注释同步更新（spend a–e 增补 f 条；income 注释增补同约束）。
+- 验证证据（全部合成数据，无真实财务数据；命令 `bun validate-arch-incremental.ts`，本机 bun 1.4.4）：
+  - 扩展 `weekly-finance/validate-arch-incremental.ts`（+10 项新检查，header 注释同步）：spend/income 各一组 fcs-shift fixture（单账户基线 10-20..10-24 fcs=10-20 → 新账户 10-26/10-25 交易进入、fcs 后移）与一组 missing-tail fixture（声明 throughDate=10-26/10-25 但只送到 10-24）；另有 partial 标志变异敏感性各 1 项。
+  - 修后：56/56 通过（含既有 46 项回归：happy path、pending→posted 翻转、stale_base、daily_mismatch、incremental_mismatch、no_base、guest、full 共存——0 失败）。
+  - 修前敏感：`git stash` 仅 actions.ts 后重跑——10 项新检查按缺陷预期失败（旧日 partial 仍 stale、missing-tail 返回 ok 并发布合成 0 日）、46 项旧检查全过；`git stash pop` 恢复后 56/56。
+  - 坏请求回滚：拒绝后行数、生产 payload JSON、throughDate 字节不变（与调用前快照逐字比对）。
+  - 判据 4（getDashboard→日历/日详情）：内存库无 legacy dashboard state 时 getDashboard 不挂载 arch overlay（`if (data)` 门控），故直接用覆盖路径实际调用的 `pickCurrentDailySpendVersion` / `pickCurrentDailyIncomeVersion` 对真实表行做独立核对——10-20 partial=true、10-26/10-25 partial=false、throughDate 已推进；与日历/日详情读取的即为同一解析后生产对象。所有者本人打开确认仍为单列待办，不由本轮代替。
+  - 依赖安装说明：本机原无 node_modules，`bun install` 首次因 @hatch/space-sdk 本地 tgz 完整性校验失败，`bun install --force` 后成功（79 包）；验证后已删除 node_modules/.bun-cache 并还原 bun.lock（仅 1 行 sha 抖动），工作区无残留。
+- 局限：验证为内存 SQLite＋合成 fixture，未覆盖 SDK/Zod/Drizzle/SQL 之外的完整公共 action、线上或 owner 真实账本；getDashboard 全链路未在有 legacy state 的库上实跑（见上）；owner 视角实机确认待本人打开。
+- 回滚：revert 本提交即恢复；服务端拒绝语义为纯加法门控（旧合法请求不受影响——46 项旧检查为证）。
+- plans.md：返工单 4 项验证判据均标 [完成 2026-11-01]（仅表示实现方已交付；PM 结论以其评审记录为准）；W6.2-LOCAL-DEMO-002 加实现方注记——多帧接入待用户整批过目点头后下一轮次执行，本轮不构建（需用户确认）。
+- 本轮未动 cron；修改文件：plans.md（返工单交付登记＋W6.2 注记）、weekly-finance/server/src/actions.ts、weekly-finance/validate-arch-incremental.ts、本文件。

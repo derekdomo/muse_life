@@ -11,6 +11,13 @@
 // production version byte-identical (rollback semantics) —
 // no_base on an empty store, guest forbidden, and coexistence
 // with the legacy full leg after an incremental publish.
+// INCR-1 coverage/tail safeguards (2026-11-01): fullCoverageStart
+// shift fixtures (stale partial on unresent days must be
+// re-derived window-wide), missing-tail rejection
+// (incremental_tail_gap, no fabricated zero days), mutation
+// sensitivity on the partial flags, and a getDashboard read
+// confirming the calendar-facing day rows carry the corrected
+// partial labels.
 // Run: bun validate-arch-incremental.ts
 import { Database } from "bun:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
@@ -21,7 +28,7 @@ const APP_DIR = new URL(".", import.meta.url).pathname;
 const appRequire = createRequire(join(APP_DIR, "package.json"));
 const { drizzle } = appRequire("drizzle-orm/bun-sqlite");
 const schema = await import(join(APP_DIR, "server/src/schema.ts"));
-const { Actions, summarizeSpendDailyServer, summarizeIncomeDailyServer } = await import(join(APP_DIR, "server/src/actions.ts"));
+const { Actions, summarizeSpendDailyServer, summarizeIncomeDailyServer, pickCurrentDailySpendVersion, pickCurrentDailyIncomeVersion } = await import(join(APP_DIR, "server/src/actions.ts"));
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -330,6 +337,209 @@ async function seedIncomeBase(db: any) {
   await seedIncomeBase(db);
   const denied = await Actions.ingestArchDailyIncome.handler(guestCtx(db), incomeIncrementalRequest());
   check("income guest: forbidden", denied.ok === false && denied.issue === "forbidden" && incomeRowCount(sqlite) === 1);
+}
+
+
+// ---------------- INCR-1 coverage/tail safeguards (2026-11-01) ----------------
+// Counterexample 1 (PM rework): fullCoverageStart shifts when a new
+// account's later-dated transactions enter the window; unresent old
+// days must get their partial flags re-derived from the envelope's
+// fullCoverageStart, not keep stale flags. Spend totals are positive
+// magnitudes (the summarizer reports spend as positive amounts).
+function spendFcsShiftBase(): any[] {
+  return [
+    { id: "sa", date: "2026-10-20", amount: -50, status: "posted", kind: "spend", category: "FOOD_AND_DRINK", account: "acct_a" },
+  ];
+}
+function spendFcsShiftV2(): any[] {
+  return [
+    ...spendFcsShiftBase(),
+    { id: "sb", date: "2026-10-26", amount: -20, status: "posted", kind: "spend", category: "TRANSPORTATION", account: "acct_b" },
+  ];
+}
+function spendFcsShiftIncrementalRequest() {
+  const v2 = spendFcsShiftV2();
+  const deltaFrom = "2026-10-23"; // baseThroughDate (10-24) - 2 days
+  const deltaTxns = v2.filter((t) => t.date >= deltaFrom && t.date <= SPEND_NEW_THROUGH);
+  const full = summarizeSpendDailyServer(v2, { fromDate: SPEND_START, toDate: SPEND_NEW_THROUGH });
+  const slice = summarizeSpendDailyServer(deltaTxns, { fromDate: deltaFrom, toDate: SPEND_NEW_THROUGH });
+  const days = slice.days.map((d: any) => ({ ...d, partial: full.fullCoverageStart !== null && d.date < full.fullCoverageStart }));
+  return {
+    arch: "F-ARCH-001" as const, version: 1 as const, mode: "incremental" as const,
+    pulledAt: SPEND_INCR_PULLED,
+    coverageStart: SPEND_START, throughDate: SPEND_NEW_THROUGH,
+    fullCoverageStart: full.fullCoverageStart,
+    baseThroughDate: SPEND_BASE_THROUGH,
+    transactions: deltaTxns,
+    days,
+    expectedTotals: {
+      posted: full.totals.posted,
+      pending: full.totals.pending,
+      transactions: v2.length,
+      conflicts: full.conflicts.length,
+      unappliedRefunds: full.unappliedRefunds.length,
+      unclassified: full.unclassified.length,
+      excludedTransfer: full.excludedCounts.transfer,
+      excludedLoanPrincipal: full.excludedCounts.loanPrincipal,
+    },
+  };
+}
+{
+  const { sqlite, db } = freshDb();
+  const seedRes = await Actions.ingestArchDailySpend.handler(ownerCtx(db), spendFullRequest(spendFcsShiftBase(), SPEND_BASE_THROUGH, SPEND_BASE_PULLED));
+  check("spend fcs-shift: base seed ok, fcs=2026-10-20, all days partial=false",
+    seedRes.ok === true && spendStored(sqlite).fullCoverageStart === "2026-10-20" &&
+    spendStored(sqlite).days.every((d: any) => d.partial === false));
+  const res = await Actions.ingestArchDailySpend.handler(ownerCtx(db), spendFcsShiftIncrementalRequest());
+  check("spend fcs-shift: incremental ok, throughDate advanced to 10-26", res.ok === true && res.newThroughDate === SPEND_NEW_THROUGH);
+  const stored = spendStored(sqlite);
+  check("spend fcs-shift: top-level fullCoverageStart = 2026-10-26", stored.fullCoverageStart === "2026-10-26");
+  const full = summarizeSpendDailyServer(spendFcsShiftV2(), { fromDate: SPEND_START, toDate: SPEND_NEW_THROUGH });
+  const partialOk = stored.days.length === full.days.length &&
+    stored.days.every((d: any, i: number) => d.date === full.days[i].date && d.partial === full.days[i].partial);
+  check("spend fcs-shift: every merged day's partial matches the full-window recompute", partialOk);
+  const d20 = stored.days.find((d: any) => d.date === "2026-10-20");
+  const d22 = stored.days.find((d: any) => d.date === "2026-10-22");
+  check("spend fcs-shift: unresent old days re-derived partial=true (10-20, 10-22)", d20.partial === true && d22.partial === true);
+  check("spend fcs-shift: merged totals still exact (posted 70)", approx(stored.totals.posted, 70) && approx(stored.totals.pending, 0));
+  // Criterion 4: the production read path getDashboard uses for the
+  // calendar/day-detail overlay (pickCurrentDailySpendVersion) sees
+  // the corrected labels.
+  const spendRows = sqlite.query("SELECT * FROM arch_daily_spend").all() as any[];
+  const currentSpend = pickCurrentDailySpendVersion(spendRows);
+  check("spend fcs-shift: production read path surfaces re-derived partial (10-20 true, 10-26 false, throughDate 10-26)",
+    currentSpend !== null && currentSpend.parsed.throughDate === SPEND_NEW_THROUGH &&
+    currentSpend.parsed.days.find((d: any) => d.date === "2026-10-20")?.partial === true &&
+    currentSpend.parsed.days.find((d: any) => d.date === "2026-10-26")?.partial === false);
+}
+// Mutation sensitivity (fresh base so the request is not stale_base):
+// a flipped partial flag on a resent day is caught.
+{
+  const { sqlite, db } = freshDb();
+  await Actions.ingestArchDailySpend.handler(ownerCtx(db), spendFullRequest(spendFcsShiftBase(), SPEND_BASE_THROUGH, SPEND_BASE_PULLED));
+  const before = JSON.stringify(spendStored(sqlite));
+  const mut = spendFcsShiftIncrementalRequest();
+  (mut.days as any[]).find((d: any) => d.date === "2026-10-26")!.partial = true; // honest=false → tampered
+  const mutRes = await Actions.ingestArchDailySpend.handler(ownerCtx(db), mut);
+  check("spend fcs-shift: mutated partial flag rejected as daily_mismatch, production untouched",
+    mutRes.ok === false && mutRes.issue === "daily_mismatch" && spendRowCount(sqlite) === 1 && JSON.stringify(spendStored(sqlite)) === before);
+}
+
+// Counterexample 2 (PM rework): throughDate advanced past the base
+// but the tail days were never sent — must be rejected, never
+// fabricated as zeros.
+{
+  const { sqlite, db } = freshDb();
+  await Actions.ingestArchDailySpend.handler(ownerCtx(db), spendFullRequest(spendFcsShiftBase(), SPEND_BASE_THROUGH, SPEND_BASE_PULLED));
+  const before = JSON.stringify(spendStored(sqlite));
+  const base = summarizeSpendDailyServer(spendFcsShiftBase(), { fromDate: SPEND_START, toDate: SPEND_BASE_THROUGH });
+  const slice = summarizeSpendDailyServer([], { fromDate: "2026-10-23", toDate: SPEND_BASE_THROUGH });
+  const req = {
+    arch: "F-ARCH-001" as const, version: 1 as const, mode: "incremental" as const,
+    pulledAt: SPEND_INCR_PULLED,
+    coverageStart: SPEND_START, throughDate: SPEND_NEW_THROUGH, // claims 10-26...
+    fullCoverageStart: base.fullCoverageStart,
+    baseThroughDate: SPEND_BASE_THROUGH,
+    transactions: [],
+    days: slice.days, // ...but only sends 10-23..10-24 (honest, matches recompute)
+    expectedTotals: {
+      posted: base.totals.posted, pending: base.totals.pending,
+      transactions: spendFcsShiftBase().length, conflicts: 0, unappliedRefunds: 0,
+      unclassified: 0, excludedTransfer: 0, excludedLoanPrincipal: 0,
+    },
+  };
+  const res = await Actions.ingestArchDailySpend.handler(ownerCtx(db), req);
+  check("spend tail-gap: missing tail rejected as incremental_tail_gap", res.ok === false && res.issue === "incremental_tail_gap");
+  check("spend tail-gap: production payload/rows/throughDate byte-identical", spendRowCount(sqlite) === 1 && JSON.stringify(spendStored(sqlite)) === before && spendStored(sqlite).throughDate === SPEND_BASE_THROUGH);
+}
+
+// Income mirrors of both counterexamples.
+function incomeFcsShiftBase(): any[] {
+  return [
+    { id: "ia", date: "2026-10-20", amount: 50, status: "posted", kind: "income", category: "INCOME_WAGES", account: "acct_a" },
+  ];
+}
+function incomeFcsShiftV2(): any[] {
+  return [
+    ...incomeFcsShiftBase(),
+    { id: "ib", date: "2026-10-25", amount: 20, status: "posted", kind: "income", category: "INCOME_WAGES", account: "acct_b" },
+  ];
+}
+function incomeFcsShiftIncrementalRequest() {
+  const v2 = incomeFcsShiftV2();
+  const deltaFrom = "2026-10-23";
+  const deltaTxns = v2.filter((t) => t.date >= deltaFrom && t.date <= INC_NEW_THROUGH);
+  const full = summarizeIncomeDailyServer(v2, { fromDate: INC_START, toDate: INC_NEW_THROUGH });
+  const slice = summarizeIncomeDailyServer(deltaTxns, { fromDate: deltaFrom, toDate: INC_NEW_THROUGH });
+  const days = slice.days.map((d: any) => ({ ...d, partial: full.fullCoverageStart !== null && d.date < full.fullCoverageStart }));
+  return {
+    arch: "F-ARCH-001" as const, version: 1 as const, mode: "incremental" as const,
+    pulledAt: INC_INCR_PULLED,
+    coverageStart: INC_START, throughDate: INC_NEW_THROUGH,
+    fullCoverageStart: full.fullCoverageStart,
+    baseThroughDate: INC_BASE_THROUGH,
+    transactions: deltaTxns,
+    days,
+    expectedTotals: {
+      total: full.totals.total, pending: full.totals.pending,
+      transactions: v2.length, conflicts: full.conflicts.length,
+      unclassified: full.unclassified.length,
+      excludedTransfer: full.excludedCounts.transfer, excludedLoanPrincipal: full.excludedCounts.loanPrincipal,
+    },
+  };
+}
+{
+  const { sqlite, db } = freshDb();
+  const seedRes = await Actions.ingestArchDailyIncome.handler(ownerCtx(db), incomeFullRequest(incomeFcsShiftBase(), INC_BASE_THROUGH, INC_BASE_PULLED));
+  check("income fcs-shift: base seed ok, fcs=2026-10-20", seedRes.ok === true && incomeStored(sqlite).fullCoverageStart === "2026-10-20");
+  const res = await Actions.ingestArchDailyIncome.handler(ownerCtx(db), incomeFcsShiftIncrementalRequest());
+  check("income fcs-shift: incremental ok, throughDate advanced to 10-25", res.ok === true && res.newThroughDate === INC_NEW_THROUGH);
+  const stored = incomeStored(sqlite);
+  const full = summarizeIncomeDailyServer(incomeFcsShiftV2(), { fromDate: INC_START, toDate: INC_NEW_THROUGH });
+  check("income fcs-shift: every merged day's partial matches the full-window recompute",
+    stored.days.length === full.days.length && stored.days.every((d: any, i: number) => d.partial === full.days[i].partial));
+  check("income fcs-shift: unresent old day 10-20 re-derived partial=true", stored.days.find((d: any) => d.date === "2026-10-20")?.partial === true);
+  check("income fcs-shift: merged totals exact (total 70)", approx(stored.totals.total, 70) && approx(stored.totals.pending, 0));
+  const incomeRows = sqlite.query("SELECT * FROM arch_daily_income").all() as any[];
+  const currentIncome = pickCurrentDailyIncomeVersion(incomeRows);
+  check("income fcs-shift: production read path surfaces re-derived partial (10-20 true, 10-25 false)",
+    currentIncome !== null &&
+    currentIncome.parsed.days.find((d: any) => d.date === "2026-10-20")?.partial === true &&
+    currentIncome.parsed.days.find((d: any) => d.date === "2026-10-25")?.partial === false);
+}
+{
+  const { sqlite, db } = freshDb();
+  await Actions.ingestArchDailyIncome.handler(ownerCtx(db), incomeFullRequest(incomeFcsShiftBase(), INC_BASE_THROUGH, INC_BASE_PULLED));
+  const before = JSON.stringify(incomeStored(sqlite));
+  const mut = incomeFcsShiftIncrementalRequest();
+  (mut.days as any[]).find((d: any) => d.date === "2026-10-25")!.partial = true; // honest=false → tampered
+  const mutRes = await Actions.ingestArchDailyIncome.handler(ownerCtx(db), mut);
+  check("income fcs-shift: mutated partial flag rejected as daily_mismatch, production untouched",
+    mutRes.ok === false && mutRes.issue === "daily_mismatch" && incomeRowCount(sqlite) === 1 && JSON.stringify(incomeStored(sqlite)) === before);
+}
+{
+  const { sqlite, db } = freshDb();
+  await Actions.ingestArchDailyIncome.handler(ownerCtx(db), incomeFullRequest(incomeFcsShiftBase(), INC_BASE_THROUGH, INC_BASE_PULLED));
+  const before = JSON.stringify(incomeStored(sqlite));
+  const base = summarizeIncomeDailyServer(incomeFcsShiftBase(), { fromDate: INC_START, toDate: INC_BASE_THROUGH });
+  const slice = summarizeIncomeDailyServer([], { fromDate: "2026-10-23", toDate: INC_BASE_THROUGH });
+  const req = {
+    arch: "F-ARCH-001" as const, version: 1 as const, mode: "incremental" as const,
+    pulledAt: INC_INCR_PULLED,
+    coverageStart: INC_START, throughDate: INC_NEW_THROUGH,
+    fullCoverageStart: base.fullCoverageStart,
+    baseThroughDate: INC_BASE_THROUGH,
+    transactions: [],
+    days: slice.days,
+    expectedTotals: {
+      total: base.totals.total, pending: base.totals.pending,
+      transactions: incomeFcsShiftBase().length, conflicts: 0, unclassified: 0,
+      excludedTransfer: 0, excludedLoanPrincipal: 0,
+    },
+  };
+  const res = await Actions.ingestArchDailyIncome.handler(ownerCtx(db), req);
+  check("income tail-gap: missing tail rejected as incremental_tail_gap", res.ok === false && res.issue === "incremental_tail_gap");
+  check("income tail-gap: production payload/rows/throughDate byte-identical", incomeRowCount(sqlite) === 1 && JSON.stringify(incomeStored(sqlite)) === before && incomeStored(sqlite).throughDate === INC_BASE_THROUGH);
 }
 
 console.log(`validate-arch-incremental: ${passed} passed, ${failed} failed`);

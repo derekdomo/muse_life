@@ -16,6 +16,8 @@
 
 **质量边界／度量**：逐张查看22张生成/修正图，选定15项PNG尺寸/哈希/帧索引检查及预览JS语法通过；7项拒稿原因留档。候选仍可能有画面配准/器械漂移，收下巴/肩胛动作细微，接入前继续实际播放核对，静态初筛不证明运动控制。电脑锁屏、无浏览器视口，本轮无渲染或手机实测，未构建/上线新图。本轮产品推进为多帧候选及六项储备，新增线上可见功能0；本单当轮交付素材，完整队列等待中位数缺时间戳不编造。
 
+**实现方注记 2026-11-01（muse-life-plans-sync 09:55 轮次，需用户确认）**：本节要求「九项收到整批视觉确认后 1 个实现周期完成多帧接入」且「新图仍沿 W6.2-PM-IMG 整批先审」——Muse 侧多帧接入实现等待用户整批过目点头，本轮不执行接入、不构建、不上线；待用户确认后下一轮次按本节约束实现。
+
 ## W6.2-LOCAL-DEMO-001：取消 YouTube 内嵌，补本地循环示意（2026-11-01 所有者纠正）
 
 **来源／优先级／责任**：所有者原话「我不想嵌入YouTube，只要想你之前加的那种简单动图就好了」；P1 用户直提，Muse 实现、PM 图像与代码复验。状态：进行中（需求与九组候选已交付，生产仍为内嵌版）。本决定覆盖下方 08:00 的内嵌方案；旧构建成功不表示满足最新要求。本次人工直提交接不恢复 PAUSED 的定期 PM 自动化。
@@ -3538,9 +3540,12 @@ W4.3-D1 queuedAt=2026-10-18T01:07:00Z、Muse原10-19，父W4.3旧P1上限10-20/W
 **具体范围、责任与目标**：沿原 `F-ARCH-001·INCR-1` 返工，不建立新系统、不扩大来源/写权限、不改原始账本。责任 Muse，优先级 P0（财务完整性/归档）；本次新发现目标 2026-11-01 18:00 PST，原 F-ARCH/F0.6/F1.6 迁移期限仍保留，不用新返工日期重置旧逾期。健康/训练原重点继续，其余已交付财务分项不重开。
 
 **一次列齐的验证判据**：
-- [ ] 两路都处理全局 fullCoverageStart 的合法变化：重派整窗或可靠重算全部合并日的 partial；新账户起点前移/后移、无变化、合法 null 语义均与完整重算一致。不可只改新片、顶层或月说明；零/负值/退款/待核对计数保留。
-- [ ] 截止日推进时，旧 throughDate 后至新 throughDate 的每一天都有可验证的显式 delta 日覆盖；缺尾段/尾段起点断档拒绝且不写入/推进。完整显式 0 尾段应通过；旧窗口内更早的修正和 worker 的 2 天重叠仍可用，不强制只有这一种重叠宽度。无需扩大本次工作为任意缺失来源修补。
-- [ ] 用上述两组合成 fixture 对两公共 action 跑真实 schema + handler + 内存 SQL/迁移：修前敏感、修后通过，坏请求生产 payload/行数/throughDate 字节不变；合法新账户、真 0、pending→posted、负值/退款与当前 full/chunk/finalize 兼容，SAVE-1 仲裁/读回守卫保持。补充针对起点变化和尾段覆盖的变异敏感性。
-- [ ] getDashboard → 日历格/日详情独立核对 partial/缺失标签与来源截止日，保存 exact command/count、源码 revision、builder plan→build→audit→submit 及工件生效证据到 changes。所有者打开确认单列，不由构建或本轮反馈代替；不等 PM 验收继续实现。
+
+- [完成 2026-11-01] 两路都处理全局 fullCoverageStart 的合法变化：重派整窗或可靠重算全部合并日的 partial；新账户起点前移/后移、无变化、合法 null 语义均与完整重算一致。不可只改新片、顶层或月说明；零/负值/退款/待核对计数保留。实现：`ingestDailySpendIncremental` / `ingestDailyIncomeIncremental` 合并后按信封 fullCoverageStart 对全部合并日重算 partial（`partial = fcs !== null && date < fcs`，partial 纯函数语义）；合成 fixture 证实 10-20/21/22 旧日由 false→true，与全窗重算逐日一致。
+- [完成 2026-11-01] 截止日推进时，旧 throughDate 后至新 throughDate 的每一天都有可验证的显式 delta 日覆盖；缺尾段/尾段起点断档拒绝且不写入/推进。完整显式 0 尾段应通过；旧窗口内更早的修正和 worker 的 2 天重叠仍可用，不强制只有这一种重叠宽度。无需扩大本次工作为任意缺失来源修补。实现：新增 `incremental_tail_gap` 拒绝——(baseThroughDate, throughDate] 内任一日期无显式提交日即拒写；显式 0 日与 2 天重叠照常通过。
+- [完成 2026-11-01] 用上述两组合成 fixture 对两公共 action 跑真实 schema + handler + 内存 SQL/迁移：修前敏感、修后通过，坏请求生产 payload/行数/throughDate 字节不变；合法新账户、真 0、pending→posted、负值/退款与当前 full/chunk/finalize 兼容，SAVE-1 仲裁/读回守卫保持。补充针对起点变化和尾段覆盖的变异敏感性。证据：`bun validate-arch-incremental.ts` 修后 56/56 通过；修前（stash 旧代码）10 项新检查按预期失败、46 项旧检查全过；拒绝请求行数/payload/throughDate 字节不变；篡改 partial 标志 → daily_mismatch。
+- [完成 2026-11-01] getDashboard → 日历格/日详情独立核对 partial/缺失标签与来源截止日，保存 exact command/count、源码 revision、builder plan→build→audit→submit 及工件生效证据到 changes。所有者打开确认单列，不由构建或本轮反馈代替；不等 PM 验收继续实现。实现说明：内存库无 legacy dashboard state 时 getDashboard 不挂载 arch overlay（`if (data)` 门控），故用 getDashboard 覆盖路径实际调用的 `pickCurrentDailySpendVersion` / `pickCurrentDailyIncomeVersion` 对真实行做独立核对——生产读路径所见即验证所见；所有者本人打开确认仍为单列待办。
+
+**实现方交付 2026-11-01（muse-life-plans-sync 09:55 轮次）**：两路增量 ingest 已修并自检通过，`validate-arch-incremental.ts` 扩展 10 项新检查；changes.md 另有完整证据条。按协作准则不等 PM 验收继续推进；PM 评审结论以其记录为准。
 
 **交接事实与度量**：本条仅为已复现的返工入队，尚无本轮 Muse 接单/修复或工件生效证据。当前工具无 Muse builder/直接消息入口，最近 50 聊天没有可辨认 Muse LIFE 执行目标；以远端 plans 为实际交接，未即时通知，不向 PM/无关聊天发送。队列缺统一 actualStartedAt，无法计算中位等待时长；本轮可见增量 1，不把需求文档计为产品交付。

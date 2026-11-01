@@ -2071,6 +2071,13 @@ async function finalizeDailySpendBatch(
 //  e. publishes through the shared publishDailySpend path
 //     (SAVE-1 arbitration + exact read-back), advancing
 //     throughDate to the envelope's throughDate.
+//  f. before any of the above, rejects incremental_tail_gap when
+//     a date in (baseThroughDate, throughDate] has no explicit
+//     submitted day row — the merge must never fabricate zero
+//     days for missing tail evidence; and re-derives partial for
+//     every merged day from the envelope's fullCoverageStart so
+//     stored days not resent in this delta cannot keep stale
+//     flags from a previous fullCoverageStart.
 async function ingestDailySpendIncremental(
   ctx: Ctx,
   args: IngestArchDailySpendArgs,
@@ -2117,6 +2124,20 @@ async function ingestDailySpendIncremental(
       return dailySpendFailure("invalid_incremental", coverageStart, throughDate);
     }
   }
+  // INCR-1 tail-evidence gate (2026-11-01): advancing throughDate
+  // requires the caller to send an explicit day row for every date
+  // in (baseThroughDate, throughDate]. Without this, the merge below
+  // would fabricate zero days for unsubmitted tail dates and publish
+  // them as partial=false — invented evidence. Days at or before
+  // baseThroughDate (the worker's 2-day overlap and earlier
+  // corrections) stay allowed; an explicit zero day row for a tail
+  // date passes.
+  const submittedSpendDates = new Set(sortedDays.map((day) => day.date));
+  for (let cur = nextDateKey(baseThroughDate); cur <= throughDate; cur = nextDateKey(cur)) {
+    if (!submittedSpendDates.has(cur)) {
+      return dailySpendFailure("incremental_tail_gap", coverageStart, throughDate);
+    }
+  }
   const db = ctx.db<typeof schema>();
   const storedRows = await db.select().from(schema.archDailySpend);
   const current = pickCurrentDailySpendVersion(storedRows);
@@ -2151,17 +2172,26 @@ async function ingestDailySpendIncremental(
   for (const day of recomputedDays) byDate.set(day.date, day);
   const mergedDays: ArchDailySpendDay[] = [];
   for (let cur = coverageStart; ; cur = nextDateKey(cur)) {
+    // INCR-1 partial consistency (2026-11-01): partial is a pure
+    // function of the envelope's fullCoverageStart, so re-derive
+    // it for every merged day. Stored days this delta did not
+    // resend must not keep stale flags computed under a previous
+    // fullCoverageStart.
+    const partial = fcs !== null && cur < fcs;
+    const existing = byDate.get(cur);
     mergedDays.push(
-      byDate.get(cur) ?? {
-        date: cur,
-        posted: 0,
-        pending: 0,
-        categories: [],
-        spendCount: 0,
-        pendingCount: 0,
-        unclassified: [],
-        partial: fcs !== null && cur < fcs,
-      },
+      existing
+        ? { ...existing, partial }
+        : {
+            date: cur,
+            posted: 0,
+            pending: 0,
+            categories: [],
+            spendCount: 0,
+            pendingCount: 0,
+            unclassified: [],
+            partial,
+          },
     );
     if (cur === throughDate) break;
   }
@@ -2680,7 +2710,11 @@ async function finalizeDailyIncomeBatch(
 // publishDailyIncome. Income day rows carry no unclassified
 // id list, so no count is derivable from the merged days;
 // the counts are stored from the worker's declared
-// full-window counts after the totals check passes.
+// full-window counts after the totals check passes. Same two
+// INCR-1 safeguards as the spend leg (2026-11-01):
+// incremental_tail_gap rejection for unsubmitted tail dates,
+// and window-wide partial re-derivation from the envelope's
+// fullCoverageStart.
 async function ingestDailyIncomeIncremental(
   ctx: Ctx,
   args: IngestArchDailyIncomeArgs,
@@ -2727,6 +2761,16 @@ async function ingestDailyIncomeIncremental(
       return dailyIncomeFailure("invalid_incremental", coverageStart, throughDate);
     }
   }
+  // INCR-1 tail-evidence gate (2026-11-01), spend leg mirrored:
+  // advancing throughDate requires an explicit day row for every
+  // date in (baseThroughDate, throughDate]; synthesized zeros must
+  // not stand in for missing tail evidence.
+  const submittedIncomeDates = new Set(sortedDays.map((day) => day.date));
+  for (let cur = nextDateKey(baseThroughDate); cur <= throughDate; cur = nextDateKey(cur)) {
+    if (!submittedIncomeDates.has(cur)) {
+      return dailyIncomeFailure("incremental_tail_gap", coverageStart, throughDate);
+    }
+  }
   const db = ctx.db<typeof schema>();
   const storedRows = await db.select().from(schema.archDailyIncome);
   const current = pickCurrentDailyIncomeVersion(storedRows);
@@ -2761,16 +2805,25 @@ async function ingestDailyIncomeIncremental(
   for (const day of recomputedDays) byDate.set(day.date, day);
   const mergedDays: ArchDailyIncomeDay[] = [];
   for (let cur = coverageStart; ; cur = nextDateKey(cur)) {
+    // INCR-1 partial consistency (2026-11-01), spend leg mirrored:
+    // partial is a pure function of the envelope's fullCoverageStart —
+    // re-derive it for every merged day so stored days not resent in
+    // this delta cannot keep stale flags from a previous
+    // fullCoverageStart.
+    const partial = fcs !== null && cur < fcs;
+    const existing = byDate.get(cur);
     mergedDays.push(
-      byDate.get(cur) ?? {
-        date: cur,
-        total: 0,
-        pending: 0,
-        sources: [],
-        incomeCount: 0,
-        pendingCount: 0,
-        partial: fcs !== null && cur < fcs,
-      },
+      existing
+        ? { ...existing, partial }
+        : {
+            date: cur,
+            total: 0,
+            pending: 0,
+            sources: [],
+            incomeCount: 0,
+            pendingCount: 0,
+            partial,
+          },
     );
     if (cur === throughDate) break;
   }
