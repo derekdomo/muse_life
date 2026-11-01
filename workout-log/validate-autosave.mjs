@@ -60,7 +60,8 @@ function buildMachine(src) {
 const M = buildMachine(clientSrc);
 
 // --- source wiring ---
-check('source: inputs save on blur', (clientSrc.match(/onBlur=\{onBlurSave\}/g) ?? []).length === 2);
+// W3.1: three set inputs (weight, reps, RIR) share the blur->save handler.
+check('source: inputs save on blur', (clientSrc.match(/onBlur=\{onBlurSave\}/g) ?? []).length === 3);
 check('source: Enter blurs into the save path', clientSrc.includes('event.currentTarget.blur()'));
 check('source: short debounce (800ms) autosaves', clientSrc.includes('}, 800);'));
 check('source: autosave posts through existing updateSet', clientSrc.includes('await api.updateSet({'));
@@ -79,13 +80,13 @@ check('init: saved with draft mirroring the server set',
 check('init: null weight/reps become empty strings',
   M.initSetSaveMachine({ id: 8, weight: null, reps: null, completed: false }).draft.weight === '');
 
-m = M.editSetDraft(m, { weight: '105', reps: '8', completed: false });
+m = M.editSetDraft(m, { weight: '105', reps: '8', rir: '', completed: false });
 check('edit: changed weight is dirty (unsaved)', m.status === 'dirty');
-m = M.editSetDraft(m, { weight: '100', reps: '8', completed: false });
+m = M.editSetDraft(m, { weight: '100', reps: '8', rir: '', completed: false });
 check('edit: reverting to confirmed values returns to saved', m.status === 'saved');
 
 // Save flow: edit -> begin -> success with unchanged draft.
-m = M.editSetDraft(m, { weight: '105', reps: '8', completed: false });
+m = M.editSetDraft(m, { weight: '105', reps: '8', rir: '', completed: false });
 let begun = M.beginSetSave(m);
 check('begin: saving with seq 1 and inflight draft captured',
   begun.seq === 1 && begun.machine.status === 'saving' && begun.machine.inflightDraft.weight === '105');
@@ -97,9 +98,9 @@ check('success: unchanged draft lands saved, confirmed updated',
 check('begin: clean machine returns null', M.beginSetSave(m) === null);
 
 // Edit during an in-flight save: success must land on dirty.
-m = M.editSetDraft(m, { weight: '110', reps: '8', completed: false });
+m = M.editSetDraft(m, { weight: '110', reps: '8', rir: '', completed: false });
 begun = M.beginSetSave(m);
-m = M.editSetDraft(begun.machine, { weight: '115', reps: '8', completed: false });
+m = M.editSetDraft(begun.machine, { weight: '115', reps: '8', rir: '', completed: false });
 check('mid-save edit: status goes back to dirty', m.status === 'dirty');
 m = M.applySetSaveSuccess({ ...m, seq: begun.seq, inflightSeq: begun.seq, inflightDraft: begun.machine.inflightDraft }, begun.seq);
 check('success after mid-save edit: dirty, not saved', m.status === 'dirty' && m.confirmed.weight === '110');
@@ -107,7 +108,7 @@ check('success after mid-save edit: dirty, not saved', m.status === 'dirty' && m
 // Out-of-order: save A (seq s1) then save B (seq s2); A's late results
 // must not move status; B's success confirms B.
 let base = M.initSetSaveMachine(SET);
-base = M.editSetDraft(base, { weight: '105', reps: '8', completed: false });
+base = M.editSetDraft(base, { weight: '105', reps: '8', rir: '', completed: false });
 const b1 = M.beginSetSave(base);
 let cur = M.editSetDraft(b1.machine, { weight: '120', reps: '9', completed: false });
 const b2 = M.beginSetSave(cur);
@@ -161,7 +162,7 @@ check('completed set re-edit: autosaves without toggling completion',
 const serverNew = { weight: '200', reps: '3', completed: true };
 const cleanAdopt = M.adoptServerDraft(M.initSetSaveMachine(SET), serverNew);
 check('adopt: saved row takes server values', cleanAdopt.draft.weight === '200' && cleanAdopt.confirmed.weight === '200');
-let dirtyRow = M.editSetDraft(M.initSetSaveMachine(SET), { weight: '111', reps: '8', completed: false });
+let dirtyRow = M.editSetDraft(M.initSetSaveMachine(SET), { weight: '111', reps: '8', rir: '', completed: false });
 check('adopt: dirty row keeps local input', M.adoptServerDraft(dirtyRow, serverNew).draft.weight === '111');
 let errorRow = M.applySetSaveFailure(M.beginSetSave(dirtyRow).machine, 1);
 check('adopt: error row keeps local input', M.adoptServerDraft(errorRow, serverNew).draft.weight === '111');
@@ -190,7 +191,7 @@ const seqGuardSrc = clientSrc.replace(
 check('mutation setup: seq-guard variant differs', seqGuardSrc !== clientSrc);
 const staleApplied = buildMachine(seqGuardSrc);
 let sm = staleApplied.initSetSaveMachine(SET);
-sm = staleApplied.editSetDraft(sm, { weight: '105', reps: '8', completed: false });
+sm = staleApplied.editSetDraft(sm, { weight: '105', reps: '8', rir: '', completed: false });
 const sb1 = staleApplied.beginSetSave(sm);
 sm = staleApplied.editSetDraft(sb1.machine, { weight: '120', reps: '9', completed: false });
 const sb2 = staleApplied.beginSetSave(sm);
@@ -201,7 +202,7 @@ check('mutation: dropping the seq guard lets a stale success mark the row saved 
 const adoptGuardSrc = clientSrc.replace('if (machine.status !== "saved") return machine;', 'if (machine.status === "never") return machine;');
 check('mutation setup: adopt-guard variant differs', adoptGuardSrc !== clientSrc);
 const adoptMut = buildMachine(adoptGuardSrc);
-let am = adoptMut.editSetDraft(adoptMut.initSetSaveMachine(SET), { weight: '111', reps: '8', completed: false });
+let am = adoptMut.editSetDraft(adoptMut.initSetSaveMachine(SET), { weight: '111', reps: '8', rir: '', completed: false });
 check('mutation: dropping the adopt guard lets a refresh overwrite a dirty draft',
   adoptMut.adoptServerDraft(am, serverNew).draft.weight === '200');
 
@@ -212,9 +213,9 @@ const forceSavedSrc = clientSrc.replace(
 check('mutation setup: force-saved variant differs', forceSavedSrc !== clientSrc);
 const forceMut = buildMachine(forceSavedSrc);
 let fm = forceMut.initSetSaveMachine(SET);
-fm = forceMut.editSetDraft(fm, { weight: '110', reps: '8', completed: false });
+fm = forceMut.editSetDraft(fm, { weight: '110', reps: '8', rir: '', completed: false });
 const fbeg = forceMut.beginSetSave(fm);
-fm = forceMut.editSetDraft(fbeg.machine, { weight: '115', reps: '8', completed: false });
+fm = forceMut.editSetDraft(fbeg.machine, { weight: '115', reps: '8', rir: '', completed: false });
 fm = forceMut.applySetSaveSuccess({ ...fm, seq: fbeg.seq, inflightSeq: fbeg.seq, inflightDraft: fbeg.machine.inflightDraft }, fbeg.seq);
 check('mutation: forcing saved on success hides a mid-save edit', fm.status === 'saved');
 
@@ -298,15 +299,15 @@ await (async () => {
     const gates = [deferred(), deferred(), deferred()];
     let persisted = '100';
     const row = makeRow(Q, SET, async (draft, n) => { await gates[n - 1].promise; persisted = draft.weight; return { ok: true }; });
-    row.edit({ weight: '20', reps: '8', completed: false });
+    row.edit({ weight: '20', reps: '8', rir: '', completed: false });
     const p1 = row.queue.requestSave();
-    row.edit({ weight: '30', reps: '8', completed: false });
+    row.edit({ weight: '30', reps: '8', rir: '', completed: false });
     const p2 = row.queue.requestSave();
     const p3 = row.queue.flush();
     check('queue: concurrent callers share one drain (single write in flight)', row.calls.length === 1 && row.maxInFlight === 1);
     gates[0].resolve(); await tick();
     check('queue: after first save the drain sends the latest draft (30), not a forked duplicate', row.calls.length === 2 && row.calls[1].weight === '30');
-    row.edit({ weight: '40', reps: '8', completed: false });
+    row.edit({ weight: '40', reps: '8', rir: '', completed: false });
     gates[1].resolve(); await tick();
     check('queue: mid-drain edit is picked up by the same drain (40 next)', row.calls.length === 3 && row.calls[2].weight === '40');
     gates[2].resolve();
@@ -321,7 +322,7 @@ await (async () => {
     let allow = false;
     let persisted = '100';
     const row = makeRow(Q, SET, async (draft) => { if (!allow) return { ok: false, forbidden: true }; persisted = draft.weight; return { ok: true }; });
-    row.edit({ weight: '20', reps: '8', completed: false });
+    row.edit({ weight: '20', reps: '8', rir: '', completed: false });
     const ok = await row.queue.requestSave();
     check('queue: resolved {ok:false} returns false, status error, draft kept, nothing persisted',
       ok === false && row.machine.status === 'error' && row.machine.draft.weight === '20' && row.machine.confirmed.weight === '100' && persisted === '100');
@@ -333,7 +334,7 @@ await (async () => {
   // (2b) Thrown transport error takes the same failure path.
   {
     const row = makeRow(Q, SET, async () => { throw new Error('network'); });
-    row.edit({ weight: '20', reps: '8', completed: false });
+    row.edit({ weight: '20', reps: '8', rir: '', completed: false });
     const ok = await row.queue.requestSave();
     check('queue: thrown error returns false and keeps the draft as error', ok === false && row.machine.status === 'error' && row.machine.draft.weight === '20');
   }
@@ -346,9 +347,9 @@ await (async () => {
     const gate = deferred();
     let persisted = '100';
     const row = makeRow(Q, { id: 7, weight: 100, reps: 8, completed: false }, async (draft, n) => { if (n === 1) await gate.promise; persisted = draft.weight; return { ok: true }; });
-    row.edit({ weight: '20', reps: '8', completed: false });
+    row.edit({ weight: '20', reps: '8', rir: '', completed: false });
     const p = row.queue.requestSave();
-    row.edit({ weight: '100', reps: '8', completed: false });
+    row.edit({ weight: '100', reps: '8', rir: '', completed: false });
     check('queue: in-flight revert to confirmed is dirty, not saved', row.machine.status === 'dirty');
     const adopted = Q.adoptServerDraft(row.machine, { weight: '999', reps: '1', completed: true });
     check('queue: refetch cannot adopt over an in-flight revert', adopted.draft.weight === '100');
@@ -384,9 +385,9 @@ await (async () => {
   {
     const gate = deferred();
     const row = makeRow(Q, SET, async (draft, n) => { if (n === 1) await gate.promise; return { ok: true }; });
-    row.edit({ weight: '20', reps: '8', completed: false });
+    row.edit({ weight: '20', reps: '8', rir: '', completed: false });
     const p = row.queue.requestSave();
-    row.edit({ weight: '30', reps: '8', completed: false });
+    row.edit({ weight: '30', reps: '8', rir: '', completed: false });
     row.seal();
     gate.resolve();
     await p;
@@ -403,7 +404,7 @@ await (async () => {
   const QNoOk = buildQueue(noOkSrc);
   {
     const row = makeRow(QNoOk, SET, async () => ({ ok: false, forbidden: true }));
-    row.edit({ weight: '20', reps: '8', completed: false });
+    row.edit({ weight: '20', reps: '8', rir: '', completed: false });
     const ok = await row.queue.requestSave();
     check('mutation: without the ok check a business rejection is marked saved', ok === true && row.machine.status === 'saved');
   }
@@ -417,9 +418,9 @@ await (async () => {
   {
     const gate = deferred();
     const row = makeRow(QOldEdit, SET, async () => { await gate.promise; return { ok: true }; });
-    row.edit({ weight: '20', reps: '8', completed: false });
+    row.edit({ weight: '20', reps: '8', rir: '', completed: false });
     void row.queue.requestSave();
-    row.edit({ weight: '100', reps: '8', completed: false });
+    row.edit({ weight: '100', reps: '8', rir: '', completed: false });
     check('mutation: confirmed-first edit logic revives the false-clean in-flight revert', row.machine.status === 'saved');
     gate.resolve(); await tick();
   }

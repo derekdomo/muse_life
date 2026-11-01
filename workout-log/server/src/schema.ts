@@ -17,6 +17,15 @@ export const workouts = sqliteTable("workouts", {
   // so an initializing workout is invisible and unwritable. Existing
   // rows default to 0 (ready).
   initializing: integer("initializing").notNull().default(0),
+  // W3.1 (migration 0009, additive): optional end-of-session self
+  // report, written only by completeWorkout when the user supplies
+  // it. All three stay NULL when the user skips the finish panel —
+  // NULL means "not recorded", never a default value. sessionRpe is
+  // 1–10; painFlags is a JSON array of flag keys (e.g. ["shoulder"]);
+  // sessionNotes is free text.
+  sessionRpe: integer("session_rpe"),
+  painFlags: text("pain_flags"),
+  sessionNotes: text("session_notes"),
 });
 
 export const workoutSets = sqliteTable("workout_sets", {
@@ -30,6 +39,10 @@ export const workoutSets = sqliteTable("workout_sets", {
   targetReps: text("target_reps").notNull(),
   weight: real("weight"),
   reps: integer("reps"),
+  // W3.1 (migration 0009, additive): optional per-set RIR
+  // (reps in reserve), an integer 0–5. NULL = not recorded; a NULL
+  // RIR never feeds any calculation (prefill / progression / volume).
+  rir: integer("rir"),
   completed: integer("completed", { mode: "boolean" }).notNull().default(false),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()

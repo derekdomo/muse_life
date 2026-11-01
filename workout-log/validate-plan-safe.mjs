@@ -122,8 +122,14 @@ function check(name, ok, note = '') {
 const MIGRATION_FILES = readdirSync(new URL('./drizzle', import.meta.url))
   .filter((f) => f.endsWith('.sql'))
   .sort();
-check('migrations: sequence 0001..0006 present',
-  MIGRATION_FILES.length === 6 && MIGRATION_FILES[4].startsWith('0005_') && MIGRATION_FILES[5].startsWith('0006_'),
+// Updated for the additive migrations that landed after the
+// plan-safe slice (0007/0008 annotations, 0009 W3.1 fields): the
+// invariant is the contiguous ordered sequence from 0001, with the
+// plan-safe pair 0005/0006 still in place — not a frozen file count.
+check('migrations: contiguous sequence 0001..0009 present, plan-safe pair in place',
+  MIGRATION_FILES.length === 9
+    && MIGRATION_FILES.every((f, i) => f.startsWith(`${String(i + 1).padStart(4, '0')}_`))
+    && MIGRATION_FILES[4].startsWith('0005_') && MIGRATION_FILES[5].startsWith('0006_'),
   MIGRATION_FILES.join(','));
 
 async function applyMigrations(client, files) {

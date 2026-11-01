@@ -2,7 +2,7 @@
   "entry": "client/dist/index.html",
   "managedCronJobs": [],
   "name": "训练记录",
-  "platformVersion": 25,
+  "platformVersion": 26,
   "runtime": "typescript",
   "slug": "space-6"
 }

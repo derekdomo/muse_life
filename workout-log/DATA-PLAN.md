@@ -111,6 +111,27 @@ Also rejected while sourcing the four shipped pairs: seated dumbbell/machine pre
 - It reports only recorded session and completed-set counts.
 - The next-week adjustment is deliberately conservative: retain the existing compound movements and add one unilateral leg exercise (Bulgarian split squat, 3 × 8–10) because the previous leg template contained bilateral squat, hip hinge, and hamstring isolation but no unilateral knee-dominant work.
 
+## RIR + session finish self-report (W3.1, added 2026-11-01)
+
+User-entered only, all optional, additive migration 0009 — no
+external source. `workout_sets.rir` (INTEGER NULL, 0–5; NULL = not
+recorded) rides the existing per-set autosave chain through
+`updateSet` (omitted field = stored value untouched; out-of-range /
+non-integer rejected with ok:false, never clamped) and is passed
+back by `getDashboard` / history reads as stored. It feeds no
+calculation: prefill, progression, and week volume never read it.
+`workouts.session_rpe` (INTEGER NULL, 1–10), `workouts.pain_flags`
+(TEXT NULL, JSON array of the fixed `PAIN_FLAG_KEYS` vocabulary),
+and `workouts.session_notes` (TEXT NULL, trimmed, blank → NULL) are
+written only by `completeWorkout` when the finish panel supplies
+them; skipping the panel leaves all three NULL. Pain flags surface
+exactly one conservative reminder in the finish panel (lower the
+intensity, watch the form, stop and seek professional advice if it
+persists) — no diagnosis, no automatic plan change. Verified by
+`validate-rir-rpe.mjs` (98 checks: real production validators /
+encoders / draft functions, skip-all → NULL mapping, stored-form
+round-trip, reminder wording, migration + wiring).
+
 ## Scroll-position restore (W2.2, added 2026-11-01)
 
 Client presentation only — no server action, schema, or stored-data

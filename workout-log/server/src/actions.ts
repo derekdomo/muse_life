@@ -89,6 +89,8 @@ const setResponse = z.object({
   target_reps: z.string(),
   weight: z.number().nullable(),
   reps: z.number().nullable(),
+  // W3.1 (additive): per-set RIR 0–5, null = not recorded.
+  rir: z.number().nullable(),
   completed: z.boolean(),
 });
 
@@ -98,6 +100,13 @@ const workoutResponse = z.object({
   unit: unitSchema,
   started_at: z.string(),
   completed_at: z.string().nullable(),
+  // W3.1 (additive): optional end-of-session self report, passed
+  // through as stored. All three are null / empty when the user
+  // skipped the finish panel: session_rpe 1–10 or null, pain_flags
+  // the recorded flag keys (possibly empty), session_notes or null.
+  session_rpe: z.number().nullable(),
+  pain_flags: z.array(z.string()),
+  session_notes: z.string().nullable(),
   sets: z.array(setResponse),
   // W1.3 (additive): true only on a workout freshly created by
   // startWorkout whose prefill weights were converted from the previous
@@ -122,6 +131,9 @@ async function loadWorkout(ctx: Ctx, workoutId: number) {
     unit: workout.unit,
     started_at: workout.startedAt.toISOString(),
     completed_at: workout.completedAt?.toISOString() ?? null,
+    session_rpe: workout.sessionRpe,
+    pain_flags: decodePainFlags(workout.painFlags),
+    session_notes: workout.sessionNotes,
     sets: setRows.map((row) => ({
       id: row.id,
       workout_id: row.workoutId,
@@ -131,6 +143,7 @@ async function loadWorkout(ctx: Ctx, workoutId: number) {
       target_reps: row.targetReps,
       weight: row.weight,
       reps: row.reps,
+      rir: row.rir,
       completed: row.completed,
     })),
   };
@@ -636,6 +649,86 @@ export function validatePlanInput(input: {
     if (item.detail.length > 120) return "微练说明太长";
   }
   return null;
+}
+
+// --- W3.1: RIR + session finish validation / encoding (pure) ---
+// RIR is an optional per-set integer 0–5 (reps in reserve). null /
+// undefined both mean "not recorded" and are always valid; anything
+// else that is not an integer in range is REJECTED with an error —
+// never silently clamped or truncated.
+export function validateRir(rir: number | null | undefined): string | null {
+  if (rir === undefined || rir === null) return null;
+  if (!Number.isInteger(rir) || rir < 0 || rir > 5) return "RIR 需要是 0–5 的整数";
+  return null;
+}
+
+// The fixed pain / form-flag vocabulary for the finish panel. The
+// client renders these keys with Chinese labels; the server accepts
+// only these keys, so stored pain_flags are always decodable.
+export const PAIN_FLAG_KEYS = [
+  "shoulder",
+  "elbow",
+  "wrist",
+  "lower-back",
+  "hip",
+  "knee",
+  "ankle",
+  "form",
+  "other",
+] as const;
+
+// Session finish fields (all optional — skipping the panel is a
+// valid finish): session RPE is an integer 1–10, pain flags come
+// only from PAIN_FLAG_KEYS, notes are free text up to 500 chars.
+export function validateSessionFinish(input: {
+  session_rpe?: number | null;
+  pain_flags?: string[] | null;
+  session_notes?: string | null;
+}): string | null {
+  const rpe = input.session_rpe;
+  if (rpe !== undefined && rpe !== null && (!Number.isInteger(rpe) || rpe < 1 || rpe > 10)) {
+    return "整体强度 RPE 需要是 1–10 的整数";
+  }
+  if (input.pain_flags != null) {
+    if (!Array.isArray(input.pain_flags)) return "疼痛标记不合法";
+    if (input.pain_flags.length > PAIN_FLAG_KEYS.length) return "疼痛标记太多";
+    for (const flag of input.pain_flags) {
+      if (!(PAIN_FLAG_KEYS as readonly string[]).includes(flag)) return `未知疼痛标记：${flag}`;
+    }
+  }
+  if (input.session_notes != null && input.session_notes.length > 500) return "备注太长（最多 500 字）";
+  return null;
+}
+
+// Stored form of pain_flags: a JSON array of keys, or NULL when the
+// user marked nothing (NULL = no flags recorded, same as skipped).
+export function encodePainFlags(flags: string[] | null | undefined): string | null {
+  if (!flags || flags.length === 0) return null;
+  return JSON.stringify([...new Set(flags)]);
+}
+
+// Read-back: anything undecodable or unknown decodes to no flags —
+// a stored value can never crash a read or leak an unknown key.
+export function decodePainFlags(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (flag): flag is string =>
+        typeof flag === "string" && (PAIN_FLAG_KEYS as readonly string[]).includes(flag),
+    );
+  } catch {
+    return [];
+  }
+}
+
+// Notes are stored trimmed; blank / whitespace-only notes collapse
+// to NULL so "wrote nothing" and "skipped" stay one state.
+export function normalizeSessionNotes(notes: string | null): string | null {
+  if (notes === null) return null;
+  const trimmed = notes.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 // The viewer's calendar date for the daily checklist, in the same
@@ -1676,17 +1769,27 @@ export const Actions = {
   }),
 
   updateSet: defineAction({
-    description: "Save one set's weight, reps, and completion state in the active workout.",
+    description: "Save one set's weight, reps, optional RIR, and completion state in the active workout.",
     request: z.object({
       id: z.number().int().positive(),
       weight: z.number().min(0).max(5000).nullable(),
       reps: z.number().int().min(0).max(1000).nullable(),
+      // W3.1 (additive, optional): per-set RIR 0–5; null clears it,
+      // omitting the field leaves the stored value untouched (older
+      // payloads stay valid). Range-checked by validateRir below —
+      // an out-of-range or non-integer value fails the save (ok:
+      // false, so the row shows its retryable error state) instead
+      // of being clamped.
+      rir: z.number().nullable().optional(),
       completed: z.boolean(),
     }),
     response: doneResponse,
     async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
       if (!isOwner(ctx)) {
         return { ok: false, forbidden: true };
+      }
+      if (validateRir(args.rir) !== null) {
+        return { ok: false, forbidden: false };
       }
       const db = ctx.db<typeof schema>();
       // W-ACTIVE-001: the active guard lives INSIDE this single UPDATE
@@ -1700,7 +1803,7 @@ export const Actions = {
       // history (or still initializing), and nothing was written.
       const updatedRows = await db.all(sql`
         UPDATE workout_sets
-        SET weight = ${args.weight}, reps = ${args.reps}, completed = ${args.completed ? 1 : 0}, updated_at = ${Date.now()}
+        SET weight = ${args.weight}, reps = ${args.reps}, completed = ${args.completed ? 1 : 0}, ${args.rir === undefined ? sql`rir = rir` : sql`rir = ${args.rir}`}, updated_at = ${Date.now()}
         WHERE id = ${args.id}
           AND EXISTS (
             SELECT 1 FROM workouts
@@ -1745,7 +1848,7 @@ export const Actions = {
         SELECT id, ${previous.exerciseKey}, ${previous.exerciseName}, ${previous.setNumber + 1}, ${previous.targetReps}, ${previous.weight}, NULL, 0, ${nowMs}, ${nowMs}
         FROM workouts
         WHERE id = ${args.workout_id} AND completed_at IS NULL AND initializing = 0
-        RETURNING id, workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, completed
+        RETURNING id, workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, rir, completed
       `);
       const row = insertedRows[0] as
         | {
@@ -1757,6 +1860,7 @@ export const Actions = {
             target_reps: string;
             weight: number | null;
             reps: number | null;
+            rir: number | null;
             completed: number;
           }
         | undefined;
@@ -1773,6 +1877,8 @@ export const Actions = {
           target_reps: row.target_reps,
           weight: row.weight,
           reps: row.reps,
+          // W3.1: a freshly added set has no RIR recorded yet.
+          rir: row.rir,
           completed: row.completed === 1,
         },
       };
@@ -1780,21 +1886,44 @@ export const Actions = {
   }),
 
   completeWorkout: defineAction({
-    description: "Mark the active workout as completed and close it.",
-    request: z.object({ workout_id: z.number().int().positive() }),
+    description: "Mark the active workout as completed and close it, optionally storing the session RPE, pain/form flags, and notes from the finish panel.",
+    request: z.object({
+      workout_id: z.number().int().positive(),
+      // W3.1 (additive, all optional): the finish panel's self
+      // report. Omitting a field leaves its column untouched (NULL
+      // for a fresh completion = skipped); an explicit null clears
+      // it. Ranges are enforced by validateSessionFinish — invalid
+      // values refuse the completion (ok: false) rather than being
+      // clamped, and the client keeps the workout editable.
+      session_rpe: z.number().nullable().optional(),
+      pain_flags: z.array(z.string()).nullable().optional(),
+      session_notes: z.string().nullable().optional(),
+    }),
     response: doneResponse,
     async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
       if (!isOwner(ctx)) {
         return { ok: false, forbidden: true };
+      }
+      if (validateSessionFinish(args) !== null) {
+        return { ok: false, forbidden: false };
       }
       const db = ctx.db<typeof schema>();
       // W0.3: complete only a workout that exists and is still active;
       // the affected-row count is the verdict, so an already-completed
       // or missing workout reports ok: false instead of success.
       // W-START-001: an initializing workout cannot be completed.
+      const completion: {
+        completedAt: Date;
+        sessionRpe?: number | null;
+        painFlags?: string | null;
+        sessionNotes?: string | null;
+      } = { completedAt: new Date() };
+      if (args.session_rpe !== undefined) completion.sessionRpe = args.session_rpe;
+      if (args.pain_flags !== undefined) completion.painFlags = encodePainFlags(args.pain_flags);
+      if (args.session_notes !== undefined) completion.sessionNotes = normalizeSessionNotes(args.session_notes);
       const updated = await db
         .update(schema.workouts)
-        .set({ completedAt: new Date() })
+        .set(completion)
         .where(
           and(
             eq(schema.workouts.id, args.workout_id),

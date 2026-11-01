@@ -57,6 +57,13 @@
       "when": 1792826032588,
       "tag": "0008_fix_home_b_note_date_bracket",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1793538337419,
+      "tag": "0009_add_rir_and_session_finish_fields",
+      "breakpoints": true
     }
   ]
 }

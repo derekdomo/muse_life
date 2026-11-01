@@ -1500,6 +1500,16 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
         已完成 {doneTotal} / {totalSets} 组
         {incompleteTotal > 0 ? <span className="receipt-incomplete"> · {incompleteTotal} 组未完成</span> : null}
       </p>
+      {workout.session_rpe != null || workout.pain_flags.length > 0 || workout.session_notes ? (
+        <div className="receipt-session">
+          <h3>本次训练感受</h3>
+          {workout.session_rpe != null ? <p>整体强度 RPE {workout.session_rpe} / 10</p> : null}
+          {workout.pain_flags.length > 0 ? (
+            <p>疼痛 / 动作异常：{workout.pain_flags.map((flag) => painFlagLabel(flag)).join("、")}</p>
+          ) : null}
+          {workout.session_notes ? <p>备注：{workout.session_notes}</p> : null}
+        </div>
+      ) : null}
       <ul className="receipt-lines">
         {lines.map((line) => (
           <li key={line.key}>
@@ -1668,7 +1678,9 @@ function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseG
 // save cannot flip the row back to saved/error. A server refresh only
 // adopts new values while the row is clean (saved); dirty / saving /
 // error drafts are never overwritten by a refetch.
-export type SetDraft = { weight: string; reps: string; completed: boolean };
+// W3.1: the draft also carries the optional RIR (0–5, "" = not
+// recorded). It rides the exact same autosave chain as weight/reps.
+export type SetDraft = { weight: string; reps: string; rir: string; completed: boolean };
 export type SetSaveStatus = "saved" | "dirty" | "saving" | "error";
 export type SetSaveMachine = {
   confirmed: SetDraft;
@@ -1683,12 +1695,20 @@ export function setDraftFromSet(set: WorkoutSet): SetDraft {
   return {
     weight: set.weight == null ? "" : String(set.weight),
     reps: set.reps == null ? "" : String(set.reps),
+    rir: set.rir == null ? "" : String(set.rir),
     completed: set.completed,
   };
 }
 
 export function sameSetDraft(a: SetDraft, b: SetDraft): boolean {
-  return a.weight === b.weight && a.reps === b.reps && a.completed === b.completed;
+  return a.weight === b.weight && a.reps === b.reps && a.rir === b.rir && a.completed === b.completed;
+}
+
+// W3.1: a RIR draft is valid only as "" (not recorded) or one digit
+// 0–5. The input accepts nothing else, so an out-of-range value can
+// never reach the save chain; the server re-validates regardless.
+export function isValidRirDraft(value: string): boolean {
+  return value === "" || /^[0-5]$/.test(value);
 }
 
 export function initSetSaveMachine(set: WorkoutSet): SetSaveMachine {
@@ -1765,6 +1785,35 @@ export function setSaveStatusLabel(status: SetSaveStatus): string {
 
 export function hasUnsavedSetStatus(statuses: SetSaveStatus[]): boolean {
   return statuses.some((status) => status !== "saved");
+}
+
+// --- W3.1: session finish self-report (pure) ---
+// The finish panel's pain / form-flag vocabulary. Keys must match
+// the server's PAIN_FLAG_KEYS in server/src/actions.ts; labels are
+// display-only.
+export const PAIN_FLAG_OPTIONS: { key: string; label: string }[] = [
+  { key: "shoulder", label: "肩部疼痛" },
+  { key: "elbow", label: "肘部疼痛" },
+  { key: "wrist", label: "腕部疼痛" },
+  { key: "lower-back", label: "腰背疼痛" },
+  { key: "hip", label: "髋部疼痛" },
+  { key: "knee", label: "膝部疼痛" },
+  { key: "ankle", label: "踝部疼痛" },
+  { key: "form", label: "动作变形 / 代偿" },
+  { key: "other", label: "其他不适" },
+];
+
+export function painFlagLabel(key: string): string {
+  return PAIN_FLAG_OPTIONS.find((option) => option.key === key)?.label ?? key;
+}
+
+// W3.1: marking any pain / form flag surfaces exactly one
+// conservative reminder — lower the intensity, watch the form. It
+// states no diagnosis and changes no plan; with no flags there is
+// no reminder.
+export function painReminderText(painFlags: string[]): string | null {
+  if (painFlags.length === 0) return null;
+  return "提醒：有疼痛或动作异常时，建议降低强度、注意动作质量；如不适持续或加重，请停止训练并咨询专业人员。";
 }
 
 // --- W-UI-001-D1: top save aggregate (pure) ---
@@ -2284,6 +2333,8 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
       id: set.id,
       weight: payload.weight.trim() === "" ? null : Number(payload.weight),
       reps: payload.reps.trim() === "" ? null : Number(payload.reps),
+      // W3.1: RIR rides the same payload; "" means not recorded.
+      rir: payload.rir.trim() === "" ? null : Number(payload.rir),
       completed: payload.completed,
     }),
     isSealed: () => sealedRef.current,
@@ -2293,7 +2344,7 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
   useEffect(() => {
     setMachine(adoptServerDraft(machineRef.current, setDraftFromSet(set)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [set.id, set.weight, set.reps, set.completed]);
+  }, [set.id, set.weight, set.reps, set.rir, set.completed]);
 
   useEffect(() => () => {
     if (timerRef.current != null) window.clearTimeout(timerRef.current);
@@ -2350,6 +2401,24 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
   function numericChange(event: ChangeEvent<HTMLInputElement>, field: "weight" | "reps") {
     const draft = { ...machineRef.current.draft, [field]: event.target.value };
     editDraft(draft, false);
+  }
+
+  // W3.1: RIR accepts only "" or a single digit 0–5 — anything else
+  // is not taken into the draft at all, so the row can never hold an
+  // unsavable RIR. Valid edits debounce-save like weight/reps.
+  function rirChange(event: ChangeEvent<HTMLInputElement>) {
+    const value = event.target.value;
+    if (!isValidRirDraft(value)) return;
+    editDraft({ ...machineRef.current.draft, rir: value }, false);
+  }
+
+  // W3.1: Enter on the RIR field only blur-saves (the shared blur
+  // path); it never joins the weight → reps focus order.
+  function onEnterRir(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.currentTarget.blur();
+    }
   }
 
   function onBlurSave() {
@@ -2430,11 +2499,30 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
       >
         {draft.completed ? "✓" : ""}
       </button>
-      <div className="set-status" data-status={status} role="status">
-        <span>{blocked ? "先填次数" : setSaveStatusLabel(status)}</span>
-        {status === "error" ? (
-          <button type="button" className="set-retry" disabled={locked} onClick={() => void requestSave()}>重试</button>
-        ) : null}
+      <div className="set-subrow">
+        <label className="rir-field">
+          <span className="rir-field-label">RIR（可选 0–5）</span>
+          <input
+            aria-label={`${set.exercise_name} 第 ${set.set_number} 组 RIR 剩余次数，可选，0 到 5`}
+            inputMode="numeric"
+            type="number"
+            min="0"
+            max="5"
+            step="1"
+            value={draft.rir}
+            disabled={locked}
+            onChange={rirChange}
+            onBlur={onBlurSave}
+            onKeyDown={onEnterRir}
+            placeholder="—"
+          />
+        </label>
+        <div className="set-status" data-status={status} role="status">
+          <span>{blocked ? "先填次数" : setSaveStatusLabel(status)}</span>
+          {status === "error" ? (
+            <button type="button" className="set-retry" disabled={locked} onClick={() => void requestSave()}>重试</button>
+          ) : null}
+        </div>
       </div>
     </div>
   );
@@ -2647,6 +2735,17 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
   const [finishBlock, setFinishBlock] = useState<FinishGateReason | null>(null);
   const [finishFailed, setFinishFailed] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  // W3.1: the optional end-of-session self report (session RPE,
+  // pain/form flags, notes). All defaults are empty = skipped; the
+  // values live only in this component and are sent once, with the
+  // completeWorkout call that actually finishes the workout. The
+  // ref mirror lets the async finish flows read the latest values.
+  const [sessionRpe, setSessionRpe] = useState<number | null>(null);
+  const [painFlags, setPainFlags] = useState<string[]>([]);
+  const [sessionNotes, setSessionNotes] = useState("");
+  const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
+  const sessionRef = useRef({ rpe: null as number | null, painFlags: [] as string[], notes: "" });
+  sessionRef.current = { rpe: sessionRpe, painFlags, notes: sessionNotes };
   const [unsavedPresent, setUnsavedPresent] = useState(false);
   const [selectedGuide, setSelectedGuide] = useState<{ guide: ExerciseGuide; key: string } | null>(null);
   // W-UI-001-D1: the exercise the user picked by tapping a card
@@ -2752,7 +2851,11 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["dashboard"] });
   const complete = useMutation({
-    mutationFn: () => api.completeWorkout({ workout_id: workout.id }),
+    // W3.1: the session self-report rides the one completion call;
+    // empty values are sent as nulls, which the server stores as
+    // NULL (skipped = not recorded).
+    mutationFn: (session: { session_rpe: number | null; pain_flags: string[] | null; session_notes: string | null }) =>
+      api.completeWorkout({ workout_id: workout.id, ...session }),
     onSuccess: refresh,
   });
 
@@ -2764,7 +2867,13 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
   async function runComplete(): Promise<boolean> {
     let result: { ok: boolean } | null = null;
     try {
-      result = await complete.mutateAsync();
+      // W3.1: read the finish panel's latest values at send time.
+      const session = sessionRef.current;
+      result = await complete.mutateAsync({
+        session_rpe: session.rpe,
+        pain_flags: session.painFlags.length > 0 ? session.painFlags : null,
+        session_notes: session.notes.trim() === "" ? null : session.notes,
+      });
     } catch {
       result = null;
     }
@@ -2922,6 +3031,20 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
       setFinishing(false);
     }
   }
+  // W3.1: the finish panel's explicit one-tap skip — clear the
+  // session self-report back to empty (the ref first, so the
+  // completion sent by the finish flow below reads the cleared
+  // values, not the pre-render state) and run the normal finish
+  // flow, which applies its usual flush/gate before completing
+  // with all-null session fields.
+  function skipSessionAndFinish() {
+    sessionRef.current = { rpe: null, painFlags: [], notes: "" };
+    setSessionRpe(null);
+    setPainFlags([]);
+    setSessionNotes("");
+    void handleFinish();
+  }
+
   const discard = useMutation({
     mutationFn: () => api.discardWorkout({ workout_id: workout.id }),
     onSuccess: () => {
@@ -3139,6 +3262,93 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
 
       {currentKey == null ? <div className="rest-timer-fallback">{restTimerUi}</div> : null}
 
+      <section className="session-panel" aria-label="训练感受（可选）">
+        <button
+          type="button"
+          className="session-panel-toggle"
+          aria-expanded={sessionPanelOpen}
+          onClick={() => setSessionPanelOpen((open) => !open)}
+          disabled={finishing}
+        >
+          <span>训练感受（可选）</span>
+          <span className="session-panel-state">
+            {sessionRpe != null || painFlags.length > 0 || sessionNotes.trim() !== "" ? "已填写 · " : "未填写 · "}
+            {sessionPanelOpen ? "收起" : "展开"}
+          </span>
+        </button>
+        {sessionPanelOpen ? (
+          <div className="session-panel-body">
+            <p className="session-panel-hint">全部可跳过：不填也能直接点「结束训练」，不会影响打卡。</p>
+            <div className="session-field">
+              <span className="session-field-label" id="session-rpe-label">
+                整体强度 RPE（1 轻松 – 10 力竭）{sessionRpe != null ? ` · 已选 ${sessionRpe}` : " · 未选"}
+              </span>
+              <div className="rpe-row" role="group" aria-labelledby="session-rpe-label">
+                {Array.from({ length: 10 }, (_, index) => index + 1).map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className="rpe-button"
+                    aria-pressed={sessionRpe === value}
+                    aria-label={`整体强度 RPE ${value}`}
+                    disabled={finishing}
+                    onClick={() => setSessionRpe(sessionRpe === value ? null : value)}
+                  >
+                    {value}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="session-field">
+              <span className="session-field-label">
+                疼痛 / 动作异常（可多选）{painFlags.length > 0 ? ` · 已选 ${painFlags.length} 项` : " · 未选"}
+              </span>
+              <div className="pain-chip-row">
+                {PAIN_FLAG_OPTIONS.map((option) => {
+                  const active = painFlags.includes(option.key);
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      className="pain-chip"
+                      aria-pressed={active}
+                      disabled={finishing}
+                      onClick={() => setPainFlags(active ? painFlags.filter((flag) => flag !== option.key) : [...painFlags, option.key])}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {painReminderText(painFlags) ? (
+                <p className="pain-reminder">{painReminderText(painFlags)}</p>
+              ) : null}
+            </div>
+            <div className="session-field">
+              <label className="session-field-label" htmlFor="session-notes-input">备注（可选，最多 500 字）</label>
+              <textarea
+                id="session-notes-input"
+                className="session-notes"
+                rows={3}
+                maxLength={500}
+                value={sessionNotes}
+                disabled={finishing}
+                onChange={(event) => setSessionNotes(event.target.value)}
+                placeholder="例如：今天状态不错，最后一组动作有点晃"
+              />
+            </div>
+            <button
+              type="button"
+              className="session-skip"
+              disabled={finishing || complete.isPending}
+              onClick={skipSessionAndFinish}
+            >
+              跳过，直接结束训练
+            </button>
+          </div>
+        ) : null}
+      </section>
+
       <section className="finish-zone">
         <div>
           <p>{doneCount === total ? "全部完成" : `还剩 ${total - doneCount} 组`}</p>
@@ -3232,6 +3442,15 @@ function History({ workouts, focus }: {
             </summary>
             <div className="history-detail">
               <p>总训练量 <strong>{Math.round(trainingVolume(workout)).toLocaleString("zh-CN")} {workout.unit}</strong></p>
+              {workout.session_rpe != null ? (
+                <div><span>整体强度 RPE</span><span>{workout.session_rpe} / 10</span></div>
+              ) : null}
+              {workout.pain_flags.length > 0 ? (
+                <div><span>疼痛 / 动作异常</span><span>{workout.pain_flags.map((flag) => painFlagLabel(flag)).join("、")}</span></div>
+              ) : null}
+              {workout.session_notes ? (
+                <div><span>备注</span><span>{workout.session_notes}</span></div>
+              ) : null}
               {groupSets(workout.sets).map((exercise) => (
                 <div key={exercise.key}>
                   <span>{exercise.name}</span>
