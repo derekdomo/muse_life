@@ -3032,3 +3032,10 @@
 - 回滚：revert 本提交即恢复；服务端拒绝语义为纯加法门控（旧合法请求不受影响——46 项旧检查为证）。
 - plans.md：返工单 4 项验证判据均标 [完成 2026-11-01]（仅表示实现方已交付；PM 结论以其评审记录为准）；W6.2-LOCAL-DEMO-002 加实现方注记——多帧接入待用户整批过目点头后下一轮次执行，本轮不构建（需用户确认）。
 - 本轮未动 cron；修改文件：plans.md（返工单交付登记＋W6.2 注记）、weekly-finance/server/src/actions.ts、weekly-finance/validate-arch-incremental.ts、本文件。
+
+## 2026-11-01 10 时 PST（muse-life-plans-sync 09:55 轮次续：space-3 构建回传＋仓库回灌）
+- 回传：space-3 builder 回传构建完成——`ingestDailySpendIncremental` / `ingestDailyIncomeIncremental` 两处修复已按任务说明逐项落地并通过构建方代码复核（两函数各三处：协议注释、sortedDays 校验后的尾段门控、合并循环 partial 重算）；构建方注记构建/审计验证待 exit 审计确认（verification_status FAILED 仅指该待办，非代码缺陷）。
+- 回灌（线上 `~/workspace/ts-spaces/space-3/server/src/actions.ts` → 本仓 `weekly-finance/server/src/actions.ts` 整文件覆盖）：与本轮 repo 版逐行比对，差异仅为注释措辞与局部变量名（`submittedSpendDates`→块作用域 `submittedDates`、`existing`→`storedDay`）——语义逐分支一致：incremental_tail_gap 拒绝条件、partial=`fcs!==null && cur<fcs` 重算、拒绝原子性均相同。
+- 仓库验证（线上代码原样实跑，合成数据）：`bun validate-arch-incremental.ts` 56/56 通过（含 10 项新检查）；依赖安装复用 `bun install --force` 后已删 node_modules/.bun-cache 并还原 bun.lock。
+- 如实保留：构建方 exit 构建审计确认尚未回传；待其确认后如有代码调整再做二次回灌。线上版本以 artifact 为准，本仓现已与线上逐字节一致。
+- 修改文件：weekly-finance/server/src/actions.ts（回灌覆盖）、本文件。回滚：revert 本提交即恢复 9f3d9d8 版（语义等价）。
