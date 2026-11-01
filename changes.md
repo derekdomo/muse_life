@@ -1,5 +1,9 @@
 # Changes
 
+## 2026-11-01 02 时 PDT（muse-life-plans-sync 01:55 轮次：W2.2 剩余子项派工）
+
+- 队列推进（无新编号条目、基线无新提交，按「推荐执行顺序」自取）：`W2.2` 训练页单手可操作四子项中，数字键盘（inputMode）、回车跳下一输入（SetRow→ExerciseBlock→handleEnterNext 的 onEnterNext 链）、44px 最小触控区已在现版本实现；本轮经 `artifact.edit` 派 builder 只做剩余子项「页面返回后恢复滚动位置」——StartScreen↔ActiveWorkout 切换、动作示范弹窗打开/关闭返回时，按视图键（start / active-<workoutId>）在 sessionStorage 保存/恢复 window.scrollY；开始新训练、结束训练回到起始页仍从顶部开始。仅 client 呈现层，不动服务端/公式/schema/同步/权限。构建交付与仓库回灌待回传；整项待 PM 验收，不勾选。修改文件：`plans.md`（派工登记）、本文件（派工登记）；业务代码待 builder 交付后回灌。回滚：revert 本提交即恢复派工登记前状态（builder 侧构建如需中止用 artifact.cancel）。
+
 ## 2026-10-13（OPS-001：协作框架）
 
 - `OPS-001`：新增根目录 `AGENTS.md`、`scripts/validate-handoff.mjs` 与 GitHub Handoff Gate；PM 负责 plans，Muse 负责实现和交付证据，限制同时进行一项需求。三小时任务改为漏检验收；即时语义评审尚未集成，CI 不宣告产品通过。本次无 app、schema/migration 或数据变更；验证为 Node 语法、现有提交范围检查和 workflow 结构检查。回滚可 revert 本次框架提交，不影响 artifact 数据。
