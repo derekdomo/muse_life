@@ -1,0 +1,58 @@
+[
+  {
+    "file": "bird-dog-v2.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "69dd5c9d4e217a28caa588570ffbc3e8d1f38a5a0bfbbdc9111757316382a1e3",
+    "status": "rejected-or-superseded-do-not-integrate",
+    "reason": "被错误生成为俯卧，非四足支撑"
+  },
+  {
+    "file": "bird-dog.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "aa938e032965e1b07f0843f312dd778988ec9148ed137e4def7a40e4620281e1",
+    "status": "rejected-or-superseded-do-not-integrate",
+    "reason": "侧面支撑与对侧关系不够清楚"
+  },
+  {
+    "file": "dead-bug-v2.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "edeb6bce5ab559b7593a149911d5351a6d21e29a72792c2795014d4b57ffc04b",
+    "status": "rejected-or-superseded-do-not-integrate",
+    "reason": "第3帧错误换边"
+  },
+  {
+    "file": "dead-bug.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "16e4c6988067cd5b341a52e6f2fd12ad8d32da684bab3d49b61f1f300ecd4228",
+    "status": "rejected-or-superseded-do-not-integrate",
+    "reason": "侧面难判断对侧关系，被俯视修正版替代"
+  },
+  {
+    "file": "single-leg-balance.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "bd56d45d7881306ef39a490e9688fa08766a0421040ec677260183c0ca70117f",
+    "status": "rejected-or-superseded-do-not-integrate",
+    "reason": "侧向与后向的视角不够清楚"
+  },
+  {
+    "file": "tibialis-raise.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "d094ee74b61cd0a8a88f6e4b0a8ee6319bda0442e3ca739e1ff35f36f8adc433",
+    "status": "rejected-or-superseded-do-not-integrate",
+    "reason": "脚跟离墙不够、站位不符"
+  },
+  {
+    "file": "wall-sit.png",
+    "width": 1998,
+    "height": 787,
+    "sha256": "bbe79c133196e389e8c3a8ba4e5928860f513a3ccc2ecd93fa7918e11481d480",
+    "status": "rejected-or-superseded-do-not-integrate",
+    "reason": "脚位置在帧间漂移"
+  }
+]

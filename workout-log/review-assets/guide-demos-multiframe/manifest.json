@@ -1,0 +1,497 @@
+[
+  {
+    "key": "supine-chin-tuck",
+    "title": "仰卧收下巴",
+    "group": "current",
+    "file": "supine-chin-tuck.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "51ccc5e005e4f9527398bff535af42057e60269a7e2c1bcdeb1714abf50fefec",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "后脑持续接触垫面，收下巴幅度细微；重点核对头颈轮廓，不夸大位移。"
+  },
+  {
+    "key": "prone-ytw",
+    "title": "俯卧 Y–T–W",
+    "group": "current",
+    "file": "prone-ytw.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "b377b63caf3f219723622665943ed911bb39cdfe98358d8bfbc4df2f76ccd0ac",
+    "cols": 4,
+    "rows": 3,
+    "frameCount": 12,
+    "sequences": [
+      {
+        "title": "Y",
+        "indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "title": "T",
+        "indices": [
+          4,
+          5,
+          6,
+          7
+        ]
+      },
+      {
+        "title": "W",
+        "indices": [
+          8,
+          9,
+          10,
+          11
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "Y/T/W 三行各四帧；Y朝头顶，T向两侧，W屈肘。每行独立播放。"
+  },
+  {
+    "key": "single-leg-balance",
+    "title": "单腿平衡三向触点",
+    "group": "current",
+    "file": "single-leg-balance-v2.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "4b2918e422072a17f64bcfa1f8cecde12c083e124a9e641bd42616480f313551",
+    "cols": 4,
+    "rows": 3,
+    "frameCount": 12,
+    "sequences": [
+      {
+        "title": "前触点",
+        "indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "title": "侧触点",
+        "indices": [
+          4,
+          5,
+          6,
+          7
+        ]
+      },
+      {
+        "title": "后触点",
+        "indices": [
+          8,
+          9,
+          10,
+          11
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "v2 前/后用侧面、侧触点用正面；每方向独立播放，禁止跨行插值。末帧触地不表示转移负重。"
+  },
+  {
+    "key": "thoracic-extension",
+    "title": "胸椎伸展（泡沫轴版）",
+    "group": "current",
+    "file": "thoracic-extension.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "c1b3f96b32ccce1748cee966b59ba302a04fb600261a251db6b1735ecaa7c357",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "泡沫轴替代版，上背支点、臀和足保留地面接触；原 bench 指南口径不变。"
+  },
+  {
+    "key": "home-bulgarian-split-squat",
+    "title": "居家保加利亚分腿蹲（哑铃版）",
+    "group": "current",
+    "file": "home-bulgarian-split-squat.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "4b50e3ce87e73ab6ff312453f3264597ca8bcca04221a88e39716bf27f2e8ae6",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "哑铃替代版；后脚搭凳，前脚全掌接地，后膝下降。原抱片计划不变。"
+  },
+  {
+    "key": "tibialis-raise",
+    "title": "靠墙胫骨前肌抬脚尖",
+    "group": "current",
+    "file": "tibialis-raise-v2.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "20051fda99d3fd7aa97c2b439e1a5e77ce936f3acc28118b190af968ee79a2fc",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "v2 明显拉开脚跟与墙的距离，背部有支撑；只抬脚尖、脚跟不离地。首稿站位不合格已排除。"
+  },
+  {
+    "key": "wall-sit",
+    "title": "靠墙静蹲（进入与保持）",
+    "group": "current",
+    "file": "wall-sit-v2.png",
+    "width": 1997,
+    "height": 787,
+    "sha256": "709f09ae4b3dc1e7a72fa5267d2dd5502b5829896b2bdb2c118419a84d3c8775",
+    "cols": 4,
+    "rows": 1,
+    "frameCount": 4,
+    "sequences": [
+      {
+        "title": "进入 → 保持",
+        "indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    ],
+    "hold": true,
+    "defaultFrame": 3,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "v2 改为脚预先前放，再下滑至保持；四帧只播放一次，最后一帧保持，不能做循环上下蹲。"
+  },
+  {
+    "key": "reverse-pec-deck",
+    "title": "反向蝴蝶机",
+    "group": "current",
+    "file": "reverse-pec-deck.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "593884a70cda5918ccee4b12044c666e2bb8a46ae699b0df0e8a8b615e759fdb",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "面朝胸垫，双臂由前向侧打开，不能反用为胸部夹胸；接入前复查机器与握把在帧间的对齐。"
+  },
+  {
+    "key": "push-up-plus",
+    "title": "前锯肌 Push-up Plus",
+    "group": "current",
+    "file": "push-up-plus.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "019bac1ac2108e42f199540467dd90fd3ca645b1815dcb621183f57ec69482f2",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "六帧肘保持伸直，变化在肩胛；上背变化小，不能通过弯肘或塌腰制造大动作。"
+  },
+  {
+    "key": "lateral-lunge",
+    "title": "侧向弓步",
+    "group": "reserve",
+    "file": "lateral-lunge.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "d7d55047b8dc44e122719ce936917082983cd156fb752ab28d857138cb963fae",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "侧向迈步、髋向后坐、蹬回；仅自重基础版，不含脉冲/跳跃，不提前变更计划。"
+  },
+  {
+    "key": "bench-step-up",
+    "title": "登阶",
+    "group": "reserve",
+    "file": "bench-step-up.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "bd9a5b1c0eba6f91ae148ac01b5133d08426872d52cecab163ecee34624328cb",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "前脚持续踩凳，后腿随前腿发力离地，控制下降；接入前需复核凳面高度与画面配准。"
+  },
+  {
+    "key": "dead-bug",
+    "title": "死虫（单侧对侧伸展）",
+    "group": "reserve",
+    "file": "dead-bug-v3.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "abbc9e715c80bae2973bc14563b0ba318bc98cf05b5e21aabea3293e3301181b",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "v3 修正俯视首稿第3帧错误换边；整组同一对侧手脚。俯视图不易表达悬空高度，结合文字和原视频。"
+  },
+  {
+    "key": "glute-bridge",
+    "title": "臀桥",
+    "group": "reserve",
+    "file": "glute-bridge.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "9fa4f4dd8f4249bdfb1900bbc16c5eba70e71e470d0e706773a68154797ce78e",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "头肩接地，髋逐步抬到肩髋膝连线，再控制回落；不要过伸腰。"
+  },
+  {
+    "key": "bird-dog",
+    "title": "鸟狗（单侧对侧伸展）",
+    "group": "reserve",
+    "file": "bird-dog-v3.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "8c3a32f220c14043f70c8649c1ce23e24e451beeb61e280921caada176bbed38",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "v3 采用高位斜侧面，明确手掌与膝支撑的四足姿，腹部离地；俯视v2误生成为俯卧，已拒绝。"
+  },
+  {
+    "key": "calf-raise",
+    "title": "扶稳提踵",
+    "group": "reserve",
+    "file": "calf-raise.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "144d4be1a9a63ab99e0401524a45e809fdbd5b60b8cd436ff9defd841c1fb25f",
+    "cols": 3,
+    "rows": 2,
+    "frameCount": 6,
+    "sequences": [
+      {
+        "title": "完整动作",
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hold": false,
+    "defaultFrame": 0,
+    "ownerApproved": false,
+    "integrated": false,
+    "reviewStatus": "candidate-needs-owner-and-runtime-review",
+    "notes": "前脚掌踩阶、脚跟从低位抬高；与胫骨前肌抬脚尖方向相反。现有提踵素材不替换。"
+  }
+]
