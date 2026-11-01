@@ -19,7 +19,7 @@
 
 ## Curated technique videos
 
-The exercise-guide dialogs contain original short form cues plus outbound links to public human-demonstration videos. The artifact does not fetch or embed these videos, and no external data is loaded when the page opens.
+The exercise-guide dialogs contain original short form cues plus public human-demonstration videos. The artifact never fetches or hosts video bytes. Guides with a frame demo keep an outbound link to their video; the 9 guides without a demo image embed their already-listed teaching video in the dialog's demonstration slot (see "Embedded teaching-video playback" below), with the outbound link retained underneath as the fallback.
 
 - Barbell bench press: https://www.youtube.com/watch?v=CjHIKDQ4RQo
 - Standing overhead press: https://www.youtube.com/watch?v=EK511FpyDEg
@@ -50,6 +50,10 @@ The 9 guides that have no demo image (see the "Searched and NOT shipped" section
 - Wall sit (`wall-sit`): https://www.youtube.com/watch?v=RG7z0P9qrLk — "Wall Sit", E3 Rehab Exercise Library (0:10). Verified: back flat against the wall, knees ~90°, held isometrically.
 - Reverse pec deck (`reverse-pec-deck`): https://www.youtube.com/watch?v=5YK4bgzXDp0 — "Machine Reverse Flye", Renaissance Periodization (0:13). Verified: seated facing the pad, chest against it, arms opening backward to the sides for the rear delts — the REVERSE direction, distinct from the same channel's separate forward pec-deck video.
 - Push-up plus (`push-up-plus`): https://www.youtube.com/watch?v=huGj4aBk9C4 — "Scapular Push Up", Marcus Filly (Functional Bodybuilding) (0:15). Verified by the research pass on the watch page: high plank, arms completely straight, protraction/retraction only — not a regular bent-elbow push-up. (Corroborating narrated tutorial also checked in research: Precision Movement, https://www.youtube.com/watch?v=fLAf2YG4flw — not linked in the UI; one link per exercise.)
+
+### Embedded teaching-video playback (added 2026-11-01)
+
+The 9 guides above have no demo image, so their guide dialogs previously showed only the outbound 「教学视频」 link card where every other guide shows its looping demonstration. Per the owner's instruction ("训练的动图按之前 GPT 给的补一下，现在的代码里就有"), the dialog now embeds each of those 9 already-stored watch URLs in the demonstration slot via YouTube's official embed endpoint — `youtubeEmbedUrl` in `client/src/App.tsx` converts a stored watch / shorts / youtu.be URL to `https://www.youtube.com/embed/{id}` (non-YouTube or malformed input returns null and the dialog falls back to the link alone). No URL changed, no new video was sourced, and no bytes are fetched or hosted: the player is a sandboxed (`allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox`), lazy-loaded, no-referrer iframe in a fixed 16/9 box, titled with the exercise name, and the original outbound link stays directly below it as the fallback for surfaces that block third-party frames. Guides WITH a frame demo are untouched (frames + outbound link, as before); `lateral-lunge` still has neither. Verified by `validate-video-embed.mjs` (32 checks: the real converter over all 9 stored URLs plus shorts/youtu.be/embed/garbage shapes, and the dialog wiring — embed only when `!guide.demo && guide.video`, position between the frame demo and the retained link, sandbox/lazy/title attributes, fixed-ratio CSS). Full regression after the change: 665 checks, 0 failures across all 11 validators.
 
 ## Exercise demo animations (W6.2, home routines)
 

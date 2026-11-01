@@ -3,6 +3,8 @@
 > **2026-11-01 08:00 PDT 本 chat 直派**：「训练记录」9 个纯文字动作的教学视频内嵌为动图演示（用户原话「训练的动图你按之前GPT给的补一下」）——本条已由本 chat 直接派 builder 实现中（artifact.edit space-6），同步轮次勿重复接单。
 >
 > **2026-11-01 08:05 PDT 更新**：构建已落地（SUCCEEDED，validate-video-embed 32/32，全回归 665 项 0 失败）。待同步轮次回灌仓库：取线上最新源码覆盖 workout-log/ 对应文件（预计 client/src/ExerciseDemo.tsx 或 App.tsx 内嵌组件、theme.css .demo-video 样式、新 validator），回灌后按惯例 commit。
+>
+> **2026-11-01 08:14 PDT 同步轮次回灌完成**：已回灌 workout-log/——App.tsx（`youtubeEmbedUrl` 转换函数＋`videoEmbedUrl` 计算＋`guide-video-embed` 渲染块＋注释，共 4 处）、theme.css（`.guide-video-embed`/`.video-embed-media` 样式 6 行）、DATA-PLAN.md（"Embedded teaching-video playback" 文档 2 处）、validate-video-embed.mjs（新）。App.tsx 回灌为外科手术式合并：仅取视频内嵌 4 hunks，W3.4 的 6 处 hunks 原样保留未动（待 W3.4 重派构建回传后另行回灌）；ExerciseDemo.tsx 线上与仓库逐字节一致、无需覆盖。仓库验证：validate-video-embed 32/32、validate-autosave 69/69、validate-receipt 37/37，隐私扫描零命中。本条回灌完毕，构建本身归直派侧。
 
 ## 所有者最新决定：仅暂停 Life PM，双向改进继续（PAUSE-LIFE-PM-001）
 

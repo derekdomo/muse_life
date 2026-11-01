@@ -2988,3 +2988,10 @@
 - 根因：同一 artifact（space-6）上同时有本 chat 直派的视频内嵌构建在跑——W3.4 构建在 audit 阶段被 supersede（平台恒报 "artifact icon build was superseded" / "The build data workspace is unavailable"），约 20 分钟多次重试未恢复。属平台并发冲突、非代码缺陷。2026-11-01 当日 AGENTS.md 已新增实测教训：被 supersede 时直接 artifact.edit 原样重派一次即可，派发避开 :55 同步轮次窗口；直派视频内嵌构建被接管后重派已落地。
 - 处理：本轮 08:12 PST 已原样重派一次（artifact.edit，代码零改动；派发前经 artifact.status 确认 space-6 无构建在跑；避开 08:55 窗口）。回传成功后由该轮次做仓库回灌（线上 `~/workspace/ts-spaces/space-6` → 本仓 `workout-log/` 逐文件比对）＋plans.md 标 [完成]＋changes.md 补交付登记＋面板更新。W3.5 仍顺延在 W3.4 确认交付之后。
 - 本轮未改业务代码；修改文件：plans.md（W3.4 重派登记）、本文件。回滚：revert 本提交即恢复重派登记前状态（builder 侧构建如需中止用 artifact.cancel）。
+
+## 2026-11-01 08 时 PST（muse-life-plans-sync 07:55 轮次续：直派视频内嵌构建的仓库回灌）
+- 背景：本 chat 直派的「训练记录」9 个纯文字动作教学视频内嵌构建已于 08:05 PDT 落地（SUCCEDED，validate-video-embed 32/32，全回归 665 项 0 失败）；`ecee1cb` 明确待同步轮次回灌仓库。本轮执行回灌（构建本身归直派侧，本轮仅做仓库镜像）。
+- 回灌（线上 `~/workspace/ts-spaces/space-6` → 本仓 `workout-log/`）：`validate-video-embed.mjs`（新）、`client/src/theme.css`（整文件覆盖，diff 仅视频内嵌 6 行样式）、`client/src/App.tsx` 与 `DATA-PLAN.md` 为外科手术式合并——线上 App.tsx 同时含视频内嵌（已落地）与 W3.4（重派构建中）两批改动，已用 difflib opcode 级脚本按标记分类逐 hunk 取舍：视频内嵌 4 hunks（`youtubeEmbedUrl`/`videoEmbedUrl`/`guide-video-embed` 渲染＋注释）已合入，W3.4 6 hunks（类型/组件/接线）原样保留；DATA-PLAN.md 取视频内嵌 2 处、跳过 W3.4 章节。`ExerciseDemo.tsx` 线上与仓库逐字节一致，无需覆盖。`server/src/actions.ts` diff 经核全为 W3.4（零视频标记），未动。
+- 仓库验证（本机实跑）：validate-video-embed 32/32、validate-autosave 69/69、validate-receipt 37/37，0 失败；隐私扫描：新增/改动行零 UUID/路径/密钥命中。未覆盖：drizzle/0007、0008（既有换行格式化差异，仓库保留原版）、bun.lock、构建产物。
+- 如实保留：W3.4 重派构建仍在跑，回传后另行回灌其 6 处 App.tsx hunks＋actions.ts＋week-frequency.ts＋validate-week-frequency.mjs＋DATA-PLAN.md W3.4 章节；面板「Life 进度」无编号条目状态变化，跳过刷新。
+- 修改文件：plans.md（直派条目回灌完成登记）、workout-log 回灌 4 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上已落地版本不受影响）。
