@@ -1,6 +1,8 @@
 # Plans
 
 > **2026-11-01 08:00 PDT 本 chat 直派**：「训练记录」9 个纯文字动作的教学视频内嵌为动图演示（用户原话「训练的动图你按之前GPT给的补一下」）——本条已由本 chat 直接派 builder 实现中（artifact.edit space-6），同步轮次勿重复接单。
+>
+> **2026-11-01 08:05 PDT 更新**：构建已落地（SUCCEEDED，validate-video-embed 32/32，全回归 665 项 0 失败）。待同步轮次回灌仓库：取线上最新源码覆盖 workout-log/ 对应文件（预计 client/src/ExerciseDemo.tsx 或 App.tsx 内嵌组件、theme.css .demo-video 样式、新 validator），回灌后按惯例 commit。
 
 ## 所有者最新决定：仅暂停 Life PM，双向改进继续（PAUSE-LIFE-PM-001）
 
