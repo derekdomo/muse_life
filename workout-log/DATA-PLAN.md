@@ -392,3 +392,83 @@ meaning never rides on colour alone. Verified by
 `validate-muscle-diagram.mjs` (23 checks: name/region coverage for
 all 30 exercises, shared-region primary-wins overlap, unknown
 key/name handling, front-only and back-only exercises).
+
+## Week frequency over the last 4 complete weeks (W3.4, added 2026-11-01)
+
+Per-exercise frequency for the history / review view, additive and
+read-only — no schema change, no migration, no stored data
+rewritten. `getDashboard` additionally returns `week_frequency`,
+computed by the pure builder `buildWeekFrequency` in
+`server/src/week-frequency.ts` (no imports; the loader
+`loadWeekFrequency` only feeds it completed workouts from the last
+42 days plus the CURRENT plan templates and schedule). Existing
+consumers （健康看板 sync) ignore the field; the forbidden response
+is unchanged.
+
+Definitions (all stated publicly on the page): a complete week is
+a Monday-start calendar week in the America/Los_Angeles frame that
+has fully ended; the window is the 4 such weeks before the current
+week's Monday, and the in-progress week never counts. Per exercise
+and week the entry carries completed sets, recorded sets, sessions,
+frequency (sessions with at least one completed set), expected sets
+(the CURRENT plan's sets-per-session × how often the current
+schedule places the routine — there is no plan history, and the UI
+discloses that past weeks are judged against today's plan), a
+baseline (the median completed-set count of the OTHER window weeks
+with a record, present only with at least 2 such weeks), a state
+and the server's reason. States: trained （已练） / not_trained
+（没练： plan expectation > 0 but no completed set, or a record with
+0 completed) / no_record （没记录： no plan expectation and no
+record) / reduced （主动减量，推测： completed sets > 0 but at most
+half the baseline, against a baseline of at least 4 sets — always
+labelled a guess, since a low week can also be a missed log) /
+uncertain （无法判断： below plan expectation with no usable
+baseline — no classification is invented). Volumes — per-cell and
+the per-week global tonnage (weight × reps, kg/lb) — are workload
+reference ONLY: `classifyWeekCell` takes no volume parameter, so
+tonnage can never influence a state; whether the user progressed
+remains the W3.2 engine's and W3.3 trends' judgement. Every state
+renders as symbol + text label (✓ / ○ / — / ▼ / ?), never colour
+alone, in the same expandable per-exercise rows as W3.3.
+
+### A-class evidence (W3.4)
+
+- `validate-week-frequency.mjs` (new, node): evaluates the REAL
+  module verbatim over synthetic data only — a behavioral suite of
+  35 assertions (4-week window starts/ends and Monday check,
+  current-week and pre-window exclusion, LA-date bucketing across
+  the UTC boundary — Sun 20:00 LA and Mon 00:30 LA both land in the
+  same week, completed-set counting with uncompleted sets ignored,
+  recorded-set and session/frequency counting, cross-exercise
+  isolation, all three named states with at least one fixture each
+  plus the trained / uncertain fallbacks, even-count baseline
+  median, tonnage invariance — ×10 weights flip no state while
+  volumes scale — global tonnage arithmetic, direct
+  classifyWeekCell boundaries, and empty-input / plan-only
+  behaviour) plus constant / version / conversion checks and 9
+  wiring checks — 16 checks total, all passing.
+- Mutation sensitivity, actually executed: 3 mutants of the module
+  source (week start Monday → Sunday; deload threshold 0.5 → 0.1;
+  completion filter removed) each make the behavioral suite fail
+  (suite throws after assertion failures / 3 / 4 assertions),
+  proving the suite is not vacuous.
+- Full regression re-run 2026-11-01, all green:
+  `validate-week-frequency (node): 16 passed, 0 failed`;
+  `validate-action-trends (node): 15 passed, 0 failed`;
+  `validate-progression-engine (node): 35 passed, 0 failed`;
+  `validate-receipt (node): 37 passed, 0 failed`;
+  `validate-rir-rpe (node): 103 passed, 0 failed`;
+  `validate-start (node): 66 passed, 0 failed`;
+  `validate-week-current (node): 59 passed, 0 failed`;
+  `validate-muscle-receipt (node): 30 passed, 0 failed`;
+  `validate-muscle-diagram (node): 36 passed, 0 failed`;
+  `validate-scroll-restore (node): 26 passed, 0 failed`;
+  `validate-video-embed (node): 32 passed, 0 failed`;
+  `validate-plan-safe (bun): 226 passed, 0 failed`.
+  Total: 681 checks, 0 failures. Privacy scan of the new/changed
+  files: zero hits (validators use synthetic fixtures only; no real
+  training data anywhere in this round's files).
+- Standing disclosure (unchanged by this round): `getDashboard`'s
+  viewer-less sync channel remains the owner's L0.1 exception of
+  2026-10-17; W3.4 only added a read-only field behind the same
+  gate and did not widen it.

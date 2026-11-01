@@ -812,6 +812,12 @@ type ReceiptAdviceEntry = NonNullable<Dashboard["receipt_advice"]>[number];
 // W3.3: server-computed per-exercise trends (action_trends) — the
 // client renders them; it computes no trend figure itself.
 type ActionTrendEntry = NonNullable<Dashboard["action_trends"]>[number];
+// W3.4: server-computed per-exercise frequency over the last 4
+// complete weeks (week_frequency) — states and reasons included;
+// the client renders them and derives no state of its own.
+type WeekFrequencyData = NonNullable<Dashboard["week_frequency"]>;
+type WeekFrequencyEntry = WeekFrequencyData["exercises"][number];
+type WeekFrequencyCell = WeekFrequencyEntry["weeks"][number];
 
 const CONFIDENCE_LABELS: Record<ProgressionAdviceEntry["confidence"], string> = {
   high: "高",
@@ -3530,6 +3536,104 @@ function ActionTrends({ trends }: { trends?: ActionTrendEntry[] }) {
   );
 }
 
+// --- W3.4: frequency over the last 4 complete weeks （近 4 个完整周训练频率） ---
+// One expandable row per exercise, rendered ONLY from the server's
+// week_frequency (buildWeekFrequency in server/src/week-frequency.ts):
+// per complete week the completed sets, the sessions-per-week
+// frequency, and the server's state with its reason. The client
+// computes no state, baseline or expectation itself. Meaning never
+// rides on colour alone: every state carries a distinct symbol AND
+// a text label (✓ 已练 / ○ 没练 / — 没记录 / ▼ 主动减量（推测） /
+// ? 无法判断）. Volumes — per week and the global tonnage — are
+// workload reference only and are labelled as such; whether the
+// user progressed is judged by the progression engine / action
+// trends, never by tonnage.
+const WEEK_FREQUENCY_STATE_META: Record<WeekFrequencyCell["state"], { symbol: string; label: string }> = {
+  trained: { symbol: "✓", label: "已练" },
+  not_trained: { symbol: "○", label: "没练" },
+  no_record: { symbol: "—", label: "没记录" },
+  reduced: { symbol: "▼", label: "主动减量（推测）" },
+  uncertain: { symbol: "?", label: "无法判断" },
+};
+
+// week_start / week_end are calendar dates (YYYY-MM-DD), not
+// instants: parse them as local calendar days so the label never
+// shifts a day with the viewer's timezone.
+function formatDateKey(value: string) {
+  const [y = 1970, m = 1, d = 1] = value.split("-").map(Number);
+  return compactDate(new Date(y, m - 1, d));
+}
+
+function weekRangeLabel(weekStart: string, weeks: WeekFrequencyData["weeks"]) {
+  const week = weeks.find((entry) => entry.week_start === weekStart);
+  return week ? `${formatDateKey(week.week_start)}–${formatDateKey(week.week_end)}` : formatDateKey(weekStart);
+}
+
+function WeekFrequency({ data }: { data?: WeekFrequencyData }) {
+  const weeks = data?.weeks ?? [];
+  const entries = data?.exercises ?? [];
+  return (
+    <section className="history-section" aria-labelledby="week-frequency-title">
+      <div className="section-heading">
+        <h2 id="week-frequency-title">近 4 个完整周训练频率</h2>
+        <span>{entries.length > 0 ? `${entries.length} 个动作` : ""}</span>
+      </div>
+      <p className="history-boundary">
+        完整周 = 周一至周日且已经结束的自然周，本周（进行中）不计入。按当前计划排期与已完成记录逐周判断：○ 没练 = 当前计划该周有安排但没有完成记录；— 没记录 = 该周既无当前计划安排、也无完成记录可依据；▼ 主动减量（推测）= 有完成记录，但完成组数明显低于其余周的个人基线（中位数）——这只是推测，也可能是漏记或状态原因；? 无法判断 = 有记录但基线不足，无法区分时如实标注、不编造分类。计划组数按当前计划推算（计划如有改动，过去周也按当前计划对照）。
+      </p>
+      <p className="history-boundary">
+        全周训练量（所有动作的重量 × 次数，吨位）仅作为工作量参考，不用于判断是否进步——进步判定看「动作趋势」与每周复盘的渐进负荷建议。
+        {weeks.length > 0 ? ` ${weeks.map((week) => `${formatDateKey(week.week_start)} 周 ${Math.round(week.volume_kg).toLocaleString("zh-CN")} kg`).join(" · ")}` : ""}
+      </p>
+      {entries.length === 0 ? (
+        <p className="empty-history">完成训练后，这里会按动作列出最近 4 个完整周的完成组数、每周频率与状态。</p>
+      ) : (
+        <div className="history-list">
+          {entries.map((entry) => {
+            const latest = entry.weeks[entry.weeks.length - 1];
+            const latestMeta = latest ? WEEK_FREQUENCY_STATE_META[latest.state] : null;
+            return (
+              <details className="history-row trend-row" key={`${entry.routine}-${entry.exercise_key}`}>
+                <summary>
+                  <span className="trend-name">{entry.exercise_name}</span>
+                  <span>{latest && latestMeta ? `${latestMeta.symbol} ${latestMeta.label}` : ""}</span>
+                  <span>{latest ? `完成 ${latest.completed_sets} 组 · ${latest.frequency} 次/周` : ""}</span>
+                  <i aria-hidden="true">›</i>
+                </summary>
+                <div className="history-detail trend-detail">
+                  <div>
+                    <span>当前计划</span>
+                    <span>
+                      {entry.sets_per_session != null && entry.expected_sessions_per_week != null
+                        ? `每次 ${entry.sets_per_session} 组 · 每周排 ${entry.expected_sessions_per_week} 次`
+                        : "不在当前计划中（仅按历史记录展示）"}
+                    </span>
+                  </div>
+                  {entry.weeks.map((cell) => {
+                    const meta = WEEK_FREQUENCY_STATE_META[cell.state];
+                    return (
+                      <div key={cell.week_start}>
+                        <span>{weekRangeLabel(cell.week_start, weeks)} · {meta.symbol} {meta.label}</span>
+                        <span>
+                          {`完成 ${cell.completed_sets} 组 · ${cell.frequency} 次/周`}
+                          {cell.expected_sets != null ? ` · 计划 ${cell.expected_sets} 组` : ""}
+                          {cell.baseline_sets != null ? ` · 基线 ${cell.baseline_sets} 组` : ""}
+                          {` · 训练量 ${Math.round(cell.volume).toLocaleString("zh-CN")} ${entry.unit}（参考）`}
+                          {` · ${cell.reason}`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // --- 2026-10-18 frequency sync: weekly schedule / daily micro-routine /
 // plan editor. All three read the persisted plan (getPlan); the editor
 // edits a local draft only — nothing is written until 保存计划 calls
@@ -3945,13 +4049,16 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, weekSummaries, progressionAdvice, actionTrends, receiptId, onCloseReceipt }: {
+function StartScreen({ recent, weekSummaries, progressionAdvice, actionTrends, weekFrequency, receiptId, onCloseReceipt }: {
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
   progressionAdvice?: ProgressionAdviceEntry[];
   // W3.3 (additive): server-computed per-exercise trends for the
   // history area; absent on older cached responses.
   actionTrends?: ActionTrendEntry[];
+  // W3.4 (additive): server-computed per-exercise frequency over
+  // the last 4 complete weeks; absent on older cached responses.
+  weekFrequency?: WeekFrequencyData;
   // W4.3-D1: the workoutId this session just finished, or null. The
   // receipt renders non-blockingly at the top of the start page.
   receiptId: number | null;
@@ -4051,6 +4158,8 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, actionTrends, r
 
       <ActionTrends trends={actionTrends} />
 
+      <WeekFrequency data={weekFrequency} />
+
       {planData ? <PlanConflicts plan={planData} /> : null}
       {planData ? (
         <PlanEditor
@@ -4117,6 +4226,7 @@ export function App() {
           weekSummaries={dashboard.data.week_summaries}
           progressionAdvice={dashboard.data.progression_advice}
           actionTrends={dashboard.data.action_trends}
+          weekFrequency={dashboard.data.week_frequency}
           receiptId={receiptId}
           onCloseReceipt={() => setReceiptId(null)}
         />

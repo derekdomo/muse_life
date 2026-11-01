@@ -2995,3 +2995,13 @@
 - 仓库验证（本机实跑）：validate-video-embed 32/32、validate-autosave 69/69、validate-receipt 37/37，0 失败；隐私扫描：新增/改动行零 UUID/路径/密钥命中。未覆盖：drizzle/0007、0008（既有换行格式化差异，仓库保留原版）、bun.lock、构建产物。
 - 如实保留：W3.4 重派构建仍在跑，回传后另行回灌其 6 处 App.tsx hunks＋actions.ts＋week-frequency.ts＋validate-week-frequency.mjs＋DATA-PLAN.md W3.4 章节；面板「Life 进度」无编号条目状态变化，跳过刷新。
 - 修改文件：plans.md（直派条目回灌完成登记）、workout-log 回灌 4 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上已落地版本不受影响）。
+
+## 2026-11-01 08 时 PST（muse-life-plans-sync 07:55 轮次续：W3.4 重派构建交付回灌）
+- 交付：space-6 builder 08:13 PST 回传重派构建 SUCCEEDED（首轮 08:10 因并发构建 supersede 失败，08:12 原样重派；实现与首轮完全一致、零代码改动）。`W3.4`：历史页新增「近 4 个完整周训练频率」区块——按动作展示最近 4 个完整周（周一起始、America/Los_Angeles 口径、本周不计入）的已完成组数与周频率，诚实区分三态：○ 没练（当前计划该周有安排但无完成记录）/— 没记录（无计划无记录）/▼ 主动减量（推测：完成组数明显低于其余周个人基线中位数，页面如实标注为推测）/? 无法判断（基线不足不编造）；吨位（重量×次数）只作工作量参考、进步判定走 W3.2/W3.3 口径。口径页面公开标注；状态配符号＋文字标签、遵守色弱规则。
+- 实现：服务端新增纯函数模块 `server/src/week-frequency.ts`（无 import，`buildWeekFrequency`/`loadWeekFrequency` 导出），`getDashboard` 加法字段 `week_frequency`（无 migration、无 schema 变更）；客户端只渲染。既有导出/签名未动。
+- 回灌（线上 `~/workspace/ts-spaces/space-6` → 本仓 `workout-log/`）：server/src/week-frequency.ts（新）、validate-week-frequency.mjs（新）、server/src/actions.ts（整文件，diff 全为 W3.4、零视频标记）、client/src/App.tsx 与 DATA-PLAN.md（外科手术式合并：线上 App.tsx 含视频内嵌＋W3.4 两批改动，已用 opcode 脚本按标记逐 hunk 取舍——W3.4 6 hunks 合入，视频内嵌 hunks 已在 08:14 回灌轮次合入、本轮 0 跳过；合并后两文件与线上逐字节一致）。**未覆盖**：app.db/构建产物/node_modules/audits/bun.lock、drizzle/0007·0008（既有换行格式化差异，仓库保留原版）、theme.css/ExerciseDemo.tsx（与线上一致，无需覆盖）。
+- 仓库验证（本轮实跑，合成数据）：validate-week-frequency 16/16（含 3 项变异实跑全部敏感）；既有回归 node 749 项（video-embed 32、autosave 69、receipt 37、rir-rpe 103、progression-engine 35、week-current 59、d1 36、progression 43、muscle-receipt 30、muscle-diagram 36、scroll-restore 26、rest-timer 48、start 66、finish 98 等）＋bun plan-safe 226/226（`@libsql/client` 借线上树 node_modules，既有环境限制）＝975 项检查、0 失败。隐私扫描：新增/改动行零 UUID/路径/密钥命中。
+- 安全：getDashboard 无身份只读通道即用户 2026-10-17 亲自批准的 L0.1 例外，W3.4 只在其后加一个只读字段 `week_frequency`、未改门禁、维持现状、不重开。
+- plans.md `W3.4` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。W3.5（连续两次下降＋高 RPE/低 RIR/疼痛/低 readiness 才建议保守调整）为下一顺位，留待后续轮次。
+- 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner、无进行中训练，owner 视角实机以本人打开为准；W3.4 的 App.tsx 回灌曾因视频内嵌 hunks 并存而走外科手术式合并、已用逐字节一致校验。
+- 本轮未动 cron；修改文件：plans.md（W3.4 交付登记）、workout-log 回灌 5 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-6 已上线版本不受影响）。

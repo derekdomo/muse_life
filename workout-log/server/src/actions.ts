@@ -10,6 +10,12 @@ import {
   buildActionTrends,
   type ActionTrendWorkout,
 } from "./action-trends";
+import {
+  buildWeekFrequency,
+  type WeekFrequencyPlanExercise,
+  type WeekFrequencyScheduleEntry,
+  type WeekFrequencyWorkout,
+} from "./week-frequency";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -277,6 +283,46 @@ const actionTrendEntryResponse = z.object({
   trends_version: z.number(),
 });
 
+// W3.4 (additive): per-exercise frequency over the last 4 complete
+// Monday-start weeks, computed by the pure builder in
+// server/src/week-frequency.ts. Every state （已练 / 没练 / 没记录 /
+// 主动减量（推测） / 无法判断） and its reason are the server's; the
+// client only renders them. Volumes — per-cell and the per-week
+// global tonnage — are workload reference only and never feed a
+// state or a progression verdict.
+const weekFrequencyCellResponse = z.object({
+  week_start: z.string(),
+  completed_sets: z.number(),
+  recorded_sets: z.number(),
+  sessions: z.number(),
+  frequency: z.number(),
+  volume: z.number(),
+  expected_sets: z.number().nullable(),
+  baseline_sets: z.number().nullable(),
+  state: z.enum(["trained", "not_trained", "no_record", "reduced", "uncertain"]),
+  reason: z.string(),
+});
+const weekFrequencyEntryResponse = z.object({
+  routine: routineSchema,
+  exercise_key: z.string(),
+  exercise_name: z.string(),
+  unit: unitSchema,
+  sets_per_session: z.number().nullable(),
+  expected_sessions_per_week: z.number().nullable(),
+  weeks: z.array(weekFrequencyCellResponse),
+  frequency_version: z.number(),
+});
+const weekFrequencyResponse = z.object({
+  weeks: z.array(z.object({
+    week_start: z.string(),
+    week_end: z.string(),
+    volume_kg: z.number(),
+    volume_lb: z.number(),
+  })),
+  exercises: z.array(weekFrequencyEntryResponse),
+  frequency_version: z.number(),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
@@ -292,6 +338,10 @@ const dashboardResponse = z.object({
   // 20-workout windows as comparable_history. Existing consumers
   // （健康看板 sync) ignore the field.
   action_trends: z.array(actionTrendEntryResponse).optional(),
+  // W3.4 (additive, optional): per-exercise frequency over the last
+  // 4 complete weeks plus the weekly state judgement, computed by
+  // buildWeekFrequency. Existing consumers ignore the field.
+  week_frequency: weekFrequencyResponse.optional(),
   // W4.3-D1 (additive, optional): present ONLY when the caller passed
   // receipt_workout_id — the completed workout read back by that exact
   // id for the completion receipt. Null when the id is unknown or the
@@ -1481,6 +1531,117 @@ async function loadActionTrends(
   return entries;
 }
 
+// W3.4: per-exercise frequency over the last 4 complete weeks. The
+// judgement itself is the pure buildWeekFrequency in
+// server/src/week-frequency.ts; this loader only gathers its inputs:
+//   - completed workouts from the last 42 days (the 4 complete
+//     weeks plus the in-progress week span at most 35 days, so the
+//     cutoff never truncates the window; the builder re-buckets by
+//     LA Monday-start weeks and ignores everything outside it), and
+//   - the CURRENT plan (templates via loadPlanTemplates, schedule
+//     rows read directly, falling back to the default schedule when
+//     the table is still empty) — the only plan that exists, which
+//     the UI discloses when it shows expected sets.
+// No new stored data: the states derive from the plan schedule and
+// the completed records alone.
+async function loadWeekFrequency(
+  ctx: Ctx,
+  now: Date,
+): Promise<z.infer<typeof weekFrequencyResponse>> {
+  const db = ctx.db<typeof schema>();
+  const cutoff = new Date(now.getTime() - 42 * 24 * 60 * 60 * 1000);
+  const rows = await db
+    .select({
+      id: schema.workouts.id,
+      routine: schema.workouts.routine,
+      unit: schema.workouts.unit,
+      completedAt: schema.workouts.completedAt,
+    })
+    .from(schema.workouts)
+    .where(and(isNotNull(schema.workouts.completedAt), gte(schema.workouts.completedAt, cutoff)))
+    .orderBy(desc(schema.workouts.completedAt));
+  const setRows = rows.length
+    ? await db
+        .select()
+        .from(schema.workoutSets)
+        .where(inArray(schema.workoutSets.workoutId, rows.map((row) => row.id)))
+        .orderBy(asc(schema.workoutSets.id))
+    : [];
+  const setsByWorkout = new Map<number, WeekFrequencyWorkout["sets"]>();
+  for (const row of setRows) {
+    const list = setsByWorkout.get(row.workoutId) ?? [];
+    list.push({
+      exerciseKey: row.exerciseKey,
+      exerciseName: row.exerciseName,
+      weight: row.weight,
+      reps: row.reps,
+      completed: row.completed,
+    });
+    setsByWorkout.set(row.workoutId, list);
+  }
+  const workouts: WeekFrequencyWorkout[] = rows.map((row) => ({
+    routine: row.routine,
+    unit: row.unit,
+    completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+    sets: setsByWorkout.get(row.id) ?? [],
+  }));
+  const templates = await loadPlanTemplates(ctx);
+  const planExercises: WeekFrequencyPlanExercise[] = [];
+  for (const routine of ROUTINE_KEYS) {
+    for (const exercise of templates[routine]) {
+      planExercises.push({
+        routine,
+        exerciseKey: exercise.key,
+        exerciseName: exercise.name,
+        setsPerSession: exercise.sets,
+      });
+    }
+  }
+  const scheduleRows = await db
+    .select()
+    .from(schema.planSchedule)
+    .orderBy(asc(schema.planSchedule.dayIndex));
+  const planSchedule: WeekFrequencyScheduleEntry[] = scheduleRows.length > 0
+    ? scheduleRows.map((row) => ({ dayIndex: row.dayIndex, routineCode: row.routineCode }))
+    : DEFAULT_PLAN_SCHEDULE.map((entry) => ({ dayIndex: entry.day_index, routineCode: entry.routine_code }));
+  const result = buildWeekFrequency({
+    now: now.toISOString(),
+    workouts,
+    planExercises,
+    planSchedule,
+  });
+  return {
+    weeks: result.weeks.map((week) => ({
+      week_start: week.weekStart,
+      week_end: week.weekEnd,
+      volume_kg: week.volumeKg,
+      volume_lb: week.volumeLb,
+    })),
+    exercises: result.exercises.map((entry) => ({
+      routine: entry.routine as z.infer<typeof routineSchema>,
+      exercise_key: entry.exerciseKey,
+      exercise_name: entry.exerciseName,
+      unit: entry.unit,
+      sets_per_session: entry.setsPerSession,
+      expected_sessions_per_week: entry.expectedSessionsPerWeek,
+      weeks: entry.weeks.map((cell) => ({
+        week_start: cell.weekStart,
+        completed_sets: cell.completedSets,
+        recorded_sets: cell.recordedSets,
+        sessions: cell.sessions,
+        frequency: cell.frequency,
+        volume: cell.volume,
+        expected_sets: cell.expectedSets,
+        baseline_sets: cell.baselineSets,
+        state: cell.state,
+        reason: cell.reason,
+      })),
+      frequency_version: entry.frequencyVersion,
+    })),
+    frequency_version: result.frequencyVersion,
+  };
+}
+
 // W4.3-D1: the pure per-exercise previous-comparable selection behind
 // the completion receipt. `candidates` is the receipt workout's own
 // routine's completed workouts that finished strictly before it, most
@@ -1897,6 +2058,7 @@ export const Actions = {
         comparable_history: await loadComparableHistory(ctx),
         progression_advice: await loadProgressionAdvice(ctx),
         action_trends: await loadActionTrends(ctx),
+        week_frequency: await loadWeekFrequency(ctx, now),
         ...(receiptFields ?? {}),
         ...(receiptAdviceFields ?? {}),
       };
