@@ -23,6 +23,8 @@
 > **2026-11-01 08:05 PDT 更新**：构建已落地（SUCCEEDED，validate-video-embed 32/32，全回归 665 项 0 失败）。待同步轮次回灌仓库：取线上最新源码覆盖 workout-log/ 对应文件（预计 client/src/ExerciseDemo.tsx 或 App.tsx 内嵌组件、theme.css .demo-video 样式、新 validator），回灌后按惯例 commit。
 >
 > **2026-11-01 08:14 PDT 同步轮次回灌完成**：已回灌 workout-log/——App.tsx（`youtubeEmbedUrl` 转换函数＋`videoEmbedUrl` 计算＋`guide-video-embed` 渲染块＋注释，共 4 处）、theme.css（`.guide-video-embed`/`.video-embed-media` 样式 6 行）、DATA-PLAN.md（"Embedded teaching-video playback" 文档 2 处）、validate-video-embed.mjs（新）。App.tsx 回灌为外科手术式合并：仅取视频内嵌 4 hunks，W3.4 的 6 处 hunks 原样保留未动（待 W3.4 重派构建回传后另行回灌）；ExerciseDemo.tsx 线上与仓库逐字节一致、无需覆盖。仓库验证：validate-video-embed 32/32、validate-autosave 69/69、validate-receipt 37/37，隐私扫描零命中。本条回灌完毕，构建本身归直派侧。
+>
+> **2026-11-01 09 时 PDT 同步轮次交付登记（W6.2-LOCAL-DEMO-001 内嵌撤除步骤）**：已在 artifact（space-6）上线并回灌本仓——App.tsx 删除 `youtubeEmbedUrl` 整函数、`ExerciseGuideDialog` 内 `videoEmbedUrl` 计算、`guide-video-embed` iframe 渲染块及相关注释（外科手术式 4 处，无其他改动）；theme.css 删除 `.guide-video-embed`/`.video-embed-media` 专用样式；DATA-PLAN.md「Embedded teaching-video playback」章节改写为撤除记录（日期、所有者原话、改动文件）；validate-video-embed.mjs 改写为撤除断言集（32/32：无 iframe、无 youtube.com/embed 引用、无 embed helper/wiring、无 embed 专用样式、9 个无图动作保留原 URL＋文字＋外链卡片、弹窗零第三方媒体请求）。9 条教学视频 URL 未动、全部文字要点未动、20 项实拍 demo 映射/素材/呈现未动、服务端/数据口径/训练计划/W3.x 未动；9 组 AI 候选图未接入（仍待所有者过目）。仓库实跑：video-embed 32/32、autosave 69/69、receipt 37/37、start 66/66、finish 98/98、progression-engine 35/35、week-current 59/59、scroll-restore 26/26，隐私扫描（UUID/密钥/路径）零命中；构建方全回归 681 项 0 失败、构建审计 pass。此登记仅表示实现方已交付撤除步骤；本条整体仍为进行中（9 组候选图待所有者视觉确认后 1 个实现周期接入），PM 结论以其评审记录为准。
 
 ## 所有者最新决定：仅暂停 Life PM，双向改进继续（PAUSE-LIFE-PM-001）
 

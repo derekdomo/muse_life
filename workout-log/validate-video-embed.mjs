@@ -1,21 +1,21 @@
-// Teaching-video embed validation (2026-11-01) — the 9 guides with
-// no photo/video-frame demo embed their already-listed YouTube
-// teaching video in the guide dialog's demonstration slot. Runs the
-// REAL production youtubeEmbedUrl extracted verbatim from
-// client/src/App.tsx, plus source wiring checks:
-//  - each of the 9 no-demo guides' stored watch URLs converts to
-//    the official https://www.youtube.com/embed/{id} endpoint with
-//    the exact video id from DATA-PLAN.md;
-//  - shorts / youtu.be / embed URL shapes also resolve; non-YouTube
-//    hosts, missing ids and garbage input return null (the dialog
-//    then falls back to the plain outbound link, unchanged);
-//  - wiring: the embed is computed only when the guide has a video
-//    and NO demo, renders between the frame demo and the outbound
-//    video link (which is retained verbatim as the fallback), uses
-//    the standard embed sandbox token set, lazy loading, no-referrer
-//    and a titled iframe; guides WITH a demo never embed.
+// Teaching-video embed REMOVAL validation (2026-11-01, W6.2-LOCAL-DEMO-001)
+// — the YouTube iframe embed added earlier on 2026-11-01 was removed
+// at the owner's instruction ("我不想嵌入YouTube，只要想你之前加的
+// 那种简单动图就好了"). The guide dialog is back to local demos only:
+// guides with real frames play the local dual-frame loop, and the 9
+// guides without a demo image show text cues plus the retained
+// outbound 「看真人教学视频」 link card — no player placeholder.
+// This validator asserts:
+//  - no iframe anywhere in the client source, no youtube.com/embed
+//    reference, no youtubeEmbedUrl helper, no videoEmbedUrl wiring;
+//  - no .guide-video-embed / .video-embed-media styles remain;
+//  - each of the 9 no-demo guides still carries its original YouTube
+//    watch URL and no frame demo (URLs unchanged);
+//  - the dialog retains the frame-demo rendering and the outbound
+//    video-link card verbatim, with no embed block between them;
+//  - the dialog makes zero third-party media requests: no iframe,
+//    no embed src, no remote thumbnail / cover loading.
 import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
 
 const clientSrc = readFileSync(new URL('./client/src/App.tsx', import.meta.url), 'utf8');
 const themeCss = readFileSync(new URL('./client/src/theme.css', import.meta.url), 'utf8');
@@ -27,28 +27,24 @@ function check(name, ok, note = '') {
   else failures++;
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${name}${note ? ` (${note})` : ''}`);
 }
-function matchDelim(s, start, open, close) {
-  let depth = 0;
-  for (let i = start; i < s.length; i++) {
-    if (s[i] === open) depth++;
-    else if (s[i] === close) { depth--; if (depth === 0) return i; }
-  }
-  throw new Error('unbalanced delimiters');
-}
-function extractFunctionEnd(source, name) {
-  const idx = source.search(new RegExp(`function ${name}\\(`));
-  if (idx < 0) throw new Error(`function ${name} not found`);
-  const openParen = source.indexOf('(', idx);
-  const closeParen = matchDelim(source, openParen, '(', ')');
-  const bodyStart = source.indexOf('{', closeParen);
-  return matchDelim(source, bodyStart, '{', '}') + 1;
-}
 
-// --- the real function, evaluated verbatim -------------------------
-const fnStart = clientSrc.indexOf('export function youtubeEmbedUrl');
-const fnEnd = extractFunctionEnd(clientSrc, 'youtubeEmbedUrl');
-const fnCode = stripTypeScriptTypes(clientSrc.slice(fnStart, fnEnd).replace(/^export /, ''));
-const youtubeEmbedUrl = new Function(`${fnCode}; return youtubeEmbedUrl;`)();
+// --- removal: no embed machinery remains ---------------------------
+check('removal: no youtubeEmbedUrl helper in client source',
+  !clientSrc.includes('youtubeEmbedUrl'));
+check('removal: no videoEmbedUrl wiring in client source',
+  !clientSrc.includes('videoEmbedUrl'));
+check('removal: no guide-video-embed block in client source',
+  !clientSrc.includes('guide-video-embed'));
+check('removal: no youtube.com/embed reference in client source',
+  !clientSrc.includes('youtube.com/embed') && !clientSrc.includes('/embed/'));
+check('removal: no <iframe anywhere in client source',
+  !/<iframe[\s>]/.test(clientSrc));
+check('removal: no .guide-video-embed style in theme.css',
+  !themeCss.includes('.guide-video-embed'));
+check('removal: no .video-embed-media style in theme.css',
+  !themeCss.includes('.video-embed-media'));
+check('removal: no iframe selector in theme.css',
+  !themeCss.includes('iframe'));
 
 // --- the 9 no-demo guides: key -> YouTube id (DATA-PLAN.md) --------
 const NINE = {
@@ -72,56 +68,36 @@ function guideBlock(key) {
 
 for (const [key, id] of Object.entries(NINE)) {
   const block = guideBlock(key);
-  const urlMatch = block.match(/video: "(https:\/\/www\.youtube\.com\/watch\?v=[^"]+)"/);
-  check(`${key}: guide carries a YouTube watch URL and no frame demo`,
-    Boolean(urlMatch) && !block.includes('demo:'));
-  check(`${key}: stored URL embeds as the official /embed/${id}`,
-    urlMatch != null && youtubeEmbedUrl(urlMatch[1]) === `https://www.youtube.com/embed/${id}`,
-    urlMatch ? youtubeEmbedUrl(urlMatch[1]) : 'no url');
+  check(`${key}: guide still carries its original YouTube watch URL (id ${id}) and no frame demo`,
+    block.includes(`video: "https://www.youtube.com/watch?v=${id}"`) && !block.includes('demo:'));
+  check(`${key}: guide retains its text cues`,
+    block.includes('cues:') && block.includes('setup:'));
 }
 
-// --- URL shape behaviour -------------------------------------------
-check('shorts URL resolves to its embed endpoint',
-  youtubeEmbedUrl('https://www.youtube.com/shorts/UAlGHwshYBM') === 'https://www.youtube.com/embed/UAlGHwshYBM');
-check('youtu.be URL resolves to its embed endpoint',
-  youtubeEmbedUrl('https://youtu.be/qFEBNu4vwSg') === 'https://www.youtube.com/embed/qFEBNu4vwSg');
-check('an /embed/ URL passes through unchanged',
-  youtubeEmbedUrl('https://www.youtube.com/embed/qFEBNu4vwSg') === 'https://www.youtube.com/embed/qFEBNu4vwSg');
-check('watch URL with extra params still resolves by v=',
-  youtubeEmbedUrl('https://www.youtube.com/watch?v=qFEBNu4vwSg&t=12s') === 'https://www.youtube.com/embed/qFEBNu4vwSg');
-check('non-YouTube host returns null',
-  youtubeEmbedUrl('https://vimeo.com/123456789') === null);
-check('watch URL without v= returns null',
-  youtubeEmbedUrl('https://www.youtube.com/watch') === null);
-check('garbage input returns null instead of throwing',
-  youtubeEmbedUrl('not a url') === null);
-
-// --- dialog wiring ---------------------------------------------------
+// --- dialog wiring: text + retained outbound link only -------------
 const dialogStart = clientSrc.indexOf('function ExerciseGuideDialog');
-const dialogEnd = clientSrc.indexOf('\nfunction ', dialogStart + 10);
+const dialogEnd = clientSrc.indexOf('\n// --- W-UI-001', dialogStart + 10);
 const dialog = clientSrc.slice(dialogStart, dialogEnd > 0 ? dialogEnd : undefined);
-check('wiring: embed URL is computed only for a video guide with no frame demo',
-  dialog.includes('const videoEmbedUrl = !guide.demo && guide.video ? youtubeEmbedUrl(guide.video) : null;'));
-check('wiring: frame demo line is unchanged and still first',
+check('wiring: frame demo line is unchanged and still rendered',
   dialog.includes('{guide.demo ? <ExerciseDemoView demo={guide.demo} name={guide.title} /> : null}'));
-const demoAt = dialog.indexOf('<ExerciseDemoView demo={guide.demo}');
-const embedAt = dialog.indexOf('className="guide-video-embed"');
-const linkAt = dialog.indexOf('className="video-link"');
-const cuesAt = dialog.indexOf('记住这三点');
-check('wiring: embed renders in the demo slot — after the frame demo, before the outbound link and the cue points',
-  demoAt >= 0 && embedAt > demoAt && linkAt > embedAt && cuesAt > linkAt);
-check('wiring: outbound YouTube link is retained verbatim as the no-frame fallback',
-  dialog.includes('{guide.video ? (') && dialog.includes('在 YouTube 打开'));
-check('wiring: iframe carries the standard embed sandbox token set',
-  dialog.includes('sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"'));
-check('wiring: iframe is lazy, no-referrer, fullscreen-capable and titled with the exercise name',
-  dialog.includes('loading="lazy"')
-  && dialog.includes('referrerPolicy="no-referrer"')
-  && dialog.includes('allowFullScreen')
-  && dialog.includes('title={`${guide.title} · 真人教学视频（内嵌播放）`}'));
-check('wiring: embed box is a fixed 16/9 frame in theme.css (no layout shift)',
-  themeCss.includes('.video-embed-media { position: relative; aspect-ratio: 16 / 9;')
-  && themeCss.includes('.video-embed-media iframe { position: absolute; inset: 0;'));
+check('wiring: outbound YouTube link card is retained verbatim',
+  dialog.includes('{guide.video ? (') && dialog.includes('className="video-link"')
+  && dialog.includes('看真人教学视频') && dialog.includes('在 YouTube 打开'));
+check('wiring: no embed block between the frame demo and the outbound link',
+  (() => {
+    const demoAt = dialog.indexOf('<ExerciseDemoView demo={guide.demo}');
+    const linkAt = dialog.indexOf('className="video-link"');
+    const between = demoAt >= 0 && linkAt > demoAt ? dialog.slice(demoAt, linkAt) : '';
+    return demoAt >= 0 && linkAt > demoAt && !between.includes('iframe') && !between.includes('embed');
+  })());
+check('wiring: dialog contains no iframe, embed src, or remote cover/thumbnail',
+  !dialog.includes('<iframe') && !dialog.includes('youtube.com/embed')
+  && !dialog.includes('i.ytimg.com') && !dialog.includes('img.youtube.com'));
+check('wiring: dialog cue sections are intact',
+  dialog.includes('记住这三点') && dialog.includes('常见错误') && dialog.includes('起始位置'));
+check('zero third-party media: client source loads no remote image/media for guides',
+  !clientSrc.includes('i.ytimg.com') && !clientSrc.includes('img.youtube.com')
+  && !clientSrc.includes('googlevideo.com'));
 
 console.log(`\n${passed} passed, ${failures} failed`);
 process.exit(failures > 0 ? 1 : 0);

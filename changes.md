@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-11-01 09 时 PDT（muse-life-plans-sync：W6.2-LOCAL-DEMO-001 内嵌撤除交付＋回灌）
+
+- 需求来源：2026-11-01 08:45 所有者纠正（用户原话「我不想嵌入YouTube，只要想你之前加的那种简单动图就好了」），覆盖同日 08:00 直派的 YouTube 内嵌方案（该内嵌已于 08:05 落地、08:14 回灌本仓）。P1 用户直提。PM 图像与代码复验仍按 W6.2-PM-IMG／本条计划执行，定期 PM 自动化保持 PAUSED。
+- 交付（space-6 已上线）：动作指南弹窗的 YouTube iframe 播放器已撤除，弹窗恢复内嵌前状态——有实拍帧的动作照旧播本地双帧循环；9 个无图动作显示文字要点＋保留的「看真人教学视频」外链卡片（在 YouTube 打开），无播放器占位、无 iframe、无自动加载远程封面、无第三方脚本/远程媒体请求。
+- 改动文件（外科手术式，4 文件）：`workout-log/client/src/App.tsx`（删除 `youtubeEmbedUrl` 整函数、`ExerciseGuideDialog` 内 `videoEmbedUrl` 计算、`guide-video-embed` iframe 渲染块及相关注释）；`workout-log/client/src/theme.css`（删除 `.guide-video-embed`/`.video-embed-media` 专用样式）；`workout-log/DATA-PLAN.md`（「Embedded teaching-video playback」章节改写为撤除记录：日期、所有者原话、改动文件）；`workout-log/validate-video-embed.mjs`（改写为撤除断言集）。9 条教学视频 URL 未动、全部文字要点未动、20 项实拍 demo 映射/素材/呈现未动、服务端/schema/数据口径/训练计划/W3.x 既有代码一律未动；9 组 AI 候选图未接入（仍待所有者过目，沿用 W6.2-PM-IMG 整批先审约定）。
+- 验证证据：构建方全回归 681 项 0 失败、构建审计 pass；仓库侧实跑——改写后的 validate-video-embed 32/32（无 iframe、无 youtube.com/embed 引用、无 embed helper/wiring、无 embed 专用样式、9 个无图动作保留原 URL＋文字＋外链卡片、弹窗零第三方媒体请求），autosave 69/69、receipt 37/37、start 66/66、finish 98/98、progression-engine 35/35、week-current 59/59、scroll-restore 26/26；grep 确认 client/src 无 youtubeEmbedUrl/videoEmbedUrl/guide-video-embed/video-embed-media/youtube.com/embed/iframe 残留；隐私扫描（UUID/密钥/路径）零命中。回灌文件与工件逐字一致。局限：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准。本登记仅表示实现方已交付撤除步骤，本条整体仍为进行中（9 组候选图待所有者视觉确认后 1 个实现周期接入）；PM 结论以其评审记录为准。回滚：revert 本提交。
+- 队列核对：`W6.2-PM-IMG` 9 组候选已进仓（workout-log/review-assets/guide-demos/），待所有者过目；`W3.5` 为下一顺位留待后续轮次（与本轮同一工件，避免并发构建 supersede）；`W-HOMEB-002` 定于 2026-11-16 自动执行、本轮未到执行日；其余未勾选项或为运行待验、或为（需用户确认）项。
+
 ## 2026-11-01 03 时 PST（muse-life-plans-sync 02:55 轮次：space-3 EVID 回灌——F-ARCH-001·INCR-1 增量协议＋交易 URL 导入）
 
 - 本轮基线检查：git pull 已最新，HEAD＝last_seen_sha（99168e4），基线..HEAD 无新提交、无新编号条目、无新 PM 记录（PM 仍按 PAUSE-LIFE-PM-001 暂停）。按队列核对惯例比对工件源码与仓库，发现 space-3（财务总览）有两处工件侧已上线、未回灌的改动（space-2/space-4/space-6 均无未回灌差异；space-2 的 ts-spaces 镜像旧于仓库 6d349b7，无需动作），本轮作 EVID 回灌。

@@ -1493,47 +1493,8 @@ function CompletionReceipt({ workoutId, onClose, onViewRecord }: {
   );
 }
 
-// Teaching-video embed (2026-11-01): the guides with no photo /
-// video-frame demo — the 9 text-only guides (supine chin tuck,
-// prone Y-T-W, thoracic extension, single-leg balance, home
-// Bulgarian split squat, tibialis raise, wall sit, reverse pec
-// deck, push-up plus) — already carry a verified YouTube teaching
-// video in their `video` field. The guide dialog now embeds that
-// same video in the demonstration slot through YouTube's official
-// /embed/{id} endpoint, so it plays in place instead of only
-// linking out; no video bytes are fetched or hosted by the
-// artifact, and the outbound watch link stays directly below the
-// player as the fallback for surfaces that block third-party
-// frames. Guides WITH a frame demo keep their existing behaviour
-// (frames + outbound link) — this helper is only applied when a
-// guide has a video and no demo.
-export function youtubeEmbedUrl(videoUrl: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(videoUrl);
-  } catch {
-    return null;
-  }
-  const host = parsed.hostname.replace(/^(www\.|m\.)/, "");
-  let id: string | null = null;
-  if (host === "youtu.be") {
-    id = parsed.pathname.split("/").filter(Boolean)[0] ?? null;
-  } else if (host === "youtube.com") {
-    if (parsed.pathname === "/watch") id = parsed.searchParams.get("v");
-    else if (parsed.pathname.startsWith("/shorts/")) id = parsed.pathname.split("/")[2] ?? null;
-    else if (parsed.pathname.startsWith("/embed/")) id = parsed.pathname.split("/")[2] ?? null;
-  }
-  if (id == null || !/^[A-Za-z0-9_-]{6,}$/.test(id)) return null;
-  return `https://www.youtube.com/embed/${id}`;
-}
-
 function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseGuide; exerciseKey: string; onClose: () => void }) {
   const muscleMapping = MUSCLE_MAP[exerciseKey];
-  // Embedded teaching video for the no-demo guides only (see
-  // youtubeEmbedUrl above); null whenever the guide has a frame
-  // demo, has no video, or the URL is not a YouTube watch/shorts
-  // URL — the dialog then renders exactly as before.
-  const videoEmbedUrl = !guide.demo && guide.video ? youtubeEmbedUrl(guide.video) : null;
   // 「练到哪里」 (primary/secondary muscle text + front/back diagram)
   // is secondary reference material: collapsed by default so the
   // demonstration and the cue points lead the dialog.
@@ -1572,28 +1533,10 @@ function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseG
           <button type="button" aria-label="关闭动作要领" onClick={onClose}>×</button>
         </div>
         <p className="guide-focus">{guide.focus}</p>
-        {/* Order: demonstration first (real photo/video frames, or
-            the embedded teaching video when the guide has no
-            frames, with its outbound link kept right below as the
-            fallback), then the cue points; the muscle text +
-            diagram live in the collapsed 「练到哪里」 section below. */}
+        {/* Order: demonstration first (real photo/video frames),
+            then the cue points; the muscle text + diagram live in
+            the collapsed 「练到哪里」 section below. */}
         {guide.demo ? <ExerciseDemoView demo={guide.demo} name={guide.title} /> : null}
-        {videoEmbedUrl ? (
-          <div className="guide-video-embed">
-            <div className="video-embed-media">
-              <iframe
-                title={`${guide.title} · 真人教学视频（内嵌播放）`}
-                src={videoEmbedUrl}
-                sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-                referrerPolicy="no-referrer"
-                loading="lazy"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                allowFullScreen
-              />
-            </div>
-            <p className="demo-caption">真人教学视频 · YouTube 内嵌播放 · 无法播放时用下方链接在 YouTube 打开</p>
-          </div>
-        ) : null}
         {guide.video ? (
           <a className="video-link" href={guide.video} target="_blank" rel="noreferrer">
             <span aria-hidden="true">▶</span>
