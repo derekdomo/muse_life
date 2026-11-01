@@ -1,5 +1,14 @@
 # Changes
 
+## 2026-11-01 13 时 PDT（muse-life-plans-sync：W5.2 配重计算器与热身组生成交付＋回灌）
+
+- 需求来源：`W5.2`（调研 T4，借鉴 Boostcamp）；用户 2026-11-01 09:56 当面再确认「排到下一实现顺位，W3.5 之后即做本条」（用户直提，P1）。
+- 交付（space-6 已上线）：训练进行中的当前动作卡内新增内嵌「配重与热身」面板（不弹窗、不遮挡录入）——(1) 配重计算器：输入目标总重量→每侧杠铃片组合，片库 lb[45,35,25,10,5,2.5]／kg[25,20,15,10,5,2.5,1.25]，每侧=(目标−杠重)/2 贪心从大到小配片；杠重默认 45lb/20kg，可选 35/45lb、15/20kg 或自定义；精确时标「✓ 可精确配出 · 每侧：…」，配不出时明标「— 最接近的可配重量 X（目标 Y 配不出来）」。(2) 热身组生成：标准（50%×8、70%×5、85%×3）、少组（60%×5、80%×3）、轻量多组（40%×8、55%×5、70%×3、85%×2）三预设，每组重量经同一配重口径取整到可配重量、页面注明口径。(3) 「一键加入热身组」只复用既有 addSet/updateSet 保存路径，把热身组置于该动作组列表最前并标记「热身组」（有未保存修改时拒绝执行，保护自动保存状态机）。目标重量默认取 W3.2 渐进负荷引擎建议重量、无则取上次可比表现重量、再无则空；单位按动作显示单位切换片库。色弱规则（文字＋符号✓/—，不只靠颜色）、控件 44px。
+- 改动文件（回灌，5 文件，逐字与工件一致）：`workout-log/client/src/plate-warmup.ts`（新，纯函数模块，无 import，导出全部逻辑：PLATE_LIBRARY、BAR_WEIGHT_PRESETS、WARMUP_PRESETS、calcPlateCombo、generateWarmupSets 等）；`workout-log/validate-plate-warmup.mjs`（新，真实生产函数全路径断言＋变异敏感性）；`workout-log/client/src/App.tsx`（新增 PlateWarmupTool 组件＋ SetRow 可选 warmup 显示标记；接线保持 SetSaveMachine/autosave 逻辑不动）；`workout-log/client/src/theme.css`（配重/热身面板与热身组标记样式）；`workout-log/DATA-PLAN.md`（W5.2 章节）。无 schema 变更、无 migration、服务端公式/同步/权限未动、既有导出/签名未动；未覆盖 app.db/构建产物/node_modules/audits/bun.lock、drizzle 换行格式化差异（沿既有）。
+- 验证证据（仓库本机实跑，合成数据）：validate-plate-warmup 27/27（23 生产全路径断言：片库/杠重、lb+kg 贪心精确配片、预设与自定义杠、最接近回退、杠下/等杠、三预设、热身同口径取整、格式化；3 项变异实跑：删贪心大到小顺序、删最接近标注回退、删可配取整，各翻转 ≥1 项断言）；既有回归 node 488（rir-rpe 103、progression 43、progression-engine 35、receipt 37、week-current 59、week-frequency 16、action-trends 15、autosave 69、rest-timer 48、deload-advisory 36）＋bun plan-safe 226/226＝714 项检查、0 失败。隐私扫描：新/改文件零 UUID/密钥/路径命中（仅合成重量数字）。
+- 局限：精确 artifact version 平台未提供；审计沙箱无所有者写身份（startWorkout 被 forbidden 拒绝），面板交互未实机驱动，行为证据为构建审计 pass＋纯函数/变异验证＋源码接线核对（默认目标接线已核对真实 progression_advice 数据）；owner 视角以本人打开为准（B 类）。热身「标记」因禁改 schema 为会话级显示标记（重载不保留），重量/次数本身按普通组持久保存，面板与 DATA-PLAN 均已注明此边界。
+- 悬置疑问（不先改、待 PM 裁定）：审计内容评审主张热身取整应取「含超目标的真最近可配重量」（如 129.5→130）；实现按需求原文程序性定义（每侧贪心从大到小、热身与配重计算器同口径）向下取整（129.5→125），面板已注明口径。本登记仅表示实现方已交付；整项待 PM 验收，不勾选。回滚：revert 本提交。
+
 ## 2026-11-01 09 时 PDT（muse-life-plans-sync：W6.2-LOCAL-DEMO-001 内嵌撤除交付＋回灌）
 
 - 需求来源：2026-11-01 08:45 所有者纠正（用户原话「我不想嵌入YouTube，只要想你之前加的那种简单动图就好了」），覆盖同日 08:00 直派的 YouTube 内嵌方案（该内嵌已于 08:05 落地、08:14 回灌本仓）。P1 用户直提。PM 图像与代码复验仍按 W6.2-PM-IMG／本条计划执行，定期 PM 自动化保持 PAUSED。

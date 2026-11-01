@@ -591,3 +591,76 @@ and signature are untouched.
   2026-10-17; W3.5 only added read-only fields behind the same
   gate (plus the optional caller-supplied readiness input) and
   did not widen it.
+
+## Plate calculator + warmup set generator (W5.2, added 2026-11-01)
+
+Client-only feature inside the active workout's exercise card —
+no schema change, no migration, no server change, no new write
+channel. All plate/warmup logic lives in the pure module
+`client/src/plate-warmup.ts` (NO imports, exported for repo-side
+validation by `validate-plate-warmup.mjs`): `calcPlateCombo`,
+`generateWarmupSets`, `loadableWeight`, `PLATE_LIBRARY`,
+`BAR_WEIGHT_PRESETS`, `DEFAULT_BAR_WEIGHT`, `WARMUP_PRESETS`,
+`formatPlateWeight`, `formatPlatesPerSide`.
+
+Plate math (single source of truth for the calculator and the
+warmup generator): plate libraries lb [45, 35, 25, 10, 5, 2.5] /
+kg [25, 20, 15, 10, 5, 2.5, 1.25]; default bar 45 lb / 20 kg with
+presets 35/45 lb and 15/20 kg plus a free numeric override;
+per-side load = (target − bar) / 2 filled greedily largest-first
+on integer hundredths (never overshoots). A target that cannot be
+loaded exactly yields the closest loadable weight AT OR BELOW it
+with `exact: false`, and the UI labels it verbatim
+「最接近的可配重量 X（目标 Y 配不出来）」 with a — symbol (✓ for
+exact) — never colour alone, never presented as exact.
+
+Warmup presets: 标准 (50%×8, 70%×5, 85%×3), 少组 (60%×5, 80%×3),
+轻量多组 (40%×8, 55%×5, 70%×3, 85%×2). Each warmup weight is the
+raw percentage weight run through the same greedy fill (floored
+to a loadable weight, never below the empty bar), and the panel
+says so in public wording. The target input defaults to the W3.2
+engine's `suggested_weight` from `progression_advice` (converted
+into the workout unit with the existing `convertWeightValue`),
+else the last comparable performance weight (`previousByExercise`),
+else empty for manual entry — the label under the field names
+which source seeded it.
+
+One-tap insertion （一键加入热身组） reuses ONLY the existing
+writes: rows are append-only via `addSet` and set order follows
+row id, so prepending N warmup sets appends N rows via `addSet`
+and then rewrites every row of the exercise via `updateSet` so
+the stored sequence reads [warmup…, original sets…] — each
+original set's weight/reps/RIR/completed travel together, so no
+recorded performance is lost or merged. The flow registers as a
+pending add (the finish flow joins it like a plain addSet) and
+refuses to run while the exercise head reports any unsaved /
+saving / failed / blocked row (a dirty SetSaveMachine would not
+adopt the shifted server values and its next autosave would
+overwrite the shift). The warmup marker （热身组 chip + aria
+label) is session-local state in ExerciseBlock: the stored set
+has no warmup flag (no schema change), so the marker does not
+survive a reload while the weights/reps persist as ordinary set
+data — the post-insert note in the panel states this boundary.
+
+Standing disclosure (unchanged by this round): `getDashboard`'s
+viewer-less sync channel remains the owner's L0.1 exception of
+2026-10-17; W5.2 added no read or write channel at all.
+- Validation evidence (2026-11-01): `validate-plate-warmup.mjs`
+  (new this round) loads the production module verbatim — 23
+  production assertions green (libraries/bars, greedy fills lb+kg,
+  preset + custom bars, not-exact fallback, at/below-bar, all
+  three presets, calculator-caliber warmup rounding, formatting)
+  plus 3 mutation runs (greedy order deleted, closest-fallback
+  deleted, loadable rounding deleted), each flipping ≥1 asserted
+  result as required — 27 passed, 0 failed total. Existing
+  regression all green (node suite 491 checks across 12 files +
+  bun plan-safe 226) for 744 checks, 0 failures. Build audit
+  passed (no console errors, no mobile overflow, security review
+  clean). The in-workout panel could not be probe-driven in the
+  audit sandbox: that environment carries no owner write identity
+  (startWorkout returns forbidden there — the same structural
+  limit recorded for earlier rounds under the owner's B-class
+  acceptance rule), so panel behaviour rests on the build audit,
+  the pure-function/mutation validation, and source wiring review;
+  the owner confirms on open. Privacy scan of new/changed files:
+  synthetic weights only, zero hits.

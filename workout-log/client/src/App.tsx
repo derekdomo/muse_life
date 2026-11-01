@@ -4,6 +4,17 @@ import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
 import { EXERCISE_DEMOS, ExerciseDemoView, type ExerciseDemo } from "./ExerciseDemo";
 import { MuscleDiagramView } from "./MuscleDiagram";
+import {
+  BAR_WEIGHT_PRESETS,
+  DEFAULT_BAR_WEIGHT,
+  PLATE_LIBRARY,
+  WARMUP_PRESETS,
+  calcPlateCombo,
+  formatPlateWeight,
+  formatPlatesPerSide,
+  generateWarmupSets,
+  type WarmupSetPlan,
+} from "./plate-warmup";
 
 type Dashboard = ApiResponse<typeof api, "getDashboard">;
 type Workout = NonNullable<Dashboard["active_workout"]>;
@@ -2341,9 +2352,14 @@ function playRestBeep() {
   }
 }
 
-function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNext }: {
+function SetRow({ set, unit, locked, warmup, onSaved, onRegister, onCompleted, onEnterNext }: {
   set: WorkoutSet;
   unit: Unit;
+  // W5.2: session-local warmup marker — set for the rows a one-tap
+  // warmup insertion placed at the front of this exercise in THIS
+  // session. Display only: the stored set carries no warmup flag
+  // (no schema change), so the marker does not survive a reload.
+  warmup?: boolean;
   // W-FINISH-001: while a finish flow owns the workout, entry is
   // locked — inputs, the completion toggle and retry are disabled so
   // no new edit can start behind the seal.
@@ -2496,7 +2512,7 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
 
   return (
     <div className={`set-row ${draft.completed ? "is-complete" : ""}`}>
-      <span className="set-index" aria-label={`第 ${set.set_number} 组`}>{set.set_number}</span>
+      <span className="set-index" aria-label={warmup ? `第 ${set.set_number} 组，热身组` : `第 ${set.set_number} 组`}>{set.set_number}</span>
       <label className="field-wrap">
         <span className="sr-only">第 {set.set_number} 组重量（{unit}）</span>
         <input
@@ -2546,6 +2562,7 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
         {draft.completed ? "✓" : ""}
       </button>
       <div className="set-subrow">
+        {warmup ? <span className="warmup-set-tag">热身组</span> : null}
         <label className="rir-field">
           <span className="rir-field-label">RIR（可选 0–5）</span>
           <input
@@ -2574,6 +2591,195 @@ function SetRow({ set, unit, locked, onSaved, onRegister, onCompleted, onEnterNe
   );
 }
 
+// --- W5.2: plate calculator + warmup generator panel ---
+// Inline tool inside the current exercise card (never a modal, never
+// an overlay): given a target weight it shows the per-side plate
+// combo from the pure plate-warmup module, generates warmup sets
+// from one of three percentage presets with every weight rounded to
+// a loadable weight by that same plate fill, and offers a one-tap
+// insert that prepends the warmup sets to this exercise's set list
+// through the parent block's existing save paths. Exactness is
+// always labelled in text with a symbol (✓ exact / — closest
+// loadable), never by colour alone.
+function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSource, setsClean, locked, onAddWarmupSets }: {
+  exerciseName: string;
+  unit: Unit;
+  // W5.2 default target: the W3.2 progression engine's suggested
+  // weight, else the last comparable performance weight — already
+  // converted into this workout's unit by the caller; null = neither
+  // exists, so the field starts empty for manual entry.
+  defaultTarget: number | null;
+  defaultTargetSource: "engine" | "previous" | null;
+  // False while this exercise has unsaved / saving / failed /
+  // blocked set rows: prepending shifts stored values between rows,
+  // so it waits until every row is saved (the caller re-checks at
+  // click time too).
+  setsClean: boolean;
+  locked: boolean;
+  onAddWarmupSets: (sets: WarmupSetPlan[]) => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [targetDraft, setTargetDraft] = useState(() => (defaultTarget != null ? formatPlateWeight(defaultTarget) : ""));
+  const [barDraft, setBarDraft] = useState(() => String(DEFAULT_BAR_WEIGHT[unit]));
+  const [presetKey, setPresetKey] = useState<string>(WARMUP_PRESETS[0]?.key ?? "standard");
+  const [adding, setAdding] = useState(false);
+  const [addState, setAddState] = useState<"idle" | "added" | "failed" | "needs-save">("idle");
+
+  const targetValue = targetDraft.trim() === "" ? null : Number(targetDraft);
+  const targetValid = targetValue != null && Number.isFinite(targetValue) && targetValue > 0;
+  const barValue = barDraft.trim() === "" ? NaN : Number(barDraft);
+  const barValid = Number.isFinite(barValue) && barValue >= 0;
+  const combo = targetValid && barValid ? calcPlateCombo(targetValue, barValue, unit) : null;
+  const preset = WARMUP_PRESETS.find((entry) => entry.key === presetKey) ?? WARMUP_PRESETS[0];
+  const warmupSets = targetValid && barValid && preset ? generateWarmupSets(targetValue, barValue, unit, preset.steps) : [];
+  const addDisabled = locked || adding || !setsClean || warmupSets.length === 0;
+
+  async function handleAddWarmup() {
+    if (addDisabled) return;
+    setAdding(true);
+    setAddState("idle");
+    let ok = false;
+    try {
+      ok = await onAddWarmupSets(warmupSets);
+    } catch {
+      ok = false;
+    }
+    setAdding(false);
+    setAddState(ok ? "added" : "failed");
+  }
+
+  return (
+    <div className="plate-tool">
+      <button
+        type="button"
+        className="plate-tool-toggle"
+        aria-expanded={open}
+        aria-label={`${exerciseName}配重与热身工具，${open ? "已展开" : "已折叠，点击展开"}`}
+        onClick={() => setOpen((value) => !value)}
+        disabled={locked}
+      >
+        <span>配重与热身</span>
+        <span aria-hidden="true">{open ? "收起 ▴" : "展开 ▾"}</span>
+      </button>
+      {open ? (
+        <div className="plate-tool-body">
+          <div className="plate-tool-fields">
+            <label className="plate-tool-field">
+              <span>目标重量（{unit}）</span>
+              <input
+                aria-label={`${exerciseName}目标重量，单位 ${unit}`}
+                inputMode="decimal"
+                type="number"
+                min="0"
+                step="0.5"
+                value={targetDraft}
+                disabled={locked}
+                onChange={(event) => { setTargetDraft(event.target.value); setAddState("idle"); }}
+                placeholder="手动输入"
+              />
+            </label>
+            <label className="plate-tool-field">
+              <span>杠重（{unit}）</span>
+              <input
+                aria-label={`${exerciseName}杠铃杠重，单位 ${unit}，可自定义`}
+                inputMode="decimal"
+                type="number"
+                min="0"
+                step="0.5"
+                value={barDraft}
+                disabled={locked}
+                onChange={(event) => { setBarDraft(event.target.value); setAddState("idle"); }}
+              />
+            </label>
+          </div>
+          <div className="plate-tool-bars" role="group" aria-label={`常用杠重，单位 ${unit}`}>
+            {BAR_WEIGHT_PRESETS[unit].map((presetBar) => (
+              <button
+                key={presetBar}
+                type="button"
+                aria-pressed={barValid && barValue === presetBar}
+                disabled={locked}
+                onClick={() => setBarDraft(String(presetBar))}
+              >
+                杠 {formatPlateWeight(presetBar)}{unit}
+              </button>
+            ))}
+            <span className="plate-tool-bar-note">杠重也可在上方直接改数值</span>
+          </div>
+          {defaultTargetSource === "engine" ? (
+            <p className="plate-tool-note">目标重量默认取渐进负荷引擎的建议重量，可直接修改。</p>
+          ) : defaultTargetSource === "previous" ? (
+            <p className="plate-tool-note">目标重量默认取上次可比表现重量，可直接修改。</p>
+          ) : null}
+          <p className="plate-tool-note">杠铃片库（{unit}）：{PLATE_LIBRARY[unit].map(formatPlateWeight).join("、")}</p>
+
+          <div className="plate-tool-result" role="status">
+            {!targetValid ? (
+              <p>输入目标重量后，这里会显示每侧配片。</p>
+            ) : !barValid ? (
+              <p>杠重需为 0 或正数。</p>
+            ) : combo && combo.exact ? (
+              <p>
+                <span aria-hidden="true">✓ </span>可精确配出：每侧：{formatPlatesPerSide(combo.platesPerSide)} · 总重 {formatPlateWeight(combo.achievedWeight)}{unit}
+              </p>
+            ) : combo ? (
+              <p>
+                <span aria-hidden="true">— </span>最接近的可配重量 {formatPlateWeight(combo.achievedWeight)}{unit}（目标 {formatPlateWeight(combo.targetWeight)}{unit} 配不出来）· 每侧：{formatPlatesPerSide(combo.platesPerSide)}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="plate-tool-presets" role="group" aria-label="热身比例方案">
+            {WARMUP_PRESETS.map((entry) => (
+              <button
+                key={entry.key}
+                type="button"
+                aria-pressed={preset?.key === entry.key}
+                disabled={locked}
+                onClick={() => { setPresetKey(entry.key); setAddState("idle"); }}
+              >
+                {entry.label}（{entry.steps.map((step) => `${step.percent}%×${step.reps}`).join("、")}）
+              </button>
+            ))}
+          </div>
+          {warmupSets.length > 0 ? (
+            <>
+              <ul className="plate-tool-warmup-list" aria-label={`${exerciseName}热身组预览`}>
+                {warmupSets.map((warmupSet, index) => (
+                  <li key={`${warmupSet.percent}-${index}`}>
+                    <span>热身 {index + 1} · {warmupSet.percent}%</span>
+                    <strong>{formatPlateWeight(warmupSet.weight)}{unit} × {warmupSet.reps} 次</strong>
+                    <span>每侧：{formatPlatesPerSide(warmupSet.platesPerSide)}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="plate-tool-note">热身组重量已按杠铃片库取整到可配重量（向下取整，不超过比例重量）。</p>
+            </>
+          ) : (
+            <p className="plate-tool-note">输入目标重量后，这里会生成热身组。</p>
+          )}
+          <button
+            type="button"
+            className="plate-tool-add"
+            disabled={addDisabled}
+            onClick={() => void handleAddWarmup()}
+          >
+            {adding ? "加入中…" : "一键加入热身组"}
+          </button>
+          {!setsClean ? (
+            <p className="plate-tool-note">本动作有未保存的修改，先等全部组保存后再加入热身组。</p>
+          ) : null}
+          {addState === "added" ? (
+            <p className="plate-tool-note" role="status">✓ 已加入：热身组已排到本动作组列表最前面，并标记为「热身组」（标记在本次训练内有效）。</p>
+          ) : addState === "failed" ? (
+            <p className="plate-tool-note" role="alert">— 加入失败，组列表已按服务器记录刷新，请检查后重试。</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // W1.3: the "上次" mark for an exercise — the latest completed set's
 // weight/reps, with the weight already converted into the active
 // workout's unit when the source workout used the other unit.
@@ -2588,10 +2794,16 @@ export type ExerciseHeadInfo = {
   statusKind: "error" | "blocked" | "dirty" | "saving" | null;
 };
 
-function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, expanded, headInfo, onSelect, onChanged, onSetCompleted, onOpenGuide, onRegisterSet, onRegisterPendingAdd, onEnterNextSet }: {
+function ExerciseBlock({ workout, exercise, previous, suggestedTarget, suggestedTargetSource, timerSlot, entryLocked, expanded, headInfo, onSelect, onChanged, onSetCompleted, onOpenGuide, onRegisterSet, onRegisterPendingAdd, onEnterNextSet }: {
   workout: Workout;
   exercise: ReturnType<typeof groupSets>[number];
   previous?: PreviousMark;
+  // W5.2: default target weight for the plate/warmup tool — the
+  // W3.2 engine's suggestion when one exists, else the last
+  // comparable performance weight (both pre-converted to this
+  // workout's unit by ActiveWorkout); null when neither exists.
+  suggestedTarget?: number | null;
+  suggestedTargetSource?: "engine" | "previous" | null;
   // W-TIMER-001: the rest-timer UI (auto toggle + panel) injected by
   // ActiveWorkout into the current exercise's block only. Purely an
   // extra child node — SetRow mounting/registration is untouched.
@@ -2626,6 +2838,81 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
     },
   });
   const guide = EXERCISE_GUIDES[exercise.key];
+
+  // W5.2: ids of this exercise's rows inserted as warmup sets during
+  // THIS session (the stored set has no warmup flag — no schema
+  // change — so the marker is session-local display state; the
+  // weights/reps themselves are ordinary saved set data).
+  const [warmupSetIds, setWarmupSetIds] = useState<ReadonlySet<number>>(() => new Set<number>());
+
+  // W5.2 one-tap warmup insertion. There is deliberately NO new
+  // write channel and no reordering write: rows are append-only via
+  // addSet and set order follows row id, so prepending N warmup sets
+  // is done by (1) appending N rows through the existing addSet
+  // action, then (2) rewriting every row's values through the
+  // existing updateSet action so the sequence reads
+  // [warmup…, original sets…] — each original set's
+  // weight/reps/RIR/completed travel together, so no recorded
+  // performance is lost or merged. The whole flow is registered as
+  // a pending add synchronously, so a finish press joins it exactly
+  // like a plain addSet. It refuses to run while any row of this
+  // exercise is unsaved / saving / failed / blocked: a dirty row's
+  // SetSaveMachine would not adopt the shifted server values and
+  // its next autosave would silently overwrite the shift.
+  function handleAddWarmupSets(warmupSets: WarmupSetPlan[]): Promise<boolean> {
+    if (entryLocked || headInfo.statusKind != null || warmupSets.length === 0) {
+      return Promise.resolve(false);
+    }
+    const originalSets = exercise.sets;
+    const snapshot = originalSets.map((set) => ({
+      weight: set.weight,
+      reps: set.reps,
+      rir: set.rir,
+      completed: set.completed,
+    }));
+    const run = (async (): Promise<boolean> => {
+      const newIds: number[] = [];
+      for (let index = 0; index < warmupSets.length; index += 1) {
+        const added = await api.addSet({ workout_id: workout.id, exercise_key: exercise.key });
+        if (added.forbidden || !added.set) throw new Error("addSet refused");
+        newIds.push(added.set.id);
+      }
+      const orderedIds = [...originalSets.map((set) => set.id), ...newIds];
+      const finalValues: { weight: number | null; reps: number | null; rir: number | null; completed: boolean }[] = [
+        ...warmupSets.map((warmupSet) => ({ weight: warmupSet.weight, reps: warmupSet.reps, rir: null, completed: false })),
+        ...snapshot,
+      ];
+      let ok = true;
+      for (let index = 0; index < orderedIds.length; index += 1) {
+        const id = orderedIds[index];
+        const value = finalValues[index];
+        if (id == null || value == null) { ok = false; continue; }
+        const saved = await api.updateSet({ id, weight: value.weight, reps: value.reps, rir: value.rir, completed: value.completed });
+        if (!saved.ok) ok = false;
+      }
+      return ok;
+    })();
+    onRegisterPendingAdd(run);
+    return run.then(
+      async (ok) => {
+        if (ok) {
+          setWarmupSetIds((previousIds) => {
+            const next = new Set(previousIds);
+            for (const id of originalSets.slice(0, warmupSets.length).map((set) => set.id)) next.add(id);
+            return next;
+          });
+        }
+        await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        onChanged();
+        return ok;
+      },
+      async () => {
+        await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        onChanged();
+        return false;
+      },
+    );
+  }
 
   // The promise is registered synchronously in the click, before any
   // later finish press can run, and unregistered by the registry
@@ -2689,6 +2976,7 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
               key={set.id}
               set={set}
               unit={workout.unit}
+              warmup={warmupSetIds.has(set.id)}
               locked={entryLocked}
               onSaved={onChanged}
               onRegister={onRegisterSet}
@@ -2700,6 +2988,15 @@ function ExerciseBlock({ workout, exercise, previous, timerSlot, entryLocked, ex
         <button className="add-set" type="button" onClick={handleAddSet} disabled={addSet.isPending || entryLocked}>
           {addSet.isPending ? "添加中…" : "+ 加一组"}
         </button>
+        <PlateWarmupTool
+          exerciseName={exercise.name}
+          unit={workout.unit}
+          defaultTarget={suggestedTarget ?? null}
+          defaultTargetSource={suggestedTargetSource ?? null}
+          setsClean={headInfo.statusKind == null}
+          locked={entryLocked}
+          onAddWarmupSets={handleAddWarmupSets}
+        />
         {timerSlot}
       </div>
     </section>
@@ -2764,10 +3061,14 @@ function RestAutoToggle({ timer, onChange }: {
   );
 }
 
-function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
+function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCompleted }: {
   workout: Workout;
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
+  // W5.2: the W3.2 engine's advice, used only as the plate/warmup
+  // tool's default target weight (display seed — no verdict is
+  // derived from it here).
+  progressionAdvice?: ProgressionAdviceEntry[];
   // W4.3-D1: fired once with this workout's id when completeWorkout
   // has genuinely succeeded, so App can show the completion receipt
   // for exactly this record on the start page.
@@ -3291,6 +3592,20 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
             workout={workout}
             exercise={exercise}
             previous={previousByExercise.get(exercise.key)}
+            suggestedTarget={(() => {
+              const advice = progressionAdvice?.find((entry) => entry.exercise_key === exercise.key);
+              if (advice && advice.suggested_weight != null) {
+                return advice.unit !== workout.unit
+                  ? convertWeightValue(advice.suggested_weight, advice.unit, workout.unit)
+                  : advice.suggested_weight;
+              }
+              return previousByExercise.get(exercise.key)?.weight ?? null;
+            })()}
+            suggestedTargetSource={(() => {
+              const advice = progressionAdvice?.find((entry) => entry.exercise_key === exercise.key);
+              if (advice && advice.suggested_weight != null) return "engine" as const;
+              return previousByExercise.get(exercise.key)?.weight != null ? "previous" as const : null;
+            })()}
             timerSlot={currentKey != null && exercise.key === currentKey ? restTimerUi : undefined}
             entryLocked={finishing}
             expanded={exercise.key === currentKey}
@@ -4287,6 +4602,7 @@ export function App() {
           workout={dashboard.data.active_workout}
           recent={dashboard.data.recent_workouts}
           weekSummaries={dashboard.data.week_summaries}
+          progressionAdvice={dashboard.data.progression_advice}
           onCompleted={(workoutId) => setReceiptId(workoutId)}
         />
       ) : (

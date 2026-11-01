@@ -286,6 +286,32 @@ button.current-week-row { cursor: pointer; font: inherit; font-size: 12px; }
 .set-retry { min-height: 44px; padding: 0 14px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); border-radius: 3px; background: var(--surface); color: var(--danger); font-size: 11px; font-weight: 800; cursor: pointer; }
 .add-set { min-height: 44px; display: inline-flex; align-items: center; margin: 10px 0 0 37px; padding: 7px 4px; border: 0; background: transparent; color: var(--dim); font-size: 12px; font-weight: 750; cursor: pointer; }
 .add-set:active { color: var(--accent); }
+.warmup-set-tag { padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: 10px; font-weight: 800; white-space: nowrap; }
+.plate-tool { margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.plate-tool-toggle { width: 100%; min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border: 0; background: transparent; color: var(--text); font-size: 13px; font-weight: 800; cursor: pointer; }
+.plate-tool-toggle:disabled { opacity: .55; cursor: default; }
+.plate-tool-body { padding: 2px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.plate-tool-fields { display: flex; flex-wrap: wrap; gap: 10px; }
+.plate-tool-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 130px; }
+.plate-tool-field > span { color: var(--dim); font-size: 11px; font-weight: 750; }
+.plate-tool-field input { width: 100%; height: 44px; padding: 1px 10px 0; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 16px; font-weight: 750; text-align: center; -moz-appearance: textfield; }
+.plate-tool-field input::-webkit-inner-spin-button, .plate-tool-field input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.plate-tool-field input:disabled { opacity: .55; }
+.plate-tool-bars { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.plate-tool-bars button, .plate-tool-presets button { min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 12px; font-weight: 750; cursor: pointer; }
+.plate-tool-bars button[aria-pressed="true"], .plate-tool-presets button[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+.plate-tool-bars button:disabled, .plate-tool-presets button:disabled { opacity: .55; cursor: default; }
+.plate-tool-bar-note { color: var(--dim); font-size: 11px; }
+.plate-tool-note { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
+.plate-tool-result { border: 1px dashed var(--border); border-radius: 4px; padding: 9px 11px; }
+.plate-tool-result p { margin: 0; font-size: 13px; font-weight: 750; line-height: 1.55; }
+.plate-tool-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.plate-tool-warmup-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.plate-tool-warmup-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-size: 12px; }
+.plate-tool-warmup-list li strong { font-size: 14px; }
+.plate-tool-warmup-list li span:last-child { color: var(--dim); }
+.plate-tool-add { min-height: 44px; padding: 0 18px; border: 1px solid var(--text); border-radius: 4px; background: var(--text); color: var(--bg); font-size: 13px; font-weight: 800; cursor: pointer; align-self: flex-start; }
+.plate-tool-add:disabled { opacity: .45; cursor: default; }
 .rest-timer { margin-top: 20px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .rest-timer-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; }
 .rest-timer-caption { color: var(--dim); font-size: 12px; font-weight: 800; letter-spacing: .08em; }
