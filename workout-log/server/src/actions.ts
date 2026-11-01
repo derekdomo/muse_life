@@ -20,6 +20,12 @@ import {
   evaluateDeloadAdvisory,
   type DeloadSession,
 } from "./deload-advisory";
+import {
+  buildMuscleHeatmap,
+  MUSCLE_MAP,
+  MUSCLE_MAP_VERSION,
+  type MuscleHeatmapWorkout,
+} from "./muscle-heatmap";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -327,6 +333,40 @@ const weekFrequencyResponse = z.object({
   frequency_version: z.number(),
 });
 
+// W5.1 (additive): one muscle group's facts for the history
+// view's heatmap, computed by the pure buildMuscleHeatmap in
+// server/src/muscle-heatmap.ts. Facts only: completed-set counts
+// over the last 7 calendar days (primary / secondary attribution
+// kept apart) and whole calendar days since the group was last
+// trained — no recovery percentage, no recovery score.
+const muscleHeatmapEntryResponse = z.object({
+  muscle: z.string(),
+  primary_sets: z.number(),
+  secondary_sets: z.number(),
+  total_sets: z.number(),
+  last_trained_date: z.string().nullable(),
+  days_since_last_trained: z.number().nullable(),
+  trained_in_window: z.boolean(),
+});
+const muscleHeatmapResponse = z.object({
+  window_start: z.string(),
+  window_end: z.string(),
+  muscles: z.array(muscleHeatmapEntryResponse),
+  unmapped_exercises: z.array(z.string()),
+  heatmap_version: z.number(),
+});
+// W5.1 (additive): the static exercise -> muscle-group mapping
+// itself (MUSCLE-MAP.md v1 — the same map the guide's muscle
+// diagram and the receipt's muscle facts use), so the history
+// view can show the owner the exact table the heatmap counts
+// with. Read-only data: correcting the map is a code change,
+// never a write through this artifact.
+const muscleMapEntryResponse = z.object({
+  exercise_key: z.string(),
+  primary: z.array(z.string()),
+  secondary: z.array(z.string()),
+});
+
 // W3.5 (additive): one exercise's conservative adjustment /
 // recovery advisory, computed by the pure module in
 // server/src/deload-advisory.ts. Display only: suggested is true
@@ -426,6 +466,16 @@ const dashboardResponse = z.object({
   // receipt (same condition as receipt_advice) — the conservative
   // adjustment / recovery advisory per exercise of that workout.
   receipt_deload_advisory: z.array(receiptDeloadAdvisoryEntryResponse).optional(),
+  // W5.1 (additive, optional): per-muscle-group set counts over
+  // the last 7 calendar days plus whole days since each group was
+  // last trained (buildMuscleHeatmap in
+  // server/src/muscle-heatmap.ts), and the static exercise ->
+  // muscle-group map (muscle_map + its version) those counts and
+  // the guide diagram share. Facts only — no recovery score.
+  // Existing consumers （健康看板 sync) ignore all three fields.
+  muscle_heatmap: muscleHeatmapResponse.optional(),
+  muscle_map: z.array(muscleMapEntryResponse).optional(),
+  muscle_map_version: z.number().optional(),
 });
 
 const planExerciseResponse = z.object({
@@ -1840,6 +1890,83 @@ async function loadWeekFrequency(
   };
 }
 
+// W5.1: per-muscle-group set counts over the last 7 calendar days
+// plus days since each group was last trained. The aggregation is
+// the pure buildMuscleHeatmap in server/src/muscle-heatmap.ts;
+// this loader only feeds it the FULL completed history (no date
+// cutoff, no limit): "days since last trained" must stay honest
+// for a group last trained months ago, and the 7-day window is
+// applied inside the builder, not by truncating the read. Only
+// the fields the builder needs are selected (no weights / reps).
+async function loadMuscleHeatmap(
+  ctx: Ctx,
+  now: Date,
+): Promise<z.infer<typeof muscleHeatmapResponse>> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .select({
+      id: schema.workouts.id,
+      completedAt: schema.workouts.completedAt,
+    })
+    .from(schema.workouts)
+    .where(isNotNull(schema.workouts.completedAt))
+    .orderBy(desc(schema.workouts.completedAt));
+  const setRows = rows.length
+    ? await db
+        .select({
+          workoutId: schema.workoutSets.workoutId,
+          exerciseKey: schema.workoutSets.exerciseKey,
+          exerciseName: schema.workoutSets.exerciseName,
+          completed: schema.workoutSets.completed,
+        })
+        .from(schema.workoutSets)
+        .where(inArray(schema.workoutSets.workoutId, rows.map((row) => row.id)))
+        .orderBy(asc(schema.workoutSets.id))
+    : [];
+  const setsByWorkout = new Map<number, MuscleHeatmapWorkout["sets"]>();
+  for (const row of setRows) {
+    const list = setsByWorkout.get(row.workoutId) ?? [];
+    list.push({
+      exerciseKey: row.exerciseKey,
+      exerciseName: row.exerciseName,
+      completed: row.completed,
+    });
+    setsByWorkout.set(row.workoutId, list);
+  }
+  const workouts: MuscleHeatmapWorkout[] = rows.map((row) => ({
+    completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+    sets: setsByWorkout.get(row.id) ?? [],
+  }));
+  const result = buildMuscleHeatmap({ now: now.toISOString(), workouts });
+  return {
+    window_start: result.windowStart,
+    window_end: result.windowEnd,
+    muscles: result.muscles.map((entry) => ({
+      muscle: entry.muscle,
+      primary_sets: entry.primarySets,
+      secondary_sets: entry.secondarySets,
+      total_sets: entry.totalSets,
+      last_trained_date: entry.lastTrainedDate,
+      days_since_last_trained: entry.daysSinceLastTrained,
+      trained_in_window: entry.trainedInWindow,
+    })),
+    unmapped_exercises: result.unmappedExercises,
+    heatmap_version: result.heatmapVersion,
+  };
+}
+
+// The static exercise -> muscle-group mapping table for the
+// history view (W5.1): the module's MUSCLE_MAP in its authored
+// order — the same map the heatmap counts with, the guide
+// diagram paints from, and the receipt's muscle facts use.
+function muscleMapEntries(): z.infer<typeof muscleMapEntryResponse>[] {
+  return Object.entries(MUSCLE_MAP).map(([exerciseKey, mapping]) => ({
+    exercise_key: exerciseKey,
+    primary: mapping.primary,
+    secondary: mapping.secondary,
+  }));
+}
+
 // W4.3-D1: the pure per-exercise previous-comparable selection behind
 // the completion receipt. `candidates` is the receipt workout's own
 // routine's completed workouts that finished strictly before it, most
@@ -2401,6 +2528,9 @@ export const Actions = {
         progression_advice: await loadProgressionAdvice(ctx),
         action_trends: await loadActionTrends(ctx),
         week_frequency: await loadWeekFrequency(ctx, now),
+        muscle_heatmap: await loadMuscleHeatmap(ctx, now),
+        muscle_map: muscleMapEntries(),
+        muscle_map_version: MUSCLE_MAP_VERSION,
         deload_advisory: await loadDeloadAdvisories(ctx, args.readiness_score ?? null),
         ...(receiptFields ?? {}),
         ...(receiptAdviceFields ?? {}),

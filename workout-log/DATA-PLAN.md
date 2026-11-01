@@ -664,3 +664,75 @@ viewer-less sync channel remains the owner's L0.1 exception of
   the pure-function/mutation validation, and source wiring review;
   the owner confirms on open. Privacy scan of new/changed files:
   synthetic weights only, zero hits.
+
+## Muscle-group weekly sets + recovery heatmap (W5.1, added 2026-11-01)
+
+History-view section 「肌群恢复热力图」: per muscle group, the
+completed sets of the last 7 calendar days and the whole calendar
+days since the group was last trained. All aggregation lives in
+the new pure server module `server/src/muscle-heatmap.ts` (NO
+imports, exported for repo-side validation): `buildMuscleHeatmap`,
+`muscleHeatmapWindow`, `MUSCLE_MAP`, `MUSCLE_MAP_VERSION`,
+`MUSCLE_GROUPS`, `MUSCLE_HEATMAP_VERSION`. The client only
+renders the server's figures.
+
+One mapping, never two: the module carries the SAME exercise ->
+primary/secondary muscle-group map as the client's MUSCLE_MAP
+(MUSCLE-MAP.md map_version 1, 31 keys incl. lateral-lunge) — the
+map the guide's muscle diagram paints from and the completion
+receipt's muscle facts use. It is duplicated server-side only
+because the module must stay import-free for verbatim
+validation; `validate-muscle-heatmap.mjs` asserts the two copies
+are entry-for-entry identical (and the versions equal), so they
+cannot silently drift. The full table is owner-visible in the
+history view (expandable 「动作 → 肌群映射表」, rendered from the
+additive `muscle_map` / `muscle_map_version` dashboard fields);
+correcting the map remains a code change — W5.1 added NO write
+entry for it.
+
+Caliber (stated verbatim on the page): the window is the last 7
+natural days in the America/Los_Angeles frame, today included,
+bucketed by each workout's completion calendar day; set counts
+include COMPLETED sets only, inside completed workouts; an
+exercise's completed sets count under EACH of its groups —
+primary sets under primary groups, synergist （协同） sets under
+secondary groups (the H4.6 duplicate-attribution rule, so
+per-group counts never sum to a whole-body total);
+days-since-last-trained counts whole calendar days to the most
+recent day the group received any completed set (primary or
+secondary) over the FULL completed history — the loader
+deliberately reads without a date cutoff so the figure stays
+honest for long-untrained groups; never-trained groups report
+null date/days, never a fabricated figure. Facts only: NO
+recovery percentage and NO recovery score exist anywhere in the
+module, the wire shape, or the UI.
+
+Presentation follows the colour-weak rule: each cell's state is
+a symbol + text + numbers (● 已练 / ○ 未练 / — 从未训练， plus
+primary/synergist set counts and the days figure); the tint step
+and bar length only restate the printed set count. The mapping
+table's disclosure control is ≥44px. No schema change, no
+migration: `muscle_heatmap` / `muscle_map` /
+`muscle_map_version` are additive optional fields on
+getDashboard's response, behind the same owner / L0.1
+sync-channel read gate; no existing export or signature changed
+(W3.1–W5.2 intact) and no channel was widened.
+
+- Validation evidence (2026-11-01): `validate-muscle-heatmap.mjs`
+  (new this round) loads the production module verbatim — the
+  20-assertion behavioral suite green (window bounds incl. the
+  23:59-out / 00:00-in LA-midnight boundary and a DST fall-back
+  window, completed-only counting, primary + synergist
+  attribution, most-recent-day wins across roles, never-trained
+  nulls, unmapped listed once and zero-completed unmapped
+  suppressed, exactly-seven-fact-fields shape), map parity
+  (31 keys, entry-for-entry identical to the client map, group
+  union = 19) and wiring checks — 22 top-level checks passed,
+  0 failed; plus 3 mutation runs (synergist attribution deleted
+  → 4 assertions flipped; 7-day window lower bound deleted → 4
+  flipped; completed-only filter deleted → 5 flipped), each
+  required to flip ≥1 assertion. Existing regression all green:
+  node suite 540 checks across 14 files (incl. the new one) +
+  bun plan-safe 226 + client/server typecheck clean = 766
+  checks, 0 failures. Privacy scan of new/changed files:
+  synthetic data only, zero hits.

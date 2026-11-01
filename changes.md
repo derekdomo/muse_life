@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-11-01 13 时 PST（muse-life-plans-sync：W5.1 肌群恢复热力图交付＋回灌）
+- 交付：space-6 builder 13:06 PST 回传构建成功（12:55 PST 派工）——`W5.1` 肌群周组数与恢复热力图已在 artifact（space-6）上线：历史/复盘视图新增「肌群恢复热力图」区块——服务端新增无 import 纯函数模块 `server/src/muscle-heatmap.ts`（`buildMuscleHeatmap` 等全部导出；复用与动作示意图/完成小票同一套 MUSCLE-MAP v1，31 个动作、19 肌群并集，服务端/客户端映射逐项一致、版本同为 1），`getDashboard` 仅加法新增 `muscle_heatmap` / `muscle_map` / `muscle_map_version` 三个可选字段（无 schema 变更、无 migration）；按最近 7 个自然日（洛杉矶日期、含今天）逐肌群展示已完成组数（主要/协同分开计、重复归属口径与完成小票一致）与距上次训练的自然日天数，只列事实、无恢复百分比/评分，口径页面公开标注；状态用 ● 已练 / ○ 未练 / — 从未训练 符号＋文字＋数字（守色弱规则），展开区附完整映射表（修正走代码变更，本轮未新增任何写入口）；client 只渲染、不自算。W3.1–W5.2 既有导出/签名未动；L0.1 只读通道维持现状。
+- 回灌（线上 `~/workspace/ts-spaces/space-6` → 本仓 `workout-log/`）：server/src/muscle-heatmap.ts（新）、validate-muscle-heatmap.mjs（新）、server/src/actions.ts、client/src/App.tsx、client/src/theme.css、DATA-PLAN.md；diff 核验全部为 W5.1-only 变更。**未覆盖**：app.db/构建产物/node_modules/bun.lock、drizzle 换行格式化差异（沿既有）。
+- 仓库验证（本轮实跑，合成数据）：validate-muscle-heatmap 22/22（含 20 断言行为套件＋3 项变异实跑全部翻转：删协同计入、删 7 天窗口下界、删完成过滤）；既有回归 autosave 69、rest-timer 48、receipt 37、progression 43、progression-engine 35、week-current 59、week-frequency 16、action-trends 15、plate-warmup 27、deload-advisory 36、rir-rpe 103、start 66、finish 98、scroll-restore 26、muscle-diagram 36、muscle-receipt 30、d1 36——0 失败。隐私扫描：新增/改动文件零 UUID/路径/密钥命中。
+- plans.md `W5.1` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。
+- 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准。
+- 本轮未动 cron；修改文件：plans.md（W5.1 交付登记）、workout-log 回灌 6 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-6 已上线版本不受影响）。
+
 ## 2026-11-01 12:55 PST（muse-life-plans-sync：W5.1 派工）
 - git pull 已最新（HEAD `cb7ebe5`＝基线 `last_seen_sha`，无新提交、无新编号条目/PM 记录）。
 - 队列推进：W5.2、W2.2 滚动恢复均已交付回灌（仓库与线上逐字一致；W5.2 热身取整方向悬置疑问待 PM 裁定，W2.2 整项待 PM 验收——两处「不勾选」为前轮既定状态，本轮不翻转）。W6.2-LOCAL-DEMO-001/002 待用户整批过目点头（前轮已标需用户确认），W-HOMEB-002 授权 11-16 自动执行、本轮不碰。

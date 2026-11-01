@@ -829,6 +829,15 @@ type ActionTrendEntry = NonNullable<Dashboard["action_trends"]>[number];
 type WeekFrequencyData = NonNullable<Dashboard["week_frequency"]>;
 type WeekFrequencyEntry = WeekFrequencyData["exercises"][number];
 type WeekFrequencyCell = WeekFrequencyEntry["weeks"][number];
+// W5.1: server-computed per-muscle-group facts for the last 7
+// calendar days (muscle_heatmap, buildMuscleHeatmap in
+// server/src/muscle-heatmap.ts) plus the static exercise ->
+// muscle-group map (muscle_map) the heatmap, the guide diagram
+// and the receipt all share — the client renders both and
+// computes neither.
+type MuscleHeatmapData = NonNullable<Dashboard["muscle_heatmap"]>;
+type MuscleHeatmapEntry = MuscleHeatmapData["muscles"][number];
+type MuscleMapEntry = NonNullable<Dashboard["muscle_map"]>[number];
 // W3.5: server-computed conservative adjustment / recovery
 // advisories (deload_advisory for the weekly review,
 // receipt_deload_advisory for the completion receipt) — one
@@ -4015,6 +4024,114 @@ function WeekFrequency({ data }: { data?: WeekFrequencyData }) {
   );
 }
 
+// --- W5.1: muscle-group heatmap over the last 7 days （肌群恢复热力图） ---
+// Rendered ONLY from the server's muscle_heatmap (buildMuscleHeatmap
+// in server/src/muscle-heatmap.ts): per muscle group, the completed
+// sets of the last 7 calendar days (primary / synergist attribution
+// kept apart) and the whole calendar days since the group was last
+// trained. Facts only — the server computes no recovery percentage
+// and no recovery score, and the client invents none either. The
+// grid's tint and bar length echo the printed set count; meaning
+// never rides on colour alone (the owner is colour-weak): every
+// cell carries a symbol (● 已练 / ○ 未练 / — 从未训练）, a text
+// state and the numbers themselves. Below the grid, the static
+// exercise -> muscle-group map (muscle_map) is shown in full — the
+// same MUSCLE-MAP v1 table the guide diagram paints from — so the
+// owner can inspect exactly what the counts rest on.
+function muscleHeatState(entry: MuscleHeatmapEntry): { symbol: string; label: string } {
+  if (entry.days_since_last_trained == null) return { symbol: "—", label: "从未训练" };
+  if (entry.trained_in_window) return { symbol: "●", label: "已练" };
+  return { symbol: "○", label: "未练" };
+}
+
+function muscleHeatDaysText(entry: MuscleHeatmapEntry): string {
+  if (entry.days_since_last_trained == null || entry.last_trained_date == null) return "尚无记录";
+  if (entry.days_since_last_trained === 0) return `今天（${formatDateKey(entry.last_trained_date)}）`;
+  return `${entry.days_since_last_trained} 天前（${formatDateKey(entry.last_trained_date)}）`;
+}
+
+function MuscleHeatmap({ data, muscleMap, muscleMapVersion }: {
+  data?: MuscleHeatmapData;
+  muscleMap?: MuscleMapEntry[];
+  muscleMapVersion?: number;
+}) {
+  const muscles = data?.muscles ?? [];
+  const maxSets = muscles.reduce((max, entry) => Math.max(max, entry.total_sets), 0);
+  const mapEntries = muscleMap ?? [];
+  return (
+    <section className="history-section" aria-labelledby="muscle-heatmap-title">
+      <div className="section-heading">
+        <h2 id="muscle-heatmap-title">肌群恢复热力图</h2>
+        <span>{data ? `近 7 天 · ${formatDateKey(data.window_start)}–${formatDateKey(data.window_end)}` : ""}</span>
+      </div>
+      <p className="history-boundary">
+        口径：窗口为最近 7 个自然日（洛杉矶日期，含今天，共 7 天）；组数只计已完成组，一个动作的完成组同时计入它的每个主要肌群与协同肌群（重复归属，各肌群组数不可相加为全身总量）；距上次训练按自然日计，今天练过记 0 天。这里只列事实——组数与天数，不计算恢复百分比、不编造恢复评分。底色深浅与条形长度只复述组数本身，状态以符号＋文字＋数字为准。
+      </p>
+      {muscles.length === 0 ? (
+        <p className="empty-history">完成训练后，这里会按肌群列出最近 7 天的完成组数与距上次训练天数。</p>
+      ) : (
+        <>
+          <div className="muscle-heatmap-grid">
+            {muscles.map((entry) => {
+              const state = muscleHeatState(entry);
+              const level = entry.total_sets === 0 || maxSets === 0
+                ? 0
+                : entry.total_sets * 3 <= maxSets
+                  ? 1
+                  : entry.total_sets * 3 <= maxSets * 2
+                    ? 2
+                    : 3;
+              const barPct = maxSets > 0 ? Math.round((entry.total_sets / maxSets) * 100) : 0;
+              return (
+                <div
+                  key={entry.muscle}
+                  className="muscle-heat-cell"
+                  data-level={level}
+                  aria-label={`${entry.muscle}：${state.label}，近 7 天共 ${entry.total_sets} 组（主要 ${entry.primary_sets} 组、协同 ${entry.secondary_sets} 组），距上次训练 ${muscleHeatDaysText(entry)}`}
+                >
+                  <div className="muscle-heat-head">
+                    <strong>{entry.muscle}</strong>
+                    <span className="muscle-heat-state">{state.symbol} {state.label}</span>
+                  </div>
+                  <p className="muscle-heat-sets"><strong>{entry.total_sets}</strong> 组</p>
+                  <div className="muscle-heat-bar" aria-hidden="true"><span style={{ width: `${barPct}%` }} /></div>
+                  <p className="muscle-heat-detail">主要 {entry.primary_sets} 组 · 协同 {entry.secondary_sets} 组</p>
+                  <p className="muscle-heat-detail">距上次 {muscleHeatDaysText(entry)}</p>
+                </div>
+              );
+            })}
+          </div>
+          {data && data.unmapped_exercises.length > 0 ? (
+            <p className="history-boundary muscle-heat-unmapped">
+              尚无映射（未计入任何肌群）：{data.unmapped_exercises.join("、")}
+            </p>
+          ) : null}
+        </>
+      )}
+      {mapEntries.length > 0 ? (
+        <details className="muscle-map-table">
+          <summary>
+            <span>动作 → 肌群映射表（与动作示意图同一套映射 · MUSCLE-MAP v{muscleMapVersion ?? 1}，共 {mapEntries.length} 个动作）</span>
+            <i aria-hidden="true">›</i>
+          </summary>
+          <div className="muscle-map-list">
+            {mapEntries.map((entry) => (
+              <div key={entry.exercise_key} className="muscle-map-row">
+                <span className="muscle-map-name">{EXERCISE_GUIDES[entry.exercise_key]?.title ?? entry.exercise_key}</span>
+                <span>主要：{entry.primary.length > 0 ? entry.primary.join("、") : "—"}</span>
+                <span>协同：{entry.secondary.length > 0 ? entry.secondary.join("、") : "—"}</span>
+              </div>
+            ))}
+          </div>
+          <p className="history-boundary">
+            映射有误时告诉 Muse 即可修正；修正后热力图、动作示意图与完成小票会同步使用同一套映射。
+          </p>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
 // --- 2026-10-18 frequency sync: weekly schedule / daily micro-routine /
 // plan editor. All three read the persisted plan (getPlan); the editor
 // edits a local draft only — nothing is written until 保存计划 calls
@@ -4430,7 +4547,7 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory, actionTrends, weekFrequency, receiptId, onCloseReceipt }: {
+function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory, actionTrends, weekFrequency, muscleHeatmap, muscleMap, muscleMapVersion, receiptId, onCloseReceipt }: {
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
   progressionAdvice?: ProgressionAdviceEntry[];
@@ -4443,6 +4560,12 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
   // W3.4 (additive): server-computed per-exercise frequency over
   // the last 4 complete weeks; absent on older cached responses.
   weekFrequency?: WeekFrequencyData;
+  // W5.1 (additive): server-computed per-muscle-group facts for
+  // the last 7 days plus the static exercise -> muscle map;
+  // absent on older cached responses.
+  muscleHeatmap?: MuscleHeatmapData;
+  muscleMap?: MuscleMapEntry[];
+  muscleMapVersion?: number;
   // W4.3-D1: the workoutId this session just finished, or null. The
   // receipt renders non-blockingly at the top of the start page.
   receiptId: number | null;
@@ -4544,6 +4667,8 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
 
       <WeekFrequency data={weekFrequency} />
 
+      <MuscleHeatmap data={muscleHeatmap} muscleMap={muscleMap} muscleMapVersion={muscleMapVersion} />
+
       {planData ? <PlanConflicts plan={planData} /> : null}
       {planData ? (
         <PlanEditor
@@ -4613,6 +4738,9 @@ export function App() {
           deloadAdvisory={dashboard.data.deload_advisory}
           actionTrends={dashboard.data.action_trends}
           weekFrequency={dashboard.data.week_frequency}
+          muscleHeatmap={dashboard.data.muscle_heatmap}
+          muscleMap={dashboard.data.muscle_map}
+          muscleMapVersion={dashboard.data.muscle_map_version}
           receiptId={receiptId}
           onCloseReceipt={() => setReceiptId(null)}
         />
