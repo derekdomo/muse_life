@@ -625,22 +625,31 @@ else the last comparable performance weight (`previousByExercise`),
 else empty for manual entry — the label under the field names
 which source seeded it.
 
-One-tap insertion （一键加入热身组） reuses ONLY the existing
-writes: rows are append-only via `addSet` and set order follows
-row id, so prepending N warmup sets appends N rows via `addSet`
-and then rewrites every row of the exercise via `updateSet` so
-the stored sequence reads [warmup…, original sets…] — each
-original set's weight/reps/RIR/completed travel together, so no
-recorded performance is lost or merged. The flow registers as a
-pending add (the finish flow joins it like a plain addSet) and
-refuses to run while the exercise head reports any unsaved /
-saving / failed / blocked row (a dirty SetSaveMachine would not
-adopt the shifted server values and its next autosave would
-overwrite the shift). The warmup marker （热身组 chip + aria
-label) is session-local state in ExerciseBlock: the stored set
-has no warmup flag (no schema change), so the marker does not
-survive a reload while the weights/reps persist as ordinary set
-data — the post-insert note in the panel states this boundary.
+One-tap insertion （一键加入热身组） — REMOVED 2026-11-01,
+W-WARMUP-WRITE-001 (P0). The W5.2 implementation described in
+earlier revisions appended N rows via `addSet` and then rewrote
+every row of the exercise via `updateSet` so the stored sequence
+read [warmup…, original sets…]. An independent reproduction
+(injected failure on the 3rd update) showed the non-atomic shift
+overwrites completed working sets (100×8 / RIR 2 / completed)
+into incomplete warmups with no recovery from the error path —
+recorded performance was lost. The entire prepend write path
+(`handleAddWarmup` → `onAddWarmupSets` → `handleAddWarmupSets`)
+has been removed from `client/src/App.tsx`: `PlateWarmupTool`
+no longer receives a write callback, renders no add button, and
+shows an explicit disabled notice at the former write entry
+explaining the data-safety reason. The read-only calculator and
+preview (target input, bar weight + presets, plate library,
+warmup presets, warmup-set preview list) are unchanged and fully
+usable. The warmup marker （热身组 chip + aria label) display
+logic (`warmupSetIds.has(set.id)` in ExerciseBlock / SetRow) is
+kept unchanged — only its writer is gone. No production records
+were scanned, inferred, corrected or deleted in this fix. A
+future re-introduction must use independent warmup identity
+with atomic / idempotent writes that never move or rewrite an
+existing working set's identity / weight / reps / RIR /
+completed, and must be lossless under k-th-step failure, retry,
+double-click, concurrency, completed sets and dirty drafts.
 
 Standing disclosure (unchanged by this round): `getDashboard`'s
 viewer-less sync channel remains the owner's L0.1 exception of

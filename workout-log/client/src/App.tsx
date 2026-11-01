@@ -13,7 +13,6 @@ import {
   formatPlateWeight,
   formatPlatesPerSide,
   generateWarmupSets,
-  type WarmupSetPlan,
 } from "./plate-warmup";
 
 type Dashboard = ApiResponse<typeof api, "getDashboard">;
@@ -2364,10 +2363,11 @@ function playRestBeep() {
 function SetRow({ set, unit, locked, warmup, onSaved, onRegister, onCompleted, onEnterNext }: {
   set: WorkoutSet;
   unit: Unit;
-  // W5.2: session-local warmup marker — set for the rows a one-tap
-  // warmup insertion placed at the front of this exercise in THIS
-  // session. Display only: the stored set carries no warmup flag
-  // (no schema change), so the marker does not survive a reload.
+  // W5.2: session-local warmup marker — display only for rows
+  // marked as warmups in THIS session. The stored set carries no
+  // warmup flag (no schema change), so the marker does not survive
+  // a reload. W-WARMUP-WRITE-001 removed the writer that placed
+  // these marks; this display prop is kept unchanged.
   warmup?: boolean;
   // W-FINISH-001: while a finish flow owns the workout, entry is
   // locked — inputs, the completion toggle and retry are disabled so
@@ -2601,16 +2601,20 @@ function SetRow({ set, unit, locked, warmup, onSaved, onRegister, onCompleted, o
 }
 
 // --- W5.2: plate calculator + warmup generator panel ---
-// Inline tool inside the current exercise card (never a modal, never
-// an overlay): given a target weight it shows the per-side plate
-// combo from the pure plate-warmup module, generates warmup sets
-// from one of three percentage presets with every weight rounded to
-// a loadable weight by that same plate fill, and offers a one-tap
-// insert that prepends the warmup sets to this exercise's set list
-// through the parent block's existing save paths. Exactness is
-// always labelled in text with a symbol (✓ exact / — closest
-// loadable), never by colour alone.
-function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSource, setsClean, locked, onAddWarmupSets }: {
+// W-WARMUP-WRITE-001 (P0): the one-tap prepend write path is REMOVED.
+// The previous implementation appended N blank rows and then rewrote
+// every old/new row id so old ids became warmups and old performance
+// moved to new ids — with no atomicity. A mid-sequence failure left
+// completed working sets overwritten as incomplete warmups with no
+// way to recover from the error toast alone. That whole write path
+// (handleAddWarmup → onAddWarmupSets → handleAddWarmupSets) is gone:
+// this panel is now read-only. It still shows the per-side plate
+// combo and the warmup-set preview, but it writes nothing and never
+// moves or rewrites an existing working set's identity or values.
+// A future re-introduction must use independent warmup identity with
+// atomic / idempotent writes. Exactness is always labelled in text
+// with a symbol (✓ exact / — closest loadable), never by colour alone.
+function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSource, locked }: {
   exerciseName: string;
   unit: Unit;
   // W5.2 default target: the W3.2 progression engine's suggested
@@ -2619,20 +2623,12 @@ function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSourc
   // exists, so the field starts empty for manual entry.
   defaultTarget: number | null;
   defaultTargetSource: "engine" | "previous" | null;
-  // False while this exercise has unsaved / saving / failed /
-  // blocked set rows: prepending shifts stored values between rows,
-  // so it waits until every row is saved (the caller re-checks at
-  // click time too).
-  setsClean: boolean;
   locked: boolean;
-  onAddWarmupSets: (sets: WarmupSetPlan[]) => Promise<boolean>;
 }) {
   const [open, setOpen] = useState(false);
   const [targetDraft, setTargetDraft] = useState(() => (defaultTarget != null ? formatPlateWeight(defaultTarget) : ""));
   const [barDraft, setBarDraft] = useState(() => String(DEFAULT_BAR_WEIGHT[unit]));
   const [presetKey, setPresetKey] = useState<string>(WARMUP_PRESETS[0]?.key ?? "standard");
-  const [adding, setAdding] = useState(false);
-  const [addState, setAddState] = useState<"idle" | "added" | "failed" | "needs-save">("idle");
 
   const targetValue = targetDraft.trim() === "" ? null : Number(targetDraft);
   const targetValid = targetValue != null && Number.isFinite(targetValue) && targetValue > 0;
@@ -2641,21 +2637,6 @@ function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSourc
   const combo = targetValid && barValid ? calcPlateCombo(targetValue, barValue, unit) : null;
   const preset = WARMUP_PRESETS.find((entry) => entry.key === presetKey) ?? WARMUP_PRESETS[0];
   const warmupSets = targetValid && barValid && preset ? generateWarmupSets(targetValue, barValue, unit, preset.steps) : [];
-  const addDisabled = locked || adding || !setsClean || warmupSets.length === 0;
-
-  async function handleAddWarmup() {
-    if (addDisabled) return;
-    setAdding(true);
-    setAddState("idle");
-    let ok = false;
-    try {
-      ok = await onAddWarmupSets(warmupSets);
-    } catch {
-      ok = false;
-    }
-    setAdding(false);
-    setAddState(ok ? "added" : "failed");
-  }
 
   return (
     <div className="plate-tool">
@@ -2683,7 +2664,7 @@ function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSourc
                 step="0.5"
                 value={targetDraft}
                 disabled={locked}
-                onChange={(event) => { setTargetDraft(event.target.value); setAddState("idle"); }}
+                onChange={(event) => { setTargetDraft(event.target.value); }}
                 placeholder="手动输入"
               />
             </label>
@@ -2697,7 +2678,7 @@ function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSourc
                 step="0.5"
                 value={barDraft}
                 disabled={locked}
-                onChange={(event) => { setBarDraft(event.target.value); setAddState("idle"); }}
+                onChange={(event) => { setBarDraft(event.target.value); }}
               />
             </label>
           </div>
@@ -2745,7 +2726,7 @@ function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSourc
                 type="button"
                 aria-pressed={preset?.key === entry.key}
                 disabled={locked}
-                onClick={() => { setPresetKey(entry.key); setAddState("idle"); }}
+                onClick={() => { setPresetKey(entry.key); }}
               >
                 {entry.label}（{entry.steps.map((step) => `${step.percent}%×${step.reps}`).join("、")}）
               </button>
@@ -2767,22 +2748,10 @@ function PlateWarmupTool({ exerciseName, unit, defaultTarget, defaultTargetSourc
           ) : (
             <p className="plate-tool-note">输入目标重量后，这里会生成热身组。</p>
           )}
-          <button
-            type="button"
-            className="plate-tool-add"
-            disabled={addDisabled}
-            onClick={() => void handleAddWarmup()}
-          >
-            {adding ? "加入中…" : "一键加入热身组"}
-          </button>
-          {!setsClean ? (
-            <p className="plate-tool-note">本动作有未保存的修改，先等全部组保存后再加入热身组。</p>
-          ) : null}
-          {addState === "added" ? (
-            <p className="plate-tool-note" role="status">✓ 已加入：热身组已排到本动作组列表最前面，并标记为「热身组」（标记在本次训练内有效）。</p>
-          ) : addState === "failed" ? (
-            <p className="plate-tool-note" role="alert">— 加入失败，组列表已按服务器记录刷新，请检查后重试。</p>
-          ) : null}
+          <div className="plate-tool-disabled" role="note" aria-label="一键加入热身组已禁用">
+            <p><strong>一键加入热身组已禁用</strong>（数据安全）</p>
+            <p>原前插写入会改写已有工作组的身份与已保存表现，非原子写入中途失败可能损坏记录，因此该写入口已撤下。配重计算与上方热身组预览仍可正常查看；需要热身组时，请按预览用「+ 加一组」逐组手动添加并填写。</p>
+          </div>
         </div>
       ) : null}
     </div>
@@ -2848,80 +2817,17 @@ function ExerciseBlock({ workout, exercise, previous, suggestedTarget, suggested
   });
   const guide = EXERCISE_GUIDES[exercise.key];
 
-  // W5.2: ids of this exercise's rows inserted as warmup sets during
-  // THIS session (the stored set has no warmup flag — no schema
-  // change — so the marker is session-local display state; the
-  // weights/reps themselves are ordinary saved set data).
-  const [warmupSetIds, setWarmupSetIds] = useState<ReadonlySet<number>>(() => new Set<number>());
-
-  // W5.2 one-tap warmup insertion. There is deliberately NO new
-  // write channel and no reordering write: rows are append-only via
-  // addSet and set order follows row id, so prepending N warmup sets
-  // is done by (1) appending N rows through the existing addSet
-  // action, then (2) rewriting every row's values through the
-  // existing updateSet action so the sequence reads
-  // [warmup…, original sets…] — each original set's
-  // weight/reps/RIR/completed travel together, so no recorded
-  // performance is lost or merged. The whole flow is registered as
-  // a pending add synchronously, so a finish press joins it exactly
-  // like a plain addSet. It refuses to run while any row of this
-  // exercise is unsaved / saving / failed / blocked: a dirty row's
-  // SetSaveMachine would not adopt the shifted server values and
-  // its next autosave would silently overwrite the shift.
-  function handleAddWarmupSets(warmupSets: WarmupSetPlan[]): Promise<boolean> {
-    if (entryLocked || headInfo.statusKind != null || warmupSets.length === 0) {
-      return Promise.resolve(false);
-    }
-    const originalSets = exercise.sets;
-    const snapshot = originalSets.map((set) => ({
-      weight: set.weight,
-      reps: set.reps,
-      rir: set.rir,
-      completed: set.completed,
-    }));
-    const run = (async (): Promise<boolean> => {
-      const newIds: number[] = [];
-      for (let index = 0; index < warmupSets.length; index += 1) {
-        const added = await api.addSet({ workout_id: workout.id, exercise_key: exercise.key });
-        if (added.forbidden || !added.set) throw new Error("addSet refused");
-        newIds.push(added.set.id);
-      }
-      const orderedIds = [...originalSets.map((set) => set.id), ...newIds];
-      const finalValues: { weight: number | null; reps: number | null; rir: number | null; completed: boolean }[] = [
-        ...warmupSets.map((warmupSet) => ({ weight: warmupSet.weight, reps: warmupSet.reps, rir: null, completed: false })),
-        ...snapshot,
-      ];
-      let ok = true;
-      for (let index = 0; index < orderedIds.length; index += 1) {
-        const id = orderedIds[index];
-        const value = finalValues[index];
-        if (id == null || value == null) { ok = false; continue; }
-        const saved = await api.updateSet({ id, weight: value.weight, reps: value.reps, rir: value.rir, completed: value.completed });
-        if (!saved.ok) ok = false;
-      }
-      return ok;
-    })();
-    onRegisterPendingAdd(run);
-    return run.then(
-      async (ok) => {
-        if (ok) {
-          setWarmupSetIds((previousIds) => {
-            const next = new Set(previousIds);
-            for (const id of originalSets.slice(0, warmupSets.length).map((set) => set.id)) next.add(id);
-            return next;
-          });
-        }
-        await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-        onChanged();
-        return ok;
-      },
-      async () => {
-        await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-        onChanged();
-        return false;
-      },
-    );
-  }
+  // W5.2 / W-WARMUP-WRITE-001: ids of this exercise's rows marked as
+  // warmup sets during THIS session (the stored set has no warmup
+  // flag — no schema change — so the marker is session-local display
+  // state; the weights/reps themselves are ordinary saved set data).
+  // The display logic below (`warmupSetIds.has(set.id)`) is kept
+  // unchanged so any ids already marked in this session still render
+  // their 「热身组」 chip. The writer that populated this set was the
+  // unsafe prepend path and has been removed with it — no code now
+  // adds new ids here, and no existing working set is ever moved or
+  // rewritten to make room for warmups.
+  const [warmupSetIds] = useState<ReadonlySet<number>>(() => new Set<number>());
 
   // The promise is registered synchronously in the click, before any
   // later finish press can run, and unregistered by the registry
@@ -3002,9 +2908,7 @@ function ExerciseBlock({ workout, exercise, previous, suggestedTarget, suggested
           unit={workout.unit}
           defaultTarget={suggestedTarget ?? null}
           defaultTargetSource={suggestedTargetSource ?? null}
-          setsClean={headInfo.statusKind == null}
           locked={entryLocked}
-          onAddWarmupSets={handleAddWarmupSets}
         />
         {timerSlot}
       </div>
