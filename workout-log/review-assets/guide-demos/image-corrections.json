@@ -1,0 +1,33 @@
+[
+  {
+    "key": "prone-ytw",
+    "prompt": "Keep same six-panel grid and model/bench. CRITICAL CORRECTION ONLY TOP-RIGHT Y: both straight arms must reach FORWARD PAST THE HEAD on diagonals, never backwards toward hips. Model head is at lower-right in the current camera, feet at upper-left; therefore Y hands belong LOWER / to either side of HEAD, NOT near the upper-left feet. Choose a direct top-down overhead camera for ALL six panels to eliminate ambiguity: head at TOP of panel, feet at BOTTOM, bench vertical. Y endpoints both straight arms above head at 10 and 2 o'clock; T horizontal to sides; W elbows bent at about90 degrees with hands above elbows. Same neutral face-down spine, thumbs up. Left column arms relaxed floorward, right each correct Y T W.",
+    "target": "/Users/xiangyusun/Projects/Muse/Muse_life/work/pm-20261020-1530/prone-ytw-v2.png",
+    "sha256": "0b18b8d101c8f6509c1e595009293756687a8943fae0fcdde9ef21673b4b981a"
+  },
+  {
+    "key": "single-leg-balance",
+    "prompt": "Correct the three right-hand endpoint panels: the moving foot's TOE MUST LIGHTLY TOUCH THE FLOOR at a visibly marked small floor target in front / side / behind, not float in the air. Use exact side view for FRONT and BACK rows so forward/backward directions and toe contact cannot be confused, front view for SIDE row. Each row's two panels same camera. Left support foot stationary flat and neutral knee tracking its toes, weight stays on left leg, hand lightly on fixed chair. Free right foot is airborne only in the LEFT start panel. FRONT reaches in front of body rather than crossing inward; SIDE goes to right side; BACK behind. No lunge or trunk lean. Preserve same person clothes.",
+    "target": "/Users/xiangyusun/Projects/Muse/Muse_life/work/pm-20261020-1530/single-leg-balance-v2.png",
+    "sha256": "afa386a9e4d3b1cd56a6feb87a1b636d007482e3cf19d19ce52a6bc0a79081c0"
+  },
+  {
+    "key": "tibialis-raise",
+    "prompt": "Correct SETUP in BOTH panels: feet must stand a clear SHORT STEP FORWARD of the wall, heels approximately 30-40cm away from wall. Person is inclined straight BACK AGAINST THE WALL, torso/pelvis leaning on wall while heels stay forward; body NOT standing vertically with heels nearly against wall. Same small knee bend/no squat in both. Left soles flat. Right heels anchored exactly same floor location while ONLY forefoot/toes rise toward shins. Precise side-view shows wall-to-heel gap, both heels ground, both toes raised. Preserve clothes person and two-panel format.",
+    "target": "/Users/xiangyusun/Projects/Muse/Muse_life/work/pm-20261020-1530/tibialis-raise-v2.png",
+    "sha256": "05196aeeae4eb014c65992ec43fbd2798d85ac25cfad0ac575173c3de106df43"
+  },
+  {
+    "key": "reverse-pec-deck",
+    "prompt": "Fix both-arm symmetry and start/end: exact OVERHEAD camera enough to see both shoulders arms and two machine levers, head facing TOP of image towards chest pad. Chest supported against pad in both. LEFT panel BOTH nearly straight arms reaching FORWARD toward the machine FRONT, narrowly spaced in front of chest, not one arm already to side; hands at shoulder height. RIGHT panel BOTH arms open equally to SIDES to form T, elbows same small fixed bend, still chest on same pad. Both mechanical levers must rotate symmetrically from forward narrow to lateral wide, grips aligned with hands. Not chest fly, no back-on-pad, no rowing or torso twist. Same two-panel layout and model clothes.",
+    "target": "/Users/xiangyusun/Projects/Muse/Muse_life/work/pm-20261020-1530/reverse-pec-deck-v2.png",
+    "sha256": "3b32a81a0f157b5bed2b22bf24b5386584bc15b72ce63fe6e993856335da13c6"
+  },
+  {
+    "key": "tibialis-raise",
+    "version": 3,
+    "target": "/Users/xiangyusun/Projects/Muse/Muse_life/work/pm-20261020-1530/tibialis-raise-v3.png",
+    "sha256": "c50e0f86f2d1ccf448ee99d79d0206b1efd4ef93d69dff0bb4f45505da26a730",
+    "prompt": "Edit ONLY the stance geometry in both panels of this tibialis raise teaching sheet. Current feet are far too close to the wall. Keep model/clothes/side-view/lighting and same two panels. MOVE BOTH HEELS ANOTHER 30cm FORWARD away from the wall in BOTH panels, fixed same position between panels. Shoulders and upper back remain supported against wall. Torso can stay upright, hips naturally flex slightly and legs slope clearly forward toward distant planted heels; do NOT force a straight body plank with pelvis touching wall. Make unmistakable wide EMPTY FLOOR GAP between wall and both heels, approximately one normal shoe length to one short step. Knees nearly straight and identical across both frames. Panel1 full feet flat. Panel2 both heels anchored on floor at same distant locations, lift only forefeet/toes high toward shins. No heels elevated, no calf raise, no squat. Both legs/feet visible. No arrows or added text except 1 and2. This is an accuracy correction, not a creative change."
+  }
+]

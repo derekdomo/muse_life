@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>九动作 · 本地循环示意候选</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f1eb;color:#222;font:16px/1.6 system-ui,sans-serif}main{max-width:1080px;margin:auto;padding:28px 20px}h1{font-size:28px;line-height:1.25}h2{font-size:19px;margin:0 0 12px}.intro{max-width:780px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:20px}.card{background:#fff;padding:18px;border:1px solid #aaa;border-radius:14px}.media{position:relative;overflow:hidden;border:1px solid #777;border-radius:10px;background:#ddd}.media img{position:absolute;width:200%;height:var(--sheet-height);max-width:none;top:var(--top);left:0}.media .end{left:-100%;opacity:0;animation:fade 3.6s ease-in-out infinite}.media.hold .end{opacity:1;animation:none}.media.start .end{opacity:0;animation:none}.media.finish .end{opacity:1;animation:none}.media.paused .end{animation-play-state:paused}@keyframes fade{0%,30%{opacity:0}46%,68%{opacity:1}84%,100%{opacity:0}}button{font:inherit;background:#fff;color:#222;border:1px solid #555;border-radius:6px;padding:7px 11px;cursor:pointer}button[aria-pressed=true]{border:3px solid #222;padding:5px 9px;font-weight:700}button:focus-visible,a:focus-visible{outline:3px solid #1949c9;outline-offset:3px}.controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.caption,.notes{font-size:13px}.notes{color:#444}.status{border-left:4px solid #333;padding-left:12px}.small{font-size:13px}@media(prefers-reduced-motion:reduce){.media .end{animation:none;opacity:0}.media.finish .end,.media.hold .end{opacity:1}}
+</style>
+<main><h1>九动作 · 本地循环示意候选</h1>
+<p class="intro">沿用现有两帧循环切换的形式。这里是之前生成的 <strong>AI 动作示意候选</strong>，不是实拍；原有教学外链和文字仍需保留。本页仅加载本地素材，没有 YouTube 播放器。</p>
+<p class="status">状态：供整批过目，尚未接入训练记录。可暂停或分别看起始／结束帧。系统设置“减少动态效果”时默认静态。静蹲默认显示保持姿势。</p>
+<div class="grid" id="grid"></div><noscript>此预览需要 JavaScript。可打开同目录 README.md 逐张查看九组原图。</noscript>
+<p class="small">两帧只展示姿势对照，不代表运动轨迹或训练节奏。细微收下巴与肩胛动作需结合原有讲解。候选图审核通过后，由 Muse 经既有 builder 接入；本页不是已上线版本。</p></main>
+<script>
+const demos=[{"key":"supine-chin-tuck","title":"仰卧收下巴","file":"supine-chin-tuck.png","sha256":"aa7501a0a1ffc7e0bbdb045149c165adfc2048eb2d1f6c3b0d658afe46c0cede","notes":"后脑均接触垫面，下巴小幅后收、未抬头。细微动作请结合保留的真人视频对照。","rows":1,"width":1942,"height":809,"phases":["动作示意"],"hold":false,"owner_approved":false,"integrated":false},{"key":"prone-ytw","title":"俯卧 Y–T–W","file":"prone-ytw-v2.png","sha256":"0b18b8d101c8f6509c1e595009293756687a8943fae0fcdde9ef21673b4b981a","notes":"首稿Y朝向不合格；v2俯视依次呈Y/T/W，胸部支撑、头颈中立、轻片，三对起止不遗漏T。","rows":3,"width":1536,"height":1024,"phases":["Y","T","W"],"hold":false,"owner_approved":false,"integrated":false},{"key":"thoracic-extension","title":"胸椎伸展（泡沫轴版）","file":"thoracic-extension.png","sha256":"fb30b45842ef5aced4ede2083a3b696542991d82b309fb3cd7d5bede03f7d59d","notes":"泡沫轴位于上背，双手托头，臀与足接地；作为已标注的泡沫轴替代版，未改原bench指南。","rows":1,"width":2048,"height":768,"phases":["动作示意"],"hold":false,"owner_approved":false,"integrated":false},{"key":"single-leg-balance","title":"单腿平衡三向触点","file":"single-leg-balance-v2.png","sha256":"afa386a9e4d3b1cd56a6feb87a1b636d007482e3cf19d19ce52a6bc0a79081c0","notes":"首稿悬空脚未触地；v2三个方向端帧脚尖接触标记、支撑脚保持、轻扶椅，不把触点当负重跨步。","rows":3,"width":1536,"height":1024,"phases":["向前触点","向侧触点","向后触点"],"hold":false,"owner_approved":false,"integrated":false},{"key":"home-bulgarian-split-squat","title":"居家保加利亚分腿蹲（哑铃版）","file":"home-bulgarian-split-squat.png","sha256":"3e12934756e1a5abe58a6a921c77d56071e63dc0a7bcc72f5e6e8a57d9fda36a","notes":"后脚背搭凳，前脚全掌着地，前膝随脚尖，下蹲/高位对照；按本条哑铃替代版，原抱片计划不变。","rows":1,"width":1536,"height":1024,"phases":["动作示意"],"hold":false,"owner_approved":false,"integrated":false},{"key":"tibialis-raise","title":"靠墙胫骨前肌抬脚尖","file":"tibialis-raise-v3.png","sha256":"c50e0f86f2d1ccf448ee99d79d0206b1efd4ef93d69dff0bb4f45505da26a730","notes":"首两版离墙站位不足，不接入；v3脚跟明确向前离墙、背部有支撑，膝角保持，末帧脚跟着地且脚尖上抬。与原指南要点逐帧对照后进入本人过目候选。","rows":1,"width":1536,"height":1024,"phases":["动作示意"],"hold":false,"owner_approved":false,"integrated":false},{"key":"wall-sit","title":"靠墙静蹲","file":"wall-sit.png","sha256":"661581e5f249759543b6459064b9f54a0957b6960f78ebbe4775d0a15116e939","notes":"末帧背靠墙、髋膝约直角、全脚掌着地、手未撑大腿；静态保持动作，不伪作重复上下训练。","rows":1,"width":1536,"height":1024,"phases":["动作示意"],"hold":true,"owner_approved":false,"integrated":false},{"key":"reverse-pec-deck","title":"反向蝴蝶机","file":"reverse-pec-deck-v2.png","sha256":"3b32a81a0f157b5bed2b22bf24b5386584bc15b72ce63fe6e993856335da13c6","notes":"首稿双臂起始不一致；v2双臂前伸→对称侧开，面朝胸垫、不变划船，不用首稿。","rows":1,"width":1774,"height":887,"phases":["动作示意"],"hold":false,"owner_approved":false,"integrated":false},{"key":"push-up-plus","title":"前锯肌 Push-up Plus","file":"push-up-plus.png","sha256":"f4a82f8e99a2dfb419a5c79d1f4685e47b7ca4c84a6c2937b73cbcde9e87fd5a","notes":"两帧肘均伸直，手/脚固定、髋未塌，上背由下沉到推出；细微肩胛变化保留真人视频解释。","rows":1,"width":1942,"height":809,"phases":["动作示意"],"hold":false,"owner_approved":false,"integrated":false}];
+const grid=document.getElementById('grid');
+for (const d of demos) {
+ const card=document.createElement('section');card.className='card';
+ const h=document.createElement('h2');h.textContent=d.title;card.append(h);
+ const phases=document.createElement('div');phases.className='controls';phases.setAttribute('role','group');phases.setAttribute('aria-label',d.title+'阶段');
+ const media=document.createElement('div');media.className='media'+(d.hold?' hold':'');
+ media.style.aspectRatio=(d.width/2)+' / '+(d.height/d.rows);media.style.setProperty('--sheet-height',(d.rows*100)+'%');media.style.setProperty('--top','0%');media.setAttribute('role','img');
+ function label(phase){media.setAttribute('aria-label',d.title+' · '+phase+' · '+(d.hold?'进入与保持姿势对照':'起始与结束姿势对照'));}
+ label(d.phases[0]);
+ for(const [i,p] of d.phases.entries()){const b=document.createElement('button');b.textContent=p;b.type='button';b.setAttribute('aria-pressed',String(i===0));b.onclick=()=>{media.style.setProperty('--top',(-i*100)+'%');label(p);for(const el of phases.children)el.setAttribute('aria-pressed',String(el===b));};phases.append(b);}
+ if(d.rows>1)card.append(phases);
+ for(const cls of ['start-image','end']){const img=document.createElement('img');img.src=d.file;img.alt='';img.setAttribute('aria-hidden','true');img.className=cls;img.loading='lazy';media.append(img);}
+ card.append(media);
+ const caption=document.createElement('p');caption.className='caption';caption.textContent='AI 动作示意 · '+(d.hold?'静态保持，不反复上下蹲':'本地双帧循环');card.append(caption);
+ const controls=document.createElement('div');controls.className='controls';controls.setAttribute('role','group');controls.setAttribute('aria-label',d.title+'演示控制');
+ const names=d.hold?['进入姿势','保持姿势']:['循环演示','起始帧','结束帧','暂停／继续'];
+ for(const [i,n] of names.entries()){const b=document.createElement('button');b.type='button';b.textContent=n;
+ b.setAttribute('aria-pressed',String(d.hold?i===1:i===0));
+ b.onclick=()=>{
+  if(n==='暂停／继续'){const paused=media.classList.toggle('paused');b.textContent=paused?'继续演示':'暂停演示';b.setAttribute('aria-pressed',String(paused));return;}
+  media.classList.remove('start','finish','paused','hold');
+  if(n==='起始帧'||n==='进入姿势')media.classList.add('start');
+  if(n==='结束帧'||n==='保持姿势')media.classList.add('finish');
+  for(const el of controls.children){el.setAttribute('aria-pressed',String(el===b));if(el.dataset.pause)el.textContent='暂停／继续';}
+ };if(n==='暂停／继续')b.dataset.pause='true';controls.append(b);}
+ card.append(controls);
+ const notes=document.createElement('p');notes.className='notes';notes.textContent=d.notes;card.append(notes);
+ const a=document.createElement('a');a.href=d.file;a.textContent='查看完整起止原图';card.append(a);grid.append(card);
+}
+</script></html>

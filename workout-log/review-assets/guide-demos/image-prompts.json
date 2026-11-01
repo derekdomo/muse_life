@@ -1,0 +1,55 @@
+{
+  "scope": "W6.2-PM-IMG",
+  "tool": "built-in image_gen",
+  "status": "candidate; owner review required before integration",
+  "specifications": [
+    [
+      "supine-chin-tuck",
+      "仰卧收下巴",
+      "Close side view of a person lying supine on a floor mat, knees bent, no pillow. Head rests on mat in BOTH panels. Left neutral relaxed neck; right gentle CHIN RETRACTION horizontally toward neck to make a small double chin, tiny motion, head and eyes remain facing ceiling. NO neck flexion, NO chin toward chest, NO head lift. Shoulders relaxed, unchanged body. Crop enough face/neck to inspect subtle motion."
+    ],
+    [
+      "prone-ytw",
+      "俯卧 Y–T–W",
+      "Make a SIX-panel sheet, THREE ROWS with two columns, the only exception to two panels, so no stage is omitted. Same person prone chest-supported on a flat bench, head neutral face down, feet grounded, tiny light weight plates in hands. Fixed high 3/4 overhead camera. Row Y: left relaxed arms down, right straight arms raised diagonal toward head making Y, thumbs up. Row T: left arms relaxed down, right straight arms to sides shoulder height making T, scapula retracted. Row W: left arms relaxed down, right elbows bent making W, elbows draw back toward hips. Torso supported throughout, no neck extension or lumbar arch. Row labels ONLY Y T W, columns 1 2."
+    ],
+    [
+      "thoracic-extension",
+      "胸椎伸展（泡沫轴版）",
+      "Side-view TWO panels, identical camera. Person on mat with foam roller transversely under UPPER THORACIC BACK, knees bent, both feet planted, buttocks stay on floor in BOTH panels. Hands gently support back of head, elbows open. Left neutral thoracic position; right GENTLE upper-back extension over roller, small range, lower back stays neutral, hips never bridge. Not a situp or lumbar backbend. Show roller location beneath upper back, never beneath neck/lumbar. No bench. Clearly a foam-roller substitute."
+    ],
+    [
+      "single-leg-balance",
+      "单腿平衡三向触点",
+      "SIX-panel sheet, THREE rows two columns so each direction has accurate start/end. Fixed front-three-quarter full body view, same person, one hand lightly on fixed chair for support, left support foot stays flat and stationary, torso upright, support knee tracks toes. Each left panel neutral single-left-leg stance, right foot just off ground. Row1 right panel right toes gently tap in FRONT without weight shift. Row2 right panel right toes tap to RIGHT SIDE. Row3 right panel right toes tap BEHIND. Support heel never lifts, no knee collapse, no exaggerated lunge. Tiny labels only 1/2 columns, direction labels FRONT SIDE BACK."
+    ],
+    [
+      "home-bulgarian-split-squat",
+      "居家保加利亚分腿蹲（哑铃版）",
+      "Two panels side-three-quarter full body view, consistent feet placement and bench. Rear right foot instep rests on stable bench behind, front left foot whole sole on ground well forward. Person holds one light dumbbell in each hand arms by sides. Left high split-stance position, front knee slightly bent, not locked. Right controlled split squat lowering rear knee toward floor, front thigh approximately horizontal, front knee tracks foot and heel stays flat. Torso slight natural lean, pelvis level, no rear-foot push. Same exercise not walking lunge, no plate. Dumbbell substitute explicitly."
+    ],
+    [
+      "tibialis-raise",
+      "靠墙胫骨前肌抬脚尖",
+      "Two panels clear exact SIDE view full body plus feet, person back and pelvis resting against wall, heels on floor a small step forward of wall, knees nearly straight same angle. Left both whole feet flat. Right HEELS STAY ON FLOOR, FOREFOOT AND TOES lifted toward shins by ankle dorsiflexion. Legs/back remain same position in both, no squat, no heel raise, no leaning forward. Make toes vs heel contact visually unmistakable."
+    ],
+    [
+      "wall-sit",
+      "靠墙静蹲",
+      "Two full-body side-three-quarter panels, fixed camera wall position and feet. Left back flat against wall standing knees slightly bent feet a comfortable step forward. Right slide BACK DOWN WALL into static hold with hips/knees near90deg, thighs horizontal, shins near vertical, heels and whole feet flat. Back and pelvis touch wall. Hands relaxed by sides not pressing thighs, knees track toes, neutral spine. The right pose is held static, no bouncing. No bench."
+    ],
+    [
+      "reverse-pec-deck",
+      "反向蝴蝶机",
+      "Two panels from fixed raised rear-three-quarter view, full upper body and clearly plausible reverse-pec-deck machine visible. Person sits FACING the vertical chest pad and machine, chest against pad always, not back against pad. Same hand-grip height at shoulders throughout. LEFT arms nearly straight reaching FORWARD to grasp the two handles. RIGHT arms OPEN LATERALLY/BACK to a T at shoulder height with elbows softly bent same small angle, retract shoulder blades. Machine levers pivot appropriately, show both grips clearly. Not a forward chest fly, not seated rowing, no elbow bending, no torso lean or shoulder shrug."
+    ],
+    [
+      "push-up-plus",
+      "前锯肌 Push-up Plus",
+      "Two panels clear exact side view full body high plank on mat, palms directly below shoulders, elbows fully STRAIGHT IN BOTH, toes planted, neck neutral, hips and abdomen aligned never sag or pike. Left shoulder blades gently closer together, chest sinks only a FEW centimeters between straight arms. Right PUSH FLOOR AWAY by shoulder-blade protraction, UPPER back gently domes, arms remain straight. Only subtle scapular movement; no ordinary bent-arm pushup, no large spine arch, no shrug. Head/hand/foot positions fixed. Ensure elbows visible."
+    ]
+  ],
+  "common_prompt": "Use case: scientific-educational. Asset: candidate exercise teaching reference, requiring owner review before use. Generate ONE clean contact sheet for [TITLE]. Photorealistic fitness studio instruction with one generic adult athletic model, dark teal fitted t-shirt, charcoal shorts, plain trainers, soft grey wall and floor, no branding. Same identity clothing camera scale lighting in every panel. Most exercises have two equal landscape panels side by side start 1 / end 2, slim white gutter. Neutral editorial lighting, joints and contact points unobstructed. Human anatomical accuracy. No medical claims, no watermark, no decorative text, tiny panel numerals only unless specified. [ACTION DETAIL]",
+  "edit_common_prefix": "Edit this exercise reference candidate. Scientific educational photorealistic teaching sheet. ",
+  "edit_common_suffix": " Preserve neutral grey studio, no branding, correct human anatomy and unobstructed contact points. Only existing small labels, no extra advice."
+}
