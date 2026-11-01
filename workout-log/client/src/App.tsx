@@ -69,6 +69,125 @@ type Plan = ApiResponse<typeof api, "getPlan">;
 type PlanRoutineEntry = Plan["routines"][number];
 type PlanExerciseDraft = { key: string; name: string; sets: number; target: string };
 
+// W2.2 scroll restore (client presentation only; no server writes):
+// each top-level view saves its window.scrollY under its own view
+// key — "start" for the start screen and "active-<workoutId>" for
+// a workout in progress — and restores it when the user comes back
+// to that same view (switching back from the other view, reopening
+// after the guide dialog, or a reload). Positions live in an
+// in-memory map first (always available for in-session view
+// switches) and are mirrored to sessionStorage under the
+// "space6-scroll:" prefix so a reload can restore them too; storage
+// access is fully guarded because a sandboxed frame may deny it,
+// and the in-memory copy keeps the in-session flows working even
+// then. A view with no saved entry starts at the top, so beginning
+// a new workout always lands at the top; finishing or discarding a
+// workout clears BOTH keys (see runComplete / the discard mutation),
+// so returning to the start screen after a workout also starts at
+// the top instead of resurrecting the pre-workout scroll position.
+// Because the key carries the workout id, one workout's position
+// can never leak into another workout's view.
+const SCROLL_KEY_PREFIX = "space6-scroll:";
+export const START_VIEW_KEY = "start";
+export const activeViewKey = (workoutId: number) => `active-${workoutId}`;
+const scrollStorageKey = (viewKey: string) => `${SCROLL_KEY_PREFIX}${viewKey}`;
+const memoryViewScroll = new Map<string, number>();
+
+export function saveViewScroll(viewKey: string, scrollY: number): void {
+  const value = Math.max(0, Math.round(scrollY));
+  memoryViewScroll.set(viewKey, value);
+  try {
+    window.sessionStorage.setItem(scrollStorageKey(viewKey), String(value));
+  } catch {
+    // sessionStorage can be unavailable (sandboxed frame, private
+    // mode, quota); the in-memory copy above still covers
+    // in-session view switches, and restore is never a blocker.
+  }
+}
+
+export function readViewScroll(viewKey: string): number | null {
+  const remembered = memoryViewScroll.get(viewKey);
+  if (remembered != null) return remembered;
+  try {
+    const raw = window.sessionStorage.getItem(scrollStorageKey(viewKey));
+    if (raw == null) return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) return null;
+    memoryViewScroll.set(viewKey, value);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export function clearViewScroll(viewKey: string): void {
+  memoryViewScroll.delete(viewKey);
+  try {
+    window.sessionStorage.removeItem(scrollStorageKey(viewKey));
+  } catch {
+    // Same tolerance as saveViewScroll.
+  }
+}
+
+// Restores a saved position, retrying briefly because the view's
+// content (plan data, history) can keep growing the page after
+// mount; a user scroll gesture cancels the retry so the restore
+// never fights the user for the scrollbar.
+function restoreScrollPosition(target: number): () => void {
+  let cancelled = false;
+  let timer = 0;
+  const cancel = () => {
+    cancelled = true;
+    window.clearTimeout(timer);
+    window.removeEventListener("wheel", cancel);
+    window.removeEventListener("touchmove", cancel);
+  };
+  const attempt = (triesLeft: number) => {
+    if (cancelled) return;
+    window.scrollTo(0, target);
+    if (Math.abs(window.scrollY - target) <= 1 || triesLeft <= 0) {
+      cancel();
+      return;
+    }
+    timer = window.setTimeout(() => attempt(triesLeft - 1), 120);
+  };
+  window.addEventListener("wheel", cancel, { passive: true });
+  window.addEventListener("touchmove", cancel, { passive: true });
+  attempt(12);
+  return cancel;
+}
+
+// Mount hook for one top-level view: restores the saved position
+// for viewKey (or starts at the top when there is none), then keeps
+// the saved position current on scroll, on page hide, and on
+// unmount (the view switching away).
+export function useViewScrollRestore(viewKey: string): void {
+  useEffect(() => {
+    const saved = readViewScroll(viewKey);
+    const cancelRestore = saved != null && saved > 0
+      ? restoreScrollPosition(saved)
+      : (window.scrollTo(0, 0), null);
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = window.requestAnimationFrame(() => {
+        raf = 0;
+        saveViewScroll(viewKey, window.scrollY);
+      });
+    };
+    const onPageHide = () => saveViewScroll(viewKey, window.scrollY);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      cancelRestore?.();
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("pagehide", onPageHide);
+      if (raf) window.cancelAnimationFrame(raf);
+      saveViewScroll(viewKey, window.scrollY);
+    };
+  }, [viewKey]);
+}
+
 type ExerciseGuide = {
   title: string;
   focus: string;
@@ -1451,12 +1570,19 @@ function ExerciseGuideDialog({ guide, exerciseKey, onClose }: { guide: ExerciseG
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
+    // W2.2: capture the underlying view's scroll position before
+    // the body scroll lock; some browsers drop or shift scrollY
+    // while the body is locked, so closing restores it explicitly
+    // (the view's own scroll listener then re-saves the same value
+    // under its view key).
+    const scrollYAtOpen = window.scrollY;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", onKeyDown);
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
+      window.scrollTo(0, scrollYAtOpen);
     };
   }, [onClose]);
 
@@ -2514,6 +2640,8 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
   onCompleted: (workoutId: number) => void;
 }) {
   const queryClient = useQueryClient();
+  // W2.2: restore this workout view's scroll position on return.
+  useViewScrollRestore(activeViewKey(workout.id));
   const [, setClock] = useState(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [finishBlock, setFinishBlock] = useState<FinishGateReason | null>(null);
@@ -2641,6 +2769,12 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
       result = null;
     }
     if (result && result.ok === true) {
+      // W2.2: the workout is over — the start screen it returns to
+      // starts at the top, so drop both views' saved positions
+      // before the switch (the unmount save would otherwise keep
+      // the pre-workout start position alive under its key).
+      clearViewScroll(START_VIEW_KEY);
+      clearViewScroll(activeViewKey(workout.id));
       onCompleted(workout.id);
       return true;
     }
@@ -2790,7 +2924,13 @@ function ActiveWorkout({ workout, recent, weekSummaries, onCompleted }: {
   }
   const discard = useMutation({
     mutationFn: () => api.discardWorkout({ workout_id: workout.id }),
-    onSuccess: refresh,
+    onSuccess: () => {
+      // W2.2: discarding ends the workout like finishing does —
+      // the start screen it returns to starts at the top.
+      clearViewScroll(START_VIEW_KEY);
+      clearViewScroll(activeViewKey(workout.id));
+      refresh();
+    },
   });
 
   const previousByExercise = useMemo(() => {
@@ -3541,6 +3681,8 @@ function StartScreen({ recent, weekSummaries, comparableHistory, receiptId, onCl
   onCloseReceipt: () => void;
 }) {
   const queryClient = useQueryClient();
+  // W2.2: restore the start view's scroll position on return.
+  useViewScrollRestore(START_VIEW_KEY);
   const [unit, setUnit] = useState<Unit>("lb");
   const [historyFocus, setHistoryFocus] = useState<{ id: number; n: number } | null>(null);
   const plan = useQuery({

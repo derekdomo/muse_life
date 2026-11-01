@@ -91,6 +91,7 @@ For the remaining 9 movements no accurate, cleanly licensed real video was found
 - Wall sit (`wall-sit`): no wall-sit video exists in the searched libraries.
 - Reverse pec deck (`reverse-pec-deck`): the one pec-deck video downloaded and checked second-by-second (Pexels 4921622) is the FORWARD fly — arms closing in front of the chest, the exact opposite direction. Rejected.
 - Push-up plus (`push-up-plus`): available push-up videos (e.g. Pexels 4367576) are regular push-ups with bent elbows; the plus is a straight-arm scapular movement, so they would teach the guide's own listed mistake. Rejected.
+
 - Lateral lunge (`lateral-lunge`, added 2026-10-24, W-HOMEB-001): text-only guide prepared ahead of the dated Home B swap — from 2026-11-16 until the first snowboard trip it takes the `bench-step-up` slot at equal volume (2 sets), progressing bodyweight lateral lunge → pulse lunge over three weeks. No demo image, no generated imagery, no video link: no verified real demonstration was sourced for this movement, so it ships text cues only under the same accuracy rule as the 9 above. The stored plan itself is unchanged until the window opens — the swap exists only as the dated annotation appended to the day-2 (`home_snowboard`) schedule note by migration 0007, mirrored in `DEFAULT_PLAN_SCHEDULE`.
 
 Also rejected while sourcing the four shipped pairs: seated dumbbell/machine presses (Pexels 4367541, 29569376, 7187395; CDC Commons machine press) for the standing barbell press; a standing dumbbell press (Pexels 5837705, cropped close-up, wrong implement for a barbell guide); biceps-curl videos surfaced under "lateral raise" (Pexels 6326722, 16368952); an outdoor resistance-band row (Pexels 6022753) for the cable row; and a distant calf-machine video with a water-drinking break (Pexels 10315443) in favour of the close-up step video above.
@@ -109,6 +110,26 @@ Also rejected while sourcing the four shipped pairs: seated dumbbell/machine pre
 - The review uses the viewer's current calendar week (Monday through now) and the stored completed workouts.
 - It reports only recorded session and completed-set counts.
 - The next-week adjustment is deliberately conservative: retain the existing compound movements and add one unilateral leg exercise (Bulgarian split squat, 3 × 8–10) because the previous leg template contained bilateral squat, hip hinge, and hamstring isolation but no unilateral knee-dominant work.
+
+## Scroll-position restore (W2.2, added 2026-11-01)
+
+Client presentation only — no server action, schema, or stored-data
+change. Each top-level view saves `window.scrollY` under its own
+view key (`start`, `active-<workoutId>`) via `useViewScrollRestore`
+in `client/src/App.tsx` — in an in-memory map first, mirrored to
+`sessionStorage` under the `space6-scroll:` prefix so a reload can
+restore too (storage access is guarded; a sandboxed frame may deny
+it, and the in-memory copy keeps in-session view switches working
+regardless) — and restores it when the user returns to that view
+(view switch, reload, or closing the exercise-guide dialog — the
+dialog also captures the position on open and restores it on
+close, since locking body scroll can shift it). A view with no
+saved entry starts at the top; finishing or discarding a workout
+clears both the start key and that workout's key, so the start
+screen after a workout always begins at the top. Verified by
+`validate-scroll-restore.mjs` (24 checks: per-key save/read,
+cross-workout isolation, clear semantics, hostile/unavailable
+storage, and source wiring).
 
 ## Muscle diagram (W6.2, added 2026-10-20)
 

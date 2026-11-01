@@ -1,5 +1,11 @@
 # Changes
 
+## 2026-11-01 02 时 PDT（muse-life-plans-sync：W2.2 滚动恢复交付＋回灌）
+
+- `W2.2` 剩余子项「页面返回后恢复滚动位置」已交付并上线（space-6）：新增 `useViewScrollRestore`（`client/src/App.tsx`）——起始页/训练页按视图键（start / active-<workoutId>）保存 `window.scrollY`，内存映射为主、`sessionStorage`（`space6-scroll:` 前缀）镜像，存储被拒时会话内切换仍可恢复；动作示范弹窗打开时捕获位置、关闭时恢复；开始新训练、结束/放弃训练清键、回到起始页仍从顶部开始，不同训练不串位。服务端仅 platform v26 升级附带的 10 个 action 一句话 `description` 元数据（getDashboard、startWorkout、updateSet、addSet、completeWorkout、discardWorkout、getPlan、updatePlan、resolvePlanConflict、toggleDailyItem；handler/schema/权限零改动）。审计发现如实记录：安全评审指出的 getDashboard 无身份只读通道即用户 2026-10-17 亲自批准的 L0.1 例外（维持现状，不重开）；审计沙箱非 owner、无进行中训练，训练页/弹窗实机恢复以纯函数与接线断言覆盖。
+- 仓库回灌：`workout-log/client/src/App.tsx`、`server/src/actions.ts`、`DATA-PLAN.md`（新增 W2.2 整节文档）、`validate-scroll-restore.mjs` 四文件与线上逐字一致（server diff 仅 10 个 description 新增）；脱敏扫描：无 UUID/无 /Users/ 路径/无密钥。验证证据：仓库实跑 validate-scroll-restore 26/26、autosave 69/69、rest-timer 48/48、receipt 36/36、muscle-receipt 30/30、week-current 58/58；plan-safe 因本地无 node_modules SDK dist 未能运行（环境限制、与本轮无关）。局限：审计沙箱 reload 不保留 sessionStorage；恢复重试窗口约 1.4 秒，慢加载继续增高时恢复位置可能略短。整项待 PM 验收，不勾选；回滚 revert 本提交。
+- 队列核对：未勾选项或为运行待验（缺 owner/PM 运行证据，不伪造验收）、或为（需用户确认）项（`CWEB-LEVEL-001` 四参数/路径、`W6.2-PM-IMG` 整批过目未收、`H4.6` 恢复参考 T 未定、`H-SWIM-PRIV-001` 已提交历史清理范围、`F-ARCH-001` 异常阈值定案）；`F-ARCH-001` 余项（F0.6/F1.6 其余迁移，A 类复杂项）与 `F1.3` P1 可编辑假设（口径未定案）沿原队列保留；`F0.5` P0 仍属原 Muse 负责、PM 暂停期间不虚构交付；`W-HOMEB-002` 定于 2026-11-16 自动执行、本轮未到执行日。
+
 ## 2026-11-01 02 时 PDT（muse-life-plans-sync 01:55 轮次：W2.2 剩余子项派工）
 
 - 队列推进（无新编号条目、基线无新提交，按「推荐执行顺序」自取）：`W2.2` 训练页单手可操作四子项中，数字键盘（inputMode）、回车跳下一输入（SetRow→ExerciseBlock→handleEnterNext 的 onEnterNext 链）、44px 最小触控区已在现版本实现；本轮经 `artifact.edit` 派 builder 只做剩余子项「页面返回后恢复滚动位置」——StartScreen↔ActiveWorkout 切换、动作示范弹窗打开/关闭返回时，按视图键（start / active-<workoutId>）在 sessionStorage 保存/恢复 window.scrollY；开始新训练、结束训练回到起始页仍从顶部开始。仅 client 呈现层，不动服务端/公式/schema/同步/权限。构建交付与仓库回灌待回传；整项待 PM 验收，不勾选。修改文件：`plans.md`（派工登记）、本文件（派工登记）；业务代码待 builder 交付后回灌。回滚：revert 本提交即恢复派工登记前状态（builder 侧构建如需中止用 artifact.cancel）。

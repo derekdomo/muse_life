@@ -1221,6 +1221,7 @@ async function loadReceiptPrevious(
 
 export const Actions = {
   getDashboard: defineAction({
+    description: "Read the workout dashboard: the active workout, recent completed workouts, week summaries, comparable history, and optionally one completion receipt read back by id.",
     request: z.object({
       recent_limit: z.number().int().min(1).max(20).default(8),
       // W4.3-D1 (additive, optional): the id of the workout the caller
@@ -1340,6 +1341,7 @@ export const Actions = {
   }),
 
   startWorkout: defineAction({
+    description: "Start a new workout session for a routine, building its sets from the saved plan template with history-based prefill.",
     request: z.object({ routine: routineSchema, unit: unitSchema }),
     response: startResponse,
     async handler(ctx, args): Promise<z.infer<typeof startResponse>> {
@@ -1674,6 +1676,7 @@ export const Actions = {
   }),
 
   updateSet: defineAction({
+    description: "Save one set's weight, reps, and completion state in the active workout.",
     request: z.object({
       id: z.number().int().positive(),
       weight: z.number().min(0).max(5000).nullable(),
@@ -1712,6 +1715,7 @@ export const Actions = {
   }),
 
   addSet: defineAction({
+    description: "Add one extra set for an exercise to the active workout.",
     request: z.object({ workout_id: z.number().int().positive(), exercise_key: z.string().min(1) }),
     response: addSetResponse,
     async handler(ctx, args): Promise<z.infer<typeof addSetResponse>> {
@@ -1776,6 +1780,7 @@ export const Actions = {
   }),
 
   completeWorkout: defineAction({
+    description: "Mark the active workout as completed and close it.",
     request: z.object({ workout_id: z.number().int().positive() }),
     response: doneResponse,
     async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
@@ -1805,6 +1810,7 @@ export const Actions = {
   }),
 
   discardWorkout: defineAction({
+    description: "Delete the active workout and all of its sets without recording it in history.",
     request: z.object({ workout_id: z.number().int().positive() }),
     response: doneResponse,
     async handler(ctx, args): Promise<z.infer<typeof doneResponse>> {
@@ -1832,6 +1838,7 @@ export const Actions = {
   }),
 
   getPlan: defineAction({
+    description: "Read the editable training plan: routine templates, the weekly schedule, daily micro-routine items, and any unconfirmed plan conflicts.",
     request: z.object({}),
     response: planResponse,
     async handler(ctx): Promise<z.infer<typeof planResponse>> {
@@ -1933,6 +1940,7 @@ export const Actions = {
   }),
 
   updatePlan: defineAction({
+    description: "Save edits to the training plan: routine exercise templates, the weekly schedule, and daily micro-routine items.",
     request: z.object({
       routines: z.array(
         z.object({
@@ -2087,6 +2095,7 @@ export const Actions = {
   // decision (double tap, retried request) is answered from the
   // recorded decision: ok with outcome "already_resolved".
   resolvePlanConflict: defineAction({
+    description: "Resolve an archived duplicate plan-exercise conflict by choosing which candidate version stays in the plan.",
     request: z.object({
       routine: z.string().min(1),
       exercise_key: z.string().min(1),
@@ -2574,6 +2583,7 @@ export const Actions = {
   }),
 
   toggleDailyItem: defineAction({
+    description: "Set one daily posture micro-routine item's completion state for a given date.",
     request: z.object({
       date_key: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       item_key: z.string().min(1),
