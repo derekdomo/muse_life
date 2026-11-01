@@ -60,6 +60,49 @@ const ROUTINE_META: Record<Routine, { label: string; title: string; day: string;
   },
 };
 
+// --- W-TRAIN-FLOW-001: guided flow helpers (pure) ---
+// The default warmup is the routine's existing ROUTINE_META warmup
+// text, structured into sequential steps — the movements, durations
+// and set/rep counts are the original text split on "·", unchanged.
+// Warmup steps are preparation only: they are never workout sets and
+// never enter the formal set count.
+export function warmupStepsFor(routine: Routine): string[] {
+  return ROUTINE_META[routine].warmup
+    .split("·")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+}
+
+// W-TRAIN-FLOW-001: implement kinds for the guided card. Only
+// barbell movements ever show a plate combination; dumbbells are
+// labelled as a per-dumbbell weight; machine / cable / bodyweight /
+// timed movements never get barbell plate math.
+export const BARBELL_EXERCISE_KEYS: ReadonlySet<string> = new Set([
+  "barbell-bench",
+  "overhead-press",
+  "back-squat",
+  "romanian-deadlift",
+]);
+export const DUMBBELL_EXERCISE_KEYS: ReadonlySet<string> = new Set([
+  "incline-dumbbell-press",
+  "lateral-raise",
+  "bulgarian-split-squat",
+]);
+// Movements the guides perform one side at a time; the guided card
+// says so in words instead of assuming a bilateral set.
+export const PER_SIDE_EXERCISE_KEYS: ReadonlySet<string> = new Set([
+  "bulgarian-split-squat",
+  "home-bulgarian-split-squat",
+  "bench-step-up",
+  "single-leg-balance",
+  "side-external-rotation",
+  "side-plank",
+]);
+
+export function isTimedTarget(target: string): boolean {
+  return target.includes("秒");
+}
+
 // The weekly review's "完整一轮" still means the three gym sessions;
 // the home routines are tracked in history but never gate the review.
 const GYM_ROUTINES: Routine[] = ["push", "pull", "legs"];
@@ -2005,6 +2048,17 @@ export type SetSaveHandle = {
   // Undo a seal (e.g. a finish attempt failed): the row becomes
   // editable and saveable again with its draft untouched.
   unseal: () => void;
+  // W-TRAIN-FLOW-001: the guided card is a second view onto this
+  // row's ONE draft — it reads and edits the same machine the set
+  // table edits, so a dirty draft survives switching between the
+  // guided card and the plan table, and the finish gate keeps
+  // judging the same registered handle.
+  getDraft: () => SetDraft;
+  applyDraft: (draft: SetDraft) => void;
+  // Marks the current draft completed and flushes the save queue;
+  // resolves true only when the completed values are confirmed
+  // saved (and the row is not blocked on a missing rep count).
+  completeAndFlush: () => Promise<boolean>;
 };
 
 // --- W-UI-001 rework: single-writer save queue per set ---
@@ -2452,6 +2506,17 @@ function SetRow({ set, unit, locked, warmup, onSaved, onRegister, onCompleted, o
       },
       unseal: () => {
         sealedRef.current = false;
+      },
+      getDraft: () => machineRef.current.draft,
+      applyDraft: (draft: SetDraft) => {
+        editDraft(draft, false);
+      },
+      completeAndFlush: async () => {
+        const next = { ...machineRef.current.draft, completed: true };
+        if (setSaveBlocked({ ...machineRef.current, draft: next })) return false;
+        editDraft(next, true);
+        const ok = await flushSave();
+        return ok && machineRef.current.draft.completed;
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2974,6 +3039,53 @@ function RestAutoToggle({ timer, onChange }: {
   );
 }
 
+// --- W-TRAIN-FLOW-001: warmup progress (session-local only) ---
+// Warmup steps carry NO server identity and are never written as
+// workout sets (the removed W-WARMUP-WRITE-001 prepend path stays
+// removed). Progress lives in sessionStorage on this device only,
+// keyed by workout id. Because it is not persisted server-side, a
+// reload mid-warmup never pretends the progress was recorded: the
+// flow stops at an explicit recovery choice （已热身 / 继续 / 重新）
+// and formal-set recovery from the server record is unaffected.
+export type WarmupStepStatus = "done" | "skipped";
+export type WarmupProgress = {
+  index: number;
+  statuses: WarmupStepStatus[];
+  finished: boolean;
+  selfDone: boolean;
+};
+const WARMUP_STORAGE_PREFIX = "space6-guided-warmup:";
+
+export function readWarmupProgress(workoutId: number): WarmupProgress | null {
+  try {
+    const raw = window.sessionStorage.getItem(`${WARMUP_STORAGE_PREFIX}${workoutId}`);
+    if (raw == null) return null;
+    const parsed = JSON.parse(raw) as Partial<WarmupProgress>;
+    if (typeof parsed.index !== "number" || !Array.isArray(parsed.statuses)) return null;
+    return {
+      index: Math.max(0, Math.floor(parsed.index)),
+      statuses: parsed.statuses.filter(
+        (status): status is WarmupStepStatus => status === "done" || status === "skipped",
+      ),
+      finished: parsed.finished === true,
+      selfDone: parsed.selfDone === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeWarmupProgress(workoutId: number, progress: WarmupProgress): void {
+  try {
+    window.sessionStorage.setItem(`${WARMUP_STORAGE_PREFIX}${workoutId}`, JSON.stringify(progress));
+  } catch {
+    // Storage can be unavailable (sandboxed frame, private mode);
+    // the in-memory state still drives this session's flow.
+  }
+}
+
+export type GuidedPhase = "warmup" | "warmup-recovery" | "work" | "rest";
+
 function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCompleted }: {
   workout: Workout;
   recent: Workout[];
@@ -3017,7 +3129,30 @@ function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCo
   // W-UI-001-D1: live per-set save state mirrored out of the handle
   // registry on every registration/status change, so the top save
   // aggregate and the card heads re-render with each row's status.
-  const [handleStates, setHandleStates] = useState<ReadonlyMap<number, { status: SetSaveStatus; blocked: boolean; completed: boolean }>>(new Map());
+  const [handleStates, setHandleStates] = useState<ReadonlyMap<number, { status: SetSaveStatus; blocked: boolean; completed: boolean; draftWeight: string; draftReps: string; draftRir: string }>>(new Map());
+  // W-TRAIN-FLOW-001: guided flow state. The phase walks
+  // warmup → work ⇄ rest; a workout that already has saved
+  // completed sets (server fact) resumes straight in "work" — it
+  // never restarts the warmup and never re-creates sets. An
+  // unfinished session-local warmup found on mount stops at
+  // "warmup-recovery" and asks, instead of inventing progress.
+  const [guidedPhase, setGuidedPhase] = useState<GuidedPhase>(() => {
+    if (workout.sets.some((set) => set.completed)) return "work";
+    const stored = readWarmupProgress(workout.id);
+    if (stored?.finished) return "work";
+    if (stored && (stored.index > 0 || stored.statuses.length > 0)) return "warmup-recovery";
+    return "warmup";
+  });
+  const [warmupIndex, setWarmupIndex] = useState<number>(() => readWarmupProgress(workout.id)?.index ?? 0);
+  const [warmupStatuses, setWarmupStatuses] = useState<WarmupStepStatus[]>(() => readWarmupProgress(workout.id)?.statuses ?? []);
+  const [warmupOutcome, setWarmupOutcome] = useState<"steps" | "self" | null>(null);
+  const [guidedSetId, setGuidedSetId] = useState<number | null>(null);
+  // Sets the user explicitly skipped in the guided flow this
+  // session. A skipped set stays incomplete in the record — it is
+  // never auto-checked — and can still be done from 本次计划.
+  const [skippedSetIds, setSkippedSetIds] = useState<ReadonlySet<number>>(new Set());
+  const [guidedSaving, setGuidedSaving] = useState(false);
+  const [guidedError, setGuidedError] = useState<"save" | "missing" | null>(null);
   const [pendingAddCount, setPendingAddCount] = useState(0);
   const finishButtonRef = useRef<HTMLButtonElement | null>(null);
   const preFinishFocusRef = useRef<HTMLElement | null>(null);
@@ -3095,9 +3230,17 @@ function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCo
   }, [unsavedPresent]);
 
   const refreshHandleStates = () => {
-    const next = new Map<number, { status: SetSaveStatus; blocked: boolean; completed: boolean }>();
+    const next = new Map<number, { status: SetSaveStatus; blocked: boolean; completed: boolean; draftWeight: string; draftReps: string; draftRir: string }>();
     for (const handle of setHandlesRef.current.values()) {
-      next.set(handle.id, { status: handle.getStatus(), blocked: handle.isBlocked(), completed: handle.isCompleted() });
+      const draft = handle.getDraft();
+      next.set(handle.id, {
+        status: handle.getStatus(),
+        blocked: handle.isBlocked(),
+        completed: handle.isCompleted(),
+        draftWeight: draft.weight,
+        draftReps: draft.reps,
+        draftRir: draft.rir,
+      });
     }
     setHandleStates(next);
     setUnsavedPresent(hasUnsavedSetStatus([...next.values()].map((entry) => entry.status)));
@@ -3401,14 +3544,202 @@ function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCo
     })),
     selectedExerciseKey,
   );
-  const restTimerUi = (
-    <>
-      <RestAutoToggle timer={restTimer} onChange={updateRestTimer} />
-      {restTimer.endsAt != null ? (
-        <RestTimerPanel timer={restTimer} nowMs={restNow} onChange={updateRestTimer} />
-      ) : null}
-    </>
-  );
+  // --- W-TRAIN-FLOW-001: guided flow derivation + handlers ---
+  // The guided card works on the flat plan order. A set counts as
+  // done only through its registered save handle (the live draft)
+  // or, before registration, the server record — the same facts the
+  // finish gate judges. Skipped sets are passed over for "current"
+  // but stay incomplete everywhere in the record.
+  const warmupSteps = warmupStepsFor(workout.routine);
+  const flatGuidedSets = exerciseGroups.flatMap((group) => group.sets.map((set) => ({ group, set })));
+  const isGuidedDone = (set: WorkoutSet): boolean => {
+    const handle = setHandlesRef.current.get(set.id);
+    return handle ? handle.isCompleted() : (handleStates.get(set.id)?.completed ?? set.completed);
+  };
+  const guidedCurrent = (() => {
+    const preferred = flatGuidedSets.find(
+      (item) => item.set.id === guidedSetId && !isGuidedDone(item.set) && !skippedSetIds.has(item.set.id),
+    );
+    if (preferred) return preferred;
+    return flatGuidedSets.find((item) => !isGuidedDone(item.set) && !skippedSetIds.has(item.set.id)) ?? null;
+  })();
+  const guidedNext = (() => {
+    if (!guidedCurrent) return null;
+    const index = flatGuidedSets.findIndex((item) => item.set.id === guidedCurrent.set.id);
+    for (let i = index + 1; i < flatGuidedSets.length; i += 1) {
+      const item = flatGuidedSets[i];
+      if (item && !isGuidedDone(item.set) && !skippedSetIds.has(item.set.id)) return item;
+    }
+    return null;
+  })();
+
+  function guidedSetPreview(item: { group: (typeof flatGuidedSets)[number]["group"]; set: WorkoutSet }): string {
+    const snapshot = handleStates.get(item.set.id);
+    const weight = snapshot ? snapshot.draftWeight : item.set.weight != null ? String(item.set.weight) : "";
+    const reps = snapshot ? snapshot.draftReps : item.set.reps != null ? String(item.set.reps) : "";
+    const timed = isTimedTarget(item.set.target_reps);
+    const loadText = timed
+      ? `${reps !== "" ? reps : item.set.target_reps} 秒`
+      : `${weight !== "" ? `${weight}${workout.unit}` : "自重"} × ${reps !== "" ? reps : `目标 ${item.set.target_reps}`} 次`;
+    return `${item.group.name} · 第 ${item.set.set_number} 组 · ${loadText}`;
+  }
+
+  function finishWarmup(selfDone: boolean, statuses: WarmupStepStatus[] = warmupStatuses, index: number = warmupIndex) {
+    writeWarmupProgress(workout.id, { index, statuses, finished: true, selfDone });
+    setWarmupOutcome(selfDone ? "self" : "steps");
+    setGuidedPhase("work");
+  }
+
+  function advanceWarmup(status: WarmupStepStatus) {
+    const nextStatuses = [...warmupStatuses];
+    nextStatuses[warmupIndex] = status;
+    setWarmupStatuses(nextStatuses);
+    if (warmupIndex + 1 >= warmupSteps.length) {
+      finishWarmup(false, nextStatuses, warmupIndex);
+      return;
+    }
+    const nextIndex = warmupIndex + 1;
+    setWarmupIndex(nextIndex);
+    writeWarmupProgress(workout.id, { index: nextIndex, statuses: nextStatuses, finished: false, selfDone: false });
+  }
+
+  function restartWarmup() {
+    setWarmupIndex(0);
+    setWarmupStatuses([]);
+    writeWarmupProgress(workout.id, { index: 0, statuses: [], finished: false, selfDone: false });
+    setGuidedPhase("warmup");
+  }
+
+  // After a guided save lands, move to the next open set: rest
+  // first when one exists (the countdown starts only under the
+  // existing auto setting; the rest screen itself always shows).
+  function advanceAfterGuidedSave(savedSetId: number) {
+    const index = flatGuidedSets.findIndex((item) => item.set.id === savedSetId);
+    let next: (typeof flatGuidedSets)[number] | null = null;
+    for (let i = index + 1; i < flatGuidedSets.length; i += 1) {
+      const item = flatGuidedSets[i];
+      if (item && !isGuidedDone(item.set) && !skippedSetIds.has(item.set.id)) { next = item; break; }
+    }
+    if (!next) {
+      next = flatGuidedSets.find((item) => !isGuidedDone(item.set) && !skippedSetIds.has(item.set.id)) ?? null;
+    }
+    refreshHandleStates();
+    if (!next) {
+      setGuidedSetId(null);
+      setGuidedPhase("work");
+      return;
+    }
+    setGuidedSetId(next.set.id);
+    setSelectedExerciseKey(next.group.key);
+    setRestTimer((state) => (shouldAutoStartRest(state) ? startRestTimer(state, Date.now()) : state));
+    setGuidedPhase("rest");
+  }
+
+  // 完成这组： submits the current set's id with the values visible
+  // on the guided card (the row's own draft). Only a confirmed save
+  // advances the flow and starts the rest countdown; a failure
+  // stays on this set with the input kept and a retry offered.
+  async function handleGuidedComplete() {
+    if (!guidedCurrent || guidedSaving || finishing) return;
+    const setId = guidedCurrent.set.id;
+    const handle = setHandlesRef.current.get(setId);
+    if (!handle) {
+      setGuidedError("save");
+      return;
+    }
+    if (handle.getDraft().reps.trim() === "") {
+      setGuidedError("missing");
+      return;
+    }
+    setGuidedError(null);
+    setGuidedSaving(true);
+    let ok = false;
+    try {
+      ok = await handle.completeAndFlush();
+    } catch {
+      ok = false;
+    }
+    setGuidedSaving(false);
+    refreshHandleStates();
+    if (!ok) {
+      setGuidedError(handle.getDraft().completed ? "save" : "missing");
+      return;
+    }
+    advanceAfterGuidedSave(setId);
+  }
+
+  // Retry after a failed guided save: when the draft already
+  // carries the completion, a plain flush re-sends it; otherwise
+  // the full complete path runs again.
+  async function handleGuidedRetry() {
+    if (!guidedCurrent || guidedSaving || finishing) return;
+    const setId = guidedCurrent.set.id;
+    const handle = setHandlesRef.current.get(setId);
+    if (!handle) {
+      setGuidedError("save");
+      return;
+    }
+    if (!handle.getDraft().completed) {
+      await handleGuidedComplete();
+      return;
+    }
+    setGuidedError(null);
+    setGuidedSaving(true);
+    let ok = false;
+    try {
+      ok = await handle.flush();
+    } catch {
+      ok = false;
+    }
+    setGuidedSaving(false);
+    refreshHandleStates();
+    if (!ok) {
+      setGuidedError("save");
+      return;
+    }
+    advanceAfterGuidedSave(setId);
+  }
+
+  function handleGuidedSkip() {
+    if (!guidedCurrent || guidedSaving) return;
+    const setId = guidedCurrent.set.id;
+    const nextSkipped = new Set(skippedSetIds);
+    nextSkipped.add(setId);
+    setSkippedSetIds(nextSkipped);
+    setGuidedError(null);
+    const index = flatGuidedSets.findIndex((item) => item.set.id === setId);
+    let next: (typeof flatGuidedSets)[number] | null = null;
+    for (let i = index + 1; i < flatGuidedSets.length; i += 1) {
+      const item = flatGuidedSets[i];
+      if (item && !isGuidedDone(item.set) && !nextSkipped.has(item.set.id)) { next = item; break; }
+    }
+    setGuidedSetId(next?.set.id ?? null);
+    if (next) setSelectedExerciseKey(next.group.key);
+  }
+
+  function guidedDraftChange(field: "weight" | "reps" | "rir", value: string) {
+    if (!guidedCurrent) return;
+    const handle = setHandlesRef.current.get(guidedCurrent.set.id);
+    if (!handle) return;
+    if (field === "rir" && !isValidRirDraft(value)) return;
+    handle.applyDraft({ ...handle.getDraft(), [field]: value });
+    if (guidedError) setGuidedError(null);
+    refreshHandleStates();
+  }
+
+  const suggestedTargetFor = (exerciseKey: string): { value: number | null; source: "engine" | "previous" | null } => {
+    const advice = progressionAdvice?.find((entry) => entry.exercise_key === exerciseKey);
+    if (advice && advice.suggested_weight != null) {
+      return {
+        value: advice.unit !== workout.unit
+          ? convertWeightValue(advice.suggested_weight, advice.unit, workout.unit)
+          : advice.suggested_weight,
+        source: "engine",
+      };
+    }
+    const previousWeight = previousByExercise.get(exerciseKey)?.weight ?? null;
+    return { value: previousWeight, source: previousWeight != null ? "previous" : null };
+  };
 
   function focusSetInput(setId: number, field: "weight" | "reps") {
     // Two frames: the target exercise may need one render to expand
@@ -3474,7 +3805,9 @@ function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCo
         </div>
       </header>
 
-      <CurrentWeekProgress workouts={recent} weekSummaries={weekSummaries} activeWorkout={workout} compact />
+      {/* W-TRAIN-FLOW-001: the in-workout first screen is the guided
+          flow only — no weekly progress or analysis up here (the
+          week block lives in a collapsed section below). */}
 
       {/* LIFE-DESIGN-001-B2B (8): progress bar + status bar merged
           into ONE row — completion count, an inline progress track,
@@ -3493,48 +3826,324 @@ function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCo
         </span>
       </div>
 
-      <details className="warmup-strip">
-        <summary>先热身 <span>展开</span></summary>
-        <p>{meta.warmup}</p>
+      {/* W-TRAIN-FLOW-001: the guided flow — one thing at a time.
+          Warmup steps are preparation only (never sets); the work
+          card shows exactly the current set; rest shows the
+          countdown and the next set. The full plan table stays
+          mounted below in 本次计划， so every SetRow handle, dirty
+          draft and finish protection is untouched by this flow. */}
+      {guidedPhase === "warmup-recovery" ? (
+        <section className="guided-card" aria-label="热身进度恢复">
+          <p className="guided-kicker">准备热身 · 上次没做完</p>
+          <h2 className="guided-exercise">热身进行到第 {Math.min(warmupIndex + 1, warmupSteps.length)} / {warmupSteps.length} 项</h2>
+          <p className="guided-note">热身进度只存在这台设备上，没有写入训练记录；正式组的记录不受影响，也不会重新开始。下面选一个：</p>
+          <button type="button" className="guided-primary" onClick={() => finishWarmup(true)}>
+            已热身，进入正式训练
+          </button>
+          <div className="guided-secondary-row">
+            <button type="button" onClick={() => setGuidedPhase("warmup")}>继续热身（从第 {Math.min(warmupIndex + 1, warmupSteps.length)} 项）</button>
+            <button type="button" onClick={restartWarmup}>重新热身</button>
+          </div>
+        </section>
+      ) : null}
+
+      {guidedPhase === "warmup" ? (
+        <section className="guided-card" aria-label="准备热身">
+          <p className="guided-kicker">准备热身 · 第 {Math.min(warmupIndex + 1, warmupSteps.length)} / {warmupSteps.length} 项 · 正式组 {doneCount}/{total}（热身不计入）</p>
+          <h2 className="guided-exercise">{warmupSteps[warmupIndex] ?? ""}</h2>
+          <p className="guided-note">照着做就行：不用选比例、不用配片、不用手动加组。做完点「完成这项」进入下一项。</p>
+          <button type="button" className="guided-primary" onClick={() => advanceWarmup("done")}>
+            完成这项
+          </button>
+          <div className="guided-secondary-row">
+            <button type="button" onClick={() => advanceWarmup("skipped")}>跳过这项（记为跳过）</button>
+            <button type="button" onClick={() => finishWarmup(true)}>已自行热身，进入正式训练</button>
+          </div>
+          <ol className="guided-warmup-list">
+            {warmupSteps.map((step, index) => {
+              const status = index === warmupIndex ? "当前" : warmupStatuses[index] === "done" ? "✓ 已完成" : warmupStatuses[index] === "skipped" ? "— 已跳过" : "待做";
+              return (
+                <li key={`${step}-${index}`} data-current={index === warmupIndex || undefined}>
+                  <span>{step}</span>
+                  <span className="guided-warmup-status">{status}</span>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      ) : null}
+
+      {guidedPhase === "rest" ? (
+        <section className="guided-card" aria-label="休息">
+          <p className="guided-kicker">✓ 上一组已保存 · 正式组 {doneCount}/{total}</p>
+          <h2 className="guided-exercise">休息</h2>
+          {restTimer.endsAt != null ? (
+            <>
+              {restTimerDone(restTimer, restNow) ? (
+                <p className="guided-rest-done">✓ 可以开始了。倒计时结束不会自动开始下一组。</p>
+              ) : null}
+              <RestTimerPanel timer={restTimer} nowMs={restNow} onChange={updateRestTimer} />
+            </>
+          ) : (
+            <div className="guided-rest-manual">
+              <p className="guided-note">{restTimer.autoEnabled ? "计时已结束或被跳过。" : "自动休息计时已关，计时没有启动。"}准备好后直接开始下一组，也可以先开始计时。</p>
+              <div className="rest-timer-durations" role="group" aria-label="休息时长（开始计时时生效）">
+                {REST_DURATIONS.map((seconds) => (
+                  <button
+                    key={seconds}
+                    type="button"
+                    aria-pressed={restTimer.durationSec === seconds}
+                    onClick={() => updateRestTimer((state) => setRestDuration(state, seconds))}
+                  >
+                    {seconds} 秒
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="guided-secondary" onClick={() => updateRestTimer((state) => startRestTimer(state, Date.now()))}>
+                开始计时
+              </button>
+              <RestAutoToggle timer={restTimer} onChange={updateRestTimer} />
+            </div>
+          )}
+          <p className="guided-next">下一组：{guidedCurrent ? guidedSetPreview(guidedCurrent) : "结束训练"}</p>
+          <button
+            type="button"
+            className="guided-primary"
+            onClick={() => {
+              updateRestTimer((state) => skipRestTimer(state));
+              setGuidedPhase("work");
+            }}
+          >
+            开始下一组
+          </button>
+        </section>
+      ) : null}
+
+      {guidedPhase === "work" ? (
+        guidedCurrent ? (() => {
+          const item = guidedCurrent;
+          const set = item.set;
+          const guide = EXERCISE_GUIDES[item.group.key];
+          const snapshot = handleStates.get(set.id);
+          const weightValue = snapshot?.draftWeight ?? (set.weight != null ? String(set.weight) : "");
+          const repsValue = snapshot?.draftReps ?? (set.reps != null ? String(set.reps) : "");
+          const rirValue = snapshot?.draftRir ?? (set.rir != null ? String(set.rir) : "");
+          const timed = isTimedTarget(set.target_reps);
+          const weightNumber = weightValue.trim() === "" ? null : Number(weightValue);
+          const plateCombo = BARBELL_EXERCISE_KEYS.has(item.group.key) && weightNumber != null && Number.isFinite(weightNumber) && weightNumber > 0
+            ? calcPlateCombo(weightNumber, DEFAULT_BAR_WEIGHT[workout.unit], workout.unit)
+            : null;
+          const isDumbbell = DUMBBELL_EXERCISE_KEYS.has(item.group.key);
+          const perSide = PER_SIDE_EXERCISE_KEYS.has(item.group.key);
+          const hasPrefill = set.weight != null || set.reps != null;
+          const exerciseIndex = exerciseGroups.findIndex((group) => group.key === item.group.key);
+          const suggested = suggestedTargetFor(item.group.key);
+          const warmupLine = warmupOutcome === "self"
+            ? "准备热身：已自行热身 ✓"
+            : warmupOutcome === "steps"
+              ? `准备热身：完成 ${warmupStatuses.filter((status) => status === "done").length} 项 · 跳过 ${warmupStatuses.filter((status) => status === "skipped").length} 项`
+              : null;
+          const sourceText = hasPrefill
+            ? "数值已按上次表现预填（含渐进建议）：核对无误直接点「完成这组」；改了数字，就按改后的实际值存档。"
+            : timed
+              ? "第一次记录这个动作：填上实际保持的秒数，点「完成这组」才会存档；不会替你编一个秒数。"
+              : "第一次记录这个动作：填上实际用的重量和次数，点「完成这组」才会存档；重量不知道就留空，不要填 0。";
+          return (
+            <section className="guided-card" aria-label="当前这一组">
+              <p className="guided-kicker">
+                第 {exerciseIndex + 1}/{exerciseGroups.length} 个动作 · 正式组 {doneCount}/{total}
+                {warmupLine ? ` · ${warmupLine}` : ""}
+              </p>
+              <h2 className="guided-exercise">{item.group.name}</h2>
+              <p className="guided-set-line">第 {set.set_number} 组 / 共 {item.group.sets.length} 组 · 目标 {set.target_reps}{timed ? "" : " 次"}</p>
+              {guide?.cues[0] ? <p className="guided-cue">要领：{guide.cues[0]}</p> : null}
+              {guide ? (
+                <button type="button" className="guided-guide-button" onClick={() => setSelectedGuide({ guide, key: item.group.key })}>
+                  看示范与要领
+                </button>
+              ) : null}
+              <div className="guided-fields">
+                {timed ? (
+                  <label className="guided-field">
+                    <span>保持秒数（目标 {set.target_reps}）</span>
+                    <input
+                      aria-label={`${item.group.name} 第 ${set.set_number} 组秒数`}
+                      inputMode="numeric"
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={repsValue}
+                      disabled={finishing || guidedSaving}
+                      onChange={(event) => guidedDraftChange("reps", event.target.value)}
+                      placeholder={set.target_reps.replace(/[^0-9]/g, "") || "秒"}
+                    />
+                  </label>
+                ) : (
+                  <>
+                    <label className="guided-field">
+                      <span>重量（{workout.unit}）{isDumbbell ? " · 单只哑铃" : ""}</span>
+                      <input
+                        aria-label={`${item.group.name} 第 ${set.set_number} 组重量，单位 ${workout.unit}${isDumbbell ? "，单只哑铃" : ""}`}
+                        inputMode="decimal"
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={weightValue}
+                        disabled={finishing || guidedSaving}
+                        onChange={(event) => guidedDraftChange("weight", event.target.value)}
+                        placeholder="自重留空"
+                      />
+                    </label>
+                    <label className="guided-field">
+                      <span>次数（目标 {set.target_reps}）</span>
+                      <input
+                        aria-label={`${item.group.name} 第 ${set.set_number} 组次数`}
+                        inputMode="numeric"
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={repsValue}
+                        disabled={finishing || guidedSaving}
+                        onChange={(event) => guidedDraftChange("reps", event.target.value)}
+                        placeholder="实际次数"
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              {perSide ? <p className="guided-note">左右两侧各做一遍，上面填单侧的{timed ? "秒数" : "次数"}。</p> : null}
+              {isDumbbell && !timed ? <p className="guided-note">重量按单只哑铃计，不是两只合计。</p> : null}
+              {plateCombo ? (
+                <p className="guided-plate">
+                  {plateCombo.exact ? "✓ " : "— 最接近可配："}总重 {formatPlateWeight(plateCombo.achievedWeight)}{workout.unit}（含杠 {formatPlateWeight(DEFAULT_BAR_WEIGHT[workout.unit])}{workout.unit}）· 每侧：{formatPlatesPerSide(plateCombo.platesPerSide)}
+                </p>
+              ) : null}
+              <p className="guided-source">{sourceText}</p>
+              {guidedError === "missing" ? (
+                <p className="guided-error" role="alert">未保存：先填{timed ? "秒数" : "次数"}——目标范围不会自动当成实际{timed ? "秒数" : "次数"}存档。</p>
+              ) : null}
+              {guidedError === "save" ? (
+                <p className="guided-error" role="alert">未保存，输入已保留，重试即可。</p>
+              ) : null}
+              <button
+                type="button"
+                className="guided-primary"
+                disabled={guidedSaving || finishing}
+                onClick={() => void handleGuidedComplete()}
+              >
+                {guidedSaving ? "保存中…" : "完成这组"}
+              </button>
+              {guidedError === "save" ? (
+                <button type="button" className="guided-secondary" disabled={guidedSaving || finishing} onClick={() => void handleGuidedRetry()}>
+                  重试保存
+                </button>
+              ) : null}
+              <div className="guided-secondary-row">
+                <button type="button" disabled={guidedSaving || finishing} onClick={handleGuidedSkip}>
+                  跳过这组（未完成）
+                </button>
+              </div>
+              <details className="guided-tools">
+                <summary>调整 / 训练工具（可选） <span>配片 · 热身比例预览 · RIR</span></summary>
+                <div className="guided-tools-body">
+                  <label className="guided-rir">
+                    <span>RIR 剩余次数（可选 0–5）</span>
+                    <input
+                      aria-label={`${item.group.name} 第 ${set.set_number} 组 RIR 剩余次数，可选，0 到 5`}
+                      inputMode="numeric"
+                      type="number"
+                      min="0"
+                      max="5"
+                      step="1"
+                      value={rirValue}
+                      disabled={finishing || guidedSaving}
+                      onChange={(event) => guidedDraftChange("rir", event.target.value)}
+                      placeholder="—"
+                    />
+                  </label>
+                  <PlateWarmupTool
+                    exerciseName={item.group.name}
+                    unit={workout.unit}
+                    defaultTarget={suggested.value}
+                    defaultTargetSource={suggested.source}
+                    locked={finishing}
+                  />
+                </div>
+              </details>
+              <p className="guided-next">下一步：{guidedNext ? guidedSetPreview(guidedNext) : "结束训练"}</p>
+            </section>
+          );
+        })() : (
+          <section className="guided-card" aria-label="正式组已处理完">
+            {doneCount === total ? (
+              <>
+                <p className="guided-kicker">正式组 {doneCount}/{total}</p>
+                <h2 className="guided-exercise">✓ 全部正式组已完成</h2>
+                <p className="guided-note">点下方「结束训练」收尾，进入历史记录。</p>
+              </>
+            ) : (
+              <>
+                <p className="guided-kicker">正式组 {doneCount}/{total}</p>
+                <h2 className="guided-exercise">其余组已跳过（未完成）</h2>
+                <p className="guided-note">跳过的组没有打勾，仍可在下方「本次计划」里逐组补做，或直接结束训练。</p>
+                <button type="button" className="guided-secondary" onClick={() => setSkippedSetIds(new Set())}>
+                  回到第一个未完成组
+                </button>
+              </>
+            )}
+          </section>
+        )
+      ) : null}
+
+      <details className="plan-overview">
+        <summary>本次计划 <span>全部 {exerciseGroups.length} 个动作 · {total} 组 · 可改任意一组</span></summary>
+        <div className="exercise-stack">
+          {exerciseGroups.map((exercise) => (
+            <ExerciseBlock
+              key={exercise.key}
+              workout={workout}
+              exercise={exercise}
+              previous={previousByExercise.get(exercise.key)}
+              suggestedTarget={(() => {
+                const advice = progressionAdvice?.find((entry) => entry.exercise_key === exercise.key);
+                if (advice && advice.suggested_weight != null) {
+                  return advice.unit !== workout.unit
+                    ? convertWeightValue(advice.suggested_weight, advice.unit, workout.unit)
+                    : advice.suggested_weight;
+                }
+                return previousByExercise.get(exercise.key)?.weight ?? null;
+              })()}
+              suggestedTargetSource={(() => {
+                const advice = progressionAdvice?.find((entry) => entry.exercise_key === exercise.key);
+                if (advice && advice.suggested_weight != null) return "engine" as const;
+                return previousByExercise.get(exercise.key)?.weight != null ? "previous" as const : null;
+              })()}
+              entryLocked={finishing}
+              expanded={exercise.key === currentKey}
+              headInfo={headInfoByKey[exercise.key] ?? { doneCount: 0, statusText: null, statusKind: null }}
+              onSelect={() => {
+                setSelectedExerciseKey(exercise.key);
+                const firstOpen = exercise.sets.find((set) => !isGuidedDone(set) && !skippedSetIds.has(set.id));
+                if (firstOpen) {
+                  setGuidedSetId(firstOpen.id);
+                  if (guidedPhase === "rest") setGuidedPhase("work");
+                }
+              }}
+              onChanged={refresh}
+              onSetCompleted={handleSetCompleted}
+              onOpenGuide={(guide, key) => setSelectedGuide({ guide, key })}
+              onRegisterSet={registerSet}
+              onRegisterPendingAdd={registerPendingAdd}
+              onEnterNextSet={(setId, field) => handleEnterNext(exercise.key, setId, field)}
+            />
+          ))}
+        </div>
       </details>
 
-      <div className="exercise-stack">
-        {exerciseGroups.map((exercise) => (
-          <ExerciseBlock
-            key={exercise.key}
-            workout={workout}
-            exercise={exercise}
-            previous={previousByExercise.get(exercise.key)}
-            suggestedTarget={(() => {
-              const advice = progressionAdvice?.find((entry) => entry.exercise_key === exercise.key);
-              if (advice && advice.suggested_weight != null) {
-                return advice.unit !== workout.unit
-                  ? convertWeightValue(advice.suggested_weight, advice.unit, workout.unit)
-                  : advice.suggested_weight;
-              }
-              return previousByExercise.get(exercise.key)?.weight ?? null;
-            })()}
-            suggestedTargetSource={(() => {
-              const advice = progressionAdvice?.find((entry) => entry.exercise_key === exercise.key);
-              if (advice && advice.suggested_weight != null) return "engine" as const;
-              return previousByExercise.get(exercise.key)?.weight != null ? "previous" as const : null;
-            })()}
-            timerSlot={currentKey != null && exercise.key === currentKey ? restTimerUi : undefined}
-            entryLocked={finishing}
-            expanded={exercise.key === currentKey}
-            headInfo={headInfoByKey[exercise.key] ?? { doneCount: 0, statusText: null, statusKind: null }}
-            onSelect={() => setSelectedExerciseKey(exercise.key)}
-            onChanged={refresh}
-            onSetCompleted={handleSetCompleted}
-            onOpenGuide={(guide, key) => setSelectedGuide({ guide, key })}
-            onRegisterSet={registerSet}
-            onRegisterPendingAdd={registerPendingAdd}
-            onEnterNextSet={(setId, field) => handleEnterNext(exercise.key, setId, field)}
-          />
-        ))}
-      </div>
-
-      {currentKey == null ? <div className="rest-timer-fallback">{restTimerUi}</div> : null}
+      <details className="plan-overview">
+        <summary>本周进度 <span>展开看本周已完成记录</span></summary>
+        <CurrentWeekProgress workouts={recent} weekSummaries={weekSummaries} activeWorkout={workout} compact />
+      </details>
 
       <section className="session-panel" aria-label="训练感受（可选）">
         <button
@@ -4528,52 +5137,128 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
         </div>
       </section>
 
-      <section className="routine-selector" aria-label="选择训练日">
-        {ALL_ROUTINES.map((routine, index) => {
-          const meta = ROUTINE_META[routine];
-          const planEntry: PlanRoutineEntry | undefined = planData?.routines.find((entry) => entry.routine === routine);
-          const countText = planEntry
-            ? `${planEntry.exercises.length} 个动作 · ${planEntry.exercises.reduce((sum, exercise) => sum + exercise.sets, 0)} 组`
-            : meta.count;
-          const scheduledDays = planData
-            ? planData.schedule.filter((entry) => entry.routine_code === routine).map((entry) => SCHEDULE_DAY_LABELS[entry.day_index] ?? "")
-            : [];
-          const dayText = scheduledDays.length > 0 ? scheduledDays.join(" · ") : meta.day;
-          return (
-            <button key={routine} type="button" className={`routine-option routine-${routine}`} onClick={() => start.mutate(routine)} disabled={start.isPending}>
-              <span className="routine-number">0{index + 1}</span>
-              <span className={`routine-name${routine.startsWith("home") ? " routine-name-home" : ""}`}>{meta.label}</span>
-              <span className="routine-detail"><b>{dayText}</b>{countText}</span>
-              <span className="routine-arrow" aria-hidden="true">→</span>
-            </button>
-          );
-        })}
-      </section>
-
-      {start.isError ? <p className="error-banner">没能开始训练，请再试一次。</p> : null}
-
       {planReadFailed ? (
         <p className="error-banner" role="alert">
-          {plan.data?.read_error ?? "计划读取失败"}——已保留当前显示的计划与编辑草稿，没有清空。
+          {plan.data?.read_error ?? "计划读取失败"}——已保留当前显示的计划与编辑草稿，没有清空；下面的「今天的计划」未经本次核实。
           <button type="button" className="plan-read-retry" onClick={() => plan.refetch()}>重试读取</button>
         </p>
       ) : null}
 
+      {/* W-TRAIN-FLOW-001: today's plan from the real getPlan
+          schedule is the one primary path. A swim / rest day is
+          shown as scheduled — no strength session is substituted.
+          Other training days and every review / analysis surface
+          move behind clearly labelled secondary entries below. */}
+      {(() => {
+        const todayIndex = todayScheduleIndex();
+        const todayEntry = planData?.schedule.find((entry) => entry.day_index === todayIndex) ?? null;
+        const todayRoutine = todayEntry && (ALL_ROUTINES as readonly string[]).includes(todayEntry.routine_code)
+          ? (todayEntry.routine_code as Routine)
+          : null;
+        const todayPlanEntry = todayRoutine
+          ? planData?.routines.find((entry) => entry.routine === todayRoutine)
+          : undefined;
+        const todayCountText = todayRoutine
+          ? todayPlanEntry
+            ? `${todayPlanEntry.exercises.length} 个动作 · ${todayPlanEntry.exercises.reduce((sum, exercise) => sum + exercise.sets, 0)} 组`
+            : ROUTINE_META[todayRoutine].count
+          : null;
+        return (
+          <section className="today-plan" aria-label="今天的计划">
+            <p className="today-plan-kicker">今天的计划 · {SCHEDULE_DAY_LABELS[todayIndex] ?? ""}</p>
+            {!planData ? (
+              <>
+                <h2 className="today-plan-title">计划还没读出来</h2>
+                <p className="today-plan-note">无法确认今天的安排，不会随便推荐一个训练日。可以重试读取，或在下方「换个训练」里自己选。</p>
+                <button type="button" className="today-plan-retry" onClick={() => plan.refetch()}>重试读取计划</button>
+              </>
+            ) : todayRoutine ? (
+              <>
+                <h2 className="today-plan-title">{ROUTINE_META[todayRoutine].title}</h2>
+                <p className="today-plan-note">
+                  {todayCountText} · 先做 {warmupStepsFor(todayRoutine).length} 项准备热身（不计入正式组），然后一组一组跟着走，不用自己算。
+                </p>
+                {todayEntry?.note ? <p className="today-plan-note">{todayEntry.note}</p> : null}
+                {planReadFailed ? <p className="today-plan-note">注：计划读取失败，以上是上次读到的排期，未经本次核实。</p> : null}
+                <button
+                  type="button"
+                  className="today-plan-start"
+                  onClick={() => start.mutate(todayRoutine)}
+                  disabled={start.isPending}
+                >
+                  {start.isPending ? "正在开始…" : "按计划开始"}
+                </button>
+              </>
+            ) : todayEntry ? (
+              <>
+                <h2 className="today-plan-title">{SCHEDULE_CODE_LABELS[todayEntry.routine_code] ?? todayEntry.routine_code}</h2>
+                <p className="today-plan-note">今天按排期是{SCHEDULE_CODE_LABELS[todayEntry.routine_code] ?? todayEntry.routine_code}，没有力量训练安排，不用硬练。</p>
+                {todayEntry.note ? <p className="today-plan-note">{todayEntry.note}</p> : null}
+                {planReadFailed ? <p className="today-plan-note">注：计划读取失败，以上是上次读到的排期，未经本次核实。</p> : null}
+              </>
+            ) : (
+              <>
+                <h2 className="today-plan-title">今天没有排期</h2>
+                <p className="today-plan-note">当前计划里今天这一天没有安排。可以在下方「换个训练」里自己选，或在「编辑训练计划」里调整周安排。</p>
+              </>
+            )}
+          </section>
+        );
+      })()}
+
+      {start.isError ? <p className="error-banner">没能开始训练，请再试一次。</p> : null}
+
+      <details className="home-details">
+        <summary>换个训练 <span>其他训练日 · 自己选</span></summary>
+        <section className="routine-selector" aria-label="选择训练日">
+          {ALL_ROUTINES.map((routine, index) => {
+            const meta = ROUTINE_META[routine];
+            const planEntry: PlanRoutineEntry | undefined = planData?.routines.find((entry) => entry.routine === routine);
+            const countText = planEntry
+              ? `${planEntry.exercises.length} 个动作 · ${planEntry.exercises.reduce((sum, exercise) => sum + exercise.sets, 0)} 组`
+              : meta.count;
+            const scheduledDays = planData
+              ? planData.schedule.filter((entry) => entry.routine_code === routine).map((entry) => SCHEDULE_DAY_LABELS[entry.day_index] ?? "")
+              : [];
+            const dayText = scheduledDays.length > 0 ? scheduledDays.join(" · ") : meta.day;
+            return (
+              <button key={routine} type="button" className={`routine-option routine-${routine}`} onClick={() => start.mutate(routine)} disabled={start.isPending}>
+                <span className="routine-number">0{index + 1}</span>
+                <span className={`routine-name${routine.startsWith("home") ? " routine-name-home" : ""}`}>{meta.label}</span>
+                <span className="routine-detail"><b>{dayText}</b>{countText}</span>
+                <span className="routine-arrow" aria-hidden="true">→</span>
+              </button>
+            );
+          })}
+        </section>
+      </details>
+
       {planData ? <DailyChecklist key={`daily-${planData.daily_date}`} plan={planData} /> : null}
 
-      <ThisWeekSection plan={planData} workouts={recent} weekSummaries={weekSummaries} focus={historyFocus} />
-
-      <WeeklyReview workouts={recent} progressionAdvice={progressionAdvice} deloadAdvisory={deloadAdvisory} />
-
-      <History workouts={earlierWorkouts} focus={historyFocus} />
-
-      <ActionTrends trends={actionTrends} />
-
-      <WeekFrequency data={weekFrequency} />
-
-      <MuscleHeatmap data={muscleHeatmap} muscleMap={muscleMap} muscleMapVersion={muscleMapVersion} />
-
       {planData ? <PlanConflicts plan={planData} /> : null}
+
+      <details className="home-details">
+        <summary>本周安排 <span>排期 · 本周记录</span></summary>
+        <ThisWeekSection plan={planData} workouts={recent} weekSummaries={weekSummaries} focus={historyFocus} />
+      </details>
+
+      <details className="home-details">
+        <summary>上周复盘 <span>回顾与下周建议</span></summary>
+        <WeeklyReview workouts={recent} progressionAdvice={progressionAdvice} deloadAdvisory={deloadAdvisory} />
+      </details>
+
+      <details className="home-details">
+        <summary>历史与趋势 <span>历史记录 · 动作趋势 · 近 4 周频率</span></summary>
+        <History workouts={earlierWorkouts} focus={historyFocus} />
+        <ActionTrends trends={actionTrends} />
+        <WeekFrequency data={weekFrequency} />
+      </details>
+
+      <details className="home-details">
+        <summary>肌群分析 <span>近 7 天肌群热度</span></summary>
+        <MuscleHeatmap data={muscleHeatmap} muscleMap={muscleMap} muscleMapVersion={muscleMapVersion} />
+      </details>
+
       {planData ? (
         <PlanEditor
           key={JSON.stringify([planData.routines, planData.schedule, planData.daily_items])}

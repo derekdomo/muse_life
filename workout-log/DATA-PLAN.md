@@ -745,3 +745,87 @@ sync-channel read gate; no existing export or signature changed
   bun plan-safe 226 + client/server typecheck clean = 766
   checks, 0 failures. Privacy scan of new/changed files:
   synthetic data only, zero hits.
+
+## Guided flow — W-TRAIN-FLOW-001 (2026-11-01)
+
+Client-presentation rework only: no schema change, no migration,
+no server action changed, no stored data rewritten, and no new
+external source. The default path is now 今天的计划 → 准备热身 →
+当前这一组 → 休息 → 下一组 → 结束训练.
+
+- Home: the one primary action is 「按计划开始」 for the routine
+  the real `getPlan` schedule assigns to today (Monday-indexed
+  `todayScheduleIndex`, the same frame ThisWeekSection uses). A
+  swim / rest day renders as scheduled with no substituted strength
+  session; a missing plan renders an honest 计划还没读出来 state
+  with retry, and a failed read keeps the last good plan labelled
+  未经本次核实 (the W-PLAN-SAFE-001 read_error behaviour is
+  unchanged). Other training days sit under 「换个训练」; the week
+  schedule, weekly review, history / trends / week frequency,
+  muscle heatmap and the plan editor sit behind labelled secondary
+  `<details>` entries. An active workout still takes over the
+  whole screen via `App` (继续训练 is the ActiveWorkout view
+  itself), as before.
+- Warmup: `warmupStepsFor` splits the EXISTING `ROUTINE_META`
+  warmup text on "·" — movements, durations and set/rep counts are
+  the original text, unchanged (e.g. push still ends with
+  空杆卧推 2×12 as one step). Steps are preparation only: they are
+  never workout sets, never enter the formal set denominator, and
+  are never written through any set write path — the removed
+  W-WARMUP-WRITE-001 prepend writer stays removed. The three
+  percentage presets remain only inside the 「调整/训练工具」
+  `PlateWarmupTool` (read-only as shipped in W5.2's fix).
+- Warmup progress is session-local by design (sessionStorage key
+  `space6-guided-warmup:<workoutId>`, guarded like the W2.2 scroll
+  storage): it has no server identity and is never presented as
+  recorded. A reload mid-warmup lands on an explicit
+  warmup-recovery choice （已热身 / 继续 / 重新）; a workout with
+  any saved completed set resumes directly in the work phase from
+  the server record, so formal-set recovery never depends on the
+  local warmup state.
+- Guided set card: a second view onto the SAME per-set save
+  machine the plan table edits — `SetSaveHandle` gained
+  `getDraft` / `applyDraft` / `completeAndFlush`, all delegating
+  to the row's existing queue, so dirty drafts, handle
+  registration and the finish gate's protections are shared, not
+  duplicated. 「完成这组」 submits the set id with the visible
+  draft values through `completeAndFlush`; only a confirmed save
+  advances and (under the existing auto setting) starts the rest
+  countdown. A blocked save (completed with no reps) or a failed
+  save stays on the set with input kept and 「未保存，重试」
+  offered; saving locks the button against double submits.
+  Prefill values are the server startWorkout prefill as stored
+  (labelled 按上次表现预填（含渐进建议）); an empty first record
+  asks for the actual weight/reps once — no 0 and no target-range
+  value is ever written as an actual. Timed targets （秒） take a
+  seconds value in the reps field, per the plan's existing
+  modelling; per-side movements are labelled 左右两侧各做一遍.
+  Plate text appears only for the four barbell keys
+  (`BARBELL_EXERCISE_KEYS`) via the existing `calcPlateCombo`
+  with the default bar; dumbbell keys are labelled 单只； all
+  other movements get no plate math.
+- Rest screen: shows the existing RestTimerPanel countdown (or,
+  with auto off / timer skipped, a manual start with duration
+  choices and the auto toggle) plus the next set preview; the
+  primary 「开始下一组」 ends rest early without touching any
+  completion record, and a finished countdown only reads
+  可以开始 — nothing auto-starts or auto-completes a set.
+- 本次计划： the full exercise stack stays MOUNTED inside a
+  collapsed `<details>` (SetRows never unmount for the guided
+  card, so save/finish protection is intact); tapping a card head
+  also points the guided flow at that exercise's first open set.
+  Skipping in the guided flow records nothing — the set stays
+  incomplete, labelled 已跳过（未完成）, and can still be done
+  from the plan table. RIR lives in the guided card's optional
+  tools and rides the row's existing autosave; the session
+  RPE / pain / notes panel and both finish paths are unchanged.
+- Regression (2026-11-01, after this rework): full validator
+  suite green — validate-start 66, validate-rir-rpe 103,
+  validate-receipt 37, validate-scroll-restore 26,
+  validate-plate-warmup 27, validate-video-embed 32,
+  validate-week-current 59, validate-progression-engine 35,
+  validate-action-trends 15, validate-week-frequency 16,
+  validate-deload-advisory 36, validate-muscle-diagram 36,
+  validate-muscle-heatmap 22, validate-muscle-receipt 30,
+  validate-plan-safe (bun) 226 — 766 checks, 0 failures, plus a
+  clean typecheck build.

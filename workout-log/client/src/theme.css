@@ -514,6 +514,81 @@ select:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 55%, 
   .guide-grid > div:last-child { padding-top: 0; padding-left: 16px; border-top: 0; border-left: 1px solid var(--border); }
 }
 
+/* W-TRAIN-FLOW-001: today's plan (home primary path), secondary
+   home entries, the guided flow cards, and the in-workout plan
+   overview. Meaning always rides on text + symbols, never colour
+   alone; every control is at least 44px tall. */
+.today-plan { margin-top: 20px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.today-plan-kicker { margin: 0 0 6px; color: var(--signal); font-size: 12px; font-weight: 800; letter-spacing: .06em; }
+.today-plan-title { margin: 0; font: 800 34px/1.05 "DIN Alternate", "Avenir Next Condensed", sans-serif; letter-spacing: -.02em; }
+.today-plan-note { margin: 9px 0 0; color: var(--dim); font-size: 13px; line-height: 1.6; }
+.today-plan-start { width: 100%; min-height: 54px; margin-top: 16px; border: 0; border-radius: 4px; background: var(--accent); color: var(--accent-ink); font-size: 17px; font-weight: 850; cursor: pointer; }
+.today-plan-start:disabled { opacity: .55; cursor: wait; }
+.today-plan-retry { min-height: 44px; margin-top: 14px; padding: 0 18px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 14px; font-weight: 800; cursor: pointer; }
+
+.home-details { margin-top: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.home-details > summary { min-height: 52px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; font-weight: 800; font-size: 15px; list-style: none; }
+.home-details > summary::-webkit-details-marker { display: none; }
+.home-details > summary span { color: var(--dim); font-size: 11px; font-weight: 650; text-align: right; }
+.home-details > .routine-selector { border-bottom: 0; }
+.home-details .this-week-section, .home-details .history-section { padding: 4px 16px 16px; }
+.home-details .weekly-review { margin: 0 16px 16px; }
+.home-details .muscle-heatmap-grid, .home-details .history-list { margin: 0 16px 16px; }
+
+.plan-overview { margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.plan-overview > summary { min-height: 52px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; font-weight: 800; font-size: 14px; list-style: none; }
+.plan-overview > summary::-webkit-details-marker { display: none; }
+.plan-overview > summary span { color: var(--dim); font-size: 11px; font-weight: 650; text-align: right; }
+.plan-overview .exercise-stack { margin-top: 0; padding: 0 14px 8px; }
+.plan-overview .current-week { margin: 0 14px 14px; }
+
+.guided-card { margin-top: 16px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.guided-kicker { margin: 0 0 8px; color: var(--signal); font-size: 12px; font-weight: 800; letter-spacing: .04em; line-height: 1.5; }
+.guided-exercise { margin: 0; font: 800 32px/1.08 "DIN Alternate", "Avenir Next Condensed", sans-serif; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.guided-set-line { margin: 9px 0 0; font-size: 15px; font-weight: 800; }
+.guided-cue { margin: 9px 0 0; color: var(--dim); font-size: 13px; line-height: 1.6; }
+.guided-guide-button { min-height: 44px; margin-top: 10px; padding: 0 16px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 800; cursor: pointer; }
+.guided-note { margin: 10px 0 0; color: var(--dim); font-size: 13px; line-height: 1.6; }
+.guided-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+.guided-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.guided-field > span { color: var(--dim); font-size: 12px; font-weight: 800; }
+.guided-field input { width: 100%; height: 56px; padding: 1px 10px 0; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 24px; font-weight: 800; text-align: center; -moz-appearance: textfield; }
+.guided-field input::-webkit-inner-spin-button, .guided-field input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.guided-field input:disabled { opacity: .55; }
+.guided-plate { margin: 12px 0 0; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 4px; font-size: 14px; font-weight: 800; line-height: 1.55; }
+.guided-source { margin: 12px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
+.guided-error { margin: 12px 0 0; padding: 10px 12px; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); font-size: 13px; font-weight: 800; line-height: 1.55; }
+.guided-primary { width: 100%; min-height: 56px; margin-top: 16px; border: 0; border-radius: 4px; background: var(--accent); color: var(--accent-ink); font-size: 18px; font-weight: 850; cursor: pointer; }
+.guided-primary:disabled { opacity: .55; cursor: wait; }
+.guided-secondary { min-height: 48px; margin-top: 10px; padding: 0 18px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 14px; font-weight: 800; cursor: pointer; }
+.guided-secondary:disabled { opacity: .55; cursor: wait; }
+.guided-secondary-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.guided-secondary-row button { flex: 1 1 150px; min-height: 48px; padding: 0 12px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--dim); font-size: 13px; font-weight: 800; cursor: pointer; }
+.guided-secondary-row button:disabled { opacity: .55; cursor: wait; }
+.guided-warmup-list { list-style: none; margin: 16px 0 0; padding: 10px 0 0; border-top: 1px solid var(--border); display: grid; gap: 6px; }
+.guided-warmup-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; line-height: 1.5; }
+.guided-warmup-list li[data-current] { font-weight: 850; }
+.guided-warmup-status { flex: 0 0 auto; color: var(--dim); font-size: 11px; font-weight: 800; white-space: nowrap; }
+.guided-warmup-list li[data-current] .guided-warmup-status { color: var(--signal); }
+.guided-tools { margin-top: 14px; border: 1px solid var(--border); border-radius: 4px; }
+.guided-tools > summary { min-height: 48px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; font-size: 13px; font-weight: 800; list-style: none; }
+.guided-tools > summary::-webkit-details-marker { display: none; }
+.guided-tools > summary span { color: var(--dim); font-size: 11px; font-weight: 650; text-align: right; }
+.guided-tools-body { padding: 2px 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+.guided-rir { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; font-weight: 800; color: var(--dim); }
+.guided-rir input { width: 72px; height: 44px; padding: 1px 6px 0; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 16px; font-weight: 750; text-align: center; -moz-appearance: textfield; }
+.guided-rir input::-webkit-inner-spin-button, .guided-rir input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.guided-tools-body .plate-tool { margin-top: 0; }
+.guided-next { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--border); color: var(--dim); font-size: 13px; font-weight: 750; line-height: 1.55; }
+.guided-rest-done { margin: 12px 0 0; color: var(--signal); font-size: 15px; font-weight: 850; }
+.guided-card .rest-timer { margin-top: 14px; }
+.guided-rest-manual { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.guided-rest-manual .rest-timer-durations { display: flex; flex-wrap: wrap; gap: 8px; }
+.guided-rest-manual .rest-timer-durations button { min-height: 44px; padding: 0 15px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 750; cursor: pointer; }
+.guided-rest-manual .rest-timer-durations button[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+.guided-rest-manual .guided-secondary { margin-top: 0; }
+.guided-rest-manual .rest-auto-toggle { margin-top: 0; justify-content: center; }
+
 /* W6.2 muscle diagram (guide dialog): front/back line outlines.
    Primary = solid Okabe-Ito vermillion, secondary = Okabe-Ito blue
    diagonal hatch + outline; the text legend carries the meaning, so
