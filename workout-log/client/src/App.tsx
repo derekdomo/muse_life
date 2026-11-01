@@ -809,6 +809,9 @@ type ReceiptPreviousEntry = NonNullable<Dashboard["receipt_previous"]>[number];
 // them; it never derives a progression verdict itself.
 type ProgressionAdviceEntry = NonNullable<Dashboard["progression_advice"]>[number];
 type ReceiptAdviceEntry = NonNullable<Dashboard["receipt_advice"]>[number];
+// W3.3: server-computed per-exercise trends (action_trends) — the
+// client renders them; it computes no trend figure itself.
+type ActionTrendEntry = NonNullable<Dashboard["action_trends"]>[number];
 
 const CONFIDENCE_LABELS: Record<ProgressionAdviceEntry["confidence"], string> = {
   high: "高",
@@ -3390,6 +3393,87 @@ function History({ workouts, focus }: {
   );
 }
 
+// --- W3.3: action-level trends （动作级趋势） ---
+// One expandable row per exercise, rendered ONLY from the server's
+// action_trends (buildActionTrends in server/src/action-trends.ts):
+// working-set completion rate, total reps, total volume, best set,
+// and the estimated 1RM. The estimate's rule is labelled in the UI
+// exactly as computed — 估算 1RM（Epley 公式） — and its source set
+// is shown, so the number is checkable; an exercise with no
+// eligible set (bodyweight / unrecorded / >12 reps only) shows
+// 暂无估算 instead of a fabricated value. Meaning never rides on
+// colour alone: every figure carries a text label and a symbol
+// (✓ completion, ★ best set, ▲ estimated 1RM).
+function ActionTrends({ trends }: { trends?: ActionTrendEntry[] }) {
+  const entries = trends ?? [];
+  return (
+    <section className="history-section" aria-labelledby="action-trends-title">
+      <div className="section-heading">
+        <h2 id="action-trends-title">动作趋势</h2>
+        <span>{entries.length > 0 ? `${entries.length} 个动作` : ""}</span>
+      </div>
+      <p className="history-boundary">
+        按动作汇总全部已保存完成记录（每个训练日最近 20 次内）：完成率 = 已完成工作组 / 计划组数；训练量 = 重量 × 次数总和；不同单位的记录先换算到该动作最近一次的单位再统计。估算 1RM（Epley 公式）只用 1–12 次、重量 &gt; 0 的已完成组，自重组不参与、不生成估算。
+      </p>
+      {entries.length === 0 ? (
+        <p className="empty-history">完成训练后，这里会按动作汇总完成率、训练量、最佳组与估算 1RM。</p>
+      ) : (
+        <div className="history-list">
+          {entries.map((trend) => {
+            const rateText = trend.completion_rate == null
+              ? "—"
+              : `${Math.round(trend.completion_rate * 100)}%`;
+            return (
+              <details className="history-row trend-row" key={`${trend.routine}-${trend.exercise_key}`}>
+                <summary>
+                  <span className="trend-name">{trend.exercise_name}</span>
+                  <span>✓ {rateText}</span>
+                  <span>{trend.estimated_one_rep_max != null ? `▲ ${trend.estimated_one_rep_max.value}${trend.unit}` : "▲ 暂无估算"}</span>
+                  <i aria-hidden="true">›</i>
+                </summary>
+                <div className="history-detail trend-detail">
+                  <div>
+                    <span>✓ 工作组完成率</span>
+                    <span>{trend.completed_sets}/{trend.planned_sets} 组 · {rateText}</span>
+                  </div>
+                  <div>
+                    <span>总次数（已完成组）</span>
+                    <span>{trend.total_reps.toLocaleString("zh-CN")} 次</span>
+                  </div>
+                  <div>
+                    <span>训练量（重量 × 次数）</span>
+                    <span>{Math.round(trend.volume).toLocaleString("zh-CN")} {trend.unit}</span>
+                  </div>
+                  <div>
+                    <span>★ 最佳工作组</span>
+                    <span>
+                      {trend.best_set != null
+                        ? `${trend.best_set.weight}${trend.unit} × ${trend.best_set.reps} 次（= ${Math.round(trend.best_set.volume).toLocaleString("zh-CN")} ${trend.unit}）${trend.best_set.date ? ` · ${formatDate(trend.best_set.date)}` : ""}`
+                        : "暂无（无带重量完成的组）"}
+                    </span>
+                  </div>
+                  <div>
+                    <span>▲ 估算 1RM（Epley 公式）</span>
+                    <span>
+                      {trend.estimated_one_rep_max != null
+                        ? `${trend.estimated_one_rep_max.value} ${trend.unit}（由 ${trend.estimated_one_rep_max.weight}${trend.unit} × ${trend.estimated_one_rep_max.reps} 次估算${trend.estimated_one_rep_max.date ? ` · ${formatDate(trend.estimated_one_rep_max.date)}` : ""}）`
+                        : "暂无估算（无 1–12 次带重量完成的组）"}
+                    </span>
+                  </div>
+                  <div>
+                    <span>训练次数</span>
+                    <span>{trend.session_count} 次{trend.last_date ? ` · 最近 ${formatDate(trend.last_date)}` : ""}</span>
+                  </div>
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // --- 2026-10-18 frequency sync: weekly schedule / daily micro-routine /
 // plan editor. All three read the persisted plan (getPlan); the editor
 // edits a local draft only — nothing is written until 保存计划 calls
@@ -3805,10 +3889,13 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, weekSummaries, progressionAdvice, receiptId, onCloseReceipt }: {
+function StartScreen({ recent, weekSummaries, progressionAdvice, actionTrends, receiptId, onCloseReceipt }: {
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
   progressionAdvice?: ProgressionAdviceEntry[];
+  // W3.3 (additive): server-computed per-exercise trends for the
+  // history area; absent on older cached responses.
+  actionTrends?: ActionTrendEntry[];
   // W4.3-D1: the workoutId this session just finished, or null. The
   // receipt renders non-blockingly at the top of the start page.
   receiptId: number | null;
@@ -3906,6 +3993,8 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, receiptId, onCl
 
       <History workouts={earlierWorkouts} focus={historyFocus} />
 
+      <ActionTrends trends={actionTrends} />
+
       {planData ? <PlanConflicts plan={planData} /> : null}
       {planData ? (
         <PlanEditor
@@ -3971,6 +4060,7 @@ export function App() {
           recent={dashboard.data.recent_workouts}
           weekSummaries={dashboard.data.week_summaries}
           progressionAdvice={dashboard.data.progression_advice}
+          actionTrends={dashboard.data.action_trends}
           receiptId={receiptId}
           onCloseReceipt={() => setReceiptId(null)}
         />

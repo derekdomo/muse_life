@@ -198,6 +198,12 @@ button.current-week-row { cursor: pointer; font: inherit; font-size: 12px; }
 .history-detail > div { display: flex; justify-content: space-between; gap: 14px; padding: 6px 0; color: var(--dim); font-size: 12px; }
 .history-detail > div span:last-child { color: var(--text); text-align: right; }
 
+/* W3.3: action-trend rows — name + completion + estimated 1RM in
+   the summary; the detail block reuses .history-detail rows. */
+.trend-row summary { grid-template-columns: 1fr auto auto 12px; }
+.trend-row summary .trend-name { color: var(--text); font-weight: 700; font-size: 14px; }
+.trend-detail { padding-left: 0; }
+
 .active-shell { padding-left: 14px; padding-right: 14px; }
 .active-header { display: flex; align-items: flex-end; justify-content: space-between; padding: 17px 4px 18px; }
 .live-label { display: flex; align-items: center; gap: 7px; margin: 0 0 7px; color: var(--dim); font-size: 11px; font-weight: 800; letter-spacing: .1em; }

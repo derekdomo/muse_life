@@ -6,6 +6,10 @@ import {
   evaluateProgression,
   type ProgressionEngineSession,
 } from "./progression-engine";
+import {
+  buildActionTrends,
+  type ActionTrendWorkout,
+} from "./action-trends";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -239,6 +243,40 @@ const receiptAdviceEntryResponse = z.object({
   engine_version: z.number(),
 });
 
+// W3.3 (additive): one exercise's all-history trend, computed by
+// the pure builder in server/src/action-trends.ts over the same
+// per-routine completed-workout windows comparable_history reads.
+// All weight-derived figures are in the entry's unit (the most
+// recent session's unit; other-unit sessions are converted first).
+// best_set / estimated_one_rep_max are null when no eligible set
+// exists — bodyweight or unrecorded sets never fabricate one.
+const actionTrendEntryResponse = z.object({
+  routine: routineSchema,
+  exercise_key: z.string(),
+  exercise_name: z.string(),
+  unit: unitSchema,
+  planned_sets: z.number(),
+  completed_sets: z.number(),
+  completion_rate: z.number().nullable(),
+  total_reps: z.number(),
+  volume: z.number(),
+  best_set: z.object({
+    weight: z.number(),
+    reps: z.number(),
+    volume: z.number(),
+    date: z.string().nullable(),
+  }).nullable(),
+  estimated_one_rep_max: z.object({
+    value: z.number(),
+    weight: z.number(),
+    reps: z.number(),
+    date: z.string().nullable(),
+  }).nullable(),
+  session_count: z.number(),
+  last_date: z.string().nullable(),
+  trends_version: z.number(),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
@@ -249,6 +287,11 @@ const dashboardResponse = z.object({
   // comparable_history for the weekly review. The client formats it;
   // it never computes a progression verdict itself anymore.
   progression_advice: z.array(progressionAdviceEntryResponse).optional(),
+  // W3.3 (additive, optional): per-exercise trends for the history
+  // page, computed by buildActionTrends over the same per-routine
+  // 20-workout windows as comparable_history. Existing consumers
+  // （健康看板 sync) ignore the field.
+  action_trends: z.array(actionTrendEntryResponse).optional(),
   // W4.3-D1 (additive, optional): present ONLY when the caller passed
   // receipt_workout_id — the completed workout read back by that exact
   // id for the completion receipt. Null when the id is unknown or the
@@ -1083,6 +1126,10 @@ export type PreviousSetLike = {
   // did not load it, which the progression engine treats exactly
   // like a recorded null (not recorded).
   rir?: number | null;
+  // W3.3 (additive, optional): the set's stored exercise name,
+  // passed through only by loaders that select it (the action-
+  // trends loader displays it); absent for every older consumer.
+  exerciseName?: string;
 };
 
 // W1-CONSISTENCY-001 (cross-window fix): the ONE raw comparable-history
@@ -1288,6 +1335,7 @@ async function loadRoutineRecentCompleted(
       reps: row.reps,
       completed: row.completed,
       rir: row.rir,
+      exerciseName: row.exerciseName,
     });
     setsByWorkout.set(row.workoutId, list);
   }
@@ -1376,6 +1424,57 @@ async function loadProgressionAdvice(
         reason: advice.reason,
         confidence: advice.confidence,
         engine_version: advice.engineVersion,
+      });
+    }
+  }
+  return entries;
+}
+
+// W3.3: per-exercise trends for the history page. The aggregation
+// itself is the pure buildActionTrends in server/src/action-
+// trends.ts; this loader only feeds it the SAME per-routine
+// 20-workout completed windows loadComparableHistory reads (most
+// recent first), routine by routine in ROUTINE_KEYS order, and maps
+// the result onto the wire shape. An exercise that appears in
+// several routines (e.g. tibialis-raise in legs + home) keeps ONE
+// entry per (routine, exercise) — trends never merge or compare
+// across routines, matching the per-routine comparable-history
+// selection. Sets keep their source values; the builder converts
+// units per session into each entry's display unit.
+async function loadActionTrends(
+  ctx: Ctx,
+): Promise<z.infer<typeof actionTrendEntryResponse>[]> {
+  const entries: z.infer<typeof actionTrendEntryResponse>[] = [];
+  for (const routine of ROUTINE_KEYS) {
+    const recentCompleted = await loadRoutineRecentCompleted(ctx, routine);
+    const workouts: ActionTrendWorkout[] = recentCompleted.map((workout) => ({
+      routine,
+      unit: workout.unit,
+      completedAt: workout.completedAt,
+      sets: workout.sets.map((set) => ({
+        exerciseKey: set.exerciseKey,
+        exerciseName: set.exerciseName ?? "",
+        weight: set.weight,
+        reps: set.reps,
+        completed: set.completed,
+      })),
+    }));
+    for (const trend of buildActionTrends(workouts)) {
+      entries.push({
+        routine,
+        exercise_key: trend.exerciseKey,
+        exercise_name: trend.exerciseName,
+        unit: trend.unit,
+        planned_sets: trend.plannedSets,
+        completed_sets: trend.completedSets,
+        completion_rate: trend.completionRate,
+        total_reps: trend.totalReps,
+        volume: trend.volume,
+        best_set: trend.bestSet,
+        estimated_one_rep_max: trend.estimatedOneRepMax,
+        session_count: trend.sessionCount,
+        last_date: trend.lastDate,
+        trends_version: trend.trendsVersion,
       });
     }
   }
@@ -1797,6 +1896,7 @@ export const Actions = {
         week_summaries: weekSummaries,
         comparable_history: await loadComparableHistory(ctx),
         progression_advice: await loadProgressionAdvice(ctx),
+        action_trends: await loadActionTrends(ctx),
         ...(receiptFields ?? {}),
         ...(receiptAdviceFields ?? {}),
       };

@@ -301,6 +301,77 @@ to nothing user-visible beyond losing the advice fields).
   typechecked build, and the identical engine path proven live via
   getDashboard.
 
+## Action-level trends (W3.3, added 2026-11-01)
+
+Per-exercise trends on the history page, additive and read-only —
+no schema change, no migration, no stored data rewritten.
+`getDashboard` additionally returns `action_trends`: one entry per
+(routine, exercise) over the same per-routine 20-completed-workout
+windows `comparable_history` reads, computed by the pure builder
+`buildActionTrends` in `server/src/action-trends.ts` (the loader
+`loadActionTrends` only feeds it `loadRoutineRecentCompleted`
+rows; `ComparableSetLike` gained an additive optional
+`exerciseName` pass-through). Existing consumers （健康看板 sync)
+ignore the field; the forbidden response is unchanged.
+
+Per exercise the entry carries: planned / completed working sets
+and their completion rate, total reps over completed sets, total
+volume (weight × reps over completed sets with both recorded),
+the best set (highest weight × reps among completed sets with a
+real positive weight), and an estimated 1RM. All weight-derived
+figures are expressed in the entry's display unit — the most
+recent session's unit — with other-unit sessions converted first
+via the server's LB_TO_KG constant and 0.5 rounding (the trends
+module's constant is asserted equal to the engine's).
+
+Estimated 1RM rule (hard constraint, labelled in the UI as
+「估算 1RM（Epley 公式）」 with its source set shown): Epley (1985),
+1RM = weight × (1 + reps / 30), computed ONLY over eligible sets —
+completed, weight > 0, integer reps in 1..12 — after unit
+conversion, compared only within the same exercise. Bodyweight
+sets (weight 0 / null), missing-weight sets, >12-rep sets and
+uncompleted sets never participate, so no fabricated PR exists:
+an exercise with no eligible set reports a null estimate and the
+UI shows 暂无估算. The client renders the server figures only and
+computes no trend or Epley value itself; every figure carries a
+text label plus a symbol (✓ completion, ★ best set, ▲ estimated
+1RM), never colour alone.
+
+### A-class evidence (W3.3)
+
+- `validate-action-trends.mjs` (new, node): evaluates the REAL
+  trends module verbatim over synthetic data only — a behavioral
+  suite of 35 assertions (completion rate / total reps / volume /
+  best set from one worked example, Epley values at 1/10/12 reps,
+  ineligibility for 13 reps / 0 reps / non-integer reps /
+  bodyweight 0 / negative / missing weight / missing reps,
+  bodyweight-only exercise → null best set + null 1RM with reps
+  and completion still counted, >12-rep set counting toward
+  volume and best set but never the 1RM, uncompleted sets counted
+  only as planned, cross-exercise isolation, unit conversion in
+  both directions before comparison, empty shapes) plus constant /
+  version checks and 8 wiring checks — 15 checks total, all
+  passing.
+- Mutation sensitivity, actually executed: 4 mutants of the module
+  source (Epley divisor 30→20; 1RM reps cap 12→30; bodyweight
+  guard `weight <= 0`→`weight < 0`; completion filter removed)
+  each make the behavioral suite fail (6 / 2 / 1 / 7 assertions),
+  proving the suite is not vacuous.
+- Full regression re-run 2026-11-01, all green:
+  `validate-action-trends (node): 15 passed, 0 failed`;
+  `validate-progression-engine (node): 35 passed, 0 failed`;
+  `validate-receipt (node): 37 passed, 0 failed`;
+  `validate-rir-rpe (node): 103 passed, 0 failed`;
+  `validate-start (node): 66 passed, 0 failed`;
+  `validate-week-current (node): 59 passed, 0 failed`;
+  `validate-muscle-receipt (node): 30 passed, 0 failed`;
+  `validate-muscle-diagram (node): 36 passed, 0 failed`;
+  `validate-scroll-restore (node): 26 passed, 0 failed`;
+  `validate-plan-safe (bun): 226 passed, 0 failed`.
+  Total: 633 checks, 0 failures. Privacy scan of the new/changed
+  files: zero hits (no UUIDs, paths, keys, or real training data;
+  validators use synthetic fixtures only).
+
 ## Muscle diagram (W6.2, added 2026-10-20)
 
 The guide dialog's front/back muscle diagram is hand-drawn SVG line
