@@ -19,6 +19,14 @@ export const strengthTrainingSnapshot = sqliteTable("strength_training_snapshot"
 export const morningCheckin = sqliteTable("morning_checkin", {
   date: text("date").primaryKey(),
   feeling: integer("feeling").notNull(),
+  // H4.1 behavior tags (additive, migration 0018): the day's optional
+  // behaviour tags as a JSON array of preset tag strings (e.g.
+  // ["饮酒","晚睡"]), written through the SAME saveMorningCheckin path
+  // and owner gate as `feeling` — no new write channel, no L0.1
+  // expansion. Nullable because rows saved before this column existed
+  // carry no tags; a null (or empty) value reads as "no tags selected",
+  // never as an error, and old rows are never rewritten or recomputed.
+  behaviorTags: text("behavior_tags"),
   // Persistent monotonic input revision (H-ARCHIVE-SAFE-001 follow-up):
   // incremented atomically inside the saveMorningCheckin upsert itself
   // (first insert = 1, conflict update = COALESCE(revision, 0) + 1), so

@@ -2,6 +2,14 @@ import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk"
 import { and, asc, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 import { computeAcwr, type AcwrResult } from "./acwr";
+import {
+  BEHAVIOR_MIN_SAMPLE,
+  BEHAVIOR_TAGS,
+  computeBehaviorImpact,
+  parseBehaviorTags,
+  serializeBehaviorTags,
+  type BehaviorImpactItem,
+} from "./behavior-impact";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
 
@@ -1020,6 +1028,81 @@ const acwrSchema = z.object({
   chronicDurationMissing: z.number().int().nonnegative(),
 });
 
+// H4.1 行为—恢复影响 (behavior → next-day recovery correlation): the
+// server-computed correlation between morning-checkin behaviour tags
+// and the NEXT day's HRV (health snapshot historyDaily) / readiness
+// (readiness_history archive), against the baseline of check-in days
+// without that tag. All math lives in the pure module
+// server/src/behavior-impact.ts; the client only renders this result.
+// Correlation only — no causal claim, no medical judgement. Items
+// below the 5-tagged-day gate carry null differences (样本不足).
+const behaviorTagSchema = z.enum(BEHAVIOR_TAGS);
+
+const behaviorImpactItemSchema = z.object({
+  tag: behaviorTagSchema,
+  label: z.string(),
+  taggedDays: z.number().int().nonnegative(),
+  hrvTaggedPairs: z.number().int().nonnegative(),
+  hrvBaselinePairs: z.number().int().nonnegative(),
+  readinessTaggedPairs: z.number().int().nonnegative(),
+  readinessBaselinePairs: z.number().int().nonnegative(),
+  hrvExcluded: z.number().int().nonnegative(),
+  readinessExcluded: z.number().int().nonnegative(),
+  hrvTaggedMean: z.number().nullable(),
+  hrvBaselineMean: z.number().nullable(),
+  readinessTaggedMean: z.number().nullable(),
+  readinessBaselineMean: z.number().nullable(),
+  hrvDiff: z.number().nullable(),
+  readinessDiff: z.number().nullable(),
+  sufficient: z.boolean(),
+});
+
+const behaviorImpactSchema = z.object({
+  items: z.array(behaviorImpactItemSchema).max(BEHAVIOR_TAGS.length),
+  threshold: z.number().int().positive(),
+  // The readiness date's own saved tag selection (the morning
+  // check-in the owner edits today), so the client renders the
+  // current selection straight from the server instead of guessing.
+  todayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  todayTags: z.array(behaviorTagSchema).max(BEHAVIOR_TAGS.length),
+});
+
+type BehaviorImpact = z.infer<typeof behaviorImpactSchema>;
+
+const EMPTY_BEHAVIOR_IMPACT: BehaviorImpact = { items: [], threshold: BEHAVIOR_MIN_SAMPLE, todayDate: null, todayTags: [] };
+
+// Load every input the behavior-impact correlation needs and compute
+// it server-side. Check-ins come from morning_checkin (all rows — the
+// correlation window is whatever history exists, never a fabricated
+// one), HRV from the health snapshot's historyDaily, and readiness
+// from the readiness_history archive (all rows). A read failure
+// degrades to empty items rather than breaking the dashboard — the
+// panel then honestly shows that no behaviour history exists yet.
+async function loadBehaviorImpact(
+  ctx: Ctx,
+  health: Snapshot | null,
+  todayDate: string | null,
+  todayTags: BehaviorImpact["todayTags"],
+): Promise<BehaviorImpact> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const checkinRows = await db
+      .select({ date: schema.morningCheckin.date, behaviorTags: schema.morningCheckin.behaviorTags })
+      .from(schema.morningCheckin);
+    const readinessRows = await db
+      .select({ date: schema.readinessHistory.date, score: schema.readinessHistory.score })
+      .from(schema.readinessHistory);
+    const items: BehaviorImpactItem[] = computeBehaviorImpact(
+      checkinRows.map((row) => ({ date: row.date, tags: parseBehaviorTags(row.behaviorTags) as unknown as string[] })),
+      (health?.historyDaily ?? []).map((row) => ({ date: row.date, hrvMs: row.hrvMs })),
+      readinessRows.map((row) => ({ date: row.date, score: row.score })),
+    );
+    return { items, threshold: BEHAVIOR_MIN_SAMPLE, todayDate, todayTags };
+  } catch {
+    return { items: [], threshold: BEHAVIOR_MIN_SAMPLE, todayDate, todayTags };
+  }
+}
+
 // Derive the ACWR input from the effective strength snapshot: the
 // coverage start is the earliest weeklyTrend week the sync retained
 // (whole-week buckets are kept for up to eight weeks, including
@@ -1051,6 +1134,9 @@ const getDashboardResponse = z.object({
   snapshot: snapshotSchema.nullable(),
   // H4.2 additive: server-computed ACWR over the strength snapshot.
   acwr: acwrSchema.nullable(),
+  // H4.1 additive: server-computed behaviour → next-day recovery
+  // correlation (pure module) plus today's saved tag selection.
+  behaviorImpact: behaviorImpactSchema,
   readiness: readinessSchema.nullable(),
   // H3.5: the owner's feedback on the current review window's focus
   // (current) and the most recent feedback row belonging to any other
@@ -3345,10 +3431,10 @@ async function handleGetRedemptionReceipt(ctx: Ctx, args: { requestId: string })
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、数据状态与统一时间线（仅所有者）。",
+    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3368,7 +3454,8 @@ export const Actions = {
       if (healthLoad.state !== "ok" || !healthLoad.snapshot) {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
-        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        const behaviorImpact = await loadBehaviorImpact(ctx, null, null, []);
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3383,8 +3470,12 @@ export const Actions = {
       // Morning check-in is read only when the health snapshot is usable.
       const readinessDate = health.morningReference?.date ?? shiftDate(health.dataDate, 1);
       const db = ctx.db<typeof schema>();
-      const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling, updatedAt: schema.morningCheckin.updatedAt, revision: schema.morningCheckin.revision }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
+      const checkinRows = await db.select({ feeling: schema.morningCheckin.feeling, updatedAt: schema.morningCheckin.updatedAt, revision: schema.morningCheckin.revision, behaviorTags: schema.morningCheckin.behaviorTags }).from(schema.morningCheckin).where(eq(schema.morningCheckin.date, readinessDate)).limit(1);
       const morningFeeling = checkinRows[0]?.feeling ?? null;
+      // H4.1: today's saved behaviour tags, bound at the same read as
+      // the feeling — the client renders this selection and the
+      // behaviour-impact panel from server state only.
+      const todayTags = parseBehaviorTags(checkinRows[0]?.behaviorTags ?? null);
       // Bind the check-in INPUT VERSION at the same read instant as the
       // feeling (H-ARCHIVE-SAFE-001 race fix): the row's updated_at as
       // read here travels with the computed score into the archive
@@ -3419,7 +3510,11 @@ export const Actions = {
       // name the same focus identity.
       const focusLoad = await loadFocusFeedback(ctx, health.dataDate, health.updatedAt);
       const focusFeedback = { current: focusLoad.current, previous: focusLoad.previous, readFailed: focusLoad.readStatus === "error" };
-      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
+      // H4.1: behaviour → next-day recovery correlation over the same
+      // loaded snapshot (historyDaily HRV) + the readiness archive +
+      // every stored check-in's tags. Computed here, rendered only.
+      const behaviorImpact = await loadBehaviorImpact(ctx, health, readinessDate, todayTags);
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
 
@@ -3665,8 +3760,17 @@ export const Actions = {
   }),
 
   saveMorningCheckin: defineAction({
-    description: "保存某天的晨间主观感受评分 1–10（仅所有者）。",
-    request: z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), feeling: z.number().int().min(1).max(10) }),
+    description: "保存某天的晨间主观感受评分 1–10 与可选行为标签（仅所有者）。",
+    request: z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      feeling: z.number().int().min(1).max(10),
+      // H4.1: the day's optional behaviour tags (preset multi-select;
+      // an empty selection is valid). Optional in the request so a
+      // feeling-only save from an older client never wipes the stored
+      // tags: when the field is absent the tags column is left exactly
+      // as stored; when present (including []) it is replaced.
+      tags: z.array(behaviorTagSchema).max(BEHAVIOR_TAGS.length).optional(),
+    }),
     response: mutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
@@ -3681,8 +3785,16 @@ export const Actions = {
       // distinct, ordered revisions. A rejected (non-owner) save returns
       // above before any statement runs, so it cannot advance the
       // revision; a failed statement likewise leaves the row untouched.
-      await db.insert(schema.morningCheckin).values({ date: args.date, feeling: args.feeling, revision: 1, createdAt: now, updatedAt: now })
-        .onConflictDoUpdate({ target: schema.morningCheckin.date, set: { feeling: args.feeling, revision: sql`COALESCE(${schema.morningCheckin.revision}, 0) + 1`, updatedAt: now } });
+      // H4.1 tags ride this exact same statement and owner gate — no
+      // new write path, no L0.1 expansion.
+      if (args.tags === undefined) {
+        await db.insert(schema.morningCheckin).values({ date: args.date, feeling: args.feeling, revision: 1, createdAt: now, updatedAt: now })
+          .onConflictDoUpdate({ target: schema.morningCheckin.date, set: { feeling: args.feeling, revision: sql`COALESCE(${schema.morningCheckin.revision}, 0) + 1`, updatedAt: now } });
+      } else {
+        const behaviorTags = serializeBehaviorTags(args.tags);
+        await db.insert(schema.morningCheckin).values({ date: args.date, feeling: args.feeling, behaviorTags, revision: 1, createdAt: now, updatedAt: now })
+          .onConflictDoUpdate({ target: schema.morningCheckin.date, set: { feeling: args.feeling, behaviorTags, revision: sql`COALESCE(${schema.morningCheckin.revision}, 0) + 1`, updatedAt: now } });
+      }
       ctx.invalidateQueries(["dashboard"]);
       return { ok: true, forbidden: false };
     },

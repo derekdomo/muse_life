@@ -31,6 +31,15 @@ type UnifiedDay = DashboardResponse["unifiedTimeline"][number];
 type StrengthTraining = NonNullable<DashboardResponse["strength"]>;
 type ReadinessHistoryPoint = DashboardResponse["readinessHistory"][number];
 type Acwr = DashboardResponse["acwr"];
+type BehaviorImpact = DashboardResponse["behaviorImpact"];
+type BehaviorImpactItem = BehaviorImpact["items"][number];
+type BehaviorTag = BehaviorImpact["todayTags"][number];
+
+// H4.1 preset behaviour tags for the morning check-in multi-select.
+// This list mirrors the server's preset set (server/src/behavior-impact.ts
+// BEHAVIOR_TAGS); the client only offers the choices and renders the
+// server's saved selection — every impact number is computed server-side.
+const BEHAVIOR_TAG_OPTIONS: BehaviorTag[] = ["饮酒", "咖啡因", "晚睡", "晚进食", "出差"];
 type SourceState = DashboardResponse["healthState"];
 type FocusFeedbackData = DashboardResponse["focusFeedback"];
 type GameState = ApiResponse<typeof api, "getGameState">;
@@ -4482,7 +4491,7 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
   );
 }
 
-function ReadinessPanel({ readiness, compact = false, open: openProp, onOpenChange }: { readiness: Readiness; compact?: boolean; open?: boolean; onOpenChange?: (open: boolean) => void }) {
+function ReadinessPanel({ readiness, behaviorImpact, compact = false, open: openProp, onOpenChange }: { readiness: Readiness; behaviorImpact: BehaviorImpact; compact?: boolean; open?: boolean; onOpenChange?: (open: boolean) => void }) {
   const queryClient = useQueryClient();
   const [internalOpen, setInternalOpen] = useState(!compact);
   const foldOpen = openProp ?? internalOpen;
@@ -4493,8 +4502,19 @@ function ReadinessPanel({ readiness, compact = false, open: openProp, onOpenChan
   };
   const [feeling, setFeeling] = useState(readiness.morningFeeling ?? 5);
   useEffect(() => setFeeling(readiness.morningFeeling ?? 5), [readiness.morningFeeling]);
+  // H4.1: today's saved behaviour tags come from the server
+  // (behaviorImpact.todayTags, bound to behaviorImpact.todayDate);
+  // local state only holds the in-flight selection until it is saved
+  // through the same saveMorningCheckin path as the feeling.
+  const savedTags = behaviorImpact.todayDate === readiness.date ? behaviorImpact.todayTags : [];
+  const savedTagsKey = savedTags.join("|");
+  const [tags, setTags] = useState<BehaviorTag[]>(savedTags);
+  useEffect(() => { setTags(savedTags); }, [savedTagsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleTag = (tag: BehaviorTag) => {
+    setTags((prev) => (prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]));
+  };
   const saveFeeling = useMutation({
-    mutationFn: () => api.saveMorningCheckin({ date: readiness.date, feeling }),
+    mutationFn: () => api.saveMorningCheckin({ date: readiness.date, feeling, tags }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
   });
   const scoreStyle = { "--readiness-score": (readiness.score ?? 0) * 10 } as CSSProperties;
@@ -4538,6 +4558,27 @@ function ReadinessPanel({ readiness, compact = false, open: openProp, onOpenChan
       <form className="morning-checkin" onSubmit={(event) => { event.preventDefault(); saveFeeling.mutate(); }}>
         <div><label htmlFor="morning-feeling">今天感觉</label><output htmlFor="morning-feeling">{feeling}/10</output></div>
         <input id="morning-feeling" aria-label="今天感觉 1 到 10" type="range" min="1" max="10" step="1" value={feeling} onChange={(event) => setFeeling(Number(event.target.value))} />
+        <fieldset className="behavior-tags">
+          <legend>当天行为（可选，可多选，也可一个都不选）</legend>
+          <div className="behavior-tag-options">
+            {BEHAVIOR_TAG_OPTIONS.map((tag) => {
+              const selected = tags.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  type="button"
+                  className={`behavior-tag-btn${selected ? " selected" : ""}`}
+                  aria-pressed={selected}
+                  aria-label={`${selected ? "取消行为标签" : "选择行为标签"} ${tag}`}
+                  onClick={() => toggleTag(tag)}
+                >
+                  <span aria-hidden="true">{selected ? "✓" : "○"}</span> {tag}
+                </button>
+              );
+            })}
+          </div>
+          <p className="behavior-tags-note">记录当天的饮酒、晚睡等行为；「行为—恢复影响」会对照次日 HRV 与准备度，仅看相关性。</p>
+        </fieldset>
         <button type="submit" disabled={saveFeeling.isPending}>{saveFeeling.isPending ? "保存中…" : readiness.morningFeeling === null ? "保存晨检" : "更新晨检"}</button>
         {saveFeeling.isSuccess ? <p>已保存</p> : null}
       </form>
@@ -4658,7 +4699,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, syncAttempt, onGoToWeekReview, onGoToDataStatus }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; syncAttempt: SyncAttemptState | null; onGoToWeekReview?: () => void; onGoToDataStatus?: () => void }) {
+function TodayView({ snapshot, readiness, readinessHistory, behaviorImpact, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, syncAttempt, onGoToWeekReview, onGoToDataStatus }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; behaviorImpact: BehaviorImpact; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; syncAttempt: SyncAttemptState | null; onGoToWeekReview?: () => void; onGoToDataStatus?: () => void }) {
   const [readinessOpen, setReadinessOpen] = useState(false);
   const openReadinessBasis = () => {
     setReadinessOpen(true);
@@ -4691,7 +4732,7 @@ function TodayView({ snapshot, readiness, readinessHistory, onSyncHealth, onSync
       <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} syncAttempt={syncAttempt} onViewReadiness={openReadinessBasis} onViewWeekReview={onGoToWeekReview} onViewDataStatus={onGoToDataStatus} />
       {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
       <WeekLoadBlock snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} />
-      {readiness ? <ReadinessPanel readiness={readiness} compact open={readinessOpen} onOpenChange={setReadinessOpen} /> : null}
+      {readiness ? <ReadinessPanel readiness={readiness} behaviorImpact={behaviorImpact} compact open={readinessOpen} onOpenChange={setReadinessOpen} /> : null}
       <section className="kpi-board" aria-label="关键健康指标">
         <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={stepStatus} />
         <Kpi label="静息心率" value={numberLabel(snapshot.restingHr.value, 1)} unit="bpm" detail={`基线约 ${snapshot.restingHr.baseline} · 常见 ${snapshot.restingHr.usualMin}–${snapshot.restingHr.usualMax}`} status={snapshot.restingHr.status} />
@@ -4821,7 +4862,73 @@ function AcwrPanel({ acwr }: { acwr: Acwr }) {
   );
 }
 
-function TrendsView({ snapshot, acwr }: { snapshot: Snapshot; acwr: Acwr }) {
+// H4.1 行为—恢复影响： renders ONLY the server-computed result
+// (getDashboard.behaviorImpact, from the pure server module) — the
+// client never recomputes a mean, a difference, or the sample gate.
+// Below the gate the row shows 样本不足 with its counts and NO
+// difference numbers. Direction is always symbol + word + signed
+// number together (color-vision rule), and the panel states plainly
+// that this is correlation only, never causation.
+function behaviorDiffText(diff: number | null, unit: string): string {
+  if (diff === null) return "— 数据不足";
+  const symbol = diff > 0 ? "▲" : diff < 0 ? "▼" : "●";
+  const word = diff > 0 ? "较高" : diff < 0 ? "较低" : "持平";
+  const signedValue = `${diff > 0 ? "+" : ""}${diff.toFixed(1)} ${unit}`;
+  return `${symbol} ${word} ${signedValue}`;
+}
+
+function BehaviorImpactPanel({ behaviorImpact }: { behaviorImpact: BehaviorImpact }) {
+  const { items, threshold } = behaviorImpact;
+  return (
+    <section className="behavior-panel" aria-labelledby="behavior-impact-title">
+      <div className="history-intro">
+        <p className="section-kicker">晨检行为 · 次日恢复</p>
+        <h2 id="behavior-impact-title">行为—恢复影响</h2>
+        <p>每种行为取其有标签日的次日 HRV 与次日准备度均值，与未贴该标签的晨检日次日均值比较。仅相关性、非因果——这里只呈现关联与样本量，不下因果结论，也不是医疗判断。</p>
+      </div>
+      {!items.length ? (
+        <p className="empty-inline">还没有晨检行为记录。在今日页的晨检里选上当天的行为标签后，这里会按下面的口径累计对照。</p>
+      ) : (
+        <div className="behavior-rows">
+          {items.map((item: BehaviorImpactItem) => (
+            <div className="behavior-row" key={item.tag}>
+              <div className="behavior-row-head">
+                <span>{item.label}</span>
+                {item.sufficient ? (
+                  <strong>● 已记录 {item.taggedDays} 天</strong>
+                ) : (
+                  <strong>○ 样本不足 · 已记录 {item.taggedDays} 天（需 ≥ {threshold} 天）</strong>
+                )}
+              </div>
+              {item.sufficient ? (
+                <>
+                  <dl className="behavior-diffs">
+                    <div>
+                      <dt>次日 HRV 平均差</dt>
+                      <dd>{behaviorDiffText(item.hrvDiff, "ms")}</dd>
+                      <dd className="behavior-mean">有标签次日均值 {item.hrvTaggedMean === null ? "—" : `${item.hrvTaggedMean.toFixed(1)} ms`} · 基线 {item.hrvBaselineMean === null ? "—" : `${item.hrvBaselineMean.toFixed(1)} ms`}</dd>
+                    </div>
+                    <div>
+                      <dt>次日准备度平均差</dt>
+                      <dd>{behaviorDiffText(item.readinessDiff, "分")}</dd>
+                      <dd className="behavior-mean">有标签次日均值 {item.readinessTaggedMean === null ? "—" : `${item.readinessTaggedMean.toFixed(1)} 分`} · 基线 {item.readinessBaselineMean === null ? "—" : `${item.readinessBaselineMean.toFixed(1)} 分`}</dd>
+                    </div>
+                  </dl>
+                  <p className="behavior-sample-note">样本说明：次日 HRV 可用配对 {item.hrvTaggedPairs}/{item.taggedDays} 天（次日缺失剔除 {item.hrvExcluded} 天），基线 {item.hrvBaselinePairs} 天；次日准备度可用配对 {item.readinessTaggedPairs}/{item.taggedDays} 天（次日缺失剔除 {item.readinessExcluded} 天），基线 {item.readinessBaselinePairs} 天。无晨检记录的日期不计入基线。</p>
+                </>
+              ) : (
+                <p className="behavior-sample-note">样本说明：有标签 {item.taggedDays} 天，其中次日 HRV 可用配对 {item.hrvTaggedPairs} 天（次日缺失剔除 {item.hrvExcluded} 天）、次日准备度可用配对 {item.readinessTaggedPairs} 天（次日缺失剔除 {item.readinessExcluded} 天）。累计满 {threshold} 天后才显示平均差，目前不下结论。</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="behavior-method">计算口径：有标签日 = 晨检里选了该行为的日期；对照取该日期的次日（+1 天）HRV（健康快照每日明细）与次日准备度（评分存档）；基线 = 其余晨检日（未贴该标签）的同类次日均值。次日数据缺失的配对直接剔除并计入样本说明，缺失不按 0 计。任一行为累计有标签日少于 {threshold} 天只显示样本不足，不显示差值。</p>
+    </section>
+  );
+}
+
+function TrendsView({ snapshot, acwr, behaviorImpact }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact }) {
   const history = useMemo(() => snapshot.historyDaily.slice(-30).map((row) => ({ ...row, label: dateLabel(row.date) })), [snapshot.historyDaily]);
   return (
     <div className="trends-view">
@@ -4842,6 +4949,8 @@ function TrendsView({ snapshot, acwr }: { snapshot: Snapshot; acwr: Acwr }) {
       </section>
 
       <AcwrPanel acwr={acwr} />
+
+      <BehaviorImpactPanel behaviorImpact={behaviorImpact} />
 
       {history.length ? (
         <details className="history-charts trends-daily-fold">
@@ -6326,7 +6435,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, acwr, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function Dashboard({ snapshot, acwr, behaviorImpact, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   // H3.5 training entry: the review window the owner asked to inspect
   // from the week-review focus card. Set when they tap 查看这段训练
@@ -6552,7 +6661,7 @@ function Dashboard({ snapshot, acwr, readiness, readinessHistory, dataStatus, un
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
         <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -6636,7 +6745,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}

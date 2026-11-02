@@ -93,7 +93,8 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .morning-checkin label { font-size: 13px; font-weight: 800; }
 .morning-checkin output { color: var(--accent); font-size: 19px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .morning-checkin input { width: 100%; margin: 13px 0 10px; accent-color: var(--accent); }
-.morning-checkin button { min-height: 34px; border: 0; border-radius: 7px; padding: 0 11px; background: var(--accent); color: var(--surface); font-size: 11px; font-weight: 800; cursor: pointer; }
+.morning-checkin button { min-height: 44px; border: 0; border-radius: 7px; padding: 0 11px; background: var(--accent); color: var(--surface); font-size: 11px; font-weight: 800; cursor: pointer; }
+.morning-checkin .behavior-tag-btn { min-height: 44px; }
 .morning-checkin button:disabled { opacity: .55; }
 .morning-checkin p { margin: 7px 0 0; color: var(--dim); font-size: 9px; line-height: 1.4; }
 .readiness-adjustments { grid-column: 1 / -1; padding: 10px 12px; background: var(--amber-soft); color: var(--amber); border-radius: 8px; }
@@ -423,6 +424,28 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 
 .strength-trend-section { margin-top: 38px; }
 .acwr-panel { margin-top: 38px; }
+/* H4.1 行为标签 + 行为—恢复影响: tag toggles are 44px touch targets
+   whose state is ✓/○ symbol + pressed state + text, never color
+   alone; impact rows pair every difference with a direction symbol,
+   a word, and the signed number. */
+.behavior-tags { margin: 12px 0 0; padding: 0; border: 0; min-width: 0; grid-column: 1 / -1; }
+.behavior-tags legend { font-size: 13px; font-weight: 800; padding: 0; }
+.behavior-tag-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+.behavior-tag-btn, .morning-checkin button.behavior-tag-btn { min-height: 44px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--dim); font-size: 13px; font-weight: 700; cursor: pointer; }
+.behavior-tag-btn.selected, .morning-checkin button.behavior-tag-btn.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.behavior-tags-note { margin: 8px 0 0; color: var(--dim); font-size: 10px; line-height: 1.55; }
+.behavior-panel { margin-top: 38px; }
+.behavior-rows { display: grid; gap: 12px; margin-top: 16px; }
+.behavior-row { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.behavior-row-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.behavior-row-head span { font-size: 14px; font-weight: 800; }
+.behavior-row-head strong { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
+.behavior-diffs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 12px 0 0; }
+.behavior-diffs dt { color: var(--dim); font-size: 11px; font-weight: 700; }
+.behavior-diffs dd { margin: 4px 0 0; font-size: 15px; font-weight: 750; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.behavior-diffs dd.behavior-mean { color: var(--dim); font-size: 11px; font-weight: 600; line-height: 1.5; }
+.behavior-sample-note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.behavior-method { margin: 12px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
 .acwr-history-note { margin: 14px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 12px; line-height: 1.6; }
 .acwr-rows { display: grid; gap: 12px; margin-top: 16px; }
 .acwr-row { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
