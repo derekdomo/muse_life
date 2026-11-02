@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-11-01 16 时 PST（muse-life-plans-sync：W5.3 构建回传交付登记）
+
+- `W5.3` 围度与体重趋势（调研 T5，借鉴 Hevy / Strong）已在 artifact（space-6）上线（builder 16:08 PST 回传成功）。交付内容：新增 `drizzle/0010_add_body_measurements.sql`（body_measurements 表：一日一行、measured_at＋body_weight（lb/kg 双单位，沿用既有引擎口径）＋waist/chest/hips/arm/thigh 可选列、缺失留 NULL）；新 action `saveBodyMeasurement`（owner 门禁、同日 upsert、拒未来日期；非所有者实调 forbidden 且零写入）＋`getDashboard` 加法字段（近 90 天原始记录 body_measurements＋对照序列 body_trends）；服务端新增纯函数模块 `server/src/body-trends.ts`（无 import，导出 buildBodyTrends/convertBodyWeight/bodyTrendWeekStart，LB_TO_KG 与既有引擎一致；每个记录点对齐其周一至周日自然周的训练量与最佳工作组，训练数据与手动数据双向不混入）；历史/趋势页新增「围度与体重趋势」区块（三区并列图：体重／各围度断线留空／周训练量柱＋最佳组虚线、符号＋线型＋数字图例、数据明细表、手动录入表单 44px），页面明示口径「仅记录与趋势展示、不给出减重或健康结论」，空态「尚未记录围度与体重」。
+- 构建方验证证据（合成数据，builder 正式完成报告）：构建审计 pass、隐私扫描零命中；新增 `validate-body-trends.mjs` 26/26（真实生产函数断言：缺失围度保留 null 不结转、跨日周一对齐、lb→kg 换算、训练量与手动数据双向不混入、同日 last-wins、无结论字段键集；4 项变异实跑全部敏感）；全量回归 16 个验证脚本 0 失败（含 bun validate-plan-safe 226/226，迁移序列已更新至 0010）；实调 getDashboard：body_measurements/body_trends 正常返回，14 周对照序列中 5 个有训练周的训练量与既有 week_summaries 逐值一致（5010/22350/23195/29785/31685 lb）；durable 行数一致（workout_sets 254、workouts 15、body_measurements 新空表 0 行，既有表数据未动）。
+- 局限：审计沙盒探针会话写点击不落地，构建方未能亲手用表单存一条记录看图表出点（表单保存走与 toggleDailyItem 相同的已证 upsert 模式，区块经审计源码级评审通过）；精确 artifact version 平台未提供；owner 视角实机以本人打开为准（B 类呈现层）。整项待 PM 验收，不勾选。
+- **仓库回灌注记（本轮如实记录）**：运行时 artifact 文件访问约束（worker 不得直接读取 artifact 文件）下，本轮未执行 artifact→仓库字节级回灌——本仓 `workout-log/` 仍为上轮同步态，线上版本以 artifact 为准；待后续轮次经允许的通道补齐。plans.md 已标 [完成 2026-11-01]（仅实现方已交付）。
+- 修改文件：plans.md（W5.3 交付登记＋标完成）、本文件。回滚：revert 本提交（线上 space-6 已上线版本不受影响）。
+
 ## 2026-11-01 16 时 PST（muse-life-plans-sync：W5.3 派工＋Life 进度面板同步派工）
 
 - 本轮基线检查：git pull 已最新，HEAD＝last_seen_sha（b5e6f8a），基线..HEAD 无新提交、无新编号条目、无新 PM 记录（PM 仍按 PAUSE-LIFE-PM-001 暂停）。
