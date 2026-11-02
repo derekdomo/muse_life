@@ -791,3 +791,19 @@ details.game-panel > section { margin-top: 10px; }
 .bar-status { align-self: start; color: var(--amber); font-size: 9px; font-weight: 800; white-space: nowrap; }
 .trend-status-note { margin: 10px 0 0; color: var(--amber); font-size: 12px; font-weight: 700; line-height: 1.55; }
 .week-review-status-gap { margin: 8px 0 0; color: var(--amber); font-size: 12px; font-weight: 700; line-height: 1.6; overflow-wrap: anywhere; }
+
+/* H4.5 月度回顾与长期基线漂移 (monthly review): the review panel,
+ * its rows, and the method disclosure. Direction is always symbol +
+ * word + number — never color alone (colour-weak rule). */
+.month-review-panel { margin-top: 16px; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.month-review-note { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
+.month-review-rows { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.month-review-row { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); }
+.month-review-row-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 14px; font-weight: 800; }
+.month-review-row-head span:last-child { font-variant-numeric: tabular-nums; }
+.month-review-row p { margin: 8px 0 0; font-size: 13px; line-height: 1.65; }
+.month-review-row p.month-review-note { font-size: 12px; color: var(--dim); }
+.month-review-disclaimer { margin: 10px 0 0; color: var(--amber); font-size: 12px; font-weight: 700; line-height: 1.6; }
+.month-review-method-summary { min-height: 44px; display: flex; align-items: center; font-size: 13px; font-weight: 700; cursor: pointer; }
+.month-review-method { margin-top: 12px; }
+.month-review-method p { margin: 8px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; }

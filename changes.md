@@ -3197,3 +3197,19 @@
 - 如实保留：(a) 构建方自陈 P1「既有回归全过未达成」——本地复跑证伪，回灌后 week-review 103/103、week-focus-feedback 196/196 全绿，无既有失败残留（构建方环境的 93/10、195/1 未复现）；(b) 构建方自陈 P1「趋势结论剔除落 client 自算」——独立核查证伪：`statusDaySet` 唯一来源为服务端 `statusMode.marks`，client 全文无 statusPeriodForDate/isStatusDate/excludeStatusDates 调用，判定唯一事实源为服务端纯模块；(c) 转录本单字符笔误已更正（validate-status-mode.mjs 基线均值断言 `row +` → `sum +`，转录形恒 NaN，更正后 38/38 与构建方口径一致）；(d) 形状变更的测试维护：validate-units.mjs（eval 域补纯 status-mode 模块）、validate-sleep-debt.mjs（主返回键序钉住跟随）、validate-week-review.mjs（WeekReviewPanel JSX 钉住跟随新增 prop）、validate-hero-layers.mjs（readiness-basis 改为互斥双分支精确二处）；(e) 精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；PM 暂停中，待验收。
 - plans.md `H4.4` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准）。本轮未动 cron；修改文件：plans.md（H4.4 交付登记＋勾选）、health-dashboard 回灌 8 文件＋DATA-PLAN、本文件、4 个验证脚本的测试维护。回滚：revert 本提交即恢复回灌前状态（线上 space-4 已上线版本不受影响）。
 - 进度面板核对（2026-11-02 07:55 PST 轮次）：「Life 进度」（slug life）经 artifact.inspect 只读诊断：H4.1/H4.2/H4.3/H4.4 均为已交付（时间戳 05:15/04:10/06:28/07:21 PST，与仓库 [完成] 一致）；H4.5 本轮仅派工、按前例派工不翻条目状态；页脚截至 2026-11-02 07:21 PST、本轮同步 H4.4、main @ 56f16be。面板与仓库一致，无需改动，跳过刷新。
+- H4.5 月度回顾与长期基线漂移交付（2026-11-02 08:20 PST 轮次，muse-life-plans-sync）。
+ - 需求编号：plans.md `H4.5`（P2，推荐执行顺序第 7 步；W5 三项、H4.1–H4.4 已交付，本轮取 H4.5）。
+ - 任务：健康看板（space-4）新增月度回顾面板——以上一个完整自然月为回顾窗，展示 HRV、静息心率、睡眠、步数月均值相对长期基线的偏移量与方向；与 H3 周复盘共用洞察口径；单月噪声不下趋势结论。
+ - 改了什么：artifact（space-4）先行上线；回灌本仓——新增 `health-dashboard/server/src/month-review.ts`（无 import 纯函数模块，全部导出）、`health-dashboard/validate-month-review.mjs`（38 断言）；
+   `server/src/actions.ts`（+import、`monthReviewMetricSchema`/`monthReviewSchema`、`buildMonthReview`、getDashboardResponse 加法字段、三条返回路径、description 增补）；
+   `client/src/App.tsx`（`MonthReview`/`MonthReviewMetric` 类型、`monthMetricValue`/`monthOffsetText`、`MonthReviewPanel`、`TrendsView`/`Dashboard`/`App()` 接线）；
+   `client/src/theme.css`（`.month-review-*` 样式块）；`DATA-PLAN.md` 末尾新增 H4.5 章节（外科手术式，既有章节逐字保留）；`validate-sleep-debt.mjs` 键序钉住跟随（H4.4 前例）。
+   未改：schema.ts（无 H4.5 变更）、readiness 公式、H-LOAD-001、同步/权限/L0.1 例外；无 migration。
+ - 验证证据（本机实跑，合成数据）：`node validate-month-review.mjs` → 38 passed, 0 failed；三项变异真实执行全部敏感（基线中位数→均值 50→55.4 翻转、删除状态剔除 50→58.1 翻转、HRV 阈值清零 与基线接近→偏高翻转；变异体上原断言 FAIL，恢复后 38/38）；
+   全回归：acwr 31、behavior-impact 27、game-settlement 150、muscle-status 50、sleep-debt 35、sleep-regularity 25、swim-partial 30、sync-readback 33、week-load 47、all-workouts 20、units 25、week-review 103、week-focus-feedback 196、hero-status 20、unified-hk 34、week-coverage 23、week-comparison 25、hero-layers 24、persist-race 42、week-load-coverage 21 全绿；
+   seven-day-facts 51/1、swim-vis 41/1、design-b1b 37/3 经 git stash 前后比对确认为改前既有漂移（与本轮 diff 无关）；validate-source.mjs、validate-steps-contract.mjs 为既有环境崩溃（沿前例）。
+   隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+ - 构建评审 P1 独立闭环：(a) 变异实跑证据缺口——本轮真实执行补证，闭环；(b) 构建环境 week-review 93/10、week-focus-feedback 195/1——仓库复跑 103/103、196/196，失败断言无一引用 H4.5 标识符，系构建侧 App.tsx 副本漂移（H-SYNC-DIVERGE-001 范畴），闭环。
+ - 局限：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；回灌为转录本实现（`statusDates` 内联形式已按校验器字面要求对齐 artifact）。
+ - 回滚：revert 本提交即恢复回灌前状态（线上 space-4 已上线版本不受影响）。
+ - plans.md `H4.5` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md（H4.5 派工登记＋交付登记＋勾选）、health-dashboard 回灌 7 文件、本文件。

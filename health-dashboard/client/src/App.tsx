@@ -35,6 +35,8 @@ type BehaviorImpact = DashboardResponse["behaviorImpact"];
 type BehaviorImpactItem = BehaviorImpact["items"][number];
 type SleepDebt = DashboardResponse["sleepDebt"];
 type StatusModeData = DashboardResponse["statusMode"];
+type MonthReview = DashboardResponse["monthReview"];
+type MonthReviewMetric = NonNullable<MonthReview>["metrics"][number];
 type StatusPeriodView = StatusModeData["periods"][number];
 type StatusMarkMap = Map<string, { mode: StatusPeriodView["mode"]; symbol: string }>;
 
@@ -5194,7 +5196,60 @@ function BehaviorImpactPanel({ behaviorImpact }: { behaviorImpact: BehaviorImpac
   );
 }
 
-function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData }) {
+function monthMetricValue(metric: MonthReviewMetric): string {
+  if (metric.monthMean === null) return "—";
+  return `${metric.monthMean.toFixed(metric.digits)} ${metric.unit}`;
+}
+
+function monthOffsetText(metric: MonthReviewMetric): string {
+  if (metric.offset === null || metric.direction === null) return "无法判断";
+  const sign = metric.offset > 0 ? "+" : "";
+  return `${metric.direction.symbol} ${metric.direction.word} ${sign}${metric.offset.toFixed(metric.digits)} ${metric.unit}`;
+}
+
+// H4.5 月度回顾与长期基线漂移: render-only — every number comes
+// from getDashboard.monthReview (server/src/month-review.ts). The
+// panel shows offset FACTS with a threshold direction only: a single
+// month is noisy, so it never emits a trend verdict （上升／变好／
+// 变差）, never a score, and never a medical judgement.
+function MonthReviewPanel({ monthReview }: { monthReview: MonthReview }) {
+  if (!monthReview) return null;
+  return (
+    <section className="month-review-panel" aria-labelledby="month-review-title">
+      <div className="section-heading"><div><p className="section-kicker">月度回顾</p><h2 id="month-review-title">月度回顾与长期基线漂移</h2></div><span className="month-review-note">{monthReview.monthLabel}</span></div>
+      <p className="month-review-disclaimer">单月数据有噪声：只呈现偏移事实与方向，不下「上升／变好」一类趋势结论，不作医疗判断。</p>
+      <div className="month-review-rows">
+        {monthReview.metrics.map((metric) => (
+          <div className="month-review-row" key={metric.key}>
+            <div className="month-review-row-head"><span>{metric.label}</span><span>{monthMetricValue(metric)}</span></div>
+            <p>
+              {metric.judgeable ? (
+                <>长期基线 {metric.baseline === null ? "—" : `${metric.baseline.toFixed(metric.digits)} ${metric.unit}`}（{metric.baselineDays} 天）· 偏移 {monthOffsetText(metric)}</>
+              ) : (
+                <>无法判断{metric.baselineSufficient ? "" : "（基线不足）"} · 本月有效 {metric.validDays} 天（需 ≥{monthReview.minValidDays} 天）</>
+              )}
+            </p>
+            {metric.missingDates.length ? (
+              <p className="month-review-note">缺失 {metric.missingDates.length} 天：{metric.missingDates.slice(0, 6).join("、")}{metric.missingDates.length > 6 ? "…" : ""}</p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      {monthReview.statusExcludedDates.length ? (
+        <p className="month-review-note">状态期（生病／受伤／旅行）{monthReview.statusExcludedDates.length} 天已剔除，不计入月均值与基线。</p>
+      ) : null}
+      <details className="month-review-method">
+        <summary className="month-review-method-summary">基线口径与覆盖说明</summary>
+        <p>回顾窗：{monthReview.monthLabel}（{monthReview.monthStart}–{monthReview.monthEnd}，{monthReview.monthDays} 天），锚定 {monthReview.anchorDate}。只回顾上一个完整自然月，本月不计入。</p>
+        <p>长期基线：HRV／静息心率／步数取回顾月末前 ≤28 天有效日中位数（≥14 天）；睡眠取最近 ≤14 晚实际睡眠均值（≥8 晚）。状态期与当天 partial 不进入基线。</p>
+        <p>月均值只计回顾窗内有效日：状态期剔除、当天 partial 与数据日期之后的行不计，缺失日期逐日列出、不按 0 填充。</p>
+        <p>方向阈值与周复盘共用：HRV ±10%、静息心率 ±3 bpm、睡眠 ±30 分钟、步数 ±20%；达阈值标偏高／偏低，未达标只给数字并标与基线接近。</p>
+      </details>
+    </section>
+  );
+}
+
+function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, monthReview }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; monthReview: MonthReview }) {
   const history = useMemo(() => snapshot.historyDaily.slice(-30).map((row) => ({ ...row, label: dateLabel(row.date) })), [snapshot.historyDaily]);
   const marks = statusMarkMap(statusMode);
   const trendHasStatusDay = snapshot.trends.some((point) => marks.has(point.date));
@@ -5222,6 +5277,8 @@ function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode }: {
       <SleepDebtPanel sleepDebt={sleepDebt} />
 
       <BehaviorImpactPanel behaviorImpact={behaviorImpact} />
+
+      <MonthReviewPanel monthReview={monthReview} />
 
       {history.length ? (
         <details className="history-charts trends-daily-fold">
@@ -6708,7 +6765,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, monthReview, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; monthReview: MonthReview; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   // H3.5 training entry: the review window the owner asked to inspect
   // from the week-review focus card. Set when they tap 查看这段训练
@@ -6935,7 +6992,7 @@ function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, read
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
         <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} statusMode={statusMode} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} statusMode={statusMode} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} statusMode={statusMode} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} statusMode={statusMode} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} statusMode={statusMode} monthReview={monthReview} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} statusMode={statusMode} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -7019,7 +7076,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} statusMode={dashboard.data.statusMode} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} statusMode={dashboard.data.statusMode} monthReview={dashboard.data.monthReview} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}

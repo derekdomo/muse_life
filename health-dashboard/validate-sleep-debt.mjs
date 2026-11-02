@@ -47,7 +47,10 @@ check('source: all three getDashboard return paths carry sleepDebt (forbidden / 
   && serverSrc.includes('const sleepDebt = buildSleepDebt(snapshot, readinessDate);')
   // H4.4: the main return gained the additive statusMode field between
   // sleepDebt and readiness — the pin tracks the live key order.
-  && serverSrc.includes('behaviorImpact, sleepDebt, statusMode, readiness,'));
+  // H4.5: the main return gained the additive monthReview field after
+  // statusMode (before readinessHistory) — the pin follows the live
+  // key order again.
+  && serverSrc.includes('behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory,'));
 check('source: server builds the input from main sleeps only (CWEB-SLEEP-001 selection)',
   serverSrc.includes('const main = selectMainSleep(rows);') && serverSrc.includes('hours: totalSleepHours(main, main.totalHours)'));
 check('source: readiness formula untouched (7-day sleep bank caliber intact)',

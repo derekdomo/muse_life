@@ -11,11 +11,13 @@ import {
   type BehaviorImpactItem,
 } from "./behavior-impact";
 import { computeSleepDebt, type SleepDebtResult } from "./sleep-debt";
+import { computeMonthReview, type MonthReviewResult } from "./month-review";
 import {
   STATUS_MODES,
   buildStatusModeView,
   excludeStatusDates,
   isValidStatusPeriod,
+  statusDatesInWindow,
   statusPeriodForDate,
   suppressReadinessForStatus,
   type StatusPeriod,
@@ -1220,6 +1222,46 @@ function buildSleepDebt(snapshot: Snapshot, readinessDate: string): SleepDebtRes
   return computeSleepDebt(nights, readinessDate);
 }
 
+// H4.5 月度回顾与长期基线漂移 (monthly review vs long-term
+// baseline): the previous complete calendar month's HRV /
+// resting-HR / sleep / steps means against their long-term
+// baselines, computed by the pure module server/src/month-review.ts;
+// the client only renders this result. Month means count valid
+// days only — status dates (H4.4, via statusDatesInWindow) and the
+// partial day never enter; missing dates are counted and listed,
+// never zero-filled. Baselines are anchored at the review month's
+// end: medians over ≤28 days (≥14 valid) for HRV / resting HR /
+// steps, the H4.3 sleep caliber (mean of the most recent ≤14
+// nights, ≥8). Direction reuses the H3 week review's
+// practical-difference thresholds; a single month is noisy, so the
+// module emits offset FACTS and a threshold direction only — never
+// a trend verdict, never a score, never a medical judgement.
+function buildMonthReview(snapshot: Snapshot, readinessDate: string, statusPeriods: readonly StatusPeriod[]): MonthReviewResult | null {
+  const daily = snapshot.historyDaily.map((row) => ({ date: row.date, steps: row.steps, restingHr: row.restingHr, hrvMs: row.hrvMs }));
+  const sleepsByDate = new Map<string, SleepHistoryRow[]>();
+  for (const row of snapshot.historySleeps) {
+    const rows = sleepsByDate.get(row.date);
+    if (rows) rows.push(row);
+    else sleepsByDate.set(row.date, [row]);
+  }
+  const nights = [];
+  for (const [date, rows] of sleepsByDate) {
+    const main = selectMainSleep(rows);
+    if (!main) continue;
+    nights.push({ date, hours: totalSleepHours(main, main.totalHours) });
+  }
+  return computeMonthReview({
+    daily,
+    nights,
+    // Every date inside an owner-declared status period (H4.4) is
+    // excluded from the month mean AND from every baseline window.
+    statusDates: statusDatesInWindow(statusPeriods, shiftDate(readinessDate, -75), readinessDate),
+    anchorDate: readinessDate,
+    dataDate: snapshot.dataDate,
+    partialDate: snapshot.morningReference?.date ?? null,
+  });
+}
+
 // H4.4 状态模式 (status mode): the owner's declared status periods
 // （生病 / 受伤 / 旅行 + inclusive start/end dates) and everything the
 // dashboard derives from them, computed by the pure module
@@ -1257,6 +1299,39 @@ const statusModeSchema = z.object({
 type StatusMode = z.infer<typeof statusModeSchema>;
 
 const EMPTY_STATUS_MODE: StatusMode = { periods: [], active: null, suppressed: false, note: null, description: null, marks: [] };
+
+// H4.5 月度回顾与长期基线漂移: the additive month-review view
+// (pure module server/src/month-review.ts). Four metrics — HRV /
+// resting HR / sleep / steps — each with the review month's mean
+// over valid days, the long-term baseline, the signed offset, and
+// a threshold direction (or nulls + 无法判断 when a gate fails).
+// Null for non-owners and whenever no usable health snapshot
+// exists; the client only renders this result.
+const monthReviewMetricSchema = z.object({
+  key: z.enum(["hrv", "restingHr", "sleep", "steps"]),
+  label: z.string(),
+  unit: z.string(),
+  digits: z.number(),
+  monthMean: z.number().nullable(),
+  validDays: z.number(),
+  missingDates: z.array(z.string()),
+  baseline: z.number().nullable(),
+  baselineDays: z.number(),
+  baselineSufficient: z.boolean(),
+  offset: z.number().nullable(),
+  direction: z.object({ symbol: z.string(), word: z.string() }).nullable(),
+  judgeable: z.boolean(),
+});
+const monthReviewSchema = z.object({
+  monthLabel: z.string(),
+  monthStart: z.string(),
+  monthEnd: z.string(),
+  monthDays: z.number(),
+  anchorDate: z.string(),
+  minValidDays: z.number(),
+  statusExcludedDates: z.array(z.string()),
+  metrics: z.array(monthReviewMetricSchema),
+});
 
 const statusPeriodMutationResponse = z.object({
   ok: z.boolean(),
@@ -1301,6 +1376,10 @@ const getDashboardResponse = z.object({
   // display window). Empty for non-owners; periods still list when
   // the health snapshot is missing, with nothing suppressed.
   statusMode: statusModeSchema,
+  // H4.5 additive: the previous complete calendar month's metric
+  // means vs their long-term baselines (pure module). Null for
+  // non-owners and whenever no usable health snapshot exists.
+  monthReview: monthReviewSchema.nullable(),
   readiness: readinessSchema.nullable(),
   // H3.5: the owner's feedback on the current review window's focus
   // (current) and the most recent feedback row belonging to any other
@@ -3595,10 +3674,10 @@ async function handleGetRedemptionReceipt(ctx: Ctx, args: { requestId: string })
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、状态模式、数据状态与统一时间线（仅所有者）。",
+    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、状态模式、月度回顾与长期基线漂移、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, statusMode: EMPTY_STATUS_MODE, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, statusMode: EMPTY_STATUS_MODE, monthReview: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3623,7 +3702,7 @@ export const Actions = {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
         const behaviorImpact = await loadBehaviorImpact(ctx, null, null, []);
-        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), monthReview: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3703,7 +3782,13 @@ export const Actions = {
       // daily history, the 14-day unified timeline, the 7-day trend
       // charts, and every week-review window ending at dataDate.
       const statusMode = buildStatusModeView(statusPeriods, readinessDate, shiftDate(readinessDate, -41), readinessDate);
-      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
+      // H4.5: the month review for the previous complete calendar
+      // month (additive). Key order is statusMode, monthReview,
+      // readinessHistory — validate-month-review.mjs pins it, and
+      // validate-sleep-debt.mjs's exact-string pin follows the same
+      // live order (H4.4 precedent).
+      const monthReview = buildMonthReview(snapshot, readinessDate, statusPeriods);
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory, readiness, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
 
