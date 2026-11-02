@@ -30,6 +30,7 @@ type DataStatus = NonNullable<DashboardResponse["dataStatus"]>;
 type UnifiedDay = DashboardResponse["unifiedTimeline"][number];
 type StrengthTraining = NonNullable<DashboardResponse["strength"]>;
 type ReadinessHistoryPoint = DashboardResponse["readinessHistory"][number];
+type Acwr = DashboardResponse["acwr"];
 type SourceState = DashboardResponse["healthState"];
 type FocusFeedbackData = DashboardResponse["focusFeedback"];
 type GameState = ApiResponse<typeof api, "getGameState">;
@@ -4765,7 +4766,62 @@ function ChartPanel({ eyebrow, title, children }: { eyebrow: string; title: stri
 
 const tooltipStyle = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 };
 
-function TrendsView({ snapshot }: { snapshot: Snapshot }) {
+// H4.2 训练负荷平衡（ACWR）: renders ONLY the server-computed result
+// (getDashboard.acwr, from the pure server module) — the client never
+// recomputes a ratio, an average, or a band. Status is always symbol +
+// word + number together (color-vision rule), and the calculation
+// caliber plus the Garmin threshold source are printed on the panel.
+function AcwrPanel({ acwr }: { acwr: Acwr }) {
+  if (!acwr) {
+    return (
+      <section className="acwr-panel" aria-labelledby="acwr-title">
+        <div className="history-intro"><p className="section-kicker">训练记录</p><h2 id="acwr-title">训练负荷平衡（ACWR）</h2></div>
+        <p className="empty-inline">训练记录同步后，这里会显示近 7 天急性负荷与近 28 天慢性负荷之比。</p>
+      </section>
+    );
+  }
+  const ratioText = (value: number | null): string => (value === null ? "—" : value.toFixed(2));
+  const bandText = (band: NonNullable<Acwr>["volumeBand"], ratio: number | null): string =>
+    band ? `${band.symbol} ${band.label} · ACWR ${ratioText(ratio)}` : `— 数据不足 · ACWR ${ratioText(ratio)}`;
+  return (
+    <section className="acwr-panel" aria-labelledby="acwr-title">
+      <div className="history-intro">
+        <p className="section-kicker">训练记录 · 负荷平衡</p>
+        <h2 id="acwr-title">训练负荷平衡（ACWR）</h2>
+        <p>截至 {fullDateLabel(acwr.asOf)} · 急性窗 {dateLabel(acwr.acuteWindowStart)}–{dateLabel(acwr.acuteWindowEnd)}（{acwr.acuteDays} 天）· 慢性窗 {dateLabel(acwr.chronicWindowStart)}–{dateLabel(acwr.chronicWindowEnd)}（{acwr.chronicDays} 天）· 完成训练 急性 {acwr.sessionsAcute} 次 / 慢性 {acwr.sessionsChronic} 次</p>
+      </div>
+      {acwr.historyNote ? (
+        <p className="acwr-history-note"><span aria-hidden="true">▲</span> {acwr.historyNote}：历史不足 28 天，慢性负荷按已有 {acwr.chronicDays} 天平均，未以 0 填充缺失天数。</p>
+      ) : null}
+      {!acwr.hasData ? (
+        <p className="empty-inline">近 28 天内还没有已完成的训练记录，暂不计算 ACWR；有记录后会按下面的口径显示。</p>
+      ) : (
+        <div className="acwr-rows">
+          <div className="acwr-row">
+            <div className="acwr-row-head"><span>训练量 ACWR</span><strong>{bandText(acwr.volumeBand, acwr.volumeAcwr)}</strong></div>
+            <p>急性日均 {acwr.acuteVolumeDailyAvg === null ? "—" : volumeLabel(acwr.acuteVolumeDailyAvg)} {acwr.displayUnit}/天（近 7 天共 {acwr.acuteVolumeTotal === null ? "—" : volumeLabel(acwr.acuteVolumeTotal)} {acwr.displayUnit}）· 慢性日均 {acwr.chronicVolumeDailyAvg === null ? "—" : volumeLabel(acwr.chronicVolumeDailyAvg)} {acwr.displayUnit}/天（近 28 天共 {acwr.chronicVolumeTotal === null ? "—" : volumeLabel(acwr.chronicVolumeTotal)} {acwr.displayUnit}）</p>
+          </div>
+          <div className="acwr-row">
+            <div className="acwr-row-head"><span>时长 ACWR</span><strong>{bandText(acwr.durationBand, acwr.durationAcwr)}</strong></div>
+            {acwr.durationAcwr === null ? (
+              <p>{acwr.chronicDurationMissing > 0 || acwr.acuteDurationMissing > 0
+                ? `有 ${Math.max(acwr.acuteDurationMissing, acwr.chronicDurationMissing)} 次已完成训练缺时长记录，时长负荷不完整，暂不计算时长 ACWR（缺失不按 0 计）。`
+                : "慢性窗口内时长日均为 0 或无时长记录，暂不计算时长 ACWR。"}</p>
+            ) : (
+              <p>急性日均 {acwr.acuteDurationDailyAvg === null ? "—" : Math.round(acwr.acuteDurationDailyAvg)} 分钟/天（近 7 天共 {acwr.acuteDurationTotal === null ? "—" : Math.round(acwr.acuteDurationTotal)} 分钟）· 慢性日均 {acwr.chronicDurationDailyAvg === null ? "—" : Math.round(acwr.chronicDurationDailyAvg)} 分钟/天（近 28 天共 {acwr.chronicDurationTotal === null ? "—" : Math.round(acwr.chronicDurationTotal)} 分钟）</p>
+            )}
+          </div>
+        </div>
+      )}
+      <details>
+        <summary className="acwr-method-summary" aria-label="展开 ACWR 计算口径与阈值来源">计算口径与阈值来源</summary>
+        <p className="acwr-method">计算口径：急性负荷 = 近 7 天日均（窗口总量 ÷ 实际观察天数）；慢性负荷 = 近 28 天日均（窗口总量 ÷ 实际观察天数）；ACWR = 急性日均 ÷ 慢性日均，训练量与时长分别计算。训练量口径与力量汇总一致：已完成组的重量 × 次数，按场次单位换算（1 lb = 0.45359237 kg）后以 {acwr.displayUnit} 汇总；只计已完成训练。阈值来源：Garmin 公开 Training Load 口径 — ACWR &lt; 0.8 不足（▼）、0.8–1.3 适宜（●）、1.3–1.5 偏高（▲）、&gt; 1.5 过高（◆）。状态始终以符号＋文字＋数字呈现，不只靠颜色区分。本指标借鉴公开概念，不是 Garmin 官方分数，也不是医学测量。</p>
+      </details>
+    </section>
+  );
+}
+
+function TrendsView({ snapshot, acwr }: { snapshot: Snapshot; acwr: Acwr }) {
   const history = useMemo(() => snapshot.historyDaily.slice(-30).map((row) => ({ ...row, label: dateLabel(row.date) })), [snapshot.historyDaily]);
   return (
     <div className="trends-view">
@@ -4784,6 +4840,8 @@ function TrendsView({ snapshot }: { snapshot: Snapshot }) {
           </ChartPanel>
         ) : <p className="empty-inline">完成训练记录并同步后，这里会按周显示训练量趋势。</p>}
       </section>
+
+      <AcwrPanel acwr={acwr} />
 
       {history.length ? (
         <details className="history-charts trends-daily-fold">
@@ -6268,7 +6326,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function Dashboard({ snapshot, acwr, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   // H3.5 training entry: the review window the owner asked to inspect
   // from the week-review focus card. Set when they tap 查看这段训练
@@ -6494,7 +6552,7 @@ function Dashboard({ snapshot, readiness, readinessHistory, dataStatus, unifiedT
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
         <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -6578,7 +6636,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}

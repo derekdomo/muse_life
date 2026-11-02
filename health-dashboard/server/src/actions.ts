@@ -1,6 +1,7 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { and, asc, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
+import { computeAcwr, type AcwrResult } from "./acwr";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
 
@@ -978,9 +979,78 @@ const saveWeekFocusFeedbackResponse = z.object({
   message: z.string(),
 });
 
+// H4.2 训练负荷平衡 (ACWR): the server-computed acute:chronic workload
+// ratio over the SAME strength snapshot every other panel reads (the
+// space-6 sync channel — no second copy, no second sync path). All math
+// lives in the pure module server/src/acwr.ts; the client only renders
+// this result. Null when no strength snapshot or no anchor date exists.
+const acwrBandResultSchema = z.object({
+  band: z.enum(["不足", "适宜", "偏高", "过高"]),
+  symbol: z.string(),
+  label: z.string(),
+});
+
+const acwrSchema = z.object({
+  asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  displayUnit: z.enum(["lb", "kg"]),
+  acuteWindowStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  acuteWindowEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  chronicWindowStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  chronicWindowEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  acuteDays: z.number().int().nonnegative(),
+  chronicDays: z.number().int().nonnegative(),
+  insufficientHistory: z.boolean(),
+  historyNote: z.string().nullable(),
+  hasData: z.boolean(),
+  sessionsAcute: z.number().int().nonnegative(),
+  sessionsChronic: z.number().int().nonnegative(),
+  acuteVolumeTotal: z.number().nullable(),
+  chronicVolumeTotal: z.number().nullable(),
+  acuteVolumeDailyAvg: z.number().nullable(),
+  chronicVolumeDailyAvg: z.number().nullable(),
+  volumeAcwr: z.number().nullable(),
+  volumeBand: acwrBandResultSchema.nullable(),
+  acuteDurationTotal: z.number().nullable(),
+  chronicDurationTotal: z.number().nullable(),
+  acuteDurationDailyAvg: z.number().nullable(),
+  chronicDurationDailyAvg: z.number().nullable(),
+  durationAcwr: z.number().nullable(),
+  durationBand: acwrBandResultSchema.nullable(),
+  acuteDurationMissing: z.number().int().nonnegative(),
+  chronicDurationMissing: z.number().int().nonnegative(),
+});
+
+// Derive the ACWR input from the effective strength snapshot: the
+// coverage start is the earliest weeklyTrend week the sync retained
+// (whole-week buckets are kept for up to eight weeks, including
+// zero-volume intervening weeks), falling back to the earliest stored
+// workout date. The anchor is the health snapshot's dataDate when one
+// is usable, otherwise the latest completed workout date — never today
+// invented by the server, because a stored snapshot's "now" is its own
+// data date.
+function buildAcwr(strength: StrengthTraining | null, anchorDate: string | null): AcwrResult | null {
+  if (!strength) return null;
+  let anchor = anchorDate;
+  if (!anchor) {
+    const dates = strength.workouts.filter((workout) => workout.status === "completed").map((workout) => workout.date);
+    anchor = dates.length ? dates.reduce((max, date) => (date > max ? date : max), dates[0] ?? "") : null;
+  }
+  if (!anchor) return null;
+  const weekStarts = strength.weeklyTrend.map((week) => week.weekStart);
+  const workoutDates = strength.workouts.map((workout) => workout.date);
+  const historyStart = weekStarts.length
+    ? weekStarts.reduce((min, date) => (date < min ? date : min), weekStarts[0] ?? anchor)
+    : workoutDates.length
+      ? workoutDates.reduce((min, date) => (date < min ? date : min), workoutDates[0] ?? anchor)
+      : null;
+  return computeAcwr(strength.workouts, anchor, strength.displayUnit, historyStart);
+}
+
 const getDashboardResponse = z.object({
   forbidden: z.boolean(),
   snapshot: snapshotSchema.nullable(),
+  // H4.2 additive: server-computed ACWR over the strength snapshot.
+  acwr: acwrSchema.nullable(),
   readiness: readinessSchema.nullable(),
   // H3.5: the owner's feedback on the current review window's focus
   // (current) and the most recent feedback row belonging to any other
@@ -3275,9 +3345,10 @@ async function handleGetRedemptionReceipt(ctx: Ctx, args: { requestId: string })
 
 export const Actions = {
   getDashboard: defineAction({
+    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3297,7 +3368,7 @@ export const Actions = {
       if (healthLoad.state !== "ok" || !healthLoad.snapshot) {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
-        return { forbidden: false, snapshot: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3348,7 +3419,7 @@ export const Actions = {
       // name the same focus identity.
       const focusLoad = await loadFocusFeedback(ctx, health.dataDate, health.updatedAt);
       const focusFeedback = { current: focusLoad.current, previous: focusLoad.previous, readFailed: focusLoad.readStatus === "error" };
-      return { forbidden: false, snapshot, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
 
@@ -3360,6 +3431,7 @@ export const Actions = {
   // the game layer is caught here and returned as ok:false, so it can
   // never break getDashboard or the health views.
   getGameState: defineAction({
+    description: "读取人生游戏状态并结算 XP/金币：角色属性、装备、每日任务与结算账本（仅所有者）。",
     request: z.object({}), response: getGameStateResponse,
     async handler(ctx): Promise<z.infer<typeof getGameStateResponse>> {
       const todayLA = laTodayString();
@@ -3446,6 +3518,7 @@ export const Actions = {
   // total XP during settlement); allocation is permanent in v1 (no
   // respec) and affects only settlements booked afterwards.
   allocateAttribute: defineAction({
+    description: "把属性点分配到力量/耐力/精神/体力之一，永久生效（仅所有者）。",
     request: z.object({ attribute: gameAttributeSchema, count: z.number().int().min(1).max(50) }),
     response: gameMutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
@@ -3465,6 +3538,7 @@ export const Actions = {
   // payment anywhere — gold is minted only by XP settlements and daily
   // tasks.
   buyEquipment: defineAction({
+    description: "用金币购买装备目录中的一件装备（仅所有者）。",
     request: z.object({ itemId: z.string().min(1) }),
     response: gameMutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
@@ -3490,6 +3564,7 @@ export const Actions = {
   // LIFE-C1 S2: equip an owned item into its slot (one item per slot;
   // equipping replaces whatever the slot held). STRICT owner gate.
   equipItem: defineAction({
+    description: "装备一件已拥有的装备到对应槽位（仅所有者）。",
     request: z.object({ itemId: z.string().min(1) }),
     response: gameMutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
@@ -3509,6 +3584,7 @@ export const Actions = {
 
   // LIFE-C1 S2: unequip a slot. STRICT owner gate.
   unequipItem: defineAction({
+    description: "卸下一个槽位上已装备的装备（仅所有者）。",
     request: z.object({ slot: z.enum(["weapon", "armor", "accessory"]) }),
     response: gameMutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof gameMutationResponse>> {
@@ -3529,6 +3605,7 @@ export const Actions = {
   // getGameState; on settlement failure the list and receipts still
   // return from stored state with ok:false.
   getRewards: defineAction({
+    description: "读取奖励列表、金币余额与兑换回执，并先完成待结算（仅所有者）。",
     request: z.object({}), response: getRewardsResponse, handler: handleGetRewards,
   }),
 
@@ -3536,12 +3613,14 @@ export const Actions = {
   // settlement, no save, no task spawn. Used by the goal card's and
   // the recovery flow's 只读重查. STRICT owner gate.
   getRewardsSnapshot: defineAction({
+    description: "只读读取已存储的奖励、金币余额与回执，不触发任何结算或写入（仅所有者）。",
     request: z.object({}), response: getRewardsSnapshotResponse, handler: handleGetRewardsSnapshot,
   }),
 
   // LIFE-C1 S3: create or edit one reward (name + positive gold price).
   // Every save bumps the reward's revision. STRICT owner gate.
   saveReward: defineAction({
+    description: "新建或编辑一条个人奖励的名称与金币价格（仅所有者）。",
     request: z.object({ id: z.number().int().positive().nullable(), name: z.string().min(1).max(60), price: z.number().int().min(1).max(1000000) }),
     response: saveRewardResponse, handler: handleSaveReward,
   }),
@@ -3550,6 +3629,7 @@ export const Actions = {
   // (rewardId only — a display preference, never an economic input).
   // STRICT owner gate.
   setRewardGoal: defineAction({
+    description: "把一条奖励设为下一奖励目标（仅所有者）。",
     request: z.object({ rewardId: z.number().int().positive() }),
     response: setRewardGoalResponse, handler: handleSetRewardGoal,
   }),
@@ -3560,17 +3640,20 @@ export const Actions = {
   // stale / insufficient / conflict rejections write nothing. STRICT
   // owner gate.
   redeemReward: defineAction({
+    description: "按预览钉住的价格与余额版本兑换一条奖励并扣金币（仅所有者）。",
     request: redeemRewardRequest, response: redeemRewardResponse, handler: handleRedeemReward,
   }),
 
   // LIFE-C1 S3: read-only receipt lookup by requestId — the
   // confirmation path after a lost response. STRICT owner gate.
   getRedemptionReceipt: defineAction({
+    description: "按请求编号只读查询一笔兑换回执以确认结果（仅所有者）。",
     request: z.object({ requestId: z.string().min(1).max(80) }),
     response: getRedemptionReceiptResponse, handler: handleGetRedemptionReceipt,
   }),
 
   initializeSnapshot: defineAction({
+    description: "初始化检查：不写入任何种子数据，无快照时保持空状态（仅所有者）。",
     request: z.object({}), response: mutationResponse,
     async handler(ctx): Promise<z.infer<typeof mutationResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true };
@@ -3582,6 +3665,7 @@ export const Actions = {
   }),
 
   saveMorningCheckin: defineAction({
+    description: "保存某天的晨间主观感受评分 1–10（仅所有者）。",
     request: z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), feeling: z.number().int().min(1).max(10) }),
     response: mutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
@@ -3628,6 +3712,7 @@ export const Actions = {
   // decideFocusSaveOutcome above; a "conflict" outcome returns the
   // stored feedback + revision so the client can show what stands.
   saveWeekFocusFeedback: defineAction({
+    description: "保存对周复盘下周重点的有帮助/不适用反馈，带版本仲裁（仅所有者）。",
     request: saveWeekFocusFeedbackRequest, response: saveWeekFocusFeedbackResponse,
     async handler(ctx, args): Promise<z.infer<typeof saveWeekFocusFeedbackResponse>> {
       if (!isOwner(ctx)) return { ok: false, forbidden: true, conflict: false, focusKey: null, feedback: null, revision: null, message: "仅所有者可提交反馈" };
@@ -3689,6 +3774,7 @@ export const Actions = {
   }),
 
   saveHealthSnapshot: defineAction({
+    description: "保存同步任务回传的 Apple 健康快照（所有者或内部同步通道）。",
     request: snapshotSchema, response: saveSnapshotResponse,
     async handler(ctx, args): Promise<z.infer<typeof saveSnapshotResponse>> {
       // expectsAction callback for this artifact's own sync tasks (see
@@ -3714,6 +3800,7 @@ export const Actions = {
   }),
 
   saveStrengthTrainingSnapshot: defineAction({
+    description: "保存同步任务回传的力量训练快照（所有者或内部同步通道）。",
     request: strengthTrainingSchema, response: saveSnapshotResponse,
     async handler(ctx, args): Promise<z.infer<typeof saveSnapshotResponse>> {
       // expectsAction callback for this artifact's own sync tasks (see
@@ -3725,6 +3812,7 @@ export const Actions = {
   }),
 
   refreshStrengthTraining: defineAction({
+    description: "启动一次从训练记录同步力量训练数据的任务（仅所有者）。",
     request: z.object({}),
     response: refreshResponse,
     async handler(ctx): Promise<z.infer<typeof refreshResponse>> {
@@ -3738,6 +3826,7 @@ export const Actions = {
   }),
 
   getRefreshStatus: defineAction({
+    description: "查询一次同步任务的状态与回传契约是否满足（仅所有者）。",
     request: z.object({ taskId: z.string().min(1) }),
     response: refreshStatusResponse,
     async handler(ctx, args): Promise<z.infer<typeof refreshStatusResponse>> {
@@ -3755,6 +3844,7 @@ export const Actions = {
   }),
 
   logSyncEvent: defineAction({
+    description: "把一条同步失败或体检事件写入同步台账（仅所有者）。",
     request: z.object({ source: z.enum(["health", "strength", "system"]), status: z.enum(["failed", "diagnosed"]), note: z.string().min(1).max(500) }),
     response: mutationResponse,
     async handler(ctx, args): Promise<z.infer<typeof mutationResponse>> {
@@ -3766,6 +3856,7 @@ export const Actions = {
   }),
 
   getSyncDiagnostics: defineAction({
+    description: "运行一键数据体检并返回逐项检查结论（仅所有者）。",
     request: z.object({}),
     response: diagnosticsResponse,
     async handler(ctx): Promise<z.infer<typeof diagnosticsResponse>> {
@@ -3829,6 +3920,7 @@ export const Actions = {
   }),
 
   refreshHealthData: defineAction({
+    description: "启动 Apple 健康与训练记录的整体同步刷新（所有者或每日计划通道）。",
     request: z.object({}),
     response: refreshResponse,
     async handler(ctx): Promise<z.infer<typeof refreshResponse>> {

@@ -299,7 +299,7 @@ async function buildHarness() {
     `${stripTypeScriptTypes(schemaCode)}\nreturn { healthSnapshot, strengthTrainingSnapshot, morningCheckin, readinessHistory, gameState, gameSettlements, gameRewards, gameRewardRedemptions, gameRewardGoal, syncLog };`)
     (core.sqliteTable, core.integer, core.text, core.real, core.primaryKey);
   const constNames = [
-    'statusSchema', 'trendPointSchema', 'dailySchema', 'workoutSchema', 'sleepHistorySchema',
+    'statusSchema', 'trendPointSchema', 'dailySchema', 'swimLapSchema', 'swimDetailSchema', 'workoutSchema', 'sleepHistorySchema',
     'strengthSetSchema', 'strengthExerciseSchema', 'strengthWorkoutSchema', 'strengthWeekSchema',
     'strengthTrainingSchema', 'snapshotSchema', 'EMPTY_STRENGTH',
     'GAME_RULE_VERSION', 'GAME_XP_PER_LEVEL', 'GAME_POINTS_PER_LEVEL',
