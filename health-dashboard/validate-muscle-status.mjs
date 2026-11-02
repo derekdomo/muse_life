@@ -11,9 +11,17 @@
 // tie-breaks, and (7) per-muscle source records: stored workout ids
 // preserved verbatim, primary/secondary overlap, out-of-window flagging,
 // and load summed only over measured completed sets in the original
-// unit. It also checks the MUSCLE-MAP v1 table's integrity against its
-// fixed vocabulary and executes one source mutation (dropping the
-// completed-set filter) to prove the assertions are sensitive to it.
+// unit. The H4.6 volume closing slice adds (8) per-muscle 7-day volume
+// aggregation: completed in-window sets with weight+reps converted to
+// the explicit volumeUnit (default kg) via the 0.45359237 constant,
+// primary/secondary kept apart; missing weight/reps counted as
+// unmeasured (capacity unknown, never 0); non-lb/kg workout units
+// counted as unknown-unit and excluded; volumes never summed across
+// muscles. It also checks the MUSCLE-MAP v1 table's integrity against its
+// fixed vocabulary and executes four source mutations (dropping the
+// completed-set filter; dropping the lb→kg conversion; counting
+// unmeasured sets as measured; accepting non-lb/kg units into the sum)
+// to prove the assertions are sensitive to them.
 // Pure Node, no deps.
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
@@ -93,6 +101,16 @@ check('source: workout ids render as plain text, never as links (no fabricated d
   !/<a[^>]*>\{source\.workoutId\}/.test(clientSrc) && clientSrc.includes('场次 {source.workoutId}'));
 check('source: no recovery percentage is computed by muscleStatus',
   !/recovery|percent/i.test(extractFunction(clientSrc, 'muscleStatus')));
+check('source: muscle rows render the per-role 7-day volume line （近7天容量 主要/次要）',
+  clientSrc.includes('近7天容量 主要') && clientSrc.includes('muscleVolumeLabel'));
+check('source: unmeasured sets are disclosed as 另有 N 组未测容量, never silently dropped',
+  clientSrc.includes('组未测容量'));
+check('source: unknown-unit sets are disclosed as 单位未知，未计入容量',
+  clientSrc.includes('组单位未知，未计入容量'));
+check('source: panel states per-muscle volumes are not summed as total-body volume',
+  clientSrc.includes('不可相加当作全身总容量'));
+check('source: muscleStatus takes an explicit volumeUnit parameter defaulting to kg',
+  /function muscleStatus\([\s\S]*?volumeUnit:\s*"lb"\s*\|\s*"kg"\s*=\s*"kg"/.test(extractFunction(clientSrc, 'muscleStatus')));
 
 // ------------------------------------------------------------ map integrity
 check('map: vocabulary is the fixed 19-group MUSCLE-MAP v1 enum',
@@ -264,6 +282,53 @@ function sset(weight, reps, completed = true) { return { weight, reps, completed
     ], TODAY).groups.find((g) => g.muscle === '小腿').sources.map((src) => src.workoutId).join(',') === 'w-b,w-a');
 }
 
+// ------------------------------------------------------- (8) 7-day volume
+{
+  const fixtures = () => [
+    richWorkout('w-lb-bench', '2026-10-18', 'lb', [richExercise('barbell-bench', [sset(100, 5), sset(100, 5), sset(null, 8)])]),
+    richWorkout('w-kg-row', '2026-10-16', 'kg', [richExercise('close-seated-row', [sset(50, 10), sset(50, 8)])]),
+    richWorkout('w-round', '2026-10-18', 'lb', [richExercise('lateral-raise', [sset(100, 3)])]),
+    richWorkout('w-stone', '2026-10-17', 'stone', [richExercise('rope-curl', [sset(10, 10)])]),
+    richWorkout('w-bodyweight', '2026-10-18', 'kg', [richExercise('dead-bug', [sset(null, 12), sset(null, 10)])]),
+    richWorkout('w-old', '2026-10-05', 'lb', [richExercise('calf-raise', [sset(40, 10)])]),
+    richWorkout('w-future', '2026-10-20', 'lb', [richExercise('barbell-bench', [sset(200, 5)])]),
+  ];
+  const s = muscleStatus(fixtures(), TODAY);
+  const chest = group(s, '胸');
+  const triceps = group(s, '肱三头肌');
+  const lats = group(s, '背阔肌');
+  const biceps = group(s, '肱二头肌');
+  const sideDelt = group(s, '肩中束');
+  const core = group(s, '核心');
+  const calf = group(s, '小腿');
+  check('volume: lb→kg conversion (100x5 + 100x5 lb = 453.59237 → 453.6 kg, one decimal)',
+    chest.primaryVolume7d === 453.6);
+  check('volume: explicit volumeUnit lb converts kg→lb (900 kg → 1984.2 lb)',
+    group(muscleStatus(fixtures(), TODAY, 'lb'), '背阔肌').primaryVolume7d === 1984.2);
+  check('volume: primary/secondary kept apart （胸 primary 453.6; 肱三头肌 secondary 1000 lb → 453.6)',
+    triceps.primaryVolume7d === null && triceps.secondaryVolume7d === 453.6);
+  check('volume: missing weight/reps counted as unmeasured, never as 0 （胸 1 组未测，容量仍 453.6)',
+    chest.volumeUnmeasuredSets7d === 1 && chest.primaryVolume7d === 453.6);
+  check('volume: a muscle with only unmeasured sets keeps null volume, not 0 （核心 2 组未测）',
+    core.primaryVolume7d === null && core.secondaryVolume7d === null && core.volumeUnmeasuredSets7d === 2);
+  check('volume: out-of-window sets excluded from the 7-day volume （小腿 null)',
+    calf.primaryVolume7d === null && calf.primarySets7d === 0);
+  check('volume: future-dated sets excluded （胸 stays 453.6, the 200x5 future bench adds nothing)',
+    chest.primaryVolume7d === 453.6);
+  check('volume: non-lb/kg workout units excluded from the sum and counted separately （肱二头肌 primary null, 1 unknown-unit set; kg secondary 900 计入）',
+    biceps.primaryVolume7d === null && biceps.volumeUnknownUnitSets7d === 1 && biceps.secondaryVolume7d === 900);
+  check('volume: repeat attribution — the same bench session counts for both 胸 (primary) and 肱三头肌 (secondary)',
+    chest.primaryVolume7d === 453.6 && triceps.secondaryVolume7d === 453.6);
+  check('volume: volumeUnit is carried back on the result (default kg; explicit lb)',
+    s.volumeUnit === 'kg' && muscleStatus(fixtures(), TODAY, 'lb').volumeUnit === 'lb');
+  check('volume: one-decimal rounding (300 lb → 136.0777 → 136.1 kg, 肩中束）',
+    sideDelt.primaryVolume7d === 136.1);
+  check('volume: unseen muscles carry null volumes, not zeros （颈深屈肌）',
+    group(s, '颈深屈肌').primaryVolume7d === null && group(s, '颈深屈肌').secondaryVolume7d === null);
+  check('volume: kg target needs no conversion (900 kg stays 900, 肱二头肌 secondary)',
+    biceps.secondaryVolume7d === 900);
+}
+
 // ------------------------------------------------------- mutation sensitivity
 {
   const mutated = buildFns(clientSrc.replace(
@@ -274,6 +339,40 @@ function sset(weight, reps, completed = true) { return { weight, reps, completed
   const flipped = mutated.muscleStatus([workout('2026-10-18', 'completed', [exercise('barbell-bench', 2, 3)])], TODAY);
   check('mutation: dropping the completed filter inflates 胸 primary sets 2 -> 5',
     group(real, '胸').primarySets7d === 2 && group(flipped, '胸').primarySets7d === 5);
+}
+{
+  // Mutation 2: drop the lb→kg conversion factor.
+  const mutated = buildFns(clientSrc.replace('volume * 0.45359237', 'volume'));
+  const fx = [richWorkout('w-lb-bench', '2026-10-18', 'lb', [richExercise('barbell-bench', [sset(100, 5), sset(100, 5)])])];
+  const real = group(muscleStatus(fx, TODAY), '胸').primaryVolume7d;
+  const flipped = group(mutated.muscleStatus(fx, TODAY), '胸').primaryVolume7d;
+  check('mutation: dropping the lb→kg conversion turns 胸 primary volume 453.6 -> 1000',
+    real === 453.6 && flipped === 1000);
+}
+{
+  // Mutation 3: count unmeasured sets as measured (capacity unknown becomes a fake 0).
+  const mutated = buildFns(clientSrc.replace(
+    'const measured = set.weight !== null && set.weight !== undefined && set.reps !== null && set.reps !== undefined;',
+    'const measured = true;',
+  ));
+  const fx = [richWorkout('w-bw', '2026-10-18', 'kg', [richExercise('dead-bug', [sset(null, 12)])])];
+  const real = group(muscleStatus(fx, TODAY), '核心').primaryVolume7d;
+  const flipped = group(mutated.muscleStatus(fx, TODAY), '核心').primaryVolume7d;
+  check('mutation: treating unmeasured sets as measured turns 核心 primary volume null -> 0',
+    real === null && flipped === 0);
+}
+{
+  // Mutation 4: accept non-lb/kg units into the sum.
+  const mutated = buildFns(clientSrc.replace(
+    'if (workout.unit !== "lb" && workout.unit !== "kg") { stat.volumeUnknownUnitSets7d += 1; continue; }',
+    '',
+  ));
+  const fx = [richWorkout('w-stone', '2026-10-18', 'stone', [richExercise('rope-curl', [sset(10, 10)])])];
+  const real = group(muscleStatus(fx, TODAY), '肱二头肌');
+  const flipped = group(mutated.muscleStatus(fx, TODAY), '肱二头肌');
+  check('mutation: accepting unknown units merges the stone sets into the sum (null -> 220.5)',
+    real.primaryVolume7d === null && real.volumeUnknownUnitSets7d === 1
+    && flipped.primaryVolume7d === 220.5);
 }
 
 console.log(`\n${passed} passed, ${failures} failed`);

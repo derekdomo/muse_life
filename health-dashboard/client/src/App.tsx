@@ -753,6 +753,21 @@ export interface MuscleGroupStatus {
   // the per-set completed flags only, primary and secondary kept apart.
   primarySets7d: number;
   secondarySets7d: number;
+  // 7-day training volume (weight × reps) per role, aggregated over
+  // in-window completed sets carrying both weight and reps, converted
+  // to volumeUnit (an explicit muscleStatus parameter, default kg),
+  // primary and secondary kept apart. Null when the muscle has no
+  // measurable sets in that role within the window — never 0. Completed
+  // in-window sets missing weight or reps are counted in
+  // volumeUnmeasuredSets7d (capacity unknown); sets from workouts whose
+  // unit is neither lb nor kg are counted in volumeUnknownUnitSets7d
+  // and excluded from the sums. Per-muscle volumes are never summed
+  // across muscles as total-body volume: one exercise legitimately
+  // appears under several muscles.
+  primaryVolume7d: number | null;
+  secondaryVolume7d: number | null;
+  volumeUnmeasuredSets7d: number;
+  volumeUnknownUnitSets7d: number;
   // Every snapshot source behind this muscle's facts (completed
   // workouts only, at least one completed set), newest first. Includes
   // out-of-window records, flagged as such on each entry.
@@ -764,6 +779,9 @@ export interface MuscleStatus {
   // completed set (mapped or not). False drives the honest empty state
   // instead of a table of zeros.
   hasCompletedTraining: boolean;
+  // The display unit every per-muscle 7-day volume was converted to
+  // (the explicit muscleStatus volumeUnit parameter, default kg).
+  volumeUnit: "lb" | "kg";
   groups: MuscleGroupStatus[];
   // Distinct exercise keys with completed sets in completed workouts
   // that MUSCLE-MAP v1 does not cover, sorted; never guessed into a
@@ -790,12 +808,15 @@ export interface MuscleStatus {
 // workouts with status "completed" count, and only sets whose completed
 // flag is set — an exercise with zero completed sets trained nothing and
 // sets no last date. Workouts dated after today are ignored entirely (a
-// future-dated record cannot be "days since"). Self-contained (own date
-// math, own map) so validate-muscle-status.mjs can extract it by name
-// and run it standalone over synthetic fixtures.
+// future-dated record cannot be "days since"). volumeUnit is the display
+// unit every per-muscle 7-day volume is converted to (default kg).
+// Self-contained (own date math, own unit conversion, own map) so
+// validate-muscle-status.mjs can extract it by name and run it standalone
+// over synthetic fixtures.
 export function muscleStatus(
   workouts: Array<Pick<StrengthWorkout, "id" | "date" | "status" | "unit" | "exercises">> | null | undefined,
   today: string,
+  volumeUnit: "lb" | "kg" = "kg",
 ): MuscleStatus {
   const shift = (date: string, days: number): string => {
     const shifted = new Date(`${date}T12:00:00Z`);
@@ -805,8 +826,14 @@ export function muscleStatus(
   const dayDiff = (from: string, to: string): number =>
     Math.round((new Date(`${to}T12:00:00Z`).getTime() - new Date(`${from}T12:00:00Z`).getTime()) / 86400000);
   const windowStart = shift(today, -6);
-  const stats = new Map<MuscleGroup, { lastDate: string | null; primarySets7d: number; secondarySets7d: number; sources: MuscleSource[] }>();
-  for (const muscle of MUSCLE_GROUPS) stats.set(muscle, { lastDate: null, primarySets7d: 0, secondarySets7d: 0, sources: [] });
+  // Own unit conversion (self-contained for standalone extraction).
+  // lb→kg and kg→lb share the single 0.45359237 constant used
+  // dashboard-wide; volumes are rounded to one decimal at the end.
+  const toVolumeUnit = (volume: number, fromUnit: string): number =>
+    fromUnit === volumeUnit ? volume : fromUnit === "lb" ? volume * 0.45359237 : volume / 0.45359237;
+  const round1 = (x: number): number => Math.round(x * 10) / 10;
+  const stats = new Map<MuscleGroup, { lastDate: string | null; primarySets7d: number; secondarySets7d: number; primaryVolumeSum: number; primaryMeasured: number; secondaryVolumeSum: number; secondaryMeasured: number; volumeUnmeasuredSets7d: number; volumeUnknownUnitSets7d: number; sources: MuscleSource[] }>();
+  for (const muscle of MUSCLE_GROUPS) stats.set(muscle, { lastDate: null, primarySets7d: 0, secondarySets7d: 0, primaryVolumeSum: 0, primaryMeasured: 0, secondaryVolumeSum: 0, secondaryMeasured: 0, volumeUnmeasuredSets7d: 0, volumeUnknownUnitSets7d: 0, sources: [] });
   const seenKeys = new Set<string>();
   const unmapped = new Set<string>();
   let hasCompletedTraining = false;
@@ -848,24 +875,42 @@ export function muscleStatus(
         unmeasuredSets,
         inWindow,
       };
+      // Per-role 7-day volume accumulation for one muscle (H4.6 volume).
+      // Completed in-window sets carrying both weight and reps convert
+      // to volumeUnit; sets missing either stay counted as unmeasured
+      // (capacity unknown, never 0); sets from workouts whose unit is
+      // neither lb nor kg are counted as unknown-unit and excluded.
+      // Repeat attribution: the same set legitimately counts for every
+      // muscle the exercise maps to (primary and secondary tracked
+      // separately).
+      const accumulateVolume = (stat: { primaryVolumeSum: number; primaryMeasured: number; secondaryVolumeSum: number; secondaryMeasured: number; volumeUnmeasuredSets7d: number; volumeUnknownUnitSets7d: number }, role: "primary" | "secondary"): void => {
+        for (const set of completedList) {
+          const measured = set.weight !== null && set.weight !== undefined && set.reps !== null && set.reps !== undefined;
+          if (!measured) { stat.volumeUnmeasuredSets7d += 1; continue; }
+          if (workout.unit !== "lb" && workout.unit !== "kg") { stat.volumeUnknownUnitSets7d += 1; continue; }
+          const converted = toVolumeUnit(set.weight * set.reps, workout.unit);
+          if (role === "primary") { stat.primaryVolumeSum += converted; stat.primaryMeasured += 1; }
+          else { stat.secondaryVolumeSum += converted; stat.secondaryMeasured += 1; }
+        }
+      };
       for (const muscle of entry.primary) {
         const stat = stats.get(muscle);
         if (!stat) continue;
         if (stat.lastDate === null || workout.date > stat.lastDate) stat.lastDate = workout.date;
-        if (inWindow) stat.primarySets7d += completedSets;
+        if (inWindow) { stat.primarySets7d += completedSets; accumulateVolume(stat, "primary"); }
         stat.sources.push({ ...base, role: "primary" });
       }
       for (const muscle of entry.secondary) {
         const stat = stats.get(muscle);
         if (!stat) continue;
         if (stat.lastDate === null || workout.date > stat.lastDate) stat.lastDate = workout.date;
-        if (inWindow) stat.secondarySets7d += completedSets;
+        if (inWindow) { stat.secondarySets7d += completedSets; accumulateVolume(stat, "secondary"); }
         stat.sources.push({ ...base, role: "secondary" });
       }
     }
   }
   const groups: MuscleGroupStatus[] = MUSCLE_GROUPS.map((muscle) => {
-    const stat = stats.get(muscle) ?? { lastDate: null, primarySets7d: 0, secondarySets7d: 0, sources: [] };
+    const stat = stats.get(muscle) ?? { lastDate: null, primarySets7d: 0, secondarySets7d: 0, primaryVolumeSum: 0, primaryMeasured: 0, secondaryVolumeSum: 0, secondaryMeasured: 0, volumeUnmeasuredSets7d: 0, volumeUnknownUnitSets7d: 0, sources: [] };
     // Newest source first; the sort is stable, so same-day sources keep
     // their snapshot order.
     const sources = [...stat.sources].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
@@ -875,6 +920,12 @@ export function muscleStatus(
       daysSince: stat.lastDate === null ? null : dayDiff(stat.lastDate, today),
       primarySets7d: stat.primarySets7d,
       secondarySets7d: stat.secondarySets7d,
+      // Null exactly when the role has no measurable in-window sets —
+      // never a dressed-up zero.
+      primaryVolume7d: stat.primaryMeasured > 0 ? round1(stat.primaryVolumeSum) : null,
+      secondaryVolume7d: stat.secondaryMeasured > 0 ? round1(stat.secondaryVolumeSum) : null,
+      volumeUnmeasuredSets7d: stat.volumeUnmeasuredSets7d,
+      volumeUnknownUnitSets7d: stat.volumeUnknownUnitSets7d,
       sources,
     };
   });
@@ -895,6 +946,7 @@ export function muscleStatus(
   const unmappedKeys = [...unmapped].sort();
   return {
     hasCompletedTraining,
+    volumeUnit,
     groups,
     unmappedKeys,
     mappedKeyCount: seenKeys.size - unmappedKeys.length,
@@ -978,7 +1030,16 @@ const MUSCLE_SECTION_HEADS: Record<"recent" | "older" | "unseen", { symbol: stri
   unseen: { symbol: "○", label: "本快照未见记录" },
 };
 
-function MuscleRow({ group, expanded, onToggle }: { group: MuscleGroupStatus; expanded: boolean; onToggle: () => void }) {
+// H4.6 volume label: per-role 7-day capacity in the status's volumeUnit.
+// A null role volume renders 容量未知 (never 0); a muscle with no
+// measurable sets at all renders 近7天容量未知.
+function muscleVolumeLabel(group: MuscleGroupStatus, volumeUnit: "lb" | "kg"): string {
+  const fmt = (v: number | null): string => (v === null ? "容量未知" : `${v.toFixed(1)} ${volumeUnit}`);
+  if (group.primaryVolume7d === null && group.secondaryVolume7d === null) return "近7天容量未知";
+  return `近7天容量 主要 ${fmt(group.primaryVolume7d)} · 次要 ${fmt(group.secondaryVolume7d)}`;
+}
+
+function MuscleRow({ group, expanded, onToggle, volumeUnit }: { group: MuscleGroupStatus; expanded: boolean; onToggle: () => void; volumeUnit: "lb" | "kg" }) {
   return (
     <div className="muscle-row">
       <button type="button" className="muscle-row-head" aria-expanded={expanded} aria-label={`${group.muscle}的来源明细`} onClick={onToggle}>
@@ -990,7 +1051,12 @@ function MuscleRow({ group, expanded, onToggle }: { group: MuscleGroupStatus; ex
         </span>
         <span className="muscle-facts">
           {group.lastDate !== null ? (
-            <span>近7天 主要 {group.primarySets7d} 组 · 次要 {group.secondarySets7d} 组</span>
+            <>
+              <span>近7天 主要 {group.primarySets7d} 组 · 次要 {group.secondarySets7d} 组</span>
+              <span>{muscleVolumeLabel(group, volumeUnit)}</span>
+              {group.volumeUnmeasuredSets7d > 0 ? <small>另有 {group.volumeUnmeasuredSets7d} 组未测容量</small> : null}
+              {group.volumeUnknownUnitSets7d > 0 ? <small>{group.volumeUnknownUnitSets7d} 组单位未知，未计入容量</small> : null}
+            </>
           ) : <span>近7天 —</span>}
           <small>修复进度：参考间隔规则未定，无法判断恢复进度</small>
         </span>
@@ -1034,7 +1100,7 @@ function MuscleStatusPanel({ strength }: { strength: StrengthTraining }) {
         <h3 className="muscle-group-head"><span aria-hidden="true">{head.symbol}</span><span>{head.label}</span><span className="muscle-group-count">{groups.length} 个肌群</span></h3>
         <div className="muscle-list muscle-list-grouped">
           {groups.map((group) => (
-            <MuscleRow key={group.muscle} group={group} expanded={expandedMuscle === group.muscle} onToggle={() => toggleMuscle(group.muscle)} />
+            <MuscleRow key={group.muscle} group={group} expanded={expandedMuscle === group.muscle} onToggle={() => toggleMuscle(group.muscle)} volumeUnit={status.volumeUnit} />
           ))}
         </div>
       </div>
@@ -1046,7 +1112,8 @@ function MuscleStatusPanel({ strength }: { strength: StrengthTraining }) {
         <div><p className="section-kicker">训练记录 · 映射 v1</p><h2 id="muscle-status-title">肌群</h2></div>
         <span className="record-count">近7天 {dateLabel(status.windowStart)}–{dateLabel(status.windowEnd)}</span>
       </div>
-      <p className="muscle-note">本区只汇总训练事实：练过哪个肌群、最近一次何时、近 7 天完成了多少组（主要与次要分开计，只计已完成组）。与 readiness 恢复分数无关，不是医学恢复测量。</p>
+      <p className="muscle-note">本区只汇总训练事实：练过哪个肌群、最近一次何时、近 7 天完成了多少组与多少训练容量（主要与次要分开计，只计已完成组；缺重量或次数的组记为未测容量，不当 0）。与 readiness 恢复分数无关，不是医学恢复测量。</p>
+      <p className="muscle-note">各肌群的近 7 天容量不可相加当作全身总容量：同一动作会同时计入它关联的每个肌群。</p>
       <p className="muscle-note">数据来自最近同步的力量快照{strength.updatedAt ? `（更新于 ${updatedLabel(strength.updatedAt)}）` : ""}，只含快照内的训练记录，可能不完整。</p>
       <p className="muscle-note">点任意肌群行，可在原行展开它的来源场次：场次 ID、日期、动作、主要/次要归属与完成组数。近 7 天之外的来源标为「本窗口外」，不计入近 7 天组数。</p>
       {status.hasCompletedTraining ? (
@@ -1064,7 +1131,7 @@ function MuscleStatusPanel({ strength }: { strength: StrengthTraining }) {
               {unseenOpen ? (
                 <div className="muscle-list muscle-list-grouped">
                   {status.sections.unseen.map((group) => (
-                    <MuscleRow key={group.muscle} group={group} expanded={expandedMuscle === group.muscle} onToggle={() => toggleMuscle(group.muscle)} />
+                    <MuscleRow key={group.muscle} group={group} expanded={expandedMuscle === group.muscle} onToggle={() => toggleMuscle(group.muscle)} volumeUnit={status.volumeUnit} />
                   ))}
                 </div>
               ) : null}

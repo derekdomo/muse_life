@@ -3213,3 +3213,15 @@
  - 局限：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；回灌为转录本实现（`statusDates` 内联形式已按校验器字面要求对齐 artifact）。
  - 回滚：revert 本提交即恢复回灌前状态（线上 space-4 已上线版本不受影响）。
  - plans.md `H4.5` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md（H4.5 派工登记＋交付登记＋勾选）、health-dashboard 回灌 7 文件、本文件。
+- H4.6 肌群劳累与修复进度·收尾交付（2026-11-02 09:02 PST 轮次，muse-life-plans-sync）。
+ - 需求编号：plans.md `H4.6`（用户直提 2026-10-18；P2，推荐执行顺序第 7 步；W5 三项、H4.1–H4.5 已交付，本轮取 H4.6 的最后未交付原子项——原需求「近 7 天训练容量」的按肌群聚合）。
+ - 任务：健康看板（space-4）肌群视图新增按肌群近 7 天训练容量聚合。MUSCLE-MAP.md 合同口径：容量先统一单位再汇总；同一动作关联多肌群时重复归属、肌群容量不可相加当全身总容量；缺重量/次数记未知不当 0。红线：不实现任何修复进度百分比（恢复规则 T 未定）。
+ - 改了什么：artifact（space-4）先行上线（space-4 v7，构建 id 1c7f1ddc-7c37-4ab1-b65c-48b85facf53f）；回灌本仓（同规格实现、功能等价验证，非逐字节拷贝——沿既有惯例）——`health-dashboard/client/src/App.tsx`（`muscleStatus` 新增 `volumeUnit` 显式入参默认 kg、结果回带；按肌群×主次角色聚合 completed∩completed组∩[today-6,today]∩weight+reps 双全的组，lb→kg 按 0.45359237 换算后汇总、一位小数；非 lb/kg 单位组计 `volumeUnknownUnitSets7d` 不混入；缺项组计 `volumeUnmeasuredSets7d` 永不当 0、无可测组该角色容量为 null；未来日期剔除沿既有口径；`muscleVolumeLabel`；`MuscleRow` 容量行＋volumeUnit prop；面板「各肌群的近 7 天容量不可相加当作全身总容量」注记；「修复进度：参考间隔规则未定，无法判断恢复进度」原样保留）；`health-dashboard/validate-muscle-status.mjs`（50→71）；`health-dashboard/DATA-PLAN.md`（末尾新增 H4.6 volume 章节，外科手术式，既有章节逐字保留）。
+   未改：服务端、schema、readiness 公式、H-LOAD-001；无 migration；无新数据源；L0.1 例外维持现状。
+ - 验证证据（本机实跑，合成数据）：`node validate-muscle-status.mjs` → 71 passed, 0 failed（50 沿用＋5 渲染源码检查＋13 容量断言）；4 项变异真实执行全部敏感（删 completed 过滤→组数 2→5 翻转；删 lb→kg 换算→453.6→1000 翻转；未测当已测→null→伪造 0 翻转；接受未知单位→null→220.5 翻转；变异体上原断言 FAIL，恢复后 71/71）；
+   全回归：acwr 31、behavior-impact 27、game-settlement 150、month-review 38、sleep-debt 35、sleep-regularity 25、status-mode 38、swim-partial 30、sync-readback 33、week-load 47、all-workouts 20、units 25、week-review 103、week-focus-feedback 196、hero-status 20、unified-hk 34、week-coverage 23、week-comparison 25、hero-layers 24、persist-race 42、week-load-coverage 21、season-swim 51、muscle-receipt 30 全绿；
+   seven-day-facts 51/1、swim-vis 41/1、design-b1b 37/3、rewards 41/1 经 git stash 前后比对确认为改前既有漂移/环境（与本轮 diff 无关，留待 PM 裁决）；
+   隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+ - 局限：回灌为同规格实现（构建方自报其验证器 50→70，本仓 71——多一项 volumeUnit 显式入参的渲染源码检查）；精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；构建报告的 attested_over_findings 含一条未解决 [P0] content-critique（DATA-PLAN.md H4.6 章节），其完整文本在回传中被截断——只读 artifact.inspect 已确认该报告未落盘到任何可访问位置、原文不可恢复，未编造、未反推；本仓 DATA-PLAN 章节按工件已核验章节与 MUSCLE-MAP.md 合同逐字对齐撰写，该发现保持开放、待 PM 裁决。
+ - 回滚：revert 本提交即恢复回灌前状态（线上 space-4 v7 已上线版本不受影响）。
+ - plans.md `H4.6` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md（H4.6 派工登记＋交付登记＋勾选）、health-dashboard 回灌 3 文件、DATA-PLAN.md、本文件。
