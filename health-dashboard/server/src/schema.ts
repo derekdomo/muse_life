@@ -267,6 +267,28 @@ export const weekFocusFeedback = sqliteTable("week_focus_feedback", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// H4.4 状态模式 (additive, migration 0019): the owner's declared
+// status periods — 生病 / 受伤 / 旅行 with an inclusive start and end
+// date (YYYY-MM-DD, America/Los_Angeles calendar semantics like every
+// other date in this artifact). This table holds ONLY the owner's
+// declaration; every effect (readiness suppression, baseline
+// exclusion, conclusion gaps, trend marks) is derived from these rows
+// by the pure module server/src/status-mode.ts at read time. No health
+// values are stored here, no score is ever written back, and no
+// recovery-progress rule reads this table — a period suppresses and
+// marks, it never judges recovery. The table starts empty and stays
+// empty until the owner sets a period: databases created before this
+// feature simply have no rows, which every consumer reads as "no
+// status mode", so nothing about pre-H4.4 behaviour changes.
+export const statusPeriod = sqliteTable("status_period", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  mode: text("mode", { enum: ["生病", "受伤", "旅行"] }).notNull(),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const syncLog = sqliteTable("sync_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   source: text("source", { enum: ["health", "strength", "system"] }).notNull(),

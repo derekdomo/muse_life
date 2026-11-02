@@ -70,7 +70,15 @@ const historySrc = clientSrc.slice(historyStart, clientSrc.indexOf('const GAME_C
 check('full week review panel rendered once, on the history page (B1B move off today)', countOccurrences(clientSrc, '<WeekReviewPanel') === 1 && countOccurrences(todaySrc, '<WeekReviewPanel') === 0 && historySrc.indexOf('<WeekReviewPanel') > -1 && historySrc.indexOf('<WeekReviewPanel') < historySrc.indexOf('<DataStatusPanel'));
 check('week review panel carries its anchor id exactly once', countOccurrences(clientSrc, 'id="week-review-panel"') === 1);
 check('seven-day facts rendered once, below the hero', countOccurrences(todaySrc, '<SevenDayFacts') === 1 && todaySrc.indexOf('<SevenDayFacts') > todaySrc.indexOf('<WhoopHero'));
-check('readiness basis anchor id present once', countOccurrences(clientSrc, 'id="readiness-basis"') === 1);
+// H4.4: the readiness-basis anchor exists on the status-mode
+// early-return branch AND the normal panel branch — the suppressed
+// panel IS the basis view during a status period. The early return
+// makes the two branches mutually exclusive at runtime, so only one
+// ever renders. This pin guards the intentional pair against a third
+// accidental copy (replaces the old exactly-once pin).
+check('readiness basis anchor id on both mutually-exclusive branches (H4.4, exactly two)',
+  countOccurrences(clientSrc, 'id="readiness-basis"') === 2
+  && clientSrc.includes('if (statusMode.suppressed && statusMode.active)'));
 check('standalone 昨日概览 verdict block removed (dedupe)', !todaySrc.includes('昨日概览') && !todaySrc.includes('verdict-title'));
 check('missing note still rendered in TodayView (not hidden)', todaySrc.includes('missing-note') || heroSrc.includes('missing-note') || todaySrc.includes('还没同步完'));
 check('KPI board kept as the single yesterday-metrics presentation', countOccurrences(todaySrc, 'kpi-board') >= 1 && countOccurrences(todaySrc, '<Kpi ') === 4);

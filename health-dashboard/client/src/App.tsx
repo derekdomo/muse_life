@@ -34,6 +34,20 @@ type Acwr = DashboardResponse["acwr"];
 type BehaviorImpact = DashboardResponse["behaviorImpact"];
 type BehaviorImpactItem = BehaviorImpact["items"][number];
 type SleepDebt = DashboardResponse["sleepDebt"];
+type StatusModeData = DashboardResponse["statusMode"];
+type StatusPeriodView = StatusModeData["periods"][number];
+type StatusMarkMap = Map<string, { mode: StatusPeriodView["mode"]; symbol: string }>;
+
+// H4.4 status-mode symbols, mirroring the server's preset set
+// (server/src/status-mode.ts STATUS_MODE_SYMBOLS). The client only
+// looks marks up by date and renders symbol + mode text together —
+// every coverage/suppression decision is computed server-side.
+const STATUS_MODE_SYMBOLS: Record<StatusPeriodView["mode"], string> = { "生病": "✚", "受伤": "✖", "旅行": "✈" };
+const STATUS_MODE_OPTIONS: Array<StatusPeriodView["mode"]> = ["生病", "受伤", "旅行"];
+
+function statusMarkMap(statusMode: StatusModeData): StatusMarkMap {
+  return new Map(statusMode.marks.map((mark) => [mark.date, { mode: mark.mode, symbol: mark.symbol }]));
+}
 type BehaviorTag = BehaviorImpact["todayTags"][number];
 
 // H4.1 preset behaviour tags for the morning check-in multi-select.
@@ -200,23 +214,26 @@ function Kpi({ label, value, unit, detail, status, anchorLabel, anchorTargetId }
   );
 }
 
-function MetricBars({ title, unit, points, getValue, baseline, formatValue }: {
-  title: string; unit: string; points: TrendPoint[]; getValue: (point: TrendPoint) => number | null; baseline: number | null; formatValue: (value: number) => string;
+function MetricBars({ title, unit, points, getValue, baseline, formatValue, marks }: {
+  title: string; unit: string; points: TrendPoint[]; getValue: (point: TrendPoint) => number | null; baseline: number | null; formatValue: (value: number) => string; marks?: StatusMarkMap;
 }) {
   const values = points.map(getValue).filter((value): value is number => value !== null);
   const max = Math.max(...values, ...(baseline === null ? [] : [baseline]), 1);
+  const hasMarks = marks !== undefined && points.some((point) => marks.has(point.date));
   return (
     <section className="trend-block" aria-label={`${title}近7天趋势`}>
       <div className="section-line"><h3>{title}</h3><span>{baseline === null ? "基线 数据不足" : `基线 ${formatValue(baseline)} ${unit}`}</span></div>
-      <div className="bar-chart">
+      <div className={`bar-chart${hasMarks ? " bar-chart-status" : ""}`}>
         {points.map((point) => {
           const value = getValue(point);
           const height = value === null ? 12 : Math.max(12, Math.round((value / max) * 92));
+          const mark = marks?.get(point.date);
           return (
             <div className="bar-column" key={`${title}-${point.date}`}>
               <span className={`bar-value ${value === null ? "missing-text" : ""}`}>{value === null ? "缺失" : formatValue(value)}</span>
-              <div className={`bar ${value === null ? "bar-missing" : ""}`} style={{ height: `${height}px` }} aria-label={`${dateLabel(point.date)} ${value === null ? "缺失" : `${formatValue(value)} ${unit}`}`} />
+              <div className={`bar ${value === null ? "bar-missing" : ""}`} style={{ height: `${height}px` }} aria-label={`${dateLabel(point.date)} ${value === null ? "缺失" : `${formatValue(value)} ${unit}`}${mark ? `，状态期 ${mark.mode}` : ""}`} />
               <span className="bar-date">{dateLabel(point.date)}</span>
+              {mark ? <span className="bar-status"><span aria-hidden="true">{mark.symbol}</span> {mark.mode}</span> : null}
             </div>
           );
         })}
@@ -2476,6 +2493,14 @@ export interface WeekReviewResult {
   // from the HealthKit session count — never merged into one total.
   // null when the caller passed no strength dates at all.
   strengthCounts: { review: number; comparison: number; baseline: number } | null;
+  // H4.4: status-period days inside the review window, named as gaps
+  // (date + mode, from the server-computed marks the caller passed).
+  // These days were excluded from every window statistic above — no
+  // trend conclusion rests on them — and the panel names them so the
+  // gap is visible instead of silent. statusGapComparison counts the
+  // comparison window's excluded status days the same way.
+  statusGapReview: Array<{ date: string; mode: string }>;
+  statusGapComparison: number;
 }
 
 interface WeekReviewMetricDef {
@@ -2496,7 +2521,10 @@ export function weekReview(
   // H3.1: optional source info. Existing four-argument calls keep
   // working; an absent coverageIncomplete means completeness UNKNOWN
   // (legacy payload), which is never treated as complete.
-  options?: { coverageIncomplete?: boolean; strengthDates?: string[] },
+  // H4.4: statusMarks carries the server-computed status-period
+  // marks (date + mode); a marked day is excluded from every window
+  // statistic and reported back as a named gap, never as data.
+  options?: { coverageIncomplete?: boolean; strengthDates?: string[]; statusMarks?: Array<{ date: string; mode: string }> },
 ): WeekReviewResult {
   const MIN_DAYS = 5;
   // H3.3: minimum number of review-window days that must EACH reach
@@ -2506,6 +2534,11 @@ export function weekReview(
   const fallbackFocus = "保持现有节奏，继续积累完整数据。";
   const coverageIncomplete: boolean | null = options?.coverageIncomplete ?? null;
   const coverageComplete = coverageIncomplete === false;
+  // H4.4: the status-day set for this call. Days in it contribute to
+  // NO window statistic (excluded in collect/collectDated below, the
+  // only gathering points) and surface only as named gaps.
+  const statusMarkByDate = new Map((options?.statusMarks ?? []).map((mark) => [mark.date, mark.mode]));
+  const statusDaySet = new Set(statusMarkByDate.keys());
   const coverageStatusNote = coverageIncomplete === true
     ? "来源覆盖不完整：以下为已存事实，完整性未确认"
     : coverageIncomplete === null
@@ -2540,6 +2573,8 @@ export function weekReview(
       coverageIncomplete,
       coverageStatusNote,
       strengthCounts: null,
+      statusGapReview: [],
+      statusGapComparison: 0,
     };
   }
   const datesBack = (count: number, endOffset: number): string[] =>
@@ -2583,9 +2618,15 @@ export function weekReview(
   // The only place window values are gathered: a day contributes its
   // value only when one is actually recorded. A missing day adds
   // nothing — it is never pushed as 0.
+  // The only place window values are gathered: a day contributes its
+  // value only when one is actually recorded. A missing day adds
+  // nothing — it is never pushed as 0. A status-period day (H4.4)
+  // adds nothing either, however complete its record looks: status
+  // days are gaps for every conclusion, by the owner's declaration.
   const collect = (dates: string[], pick: (date: string) => number | null): number[] => {
     const values: number[] = [];
     for (const date of dates) {
+      if (statusDaySet.has(date)) continue;
       const value = pick(date);
       if (value !== null) values.push(value);
     }
@@ -2597,6 +2638,7 @@ export function weekReview(
   const collectDated = (dates: string[], pick: (date: string) => number | null): Array<{ date: string; value: number }> => {
     const entries: Array<{ date: string; value: number }> = [];
     for (const date of dates) {
+      if (statusDaySet.has(date)) continue;
       const value = pick(date);
       if (value !== null) entries.push({ date, value });
     }
@@ -2663,17 +2705,23 @@ export function weekReview(
     // coverage. Only an explicit coverageIncomplete === false may be
     // called 覆盖完整; true always reads 来源覆盖不完整 (even with all
     // 7 rows present) and unknown completeness is named as such.
+    // H4.4: status days inside the review window are gaps, not
+    // missing records — the 缺 N 天 count below names only days that
+    // are neither recorded nor status days, and the status days are
+    // named separately in the result's gap fields.
+    const reviewStatusDays = reviewDates.filter((date) => statusDaySet.has(date)).length;
+    const reviewMissingDays = reviewDates.length - reviewStatusDays - reviewValues.length;
     const coverageNote = reviewValues.length === 0
       ? "无记录"
       : coverageIncomplete === true
         ? "来源覆盖不完整"
         : coverageIncomplete === null
-          ? reviewValues.length === reviewDates.length
+          ? reviewMissingDays === 0
             ? "完整性未确认"
-            : `缺 ${reviewDates.length - reviewValues.length} 天记录 · 完整性未确认`
-          : reviewValues.length === reviewDates.length
+            : `缺 ${reviewMissingDays} 天记录 · 完整性未确认`
+          : reviewMissingDays === 0
             ? "覆盖完整"
-            : `缺 ${reviewDates.length - reviewValues.length} 天记录`;
+            : `缺 ${reviewMissingDays} 天记录`;
     const baselineNote = !baselineSufficient
       ? "基线数据不足"
       : def.key === "sleep" && baselineValues.length < baselineDates.length
@@ -2923,6 +2971,13 @@ export function weekReview(
     coverageIncomplete,
     coverageStatusNote,
     strengthCounts,
+    // H4.4: the review window's status days, named as gaps with
+    // their modes; the comparison window's are counted. Neither fed
+    // any statistic above — this is reporting, not input.
+    statusGapReview: reviewDates
+      .filter((date) => statusDaySet.has(date))
+      .map((date) => ({ date, mode: statusMarkByDate.get(date) ?? "" })),
+    statusGapComparison: comparisonDates.filter((date) => statusDaySet.has(date)).length,
   };
 }
 
@@ -3048,26 +3103,37 @@ function ScoreRing({ label, score, suffix, bandKind }: { label: string; score: W
 // to live here (driver tiles, the week load verdict, the readiness
 // trend, the 7-day facts, the week review) moved below the hero in
 // TodayView; nothing was deleted, only relocated.
-function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStrength, syncing, syncAttempt, onViewReadiness, onViewWeekReview, onViewDataStatus }: {
-  snapshot: Snapshot; readiness: Readiness | null; dataStatus: DataStatus | null;
+function WhoopHero({ snapshot, readiness, statusMode, dataStatus, onSyncHealth, onSyncStrength, syncing, syncAttempt, onViewReadiness, onViewWeekReview, onViewDataStatus }: {
+  snapshot: Snapshot; readiness: Readiness | null; statusMode: StatusModeData; dataStatus: DataStatus | null;
   onSyncHealth: () => void; onSyncStrength: () => void; syncing: boolean;
   syncAttempt?: SyncAttemptState | null;
   onViewReadiness?: () => void;
   onViewWeekReview?: () => void;
   onViewDataStatus?: () => void;
 }) {
-  const recovery = recoveryScore(readiness);
-  const sleep = sleepScore(snapshot, readiness);
+  // H4.4: during a status period the hero shows the status note
+  // instead of any grade — the recovery ring carries the mode's
+  // symbol + 状态期 · 模式 text (never a number), the sleep ring is
+  // derived without the suppressed readiness (facts only), and the
+  // headline conclusion IS the server-computed status note.
+  const statusSuppressed = statusMode.suppressed && statusMode.active !== null;
+  const recovery: WhoopScore = statusSuppressed && statusMode.active
+    ? { pct: null, display: STATUS_MODE_SYMBOLS[statusMode.active.mode], band: "slate", bandLabel: `状态期 · ${statusMode.active.mode}`, detail: "" }
+    : recoveryScore(readiness);
+  const sleep = sleepScore(snapshot, statusSuppressed ? null : readiness);
   const facts = strainFacts(snapshot);
   const strain = strainScore(snapshot);
   const source = heroSourceStatus(snapshot, readiness, dataStatus);
-  const conclusion = todayConclusion(readiness, snapshot);
+  const conclusion = statusSuppressed && statusMode.active && statusMode.note
+    ? { title: `状态期 · ${statusMode.active.mode}`, text: statusMode.note }
+    : todayConclusion(readiness, snapshot);
   const review = useMemo(
     () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
       coverageIncomplete: snapshot.coverageIncomplete,
       strengthDates: snapshot.strengthTraining.workouts.map((workout) => workout.date),
+      statusMarks: statusMode.marks,
     }),
-    [snapshot],
+    [snapshot, statusMode.marks],
   );
   const teaser = weekFocusTeaser(review);
   const scrollToId = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -3130,7 +3196,7 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
           <p className="whoop-kicker">{dateLabel(readiness?.date ?? snapshot.dataDate)} · 今日状态</p>
           <h1 id="whoop-title">{conclusion.title}</h1>
         </div>
-        {readiness ? <span className="whoop-confidence">置信度{readiness.confidence} · {readiness.signalCount} 项信号</span> : null}
+        {readiness && !statusSuppressed ? <span className="whoop-confidence">置信度{readiness.confidence} · {readiness.signalCount} 项信号</span> : null}
       </div>
       <p className="whoop-summary">{conclusion.text}</p>
       <div className="whoop-focus-teaser">
@@ -3151,10 +3217,12 @@ function WhoopHero({ snapshot, readiness, dataStatus, onSyncHealth, onSyncStreng
 // trend used to sit inside the hero; they now render directly below
 // it, on the same weekLoad / readinessHistory data and wording — the
 // judgement itself is unchanged.
-function WeekLoadBlock({ snapshot, readiness, readinessHistory }: {
-  snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[];
+function WeekLoadBlock({ snapshot, readiness, readinessHistory, statusMode }: {
+  snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; statusMode: StatusModeData;
 }) {
   const load = weekLoad(snapshot, readiness);
+  const marks = statusMarkMap(statusMode);
+  const trendHasStatusDay = readinessHistory.some((point) => marks.has(point.date));
   return (
     <div className="dark-panel">
       <div className={`whoop-load whoop-${load.band}`}>
@@ -3172,11 +3240,15 @@ function WeekLoadBlock({ snapshot, readiness, readinessHistory }: {
             <>
               <div className="whoop-readiness-trend" aria-label="readiness 近 7 天趋势">
                 <span className="whoop-trend-label">readiness 近 7 天</span>
-                {readinessHistory.map((point) => (
-                  <span className="whoop-trend-point" key={point.date}>{dateLabel(point.date)} {point.score === null ? "—" : point.score.toFixed(1)}</span>
-                ))}
+                {readinessHistory.map((point) => {
+                  const mark = marks.get(point.date);
+                  return (
+                    <span className="whoop-trend-point" key={point.date}>{dateLabel(point.date)} {mark ? <span className="whoop-trend-status"><span aria-hidden="true">{mark.symbol}</span> {mark.mode}·状态期</span> : point.score === null ? "—" : point.score.toFixed(1)}</span>
+                  );
+                })}
               </div>
               <p className="whoop-load-note">readiness 近 7 天：有存档的日期显示当日分数；无存档的日期历史未提供，显示缺口，不复制今日值。存档自上线日起逐日积累，旧日期不回补。</p>
+              {trendHasStatusDay ? <p className="whoop-load-note">带符号 + 状态名的日期为状态期：不显示分数，按缺口处理，不计入趋势结论。</p> : null}
             </>
           ) : null}
         </details>
@@ -3191,10 +3263,11 @@ function WeekLoadBlock({ snapshot, readiness, readinessHistory }: {
 // value, unit, source, and update time. Daily rows carry no per-day
 // source or timestamp fields, so the detail says so instead of inventing
 // them (the snapshot-level source and update time are labelled as such).
-function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
+function SevenDayFacts({ snapshot, statusMode }: { snapshot: Snapshot; statusMode: StatusModeData }) {
   const [metricKey, setMetricKey] = useState<SevenDayMetricKey>("exerciseMinutes");
   const [openDate, setOpenDate] = useState<string | null>(null);
   const facts = sevenDayFacts(snapshot.historyDaily, snapshot.dataDate, snapshot.coverageIncomplete, metricKey, laTodayDateString());
+  const marks = statusMarkMap(statusMode);
   const swimByDate = swimInfoByDate(snapshot.historyDaily, snapshot.historyWorkouts);
   const openCell = openDate === null ? undefined : facts.days.find((day) => day.date === openDate);
   const openSwim = openCell ? swimByDate.get(openCell.date) : undefined;
@@ -3223,19 +3296,21 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
         <div className="seven-facts-grid">
           {facts.days.map((day) => {
             const swim = swimByDate.get(day.date);
+            const mark = marks.get(day.date);
             return (
             <button
               key={day.date}
               type="button"
               className={`seven-facts-day${day.conflict ? " conflict" : ""}${!day.conflict && day.value === null ? " gap" : ""}`}
               aria-expanded={openDate === day.date}
-              aria-label={`${fullDateLabel(day.date)} ${facts.metric.label} ${cellText(day)}${swim ? ` ${swimDayDetail(swim)}` : ""}`}
+              aria-label={`${fullDateLabel(day.date)} ${facts.metric.label} ${cellText(day)}${swim ? ` ${swimDayDetail(swim)}` : ""}${mark ? ` 状态期 ${mark.mode}` : ""}`}
               onClick={() => setOpenDate(openDate === day.date ? null : day.date)}
             >
               <span>{dateLabel(day.date)}</span>
               <strong>{day.conflict ? "冲突" : day.value === null ? "缺口" : numberLabel(day.value, facts.metric.digits)}</strong>
               <small>{day.conflict ? "不可用" : day.value === null ? "无记录" : facts.metric.unit}</small>
               {swim ? <small className="seven-facts-swim">{swimDayLabel(swim)}</small> : null}
+              {mark ? <small className="seven-facts-status"><span aria-hidden="true">{mark.symbol}</span> {mark.mode}·状态期</small> : null}
             </button>
             );
           })}
@@ -3246,6 +3321,7 @@ function SevenDayFacts({ snapshot }: { snapshot: Snapshot }) {
           <div><dt>日期</dt><dd>{fullDateLabel(openCell.date)}</dd></div>
           <div><dt>{facts.metric.label}原值</dt><dd>{openCell.conflict ? "冲突/不可用（同日记录不一致，未合并）" : cellText(openCell)}</dd></div>
           {openSwim ? <div><dt>游泳</dt><dd>{swimDayDetail(openSwim)}</dd></div> : null}
+          {marks.get(openCell.date) ? <div><dt>状态期</dt><dd>{marks.get(openCell.date)?.symbol} {marks.get(openCell.date)?.mode} · 状态期（只作记录，不进基线、不下结论）</dd></div> : null}
           <div><dt>来源 · 更新</dt><dd>Apple 健康 · 快照更新于 {updatedLabel(snapshot.updatedAt)}</dd></div>
         </dl>
       ) : null}
@@ -4174,17 +4250,19 @@ const focusRangeContextStore = createFocusRangeContextStore();
 // — it changes no plan, score, XP/gold, or training record.
 // Direction is always carried by the ▲/▼/— symbol plus 增加/减少/持平
 // wording, never by color alone.
-function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTraining }: {
+function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTraining, statusMode }: {
   snapshot: Snapshot; focusFeedback: FocusFeedbackData; focusReadFailed: boolean;
   onViewTraining?: (range: { start: string; end: string }) => void;
+  statusMode?: StatusModeData;
 }) {
   const queryClient = useQueryClient();
   const review = useMemo(
     () => weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
       coverageIncomplete: snapshot.coverageIncomplete,
       strengthDates: snapshot.strengthTraining.workouts.map((workout) => workout.date),
+      statusMarks: statusMode?.marks ?? [],
     }),
-    [snapshot],
+    [snapshot, statusMode],
   );
   // The card's focus identity: this review window of this snapshot
   // version — the same identity the server keys stored feedback by.
@@ -4406,6 +4484,9 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
           <div className="week-review-focus-block">
             <p className="week-review-focus"><span>下周重点</span>{review.focus}</p>
             <p className="week-review-focus-meta">本次复盘：{fullDateLabel(review.reviewWindow.start)}–{fullDateLabel(review.reviewWindow.end)}／{review.coverageStatusNote}</p>
+            {review.statusGapReview.length ? (
+              <p className="week-review-status-gap"><span aria-hidden="true">{STATUS_MODE_SYMBOLS[review.statusGapReview[0]?.mode as StatusPeriodView["mode"]] ?? "●"}</span> 复盘窗含状态期 {review.statusGapReview.length} 天（{review.statusGapReview.map((gap) => `${gap.mode} ${dateLabel(gap.date)}`).join("、")}），已按缺口排除，不参与趋势结论{review.statusGapComparison ? `；对比窗另有状态期 ${review.statusGapComparison} 天，同样排除` : ""}。</p>
+            ) : null}
             {review.canJudge ? (
               <div className="week-review-feedback">
                 <div className="week-review-feedback-actions" role="group" aria-label="下周重点反馈">
@@ -4492,10 +4573,25 @@ function WeekReviewPanel({ snapshot, focusFeedback, focusReadFailed, onViewTrain
   );
 }
 
-function ReadinessPanel({ readiness, behaviorImpact, compact = false, open: openProp, onOpenChange }: { readiness: Readiness; behaviorImpact: BehaviorImpact; compact?: boolean; open?: boolean; onOpenChange?: (open: boolean) => void }) {
+function ReadinessPanel({ readiness, behaviorImpact, statusMode, compact = false, open: openProp, onOpenChange }: { readiness: Readiness; behaviorImpact: BehaviorImpact; statusMode: StatusModeData; compact?: boolean; open?: boolean; onOpenChange?: (open: boolean) => void }) {
   const queryClient = useQueryClient();
   const [internalOpen, setInternalOpen] = useState(!compact);
   const foldOpen = openProp ?? internalOpen;
+  // H4.4: inside a status period the panel shows ONLY the status
+  // note — no ring, no grade, no radar, no components, no check-in
+  // form. The suppression decision and the note text are the
+  // server's (statusMode); this branch only renders them.
+  if (statusMode.suppressed && statusMode.active) {
+    const activePeriod = statusMode.active;
+    return (
+      <section className="readiness-panel status-mode-active" id="readiness-basis" aria-label="状态期说明">
+        <p className="section-kicker">身体准备度 · {dateLabel(readiness.date)}</p>
+        <h2 className="status-mode-active-title"><span aria-hidden="true">{STATUS_MODE_SYMBOLS[activePeriod.mode]}</span> 状态期 · {activePeriod.mode}</h2>
+        <p className="status-mode-active-note">{statusMode.note}</p>
+        <p className="status-mode-active-sub">状态期内不显示训练等级与今日结论；状态日期不进入基线，趋势与逐日记录带状态标记，结论按缺口处理。在下方「状态模式」里可以修改或删除这段状态期。</p>
+      </section>
+    );
+  }
   const handleFoldToggle = (event: SyntheticEvent<HTMLDetailsElement>) => {
     const next = event.currentTarget.open;
     setInternalOpen(next);
@@ -4629,7 +4725,119 @@ function freshnessSymbol(freshness: DataStatus["health"]["freshness"]): string {
   return "—";
 }
 
-function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; displayUnit: string }) {
+// H4.4 状态模式 management panel: the owner's own status periods
+// （生病 / 受伤 / 旅行 + start/end dates), listed from the server's
+// statusMode view and written only through the owner-gated
+// saveStatusPeriod / deleteStatusPeriod actions. The panel holds
+// only in-flight form state; every stored period, the active-period
+// flag, and every effect of a period come from the server.
+function StatusModePanel({ statusMode }: { statusMode: StatusModeData }) {
+  const queryClient = useQueryClient();
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [mode, setMode] = useState<StatusPeriodView["mode"]>("生病");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [formMessage, setFormMessage] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: () => api.saveStatusPeriod({ id: editingId, mode, startDate, endDate }),
+    onSuccess: (result) => {
+      if (result.ok) {
+        setEditingId(null);
+        setFormMessage("已保存");
+        void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else {
+        setFormMessage(result.message);
+      }
+    },
+    onError: () => setFormMessage("保存失败，请稍后再试"),
+  });
+  const remove = useMutation({
+    mutationFn: (id: number) => api.deleteStatusPeriod({ id }),
+    onSuccess: (result) => {
+      if (result.ok) void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+  const startEdit = (period: StatusPeriodView) => {
+    setEditingId(period.id);
+    setMode(period.mode);
+    setStartDate(period.startDate);
+    setEndDate(period.endDate);
+    setFormMessage(null);
+  };
+  const datesValid = startDate !== "" && endDate !== "" && startDate <= endDate;
+  return (
+    <section className="status-mode-panel" aria-labelledby="status-mode-title">
+      <div className="section-heading">
+        <div><p className="section-kicker">状态模式</p><h2 id="status-mode-title">生病 / 受伤 / 旅行时暂停评级</h2></div>
+        {statusMode.active ? <span className="status-chip status-watch"><span aria-hidden="true">{STATUS_MODE_SYMBOLS[statusMode.active.mode]}</span> 状态期 · {statusMode.active.mode}</span> : null}
+      </div>
+      <p className="status-mode-intro">设置一段状态期后：这段时间内的身体准备度只显示状态说明，不给训练等级；状态日期不进入基线，趋势结论按缺口处理、不下结论；趋势图与逐日记录会对这些日期打标记（符号 + 状态名）。</p>
+      {statusMode.periods.length ? (
+        <div className="status-period-list">
+          {statusMode.periods.map((period) => (
+            <div className="status-period-row" key={period.id}>
+              <span className="status-period-name"><span aria-hidden="true">{STATUS_MODE_SYMBOLS[period.mode]}</span> {period.mode}</span>
+              <span className="status-period-dates">{fullDateLabel(period.startDate)} 至 {fullDateLabel(period.endDate)}</span>
+              {statusMode.active?.id === period.id ? <span className="status-period-live">当前生效</span> : null}
+              <span className="status-period-actions">
+                <button type="button" className="status-period-btn" aria-label={`编辑状态期 ${period.mode} ${period.startDate} 至 ${period.endDate}`} onClick={() => startEdit(period)}>编辑</button>
+                <button type="button" className="status-period-btn" aria-label={`删除状态期 ${period.mode} ${period.startDate} 至 ${period.endDate}`} onClick={() => remove.mutate(period.id)} disabled={remove.isPending}>删除</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : <p className="empty-inline">尚未设置任何状态期。</p>}
+      <form
+        className="status-mode-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (datesValid) save.mutate();
+        }}
+      >
+        <fieldset className="status-mode-fieldset">
+          <legend>{editingId === null ? "新增状态" : "编辑状态"}</legend>
+          <div className="status-mode-options" role="group" aria-label="选择状态类型">
+            {STATUS_MODE_OPTIONS.map((option) => {
+              const selected = mode === option;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  className={`behavior-tag-btn${selected ? " selected" : ""}`}
+                  aria-pressed={selected}
+                  aria-label={`${selected ? "已选择状态" : "选择状态"} ${option}`}
+                  onClick={() => setMode(option)}
+                >
+                  <span aria-hidden="true">{selected ? "✓" : "○"}</span> <span aria-hidden="true">{STATUS_MODE_SYMBOLS[option]}</span> {option}
+                </button>
+              );
+            })}
+          </div>
+          <div className="status-mode-dates">
+            <label className="status-mode-date-field">
+              <span>开始日期</span>
+              <input type="date" aria-label="状态开始日期" value={startDate} onChange={(event) => setStartDate(event.target.value)} required />
+            </label>
+            <label className="status-mode-date-field">
+              <span>结束日期</span>
+              <input type="date" aria-label="状态结束日期" value={endDate} onChange={(event) => setEndDate(event.target.value)} required />
+            </label>
+          </div>
+          {startDate !== "" && endDate !== "" && !datesValid ? <p className="status-mode-form-note">结束日期不能早于开始日期。</p> : null}
+          <div className="status-mode-form-actions">
+            <button type="submit" className="status-mode-save" disabled={!datesValid || save.isPending}>{save.isPending ? "保存中…" : editingId === null ? "保存状态" : "保存修改"}</button>
+            {editingId !== null ? (
+              <button type="button" className="status-period-btn" aria-label="取消编辑状态期" onClick={() => { setEditingId(null); setFormMessage(null); }}>取消编辑</button>
+            ) : null}
+          </div>
+          {formMessage ? <p className="status-mode-form-note" role="status">{formMessage}</p> : null}
+        </fieldset>
+      </form>
+    </section>
+  );
+}
+
+function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit, marks }: { dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; displayUnit: string; marks?: StatusMarkMap }) {
   const queryClient = useQueryClient();
   const [diag, setDiag] = useState<{ verdict: string; checks: Array<{ key: string; label: string; ok: boolean; detail: string }> } | null>(null);
   const diagnose = useMutation({
@@ -4689,6 +4897,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
                 <div className="unified-main">
                   <strong>{day.steps === null ? "步数 —" : `${numberLabel(day.steps)} 步`}{day.sleepHours !== null ? ` · 睡 ${day.sleepHours.toFixed(1)}h` : ""}</strong>
                   <small>{day.hasStrength ? `力量 ${day.strengthSessions} 次 · ${volumeLabel(day.strengthVolume)} ${displayUnit} · ${day.strengthRoutines.map((r) => ROUTINE_LABELS[r as StrengthWorkout["routine"]] ?? r).join("、")}` : "当天没有力量训练"}{unifiedWorkoutText(day) ? ` · ${unifiedWorkoutText(day)}` : ""}{unifiedHkLabel(day) ? ` · ${unifiedHkLabel(day)}` : ""}{day.restingHr !== null ? ` · 静息 ${day.restingHr.toFixed(0)} bpm` : ""}{day.hrvMs !== null ? ` · HRV ${day.hrvMs.toFixed(0)} ms` : ""}</small>
+                  {marks?.get(day.date) ? <small className="unified-status-mark"><span aria-hidden="true">{marks.get(day.date)?.symbol}</span> 状态期 · {marks.get(day.date)?.mode}（只作记录）</small> : null}
                 </div>
                 <span className={`unified-badge ${day.hasHealth && day.hasStrength ? "both" : ""}`}>{day.hasHealth && day.hasStrength ? "两边都有" : day.hasStrength ? "只有力量" : "只有健康"}</span>
               </div>
@@ -4700,7 +4909,7 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit }: { dataSta
   );
 }
 
-function TodayView({ snapshot, readiness, readinessHistory, behaviorImpact, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, syncAttempt, onGoToWeekReview, onGoToDataStatus }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; behaviorImpact: BehaviorImpact; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; syncAttempt: SyncAttemptState | null; onGoToWeekReview?: () => void; onGoToDataStatus?: () => void }) {
+function TodayView({ snapshot, readiness, readinessHistory, behaviorImpact, statusMode, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, syncAttempt, onGoToWeekReview, onGoToDataStatus }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; behaviorImpact: BehaviorImpact; statusMode: StatusModeData; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; syncAttempt: SyncAttemptState | null; onGoToWeekReview?: () => void; onGoToDataStatus?: () => void }) {
   const [readinessOpen, setReadinessOpen] = useState(false);
   const openReadinessBasis = () => {
     setReadinessOpen(true);
@@ -4730,10 +4939,11 @@ function TodayView({ snapshot, readiness, readinessHistory, behaviorImpact, onSy
     .slice(0, 5).length;
   return (
     <div className="today-view">
-      <WhoopHero snapshot={snapshot} readiness={readiness} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} syncAttempt={syncAttempt} onViewReadiness={openReadinessBasis} onViewWeekReview={onGoToWeekReview} onViewDataStatus={onGoToDataStatus} />
+      <WhoopHero snapshot={snapshot} readiness={readiness} statusMode={statusMode} dataStatus={dataStatus} onSyncHealth={onSyncHealth} onSyncStrength={onSyncStrength} syncing={syncing} syncAttempt={syncAttempt} onViewReadiness={openReadinessBasis} onViewWeekReview={onGoToWeekReview} onViewDataStatus={onGoToDataStatus} />
       {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
-      <WeekLoadBlock snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} />
-      {readiness ? <ReadinessPanel readiness={readiness} behaviorImpact={behaviorImpact} compact open={readinessOpen} onOpenChange={setReadinessOpen} /> : null}
+      <WeekLoadBlock snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} statusMode={statusMode} />
+      {readiness ? <ReadinessPanel readiness={readiness} behaviorImpact={behaviorImpact} statusMode={statusMode} compact open={readinessOpen} onOpenChange={setReadinessOpen} /> : null}
+      <StatusModePanel statusMode={statusMode} />
       <section className="kpi-board" aria-label="关键健康指标">
         <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={stepStatus} />
         <Kpi label="静息心率" value={numberLabel(snapshot.restingHr.value, 1)} unit="bpm" detail={`基线约 ${snapshot.restingHr.baseline} · 常见 ${snapshot.restingHr.usualMin}–${snapshot.restingHr.usualMax}`} status={snapshot.restingHr.status} />
@@ -4748,7 +4958,7 @@ function TodayView({ snapshot, readiness, readinessHistory, behaviorImpact, onSy
       </section>
       <StrengthPanel strength={snapshot.strengthTraining} onSync={onSyncStrength} syncing={strengthSyncing} />
       <div className="dark-panel">
-        <SevenDayFacts snapshot={snapshot} />
+        <SevenDayFacts snapshot={snapshot} statusMode={statusMode} />
       </div>
       <div className="dark-panel">
         <SleepRegularityPanel snapshot={snapshot} />
@@ -4984,15 +5194,18 @@ function BehaviorImpactPanel({ behaviorImpact }: { behaviorImpact: BehaviorImpac
   );
 }
 
-function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt }) {
+function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData }) {
   const history = useMemo(() => snapshot.historyDaily.slice(-30).map((row) => ({ ...row, label: dateLabel(row.date) })), [snapshot.historyDaily]);
+  const marks = statusMarkMap(statusMode);
+  const trendHasStatusDay = snapshot.trends.some((point) => marks.has(point.date));
   return (
     <div className="trends-view">
       <section className="trends" aria-labelledby="trends-title">
         <div className="section-heading"><div><p className="section-kicker">近7天</p><h2 id="trends-title">短期趋势</h2></div><span className="trend-range">{dateLabel(snapshot.trends[0]?.date ?? snapshot.dataDate)}–{dateLabel(snapshot.trends[snapshot.trends.length - 1]?.date ?? snapshot.dataDate)}</span></div>
-        <MetricBars title="步数" unit="步" points={snapshot.trends} getValue={(point) => point.stepCount} baseline={snapshot.steps.baseline} formatValue={(value) => Math.round(value).toLocaleString("zh-CN")} />
-        <MetricBars title="静息心率" unit="bpm" points={snapshot.trends} getValue={(point) => point.restingHrBpm} baseline={snapshot.restingHr.baseline} formatValue={(value) => value.toFixed(value % 1 === 0 ? 0 : 1)} />
-        <MetricBars title="HRV" unit="ms" points={snapshot.trends} getValue={(point) => point.hrvMs} baseline={snapshot.hrv.baseline} formatValue={(value) => value.toFixed(value % 1 === 0 ? 0 : 1)} />
+        <MetricBars title="步数" unit="步" points={snapshot.trends} getValue={(point) => point.stepCount} baseline={snapshot.steps.baseline} formatValue={(value) => Math.round(value).toLocaleString("zh-CN")} marks={marks} />
+        <MetricBars title="静息心率" unit="bpm" points={snapshot.trends} getValue={(point) => point.restingHrBpm} baseline={snapshot.restingHr.baseline} formatValue={(value) => value.toFixed(value % 1 === 0 ? 0 : 1)} marks={marks} />
+        <MetricBars title="HRV" unit="ms" points={snapshot.trends} getValue={(point) => point.hrvMs} baseline={snapshot.hrv.baseline} formatValue={(value) => value.toFixed(value % 1 === 0 ? 0 : 1)} marks={marks} />
+        {trendHasStatusDay ? <p className="trend-status-note">带符号 + 状态名的日期为状态期：数值只作记录，不进入基线与趋势结论。</p> : null}
       </section>
 
       <section className="strength-trend-section" aria-labelledby="strength-trend-title">
@@ -5200,9 +5413,11 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
   focusFeedback?: FocusFeedbackData;
   focusReadFailed?: boolean;
   onViewTraining?: (range: { start: string; end: string }) => void;
+  statusMode?: StatusModeData;
 }) {
   const [showAllUnified, setShowAllUnified] = useState(false);
   const [workoutFilter, setWorkoutFilter] = useState<"all" | "swim">("all");
+  const marks = statusMode ? statusMarkMap(statusMode) : undefined;
   const strengths = [...snapshot.strengthTraining.workouts].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   const allWorkouts = allWorkoutsList(snapshot.historyWorkouts);
   const swimWorkoutCount = snapshot.historyWorkouts.filter((workout) => isSwimWorkout(workout.type)).length;
@@ -5370,10 +5585,10 @@ function HistoryView({ snapshot, unifiedTimeline, focusRange, focusContext, curr
       {fullHistoryVisible ? (<>
       {focusFeedback ? (
         <div className="dark-panel history-week-review-panel">
-          <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed ?? false} onViewTraining={onViewTraining} />
+          <WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed ?? false} onViewTraining={onViewTraining} statusMode={statusMode} />
         </div>
       ) : null}
-      <DataStatusPanel dataStatus={dataStatus ?? null} unifiedTimeline={unifiedTimeline ?? []} displayUnit={snapshot.strengthTraining.displayUnit} />
+      <DataStatusPanel dataStatus={dataStatus ?? null} unifiedTimeline={unifiedTimeline ?? []} displayUnit={snapshot.strengthTraining.displayUnit} marks={marks} />
       {unifiedTimeline && unifiedTimeline.length ? (
         <details className="history-section history-fold">
           <summary className="history-fold-summary" aria-label={`展开一体时间线，共 ${unifiedTimeline.length} 天`}>
@@ -6493,7 +6708,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   // H3.5 training entry: the review window the owner asked to inspect
   // from the week-review focus card. Set when they tap 查看这段训练
@@ -6566,9 +6781,10 @@ function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, readiness, readi
     const review = weekReview(snapshot.historyDaily, snapshot.historySleeps, snapshot.historyWorkouts, snapshot.dataDate, {
       coverageIncomplete: snapshot.coverageIncomplete,
       strengthDates: snapshot.strengthTraining.workouts.map((workout) => workout.date),
+      statusMarks: statusMode.marks,
     });
     return focusFeedbackKey(review.reviewWindow.start, review.reviewWindow.end, snapshot.updatedAt);
-  }, [snapshot]);
+  }, [snapshot, statusMode.marks]);
   const [lastSyncMessage, setLastSyncMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
   // H-FRESH-001 · PHASE-1: the manual-sync attempt machine. Each
@@ -6719,7 +6935,7 @@ function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, readiness, readi
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
         <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} statusMode={statusMode} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} statusMode={statusMode} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} statusMode={statusMode} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -6803,7 +7019,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} statusMode={dashboard.data.statusMode} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}

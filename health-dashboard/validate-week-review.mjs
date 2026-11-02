@@ -97,7 +97,7 @@ const todaySliceStart = clientSrc.indexOf('function TodayView(');
 const historySliceStart = clientSrc.indexOf('function HistoryView(');
 const todaySlice = clientSrc.slice(todaySliceStart, clientSrc.indexOf('function RecentWorkouts(', todaySliceStart));
 const historySlice = clientSrc.slice(historySliceStart, clientSrc.indexOf('const GAME_CATEGORY_META', historySliceStart));
-const historyPanelJsx = '<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed ?? false} onViewTraining={onViewTraining} />';
+const historyPanelJsx = '<WeekReviewPanel snapshot={snapshot} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed ?? false} onViewTraining={onViewTraining} statusMode={statusMode} />';
 check('source: panel is rendered on the history page (B1B move), not on the today page',
   historySlice.includes(historyPanelJsx) && !todaySlice.includes('<WeekReviewPanel'));
 check('source: panel is the first block on the history page, and today reaches it via the hero entry',

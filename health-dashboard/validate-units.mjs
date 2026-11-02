@@ -13,6 +13,13 @@ import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
 const src = readFileSync(new URL('./server/src/actions.ts', import.meta.url), 'utf8');
+// H4.4: calculateReadiness now calls excludeStatusDates, imported from
+// the pure ./status-mode module. The extracted functions below run in
+// an isolated eval scope, so the pure module is loaded verbatim here
+// to provide it — the functions under test keep their real behavior,
+// and the fixtures pass no status periods (legacy no-op path).
+const statusModeSrc = readFileSync(new URL('./server/src/status-mode.ts', import.meta.url), 'utf8')
+  .replace(/^export /gm, '');
 
 let passed = 0;
 let failures = 0;
@@ -66,7 +73,7 @@ const FN = ['clamp', 'round', 'signed', 'totalSleepHours', 'timeInBedHours', 'be
   'convertVolumeToUnit', 'sumWorkoutVolumeInUnit', 'buildUnifiedTimeline', 'calculateReadiness'];
 const lbDecl = src.match(/const LB_TO_KG = [0-9.]+;/)?.[0] ?? '';
 if (!lbDecl) throw new Error('LB_TO_KG declaration not found');
-const code = `${lbDecl}\n${FN.map((n) => extractFunction(src, n)).join('\n')}`;
+const code = `${lbDecl}\n${statusModeSrc}\n${FN.map((n) => extractFunction(src, n)).join('\n')}`;
 const stripped = stripTypeScriptTypes(code);
 const impl = new Function(`${stripped}\nreturn { convertVolumeToUnit, sumWorkoutVolumeInUnit, buildUnifiedTimeline, calculateReadiness };`)();
 // H-SOURCE-001 changed buildUnifiedTimeline's signature to

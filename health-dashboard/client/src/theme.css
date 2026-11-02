@@ -753,3 +753,41 @@ details.game-panel > section { margin-top: 10px; }
 .game-rewards-fold { display: block; }
 .game-rewards-fold > .game-panel { margin-top: 10px; }
 .game-panel-summary { margin-top: 16px; padding: 16px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+
+/* H4.4 状态模式 (status mode): the suppressed readiness note, the
+   management panel, and the symbol+text status marks on trend and
+   per-day surfaces. Meaning always rides on symbol + mode text +
+   dates together; color is never the only channel. All interactive
+   targets are at least 44px tall. */
+.status-mode-active { display: flex; flex-direction: column; gap: 8px; }
+.status-mode-active-title { margin: 0; font-size: 22px; }
+.status-mode-active-note { margin: 0; font-size: 14px; line-height: 1.6; }
+.status-mode-active-sub { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
+.status-mode-panel { margin-top: 16px; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.status-mode-intro { margin: 10px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; }
+.status-period-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.status-period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); }
+.status-period-name { font-size: 14px; font-weight: 800; }
+.status-period-dates { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+.status-period-live { padding: 3px 8px; border-radius: 999px; background: var(--amber-soft); color: var(--amber); font-size: 11px; font-weight: 800; }
+.status-period-actions { display: flex; gap: 8px; margin-left: auto; }
+.status-period-btn { min-height: 44px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text); font-size: 13px; font-weight: 700; cursor: pointer; }
+.status-mode-form { margin-top: 16px; }
+.status-mode-fieldset { margin: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; min-width: 0; }
+.status-mode-fieldset legend { font-size: 13px; font-weight: 800; padding: 0 4px; }
+.status-mode-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.status-mode-dates { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+.status-mode-date-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 700; color: var(--dim); }
+.status-mode-date-field input { min-height: 44px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 14px; }
+.status-mode-form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.status-mode-save { min-height: 44px; padding: 10px 18px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--text); font-size: 13px; font-weight: 800; cursor: pointer; }
+.status-mode-save:disabled { opacity: .45; cursor: not-allowed; }
+.status-mode-form-note { margin: 10px 0 0; color: var(--amber); font-size: 12px; font-weight: 700; }
+.whoop-trend-status { color: var(--amber); }
+.seven-facts-day small.seven-facts-status { color: #f2c66d; font-size: 9px; font-weight: 800; }
+.unified-status-mark { display: block; color: var(--amber); font-weight: 700; }
+.bar-chart-status { height: 160px; }
+.bar-chart-status .bar-column { grid-template-rows: 24px 92px 18px 14px; }
+.bar-status { align-self: start; color: var(--amber); font-size: 9px; font-weight: 800; white-space: nowrap; }
+.trend-status-note { margin: 10px 0 0; color: var(--amber); font-size: 12px; font-weight: 700; line-height: 1.55; }
+.week-review-status-gap { margin: 8px 0 0; color: var(--amber); font-size: 12px; font-weight: 700; line-height: 1.6; overflow-wrap: anywhere; }

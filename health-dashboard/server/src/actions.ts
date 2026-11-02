@@ -11,6 +11,15 @@ import {
   type BehaviorImpactItem,
 } from "./behavior-impact";
 import { computeSleepDebt, type SleepDebtResult } from "./sleep-debt";
+import {
+  STATUS_MODES,
+  buildStatusModeView,
+  excludeStatusDates,
+  isValidStatusPeriod,
+  statusPeriodForDate,
+  suppressReadinessForStatus,
+  type StatusPeriod,
+} from "./status-mode";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
 
@@ -275,7 +284,13 @@ const readinessSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   score: z.number().min(0).max(10).nullable(),
   objectiveScore: z.number().min(0).max(10).nullable(),
-  status: z.enum(["恢复", "量力而行", "准备就绪", "全力以赴", "数据不足"]),
+  // H4.4 additive: "状态期" is the suppressed state produced by
+  // suppressReadinessForStatus — it is never a training grade and
+  // tierFor never returns it; it exists so a status-period readiness
+  // carries its suppression in the status field itself instead of
+  // borrowing 数据不足 (the day may have plenty of data — it is the
+  // owner's declared status, not missing data, that suppresses it).
+  status: z.enum(["恢复", "量力而行", "准备就绪", "全力以赴", "数据不足", "状态期"]),
   summary: z.string().min(1),
   availableWeight: z.number().min(0).max(100),
   confidence: z.enum(["高", "中", "低"]),
@@ -445,8 +460,14 @@ function bedtimeMinutes(value: string): number | null {
   return raw < 12 * 60 ? raw + 24 * 60 : raw;
 }
 
-function calculateReadiness(snapshot: Snapshot, readinessDate: string, morningFeeling: number | null): Readiness {
-  const historyBeforeDate = snapshot.historyDaily.filter((row) => row.date < snapshot.dataDate).slice(-14);
+function calculateReadiness(snapshot: Snapshot, readinessDate: string, morningFeeling: number | null, statusPeriods: readonly StatusPeriod[] = []): Readiness {
+  // H4.4 baseline exclusion: status-period dates never enter a
+  // baseline window. The windows are selected exactly as before and
+  // the status dates are then removed from the SELECTED rows — the
+  // formula, weights, and thresholds are untouched; only the baseline
+  // inputs lose those days (their rows stay stored and stay visible
+  // as facts on every other surface).
+  const historyBeforeDate = excludeStatusDates(snapshot.historyDaily.filter((row) => row.date < snapshot.dataDate).slice(-14), statusPeriods);
   const missingLabel: "还没同步完" | "当天没戴表" = snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表";
 
   const restingHistory = historyBeforeDate.flatMap((row) => row.restingHr === null ? [] : [row.restingHr]);
@@ -463,7 +484,13 @@ function calculateReadiness(snapshot: Snapshot, readinessDate: string, morningFe
     : null;
 
   const sleepHistory = snapshot.historySleeps.filter((row) => row.date <= readinessDate).slice(-14);
-  const sleepHours = sleepHistory.map((row) => totalSleepHours(row, row.totalHours));
+  // H4.4: the sleep BASELINE (personal need, duration z, bedtime
+  // regularity) is computed over the non-status nights only. The
+  // 7-day sleep-bank below still reads the actual recent nights from
+  // sleepHistory — the bank is an accumulation of real nights, not a
+  // baseline — but it is judged against the status-free need.
+  const sleepBaselineHistory = excludeStatusDates(sleepHistory, statusPeriods);
+  const sleepHours = sleepBaselineHistory.map((row) => totalSleepHours(row, row.totalHours));
   const sleepStats = stats(sleepHours);
   const sleepNeed = sleepStats?.mean ?? null;
   const recentSevenSleeps = sleepHistory.slice(-7);
@@ -472,7 +499,7 @@ function calculateReadiness(snapshot: Snapshot, readinessDate: string, morningFe
     : Math.max(0, recentSevenSleeps.reduce((sum, row) => sum + (sleepNeed - totalSleepHours(row, row.totalHours)), 0));
 
   const currentBedtime = bedtimeMinutes(snapshot.sleep.bedtime);
-  const bedtimeHistory = sleepHistory.flatMap((row) => {
+  const bedtimeHistory = sleepBaselineHistory.flatMap((row) => {
     const parsed = bedtimeMinutes(row.start);
     return parsed === null ? [] : [parsed];
   });
@@ -1193,6 +1220,69 @@ function buildSleepDebt(snapshot: Snapshot, readinessDate: string): SleepDebtRes
   return computeSleepDebt(nights, readinessDate);
 }
 
+// H4.4 状态模式 (status mode): the owner's declared status periods
+// （生病 / 受伤 / 旅行 + inclusive start/end dates) and everything the
+// dashboard derives from them, computed by the pure module
+// server/src/status-mode.ts — readiness suppression for a covered
+// readiness date, baseline exclusion inside calculateReadiness,
+// conclusion gaps, and symbol+text marks for trend/fact surfaces.
+// The client only renders this view; it never decides coverage
+// itself. NO recovery-progress or recovery-reference rule exists
+// anywhere in this feature (PM red line): a period suppresses,
+// excludes, and marks — it never judges recovery.
+const statusModeKindSchema = z.enum(STATUS_MODES);
+
+const statusPeriodViewSchema = z.object({
+  id: z.number().int().positive(),
+  mode: statusModeKindSchema,
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
+const statusMarkSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  mode: statusModeKindSchema,
+  symbol: z.string().min(1),
+});
+
+const statusModeSchema = z.object({
+  periods: z.array(statusPeriodViewSchema).max(200),
+  active: statusPeriodViewSchema.nullable(),
+  suppressed: z.boolean(),
+  note: z.string().nullable(),
+  description: z.string().nullable(),
+  marks: z.array(statusMarkSchema).max(64),
+});
+
+type StatusMode = z.infer<typeof statusModeSchema>;
+
+const EMPTY_STATUS_MODE: StatusMode = { periods: [], active: null, suppressed: false, note: null, description: null, marks: [] };
+
+const statusPeriodMutationResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  message: z.string(),
+  periodId: z.number().int().positive().nullable(),
+});
+
+// Load the owner's stored status periods. A read failure degrades to
+// an empty list — the dashboard then behaves exactly as it did before
+// H4.4 (no suppression, no exclusion, no marks) rather than breaking;
+// malformed stored rows are dropped by the same validity rule the
+// pure module applies everywhere, so a corrupt row can never
+// suppress or exclude anything.
+async function loadStatusPeriods(ctx: Ctx): Promise<StatusPeriod[]> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select({ id: schema.statusPeriod.id, mode: schema.statusPeriod.mode, startDate: schema.statusPeriod.startDate, endDate: schema.statusPeriod.endDate })
+      .from(schema.statusPeriod);
+    return rows.filter((row) => isValidStatusPeriod(row));
+  } catch {
+    return [];
+  }
+}
+
 const getDashboardResponse = z.object({
   forbidden: z.boolean(),
   snapshot: snapshotSchema.nullable(),
@@ -1205,6 +1295,12 @@ const getDashboardResponse = z.object({
   // suggested sleep, and suggested bedtime (pure module). Null for
   // non-owners and whenever no usable health snapshot exists.
   sleepDebt: sleepDebtSchema.nullable(),
+  // H4.4 additive: the owner's status periods and the derived
+  // status-mode view (active period for the readiness date,
+  // suppression flag + status note, and symbol+text marks over the
+  // display window). Empty for non-owners; periods still list when
+  // the health snapshot is missing, with nothing suppressed.
+  statusMode: statusModeSchema,
   readiness: readinessSchema.nullable(),
   // H3.5: the owner's feedback on the current review window's focus
   // (current) and the most recent feedback row belonging to any other
@@ -3499,10 +3595,10 @@ async function handleGetRedemptionReceipt(ctx: Ctx, args: { requestId: string })
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、数据状态与统一时间线（仅所有者）。",
+    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、状态模式、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, statusMode: EMPTY_STATUS_MODE, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3519,11 +3615,15 @@ export const Actions = {
       const logs = await loadRecentLogs(ctx);
       const dataStatus = buildDataStatus(healthLoad, strengthLoad, logs);
       const unifiedTimeline = buildUnifiedTimeline(healthLoad.snapshot, strength);
+      // H4.4: the owner's status periods load on every owner path —
+      // they are the owner's own declarations, independent of either
+      // snapshot's health.
+      const statusPeriods = await loadStatusPeriods(ctx);
       if (healthLoad.state !== "ok" || !healthLoad.snapshot) {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
         const behaviorImpact = await loadBehaviorImpact(ctx, null, null, []);
-        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3558,7 +3658,17 @@ export const Actions = {
       // and also null for a legacy row saved before revisions existed —
       // both count as the oldest input in the arbitration.
       const checkinRevision = checkinRows[0]?.revision ?? null;
-      const readiness = calculateReadiness(snapshot, readinessDate, morningFeeling);
+      // H4.4: readiness is computed with the status periods as the
+      // baseline-exclusion input; when the readiness date itself
+      // falls inside a period the computed result is then suppressed
+      // to the status note (no score, no grade, no 今日结论) and is
+      // NOT archived — the date stays a gap in the readiness trend,
+      // which the marks identify as a status day. A period set later
+      // never rewrites an already-archived row (H-LOAD-001 history
+      // is immutable); the trend rendering prefers the mark.
+      const readinessRaw = calculateReadiness(snapshot, readinessDate, morningFeeling, statusPeriods);
+      const readinessSuppressed = statusPeriodForDate(statusPeriods, readinessDate) !== null;
+      const readiness = suppressReadinessForStatus(readinessRaw, statusPeriods);
       // Archive the score exactly as computed now (H-LOAD-001): this is
       // the only place readiness is ever computed, so archiving here
       // covers both manual opens and the daily refresh's reads. The
@@ -3569,7 +3679,9 @@ export const Actions = {
       // today gate (H-ARCHIVE-SAFE-001) means opening the dashboard on a
       // stale snapshot archives nothing: only the readiness actually
       // displayed for LA today is recorded.
-      await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, checkinRevision, laTodayString());
+      if (!readinessSuppressed) {
+        await archiveReadiness(ctx, readiness, health.updatedAt, checkinVersion, checkinRevision, laTodayString());
+      }
       const readinessHistory = await loadReadinessTrendPoints(ctx, readinessDate);
       // H3.5: the current window is derived from the same snapshot the
       // client renders (window_end = dataDate) and the snapshot version
@@ -3586,7 +3698,12 @@ export const Actions = {
       // loaded snapshot's main sleeps, anchored at the readiness
       // date. Computed here, rendered only.
       const sleepDebt = buildSleepDebt(snapshot, readinessDate);
-      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
+      // H4.4: the status-mode view for this readiness date. The marks
+      // window reaches 41 days back — far enough to cover the 30-day
+      // daily history, the 14-day unified timeline, the 7-day trend
+      // charts, and every week-review window ending at dataDate.
+      const statusMode = buildStatusModeView(statusPeriods, readinessDate, shiftDate(readinessDate, -41), readinessDate);
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
 
@@ -3869,6 +3986,69 @@ export const Actions = {
       }
       ctx.invalidateQueries(["dashboard"]);
       return { ok: true, forbidden: false };
+    },
+  }),
+
+  // H4.4: create or update one status period （生病 / 受伤 / 旅行，
+  // inclusive start/end dates). STRICT owner gate with exactly
+  // saveMorningCheckin's semantics — a non-owner gets forbidden and
+  // ZERO writes (the gate returns before any statement runs). Dates
+  // must be real YYYY-MM-DD calendar dates with start ≤ end; the
+  // mode is the fixed three-value enum. Saving a period changes no
+  // stored health data and rewrites no archived score: every effect
+  // is derived from the stored periods at read time by the pure
+  // status-mode module.
+  saveStatusPeriod: defineAction({
+    description: "新建或更新一段状态期（生病/受伤/旅行，含起止日期），状态期内准备度压制为状态说明（仅所有者）。",
+    request: z.object({
+      id: z.number().int().positive().nullable(),
+      mode: statusModeKindSchema,
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    }),
+    response: statusPeriodMutationResponse,
+    async handler(ctx, args): Promise<z.infer<typeof statusPeriodMutationResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可设置状态", periodId: null };
+      if (!isRealDateString(args.startDate) || !isRealDateString(args.endDate) || args.startDate > args.endDate) {
+        return { ok: false, forbidden: false, message: "状态起止日期不合法：需要真实日期且开始不晚于结束", periodId: null };
+      }
+      const db = ctx.db<typeof schema>();
+      const now = new Date();
+      if (args.id === null) {
+        const inserted = await db.insert(schema.statusPeriod)
+          .values({ mode: args.mode, startDate: args.startDate, endDate: args.endDate, createdAt: now, updatedAt: now })
+          .returning({ id: schema.statusPeriod.id });
+        ctx.invalidateQueries(["dashboard"]);
+        return { ok: true, forbidden: false, message: "状态已保存", periodId: inserted[0]?.id ?? null };
+      }
+      const updated = await db.update(schema.statusPeriod)
+        .set({ mode: args.mode, startDate: args.startDate, endDate: args.endDate, updatedAt: now })
+        .where(eq(schema.statusPeriod.id, args.id))
+        .returning({ id: schema.statusPeriod.id });
+      if (!updated.length) return { ok: false, forbidden: false, message: "没有这条状态记录", periodId: null };
+      ctx.invalidateQueries(["dashboard"]);
+      return { ok: true, forbidden: false, message: "状态已保存", periodId: args.id };
+    },
+  }),
+
+  // H4.4: delete one status period. Same strict owner gate — a
+  // non-owner gets forbidden and zero writes. Deleting a period only
+  // removes the declaration; derived effects for FUTURE reads change
+  // accordingly, and already-archived readiness history is never
+  // rewritten (H-LOAD-001).
+  deleteStatusPeriod: defineAction({
+    description: "删除一段已设置的状态期（仅所有者）。",
+    request: z.object({ id: z.number().int().positive() }),
+    response: statusPeriodMutationResponse,
+    async handler(ctx, args): Promise<z.infer<typeof statusPeriodMutationResponse>> {
+      if (!isOwner(ctx)) return { ok: false, forbidden: true, message: "仅所有者可删除状态", periodId: null };
+      const db = ctx.db<typeof schema>();
+      const deleted = await db.delete(schema.statusPeriod)
+        .where(eq(schema.statusPeriod.id, args.id))
+        .returning({ id: schema.statusPeriod.id });
+      if (!deleted.length) return { ok: false, forbidden: false, message: "没有这条状态记录", periodId: null };
+      ctx.invalidateQueries(["dashboard"]);
+      return { ok: true, forbidden: false, message: "状态已删除", periodId: args.id };
     },
   }),
 

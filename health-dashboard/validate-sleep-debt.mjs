@@ -45,7 +45,9 @@ check('source: getDashboard response carries the additive sleepDebt field',
 check('source: all three getDashboard return paths carry sleepDebt (forbidden / health-missing null, main computed)',
   (serverSrc.match(/sleepDebt: null/g) ?? []).length === 2
   && serverSrc.includes('const sleepDebt = buildSleepDebt(snapshot, readinessDate);')
-  && serverSrc.includes('behaviorImpact, sleepDebt, readiness,'));
+  // H4.4: the main return gained the additive statusMode field between
+  // sleepDebt and readiness — the pin tracks the live key order.
+  && serverSrc.includes('behaviorImpact, sleepDebt, statusMode, readiness,'));
 check('source: server builds the input from main sleeps only (CWEB-SLEEP-001 selection)',
   serverSrc.includes('const main = selectMainSleep(rows);') && serverSrc.includes('hours: totalSleepHours(main, main.totalHours)'));
 check('source: readiness formula untouched (7-day sleep bank caliber intact)',
