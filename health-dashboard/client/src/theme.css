@@ -455,6 +455,19 @@ main { width: min(100%, 1080px); margin: 0 auto; padding: 16px 16px calc(34px + 
 .acwr-row p { margin: 7px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .acwr-method-summary { display: flex; align-items: center; min-height: 44px; margin-top: 10px; color: var(--text); font-size: 13px; font-weight: 700; cursor: pointer; }
 .acwr-method { margin: 4px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+/* H4.3 睡眠债与今晚睡眠需求: mirrors the ACWR panel rhythm; status is
+   symbol + word + signed hours, never color alone, and the method
+   summary is a 44px touch target. */
+.sleep-debt-panel { margin-top: 38px; }
+.sleep-debt-note { margin: 14px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 12px; line-height: 1.6; }
+.sleep-debt-rows { display: grid; gap: 12px; margin-top: 16px; }
+.sleep-debt-row { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.sleep-debt-row-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.sleep-debt-row-head span { color: var(--dim); font-size: 12px; font-weight: 700; }
+.sleep-debt-row-head strong { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+.sleep-debt-row p { margin: 7px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sleep-debt-method-summary { display: flex; align-items: center; min-height: 44px; margin-top: 10px; color: var(--text); font-size: 13px; font-weight: 700; cursor: pointer; }
+.sleep-debt-method { margin: 4px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
 .strength-trend-section > .chart-panel { margin-top: 18px; }
 .history-charts { margin-top: 38px; }
 .history-intro { padding-bottom: 16px; border-bottom: 2px solid var(--text); }

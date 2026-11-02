@@ -10,6 +10,7 @@ import {
   serializeBehaviorTags,
   type BehaviorImpactItem,
 } from "./behavior-impact";
+import { computeSleepDebt, type SleepDebtResult } from "./sleep-debt";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
 
@@ -1129,6 +1130,69 @@ function buildAcwr(strength: StrengthTraining | null, anchorDate: string | null)
   return computeAcwr(strength.workouts, anchor, strength.displayUnit, historyStart);
 }
 
+// H4.3 睡眠债与今晚睡眠需求 (sleep debt + tonight's sleep need): the
+// server-computed 14-day cumulative sleep debt against the personal
+// baseline, tonight's suggested sleep duration, and the suggested
+// bedtime. All math lives in the pure module server/src/sleep-debt.ts;
+// the client only renders this result. A routine reference in the
+// spirit of Whoop Sleep Need — not a medical judgement.
+const sleepDebtSchema = z.object({
+  asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  windowStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  windowEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  windowDays: z.number().int().positive(),
+  recordedNights: z.number().int().nonnegative(),
+  missingNights: z.number().int().nonnegative(),
+  missingDates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(14),
+  baselineNights: z.number().int().nonnegative(),
+  baselineHours: z.number().nullable(),
+  debtHours: z.number().nullable(),
+  status: z.object({ symbol: z.string(), word: z.string() }).nullable(),
+  extraTonightHours: z.number().nullable(),
+  suggestedSleepHours: z.number().nullable(),
+  usualWakeTime: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
+  usualWakeFromDefault: z.boolean(),
+  suggestedBedtime: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
+  sufficient: z.boolean(),
+});
+
+// Parse an "HH:MM" clock string into minutes since midnight; null
+// when the value is not a usable clock time.
+function clockMinutesOrNull(value: string): number | null {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+// Derive the sleep-debt input from the health snapshot: one main
+// sleep per wake-up date (the deterministic CWEB-SLEEP-001 selection
+// readiness and settlement already use), its actual sleep duration
+// via the same totalSleepHours caliber, and its wake clock time. The
+// anchor is the readiness date — the morning the owner wakes into
+// "tonight" — never the metrics dataDate.
+function buildSleepDebt(snapshot: Snapshot, readinessDate: string): SleepDebtResult {
+  const sleepsByDate = new Map<string, SleepHistoryRow[]>();
+  for (const row of snapshot.historySleeps) {
+    const rows = sleepsByDate.get(row.date);
+    if (rows) rows.push(row);
+    else sleepsByDate.set(row.date, [row]);
+  }
+  const nights = [];
+  for (const [date, rows] of sleepsByDate) {
+    const main = selectMainSleep(rows);
+    if (!main) continue;
+    nights.push({
+      date,
+      hours: totalSleepHours(main, main.totalHours),
+      wakeMinutes: clockMinutesOrNull(main.end),
+    });
+  }
+  return computeSleepDebt(nights, readinessDate);
+}
+
 const getDashboardResponse = z.object({
   forbidden: z.boolean(),
   snapshot: snapshotSchema.nullable(),
@@ -1137,6 +1201,10 @@ const getDashboardResponse = z.object({
   // H4.1 additive: server-computed behaviour → next-day recovery
   // correlation (pure module) plus today's saved tag selection.
   behaviorImpact: behaviorImpactSchema,
+  // H4.3 additive: server-computed 14-day sleep debt, tonight's
+  // suggested sleep, and suggested bedtime (pure module). Null for
+  // non-owners and whenever no usable health snapshot exists.
+  sleepDebt: sleepDebtSchema.nullable(),
   readiness: readinessSchema.nullable(),
   // H3.5: the owner's feedback on the current review window's focus
   // (current) and the most recent feedback row belonging to any other
@@ -3431,10 +3499,10 @@ async function handleGetRedemptionReceipt(ctx: Ctx, args: { requestId: string })
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、数据状态与统一时间线（仅所有者）。",
+    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3455,7 +3523,7 @@ export const Actions = {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
         const behaviorImpact = await loadBehaviorImpact(ctx, null, null, []);
-        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3514,7 +3582,11 @@ export const Actions = {
       // loaded snapshot (historyDaily HRV) + the readiness archive +
       // every stored check-in's tags. Computed here, rendered only.
       const behaviorImpact = await loadBehaviorImpact(ctx, health, readinessDate, todayTags);
-      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
+      // H4.3: 14-day sleep debt + tonight's sleep need over the same
+      // loaded snapshot's main sleeps, anchored at the readiness
+      // date. Computed here, rendered only.
+      const sleepDebt = buildSleepDebt(snapshot, readinessDate);
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, readiness, readinessHistory, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
 

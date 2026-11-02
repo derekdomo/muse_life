@@ -3178,3 +3178,15 @@
 - plans.md `H4.1` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。
 - 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；晨检标签按钮同时把 `.morning-checkin button` min-height 从 34px 提到 44px（同 44px 要求一致，无回归）。
 - 本轮未动 cron；修改文件：plans.md（H4.1 交付登记＋勾选）、health-dashboard 回灌 9 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-4 已上线版本不受影响）。
+
+## 2026-11-02 06 时 PST（muse-life-plans-sync 05:55 轮次续：H4.3 构建回传交付回灌）
+- 基线与增量：基线 feef53d＝last_seen_sha（04:55 轮次 H4.1 交付后基线），git pull 已最新（Already up to date）；last_seen..HEAD 零新提交，无新编号条目、无新 PM bug 单（PM 仍按 PAUSE-LIFE-PM-001 暂停）；工作树干净。
+- 队列核对（按单一队列、P0 先行独立复核）：P0/P1 可执行项为空——`F0.5` 服务端逐源 coverage 本体归原 Muse；`H-SYNC-DIVERGE-001` 待 PM 裁决；`W-HOMEB-002` 未到 11-16；306 个（需用户确认）条目不动。按 changes.md 既有盘点「H4/W5/F3 共 13 项 P2 为推荐执行顺序第 7 步」——W5 三项、H4.2、H4.1 已交付，本轮取 `H4.3`。
+- 派工：2026-11-02 05:55 PST 已向 space-4 builder 派工（artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认无构建在跑）；派工登记已于 20c9b42 提交推送。
+- 交付：space-4 builder 06:02 PST 回传构建成功（verification_status SUCCEEDED，构建 id acd32391-8cdc-4e07-b46f-1c4222daee62）——`H4.3` 睡眠债与今晚睡眠需求已在 artifact（space-4）上线：(1) 服务端新增无 import 纯函数模块 `server/src/sleep-debt.ts`（computeSleepDebt/suggestedBedtime/sleepDebtStatusFor/formatClockMinutes 等全部导出）——近 14 天窗口（锚定 readinessDate）累计睡眠债 Σ(基线−实际)；基线为已有长期睡眠需求口径（最近 ≤14 晚实际睡眠均值、≥8 晚门槛，与 readiness 同源）；今晚建议睡眠＝基线＋min(1.5h, 未偿正债×25%)，盈余不扣减；常用起床＝基线夜晚起床时刻中位数、无则标注默认 07:00；建议就寝＝起床−建议睡眠（时钟回绕）。缺失日期计数＋列日期、不按 0 填充、不回退旧日期冒充；未来日期永不进入。(2) `getDashboard` 三条返回路径均带加法字段 `sleepDebt`（非所有者/无快照时 null），readiness 公式与 H-LOAD-001 未动，无 migration、无 schema 变更。(3) 趋势页新增「睡眠债与今晚睡眠需求」面板（ACWR 之后、行为影响之前），只渲染服务端结果：窗口起止/记录/缺失/基线标注、缺失日期逐日列名、累计债（符号＋文字＋带符号小时）、今晚建议睡眠、建议就寝时间；公式全文公开印在面板并标注作息参考、非医疗建议；状态 ▲/▼/● 配文字数字、不只靠颜色。
+- 回灌（经 artifact.inspect 取得变更清单与逐字内容，写回本仓 `health-dashboard/`）：`server/src/sleep-debt.ts`（新）、`validate-sleep-debt.mjs`（新）、`server/src/actions.ts`（6 hunk：import、sleepDebtSchema 17 字段、clockMinutesOrNull、buildSleepDebt、三条返回路径接线、description）、`client/src/App.tsx`（7 hunk：type SleepDebt、SleepDebtPanel 纯渲染组件、TrendsView/Dashboard/App 三级接线）、`client/src/theme.css`（1 hunk：.sleep-debt-* 样式块 13 行）、`DATA-PLAN.md`（末尾外科式新增 H4.3 章节 10 行；仓库既有 25 节逐字节保留——线上版 DATA-PLAN.md 为 25 节短版、含 H4.3 为末节，两边章节数口径不同已如实记录）。
+- 仓库验证（本机实跑，合成数据）：`validate-sleep-debt.mjs` **35/35**（基线口径与 ≥8 晚门槛、带符号债务含 −5.7h 盈余、缺失日期计数/列日期不 0 填充不回填、25% 分摊与 +1.5h 上限、起床中位数与 07:00 默认、就寝跨午夜回绕、重复日期取主睡眠、未来日期排除、三条返回路径与 client 纯渲染源码检查；2 项变异实跑全部敏感：缺失日期 0 填充债务 7.0→56.0、移除偿还上限今晚偿还 1.5→2.9）。既有回归：acwr 31、behavior-impact 27、game-settlement 150、muscle-status 50、sleep-regularity 25、swim-partial 30、sync-readback 33、week-load 47、all-workouts 20、units 25 全过，与构建方改动前后基线一致；week-review/week-focus-feedback 未在本机重跑（构建方环境为既有失败 93/10、195/1，沿前例保留）；validate-source.mjs 未重跑（既有失败沿前例）。
+- 安全：隐私扫描新增/改动文件零 UUID/密钥/路径命中；44px：`.sleep-debt-method-summary { min-height: 44px }` 源码确认；L0.1 例外维持现状（H4.3 只在已有只读通道后加一个只读字段、未改门禁、不扩大）。
+- plans.md `H4.3` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。
+- 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；睡眠快照口径沿用既有 historySleeps/CWEB-SLEEP-001，无第二数据源。
+- 本轮未动 cron；修改文件：plans.md（H4.3 派工登记＋交付登记＋勾选）、health-dashboard 回灌 6 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-4 已上线版本不受影响）。

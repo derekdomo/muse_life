@@ -33,6 +33,7 @@ type ReadinessHistoryPoint = DashboardResponse["readinessHistory"][number];
 type Acwr = DashboardResponse["acwr"];
 type BehaviorImpact = DashboardResponse["behaviorImpact"];
 type BehaviorImpactItem = BehaviorImpact["items"][number];
+type SleepDebt = DashboardResponse["sleepDebt"];
 type BehaviorTag = BehaviorImpact["todayTags"][number];
 
 // H4.1 preset behaviour tags for the morning check-in multi-select.
@@ -4862,6 +4863,61 @@ function AcwrPanel({ acwr }: { acwr: Acwr }) {
   );
 }
 
+// H4.3 睡眠债与今晚睡眠需求： renders ONLY the server-computed result
+// (getDashboard.sleepDebt, from the pure server module) — the client
+// never recomputes a debt sum, a baseline, or a bedtime. Status is
+// always symbol + word + signed hours together (color-vision rule),
+// missing nights are named as missing (never zero-filled, never
+// backfilled), and the panel carries the full public formula plus
+// the 作息参考、非医疗建议 disclaimer.
+function SleepDebtPanel({ sleepDebt }: { sleepDebt: SleepDebt }) {
+  if (!sleepDebt) {
+    return (
+      <section className="sleep-debt-panel" aria-labelledby="sleep-debt-title">
+        <div className="history-intro"><p className="section-kicker">睡眠 · 近14天</p><h2 id="sleep-debt-title">睡眠债与今晚睡眠需求</h2></div>
+        <p className="empty-inline">睡眠记录同步后，这里会显示近 14 天累计睡眠债与今晚的建议睡眠。</p>
+      </section>
+    );
+  }
+  const signedHours = (value: number): string => `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+  return (
+    <section className="sleep-debt-panel" aria-labelledby="sleep-debt-title">
+      <div className="history-intro">
+        <p className="section-kicker">睡眠 · 近14天</p>
+        <h2 id="sleep-debt-title">睡眠债与今晚睡眠需求</h2>
+        <p>窗口 {dateLabel(sleepDebt.windowStart)}–{dateLabel(sleepDebt.windowEnd)}（共 {sleepDebt.windowDays} 天）· 有睡眠记录 {sleepDebt.recordedNights} 晚 · 缺失 {sleepDebt.missingNights} 晚 · 个人基线基于近 {sleepDebt.baselineNights} 晚</p>
+      </div>
+      {sleepDebt.missingNights > 0 ? (
+        <p className="sleep-debt-note"><span aria-hidden="true">▲</span> 窗口内有 {sleepDebt.missingNights} 晚无睡眠记录（{sleepDebt.missingDates.map((date) => dateLabel(date)).join("、")}），已按缺失处理：不计入睡眠债、不按 0 小时填充，也不用更早日期的记录补齐；当前只按已有 {sleepDebt.recordedNights} 晚展示。</p>
+      ) : null}
+      {!sleepDebt.sufficient ? (
+        <p className="empty-inline">{sleepDebt.baselineHours === null
+          ? `个人睡眠基线需要至少 8 晚睡眠记录，目前只有 ${sleepDebt.baselineNights} 晚，暂不计算睡眠债与今晚建议。`
+          : "近 14 天窗口内没有睡眠记录，暂不计算睡眠债与今晚建议。"}</p>
+      ) : (
+        <div className="sleep-debt-rows">
+          <div className="sleep-debt-row">
+            <div className="sleep-debt-row-head"><span>累计睡眠债（近14天）</span><strong>{sleepDebt.status && sleepDebt.debtHours !== null ? `${sleepDebt.status.symbol} ${sleepDebt.status.word} · ${signedHours(sleepDebt.debtHours)} 小时` : "— 数据不足"}</strong></div>
+            <p>个人睡眠基线 {sleepDebt.baselineHours === null ? "—" : sleepDebt.baselineHours.toFixed(1)} 小时/晚（近 {sleepDebt.baselineNights} 晚实际睡眠均值，与准备度同一口径）；窗口内 {sleepDebt.recordedNights} 晚逐晚与基线相差累加。{sleepDebt.debtHours !== null && sleepDebt.debtHours < 0 ? "结果为负表示累计睡得比基线多（睡眠盈余）。" : "正数表示累计睡得比基线少。"}</p>
+          </div>
+          <div className="sleep-debt-row">
+            <div className="sleep-debt-row-head"><span>今晚建议睡眠</span><strong>{sleepDebt.suggestedSleepHours === null ? "—" : `${sleepDebt.suggestedSleepHours.toFixed(1)} 小时`}</strong></div>
+            <p>基线 {sleepDebt.baselineHours === null ? "—" : sleepDebt.baselineHours.toFixed(1)} 小时 + 今晚偿还 {sleepDebt.extraTonightHours === null ? "—" : sleepDebt.extraTonightHours.toFixed(1)} 小时（未偿睡眠债 × 25%，上限 +1.5 小时；无债或有盈余时今晚偿还为 0）。</p>
+          </div>
+          <div className="sleep-debt-row">
+            <div className="sleep-debt-row-head"><span>建议就寝时间</span><strong>{sleepDebt.suggestedBedtime ?? "—"}</strong></div>
+            <p>按常用起床时间 {sleepDebt.usualWakeTime ?? "—"}{sleepDebt.usualWakeFromDefault ? "（暂无足够的起床时间记录，使用默认起床时间 07:00）" : "（近基线夜晚起床时刻的中位数）"}，减去今晚建议睡眠 {sleepDebt.suggestedSleepHours === null ? "—" : sleepDebt.suggestedSleepHours.toFixed(1)} 小时倒推。</p>
+          </div>
+        </div>
+      )}
+      <details>
+        <summary className="sleep-debt-method-summary" aria-label="展开睡眠债计算公式与说明">计算公式与说明</summary>
+        <p className="sleep-debt-method">公式（全部公开）：个人基线 = 最近 14 晚实际睡眠（核心＋深睡＋REM，不含清醒）均值，少于 8 晚不计算；累计睡眠债 = Σ（基线 − 当晚实际睡眠），只对近 14 天窗口内有记录的夜晚求和，可为负（睡眠盈余）；今晚建议睡眠 = 基线 + min（1.5 小时，未偿睡眠债 × 25%）；建议就寝时间 = 常用起床时间 − 今晚建议睡眠。本面板借鉴 Whoop Sleep Need 概念，是作息参考，不是 Whoop 官方数值，也不是医疗建议。状态始终以符号＋文字＋数字呈现，不只靠颜色区分。</p>
+      </details>
+    </section>
+  );
+}
+
 // H4.1 行为—恢复影响： renders ONLY the server-computed result
 // (getDashboard.behaviorImpact, from the pure server module) — the
 // client never recomputes a mean, a difference, or the sample gate.
@@ -4928,7 +4984,7 @@ function BehaviorImpactPanel({ behaviorImpact }: { behaviorImpact: BehaviorImpac
   );
 }
 
-function TrendsView({ snapshot, acwr, behaviorImpact }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact }) {
+function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt }) {
   const history = useMemo(() => snapshot.historyDaily.slice(-30).map((row) => ({ ...row, label: dateLabel(row.date) })), [snapshot.historyDaily]);
   return (
     <div className="trends-view">
@@ -4949,6 +5005,8 @@ function TrendsView({ snapshot, acwr, behaviorImpact }: { snapshot: Snapshot; ac
       </section>
 
       <AcwrPanel acwr={acwr} />
+
+      <SleepDebtPanel sleepDebt={sleepDebt} />
 
       <BehaviorImpactPanel behaviorImpact={behaviorImpact} />
 
@@ -6435,7 +6493,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, acwr, behaviorImpact, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   // H3.5 training entry: the review window the owner asked to inspect
   // from the week-review focus card. Set when they tap 查看这段训练
@@ -6661,7 +6719,7 @@ function Dashboard({ snapshot, acwr, behaviorImpact, readiness, readinessHistory
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
         <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -6745,7 +6803,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
