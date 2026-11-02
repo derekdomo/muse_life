@@ -1,10 +1,16 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import * as schema from "./schema";
 import {
   detectRecurringCharges,
   type RecurringCharge as RecurringChargeResult,
 } from "./recurringCharges";
+import {
+  applyCategoryRules,
+  flagReviewCandidates,
+  normalizeTxMerchant,
+  type TxReviewTransactionInput,
+} from "./txReviewQueue";
 
 const financeTypeSchema = z.enum([
   "investment",
@@ -1277,6 +1283,12 @@ const dailySpendTxnInputSchema = z.object({
   category: z.string().max(64).optional(),
   account: z.string().max(200).optional(),
   refundOf: z.string().nullable().optional(),
+  // F3.5 additive: the merchant / payee name when the submitter
+  // carries one. Optional and ignored by every spend caliber —
+  // it only feeds the transaction review queue's merchant
+  // grouping (stored in tx_review_rows.merchant_name). Current
+  // submitters send none, so queue rows honestly carry null.
+  name: z.string().min(1).max(240).optional(),
 });
 
 type DailySpendTxnInput = z.infer<typeof dailySpendTxnInputSchema>;
@@ -2053,6 +2065,10 @@ async function finalizeDailySpendBatch(
       daysMerged: 0,
     };
   }
+  // F3.5 additive feed: finalize published the whole window, so
+  // the review feed is replaced with the batch's full spend set
+  // (best-effort, never affects the publish result).
+  await recordTxReviewRows(ctx, allTxns, "replace");
   await deleteBatch();
   return {
     ok: true,
@@ -2274,6 +2290,10 @@ async function ingestDailySpendIncremental(
       daysMerged: 0,
     };
   }
+  // F3.5 additive feed: an incremental publish only carries its
+  // segment, so the review feed upserts just those spend rows
+  // (best-effort, never affects the publish result).
+  await recordTxReviewRows(ctx, txns, "upsert");
   return {
     ok: true,
     issue: null,
@@ -5463,6 +5483,168 @@ async function writeTradingDataset(
   ]);
 }
 
+// ---------- F3.5 交易待复核队列 (additive, display layer only) ----------
+//
+// The queue's candidate feed is tx_review_rows: the spend rows
+// ingestArchDailySpend already receives, upserted here ONLY
+// after a publish has succeeded and read back verified (full /
+// finalize replace the whole window set; incremental upserts
+// its segment). The feed is best-effort by design — a feed
+// failure is swallowed and can never change the publish result,
+// any stored figure or any caliber; the worst case is a stale
+// queue until the next successful publish. Nothing in the
+// F-ARCH chain reads this table back.
+async function recordTxReviewRows(
+  ctx: Ctx,
+  txns: readonly DailySpendTxnInput[],
+  mode: "replace" | "upsert",
+): Promise<void> {
+  try {
+    const spendRows = txns.filter((txn) => txn.kind === "spend");
+    const db = ctx.db<typeof schema>();
+    const now = new Date();
+    const values = spendRows.map((txn) => ({
+      txnId: txn.id,
+      date: txn.date,
+      amount: txn.amount,
+      category: typeof txn.category === "string" && txn.category !== "" ? txn.category : null,
+      merchantName: typeof txn.name === "string" && txn.name.trim() !== "" ? txn.name : null,
+      status: txn.status,
+      updatedAt: now,
+    }));
+    // Sequential writes (no db.batch): the feed is display-only
+    // and best-effort, so a partial feed after a mid-write
+    // failure is acceptable — it self-heals on the next
+    // successful publish, and atomicity lives in the publish
+    // path, not here.
+    if (mode === "replace") await db.delete(schema.txReviewRows);
+    for (const value of values) {
+      await db.insert(schema.txReviewRows).values(value).onConflictDoUpdate({
+        target: schema.txReviewRows.txnId,
+        set: {
+          date: value.date,
+          amount: value.amount,
+          category: value.category,
+          merchantName: value.merchantName,
+          status: value.status,
+          updatedAt: now,
+        },
+      });
+    }
+  } catch {
+    // Best-effort display feed: never surface, never break the
+    // publish that triggered it (see the header comment).
+  }
+}
+
+const txReviewCandidateSchema = z.object({
+  id: z.string(),
+  date: z.string(),
+  merchant: z.string().nullable(),
+  normalizedMerchant: z.string().nullable(),
+  amount: z.number(),
+  category: z.string().nullable(),
+  displayCategory: z.string().nullable(),
+  flag: z.enum(["UNCATEGORIZED", "CATEGORY_UNCERTAIN", "AMOUNT_ANOMALY"]),
+  reason: z.string(),
+});
+
+const txCategoryRuleViewSchema = z.object({
+  id: z.number().int(),
+  normalizedMerchant: z.string(),
+  category: z.string(),
+  createdAt: z.string(),
+});
+
+// The pending list is capped for panel rendering; pendingTotal
+// always reports the true uncapped count so the cap is visible,
+// never silent.
+const TX_REVIEW_CANDIDATE_LIMIT = 100;
+
+const txReviewQueueSchema = z.object({
+  candidates: z.array(txReviewCandidateSchema),
+  pendingTotal: z.number().int().nonnegative(),
+  rules: z.array(txCategoryRuleViewSchema),
+  autoClassifiedCount: z.number().int().nonnegative(),
+});
+
+type TxReviewQueueView = z.infer<typeof txReviewQueueSchema>;
+
+// getDashboard's F3.5 read: flagged candidates from the stored
+// feed rows (pure flagReviewCandidates), display categories
+// overridden by the owner's rules (pure applyCategoryRules).
+// A candidate whose merchant already has a rule is auto-
+// classified by that rule: it leaves the pending queue and is
+// counted in autoClassifiedCount; deleting the rule brings it
+// back. Returns null when the F3.5 tables are unavailable
+// (legacy DB before migration 0010) so the dashboard read is
+// never broken by the queue.
+async function buildTxReviewQueue(ctx: Ctx): Promise<TxReviewQueueView | null> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const ruleRows = await db
+      .select()
+      .from(schema.txCategoryRules)
+      .orderBy(asc(schema.txCategoryRules.id));
+    const feedRows = await db.select().from(schema.txReviewRows);
+    const txns: TxReviewTransactionInput[] = feedRows.map((row) => ({
+      id: row.txnId,
+      date: row.date,
+      amount: row.amount,
+      name: row.merchantName,
+      category: row.category,
+    }));
+    const rules = ruleRows.map((row) => ({
+      normalizedMerchant: row.normalizedMerchant,
+      category: row.category,
+    }));
+    const applied = applyCategoryRules(flagReviewCandidates(txns), rules);
+    const pendingAll = applied.filter((candidate) => !candidate.ruleApplied);
+    const pending = pendingAll.slice(0, TX_REVIEW_CANDIDATE_LIMIT);
+    return {
+      candidates: pending.map((candidate) => ({
+        id: candidate.id,
+        date: candidate.date,
+        merchant: candidate.merchant,
+        normalizedMerchant: candidate.normalizedMerchant,
+        amount: candidate.amount,
+        category: candidate.category,
+        displayCategory: candidate.displayCategory,
+        flag: candidate.flag,
+        reason: candidate.reason,
+      })),
+      pendingTotal: pendingAll.length,
+      rules: ruleRows.map((row) => ({
+        id: row.id,
+        normalizedMerchant: row.normalizedMerchant,
+        category: row.category,
+        createdAt: row.createdAt.toISOString(),
+      })),
+      autoClassifiedCount: applied.length - pendingAll.length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const saveCategoryRuleResponse = z.object({
+  ok: z.boolean(),
+  issue: z.string().nullable(),
+  rule: z
+    .object({
+      id: z.number().int(),
+      normalizedMerchant: z.string(),
+      category: z.string(),
+    })
+    .nullable(),
+});
+
+const deleteCategoryRuleResponse = z.object({
+  ok: z.boolean(),
+  issue: z.string().nullable(),
+  deleted: z.boolean(),
+});
+
 export const Actions = {
   getDashboard: defineAction({
     description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner.",
@@ -5476,6 +5658,12 @@ export const Actions = {
       // unchanged; the field is null until the first trading push
       // and always null for guests.
       trading: z.record(z.string(), z.unknown()).nullable().optional(),
+      // F3.5 additive sibling field: the transaction review
+      // queue (flagged candidates + the owner's category rules)
+      // for the detail tab's 待复核 panel. Null for guests, when
+      // there is no dashboard snapshot, or when the F3.5 tables
+      // are unavailable on a legacy DB. Display layer only.
+      txReviewQueue: txReviewQueueSchema.nullable().optional(),
       refresh: z.object({
         status: z.enum(["idle", "running", "error"]),
         message: z.string().nullable(),
@@ -5493,6 +5681,7 @@ export const Actions = {
           access: "guest_denied" as const,
           data: null,
           trading: null,
+          txReviewQueue: null,
           refresh: { status: "idle" as const, message: "财务数据仅所有者可查看", updatedAt: null, startedAt: null },
         };
       }
@@ -5602,10 +5791,15 @@ export const Actions = {
         trading = null;
       }
       const staleRunning = isStaleRunningState(state?.status, state?.updatedAt, new Date());
+      // F3.5: the review queue rides along only when a dashboard
+      // snapshot exists (no snapshot -> null, per the additive
+      // contract); buildTxReviewQueue itself never throws.
+      const txReviewQueue = data ? await buildTxReviewQueue(ctx) : null;
       return {
         access: "owner" as const,
         data,
         trading,
+        txReviewQueue,
         refresh: {
           status: payloadCorrupted ? "error" : staleRunning ? "error" : (state?.status ?? "idle"),
           message: payloadCorrupted
@@ -6518,6 +6712,11 @@ export const Actions = {
       const published = await publishDailySpend(ctx, pulledAtMs, payload);
       if (published.issue === "stale_version") return dailySpendFailure("stale_version", args.coverageStart, args.throughDate);
       if (published.issue === "version_conflict") return dailySpendFailure("version_conflict", args.coverageStart, args.throughDate);
+      // F3.5 additive feed: this publish replaced the whole
+      // window, so the review feed is replaced with the same
+      // window's spend rows (best-effort, never affects the
+      // result above or below).
+      if (published.readBackVerified) await recordTxReviewRows(ctx, txns, "replace");
       return {
         ok: published.readBackVerified,
         issue: published.issue,
@@ -6843,6 +7042,74 @@ export const Actions = {
             : null,
         generated_at: typeof generatedAt === "string" ? generatedAt : null,
       };
+    },
+  }),
+
+  // F3.5: save (insert or replace) one owner category rule for
+  // the transaction review queue. Strictly owner-only — a
+  // non-owner gets ok:false with ZERO writes, and a failed write
+  // never affects any read path. The merchant is normalized
+  // server-side (the pure module's normalizeTxMerchant); the
+  // rule only overrides the review queue's DISPLAY category.
+  saveCategoryRule: defineAction({
+    description: "Save one owner merchant-to-category rule for the transaction review queue (upsert by normalized merchant).",
+    request: z.object({
+      normalizedMerchant: z.string().max(240),
+      category: z.string().max(64),
+    }),
+    response: saveCategoryRuleResponse,
+    async handler(ctx, args): Promise<z.infer<typeof saveCategoryRuleResponse>> {
+      if (!isOwner(ctx)) return { ok: false, issue: "forbidden", rule: null };
+      const normalizedMerchant = normalizeTxMerchant(args.normalizedMerchant);
+      if (normalizedMerchant === null) return { ok: false, issue: "missing_merchant", rule: null };
+      const category = typeof args.category === "string" ? args.category.trim() : "";
+      if (category === "") return { ok: false, issue: "missing_category", rule: null };
+      try {
+        const db = ctx.db<typeof schema>();
+        const inserted = await db
+          .insert(schema.txCategoryRules)
+          .values({ normalizedMerchant, category })
+          .onConflictDoUpdate({
+            target: schema.txCategoryRules.normalizedMerchant,
+            set: { category },
+          })
+          .returning();
+        const row = inserted[0];
+        ctx.invalidateQueries();
+        return {
+          ok: true,
+          issue: null,
+          rule: row
+            ? { id: row.id, normalizedMerchant: row.normalizedMerchant, category: row.category }
+            : null,
+        };
+      } catch {
+        return { ok: false, issue: "write_failed", rule: null };
+      }
+    },
+  }),
+
+  // F3.5: delete one owner category rule by id. Strictly
+  // owner-only (non-owner: ok:false, zero writes). Deleting a
+  // rule returns its merchant's flagged transactions to the
+  // pending review queue on the next dashboard read.
+  deleteCategoryRule: defineAction({
+    description: "Delete one owner merchant-to-category rule for the transaction review queue by rule id.",
+    request: z.object({ id: z.number().int().positive() }),
+    response: deleteCategoryRuleResponse,
+    async handler(ctx, args): Promise<z.infer<typeof deleteCategoryRuleResponse>> {
+      if (!isOwner(ctx)) return { ok: false, issue: "forbidden", deleted: false };
+      try {
+        const db = ctx.db<typeof schema>();
+        const deleted = await db
+          .delete(schema.txCategoryRules)
+          .where(eq(schema.txCategoryRules.id, args.id))
+          .returning();
+        ctx.invalidateQueries();
+        return { ok: true, issue: null, deleted: deleted.length > 0 };
+      } catch {
+        return { ok: false, issue: "write_failed", deleted: false };
+      }
     },
   }),
 } satisfies ActionsModule;

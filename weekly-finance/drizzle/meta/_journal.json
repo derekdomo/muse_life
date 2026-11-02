@@ -64,6 +64,13 @@
       "when": 1792943157168,
       "tag": "0009_add_trading_state",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1793657496470,
+      "tag": "0010_add_tx_review_queue",
+      "breakpoints": true
     }
   ]
 }

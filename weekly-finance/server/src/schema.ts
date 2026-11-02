@@ -168,6 +168,43 @@ export const tradingState = sqliteTable("trading_state", {
     .$defaultFn(() => new Date()),
 });
 
+// F3.5 (0010): owner-confirmed merchant → category rules for the
+// transaction review queue. One rule per normalized merchant
+// (UNIQUE); rules only override the DISPLAY category inside this
+// dashboard's review queue — no ingest caliber, Firance archive
+// figure or daily-spend category total ever reads them.
+export const txCategoryRules = sqliteTable("tx_category_rules", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  normalizedMerchant: text("normalized_merchant").notNull().unique(),
+  category: text("category").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// F3.5 (0010): the review queue's candidate feed — one row per
+// daily-spend transaction (kind = "spend" only), upserted from
+// the transactions ingestArchDailySpend already receives when a
+// publish succeeds (full / finalize replace the window set,
+// incremental upserts its segment). This is a display-layer feed
+// for the review queue ONLY: no figure, caliber or publish gate
+// reads it back, and a failed feed write never affects the
+// daily-spend publish. `merchant_name` is nullable — the current
+// daily pipeline submits no merchant name, so rows queue on
+// their category flags alone (merchant shown as —, no anomaly
+// grouping, no rule matching) until a submission carries one.
+export const txReviewRows = sqliteTable("tx_review_rows", {
+  txnId: text("txn_id").primaryKey(),
+  date: text("date").notNull(),
+  amount: real("amount").notNull(),
+  category: text("category"),
+  merchantName: text("merchant_name"),
+  status: text("status").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const refreshObservations = sqliteTable("refresh_observations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   generation: text("generation"),

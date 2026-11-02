@@ -3445,6 +3445,194 @@ function RecurringChargesPanel({ charges }: { charges: Dashboard["recurringCharg
   );
 }
 
+// F3.5 交易待复核队列：纯渲染服务端结果（getDashboard 的
+// txReviewQueue 字段）——客户端不自行判定候选、不重算异常。
+// 每行两个 owner 动作：确认为当前分类 / 改为新分类，两者都
+// 经 saveCategoryRule 落成「商户 → 分类」规则；规则在服务端
+// 读时应用，同商户交易随即自动归类并离开待复核列表。保存
+// 失败时保留已输入文本并给出原因，可直接重试。分类只影响
+// 本面板展示（见顶部免责声明）。
+export type TxReviewQueueData = NonNullable<ApiResponse<typeof api, "getDashboard">["txReviewQueue"]>;
+export type TxReviewCandidateRow = TxReviewQueueData["candidates"][number];
+export type TxCategoryRuleRow = TxReviewQueueData["rules"][number];
+
+export function txReviewFlagLabel(flag: TxReviewCandidateRow["flag"]): string {
+  switch (flag) {
+    case "UNCATEGORIZED": return "○ 待分类";
+    case "CATEGORY_UNCERTAIN": return "◐ 存疑分类";
+    case "AMOUNT_ANOMALY": return "▲ 金额异常";
+  }
+}
+
+export function txReviewIssueText(issue: string | null): string {
+  switch (issue) {
+    case "forbidden": return "仅所有者可修改分类规则";
+    case "missing_merchant": return "缺少商户名，无法保存规则";
+    case "missing_category": return "分类不能为空";
+    case "write_failed": return "保存失败，已保留输入，可重试";
+    default: return "保存失败，已保留输入，可重试";
+  }
+}
+
+function TxReviewCandidateItem({ candidate }: { candidate: TxReviewCandidateRow }) {
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const merchantKey = candidate.normalizedMerchant;
+  const confirmCategory = candidate.displayCategory ?? candidate.category ?? "UNCATEGORIZED";
+  const merchantLabel = candidate.merchant ?? "—";
+
+  const save = async (category: string) => {
+    if (!merchantKey) {
+      setError("该交易缺少商户名，无法建立分类规则");
+      return;
+    }
+    const trimmed = category.trim();
+    if (!trimmed) {
+      setError("请先输入新的分类");
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      const result = await api.saveCategoryRule({ normalizedMerchant: merchantKey, category: trimmed });
+      if (!result.ok) {
+        setError(txReviewIssueText(result.issue));
+      } else {
+        setDraft("");
+        await queryClient.invalidateQueries({ queryKey: ["finance-dashboard"] });
+      }
+    } catch {
+      setError("保存失败，已保留输入，可重试");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="tx-review-row">
+      <div className="recurring-row__main">
+        <strong>{merchantLabel}</strong>
+        <span className={`tx-review-flag tx-review-flag--${candidate.flag.toLowerCase()}`}>{txReviewFlagLabel(candidate.flag)}</span>
+        <span>{dateLabel.format(monthDate(candidate.date))} · {currencyPrecise.format(Math.abs(candidate.amount))}</span>
+      </div>
+      <p className="tx-review-reason">{candidate.reason}</p>
+      <p className="tx-review-current">当前分类：{candidate.displayCategory ?? candidate.category ?? "—"}</p>
+      {merchantKey ? (
+        <div className="tx-review-actions">
+          <button
+            type="button"
+            className="tx-review-confirm"
+            disabled={saving}
+            aria-label={`确认为当前分类：${merchantLabel} 归类为 ${confirmCategory}`}
+            onClick={() => void save(confirmCategory)}
+          >
+            确认为当前分类
+          </button>
+          <input
+            type="text"
+            className="tx-review-input"
+            value={draft}
+            disabled={saving}
+            aria-label={`为 ${merchantLabel} 输入新的分类`}
+            placeholder="输入新的分类"
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <button
+            type="button"
+            className="tx-review-change"
+            disabled={saving}
+            aria-label={`把 ${merchantLabel} 改为输入的分类`}
+            onClick={() => void save(draft)}
+          >
+            改为此分类
+          </button>
+        </div>
+      ) : (
+        <p className="tx-review-nomerchant">缺少商户名：可复核，但无法建立分类规则。</p>
+      )}
+      {error ? <p className="tx-review-error" role="alert">{error}</p> : null}
+    </div>
+  );
+}
+
+function TxReviewQueuePanel({ queue }: { queue: TxReviewQueueData | null }) {
+  const queryClient = useQueryClient();
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+
+  const deleteRule = async (rule: TxCategoryRuleRow) => {
+    setRulesError(null);
+    setDeletingId(rule.id);
+    try {
+      const result = await api.deleteCategoryRule({ id: rule.id });
+      if (!result.ok) {
+        setRulesError(txReviewIssueText(result.issue));
+      } else {
+        await queryClient.invalidateQueries({ queryKey: ["finance-dashboard"] });
+      }
+    } catch {
+      setRulesError("删除失败，可重试");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <section className="tx-review-panel" aria-label="交易待复核队列">
+      <div className="recurring-panel__heading">
+        <h2>交易待复核队列</h2>
+        <span>{queue ? `待复核 ${queue.pendingTotal} 笔` : "暂无数据"}</span>
+      </div>
+      <p className="tx-review-disclaimer">分类仅用于本看板展示；与 Firance 月度口径不一致时以 Firance 为准。</p>
+      {queue == null ? (
+        <p className="recurring-panel__empty">待复核队列暂不可用；下一次日花销同步成功后，会按最新交易重新生成。</p>
+      ) : (
+        <>
+          {queue.autoClassifiedCount > 0 ? (
+            <p className="recurring-panel__note">另有 {queue.autoClassifiedCount} 笔已按已生效规则自动归类，不再列入待复核。</p>
+          ) : null}
+          {queue.pendingTotal > queue.candidates.length ? (
+            <p className="recurring-panel__note">待复核共 {queue.pendingTotal} 笔，下面只显示最近 {queue.candidates.length} 笔。</p>
+          ) : null}
+          {queue.candidates.length === 0 ? (
+            <p className="recurring-panel__empty">当前没有待复核交易。分类缺失、落在泛类或金额异常的交易会在日花销同步后出现在这里。</p>
+          ) : (
+            <div className="tx-review-list">
+              {queue.candidates.map((candidate) => (
+                <TxReviewCandidateItem key={candidate.id} candidate={candidate} />
+              ))}
+            </div>
+          )}
+          <h3 className="forecast-subhead">已生效规则（{queue.rules.length} 条）</h3>
+          {rulesError ? <p className="tx-review-error" role="alert">{rulesError}</p> : null}
+          {queue.rules.length === 0 ? (
+            <p className="recurring-panel__empty">暂无规则。在上方候选行确认或修改分类后，同商户交易会按规则自动归类；删除规则后，该商户交易会回到待复核。</p>
+          ) : (
+            <div className="tx-review-rules">
+              {queue.rules.map((rule) => (
+                <div className="tx-review-rule" key={rule.id}>
+                  <span className="tx-review-rule__map"><strong>{rule.normalizedMerchant}</strong> → {rule.category}</span>
+                  <button
+                    type="button"
+                    className="tx-review-delete"
+                    disabled={deletingId === rule.id}
+                    aria-label={`删除规则 ${rule.normalizedMerchant} → ${rule.category}`}
+                    onClick={() => void deleteRule(rule)}
+                  >
+                    {deletingId === rule.id ? "删除中…" : "删除规则"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function DetailTab({
   data,
   current,
@@ -3458,6 +3646,7 @@ function DetailTab({
   foldHint,
   savingsRateNote,
   emergencyNote,
+  txReviewQueue,
 }: {
   data: Dashboard;
   current: Month;
@@ -3471,6 +3660,7 @@ function DetailTab({
   foldHint: ReactNode;
   savingsRateNote: string;
   emergencyNote: string;
+  txReviewQueue: TxReviewQueueData | null;
 }) {
   return (
     <>
@@ -3565,6 +3755,8 @@ function DetailTab({
       </div>
       {/* F3.2 订阅与周期支出体检：明细页签末尾加法式面板 */}
       <RecurringChargesPanel charges={data.recurringCharges} />
+      {/* F3.5 交易待复核队列：明细页签末尾加法式面板 */}
+      <TxReviewQueuePanel queue={txReviewQueue} />
     </>
   );
 }
@@ -3578,7 +3770,7 @@ function DetailTab({
 // exactly one rendering home in exactly one tab. The 交易 tab
 // renders only the trading dataset (getDashboard's optional
 // `trading` field) — none of the finance sections move.
-function DashboardView({ data, refreshFailed, trading }: { data: Dashboard; refreshFailed: boolean; trading: Record<string, unknown> | null }) {
+function DashboardView({ data, refreshFailed, trading, txReviewQueue }: { data: Dashboard; refreshFailed: boolean; trading: Record<string, unknown> | null; txReviewQueue: TxReviewQueueData | null }) {
   const [activeTab, setActiveTab] = useState<"overview" | "fire" | "detail" | "trading">("overview");
   const [range, setRange] = useState<Range>("12m");
   // F1.1: the owner's available-cash trial selection. Page-local
@@ -3703,6 +3895,7 @@ function DashboardView({ data, refreshFailed, trading }: { data: Dashboard; refr
           foldHint={foldHint}
           savingsRateNote={savingsRateNote}
           emergencyNote={emergencyNote}
+          txReviewQueue={txReviewQueue}
         />
       )}
     </>
@@ -4406,7 +4599,7 @@ export function App() {
         ) : guestDenied ? (
           <div className="state-screen private-state"><div className="private-state__mark" aria-hidden="true">$</div><h1>财务数据仅所有者可查看</h1><p>此看板包含私人账户与持仓信息，已停止向共享访客展示。</p></div>
         ) : response?.data ? (
-          <DashboardView data={response.data} refreshFailed={status === "error"} trading={response.trading ?? null} />
+          <DashboardView data={response.data} refreshFailed={status === "error"} trading={response.trading ?? null} txReviewQueue={response.txReviewQueue ?? null} />
         ) : status === "error" ? (
           <div className="empty-state">
             <div className="empty-state__rule" />
