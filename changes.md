@@ -1,5 +1,15 @@
 # Changes
 
+## 2026-11-01 18 时 PST（muse-life-plans-sync 17:55 轮次续：W-TRAIN-FLOW-001 带练 v1 构建回传＋仓库回灌）
+
+- 需求编号：`W-TRAIN-FLOW-001` 带练 v1（用户直提「现在加上热身组搞得好复杂，我就想要个无脑可以按计划来的训练方案」；目标 2026-11-03 前交第一版）。
+- 回传：space-6 builder 回传构建成功（verification_status SUCCEEDED）——带练 v1 按 plans.md 本节 7 条默认路径规则逐条源码级复核确认在位，本轮产品代码零改动（前序轮次已逐条落地）；本轮交付的是缺失的流程级验收证据。交付内容：(1) 首页以真实 getPlan 排期给出「今天的计划」＋唯一「按计划开始」（有进行中训练优先继续；游泳/休息日如实显示不代练；读计划失败保留旧计划并标注未经核实）；(2) 准备热身一屏一项（现有 ROUTINE_META 原文分步、空杆卧推 2×12 仍为单一步骤；跳过明确记跳过；进度只存本机 sessionStorage、刷新时三选恢复；正式组计数旁注「热身不计入」）；(3) 正式训练主屏（当前动作/第几正式组、大号重量×次数、一句要领、示范入口、「完成这组」——保存成功才推进并启动休息计时，失败停原组「未保存，重试」，saving 防双击；配片仅杠铃动作「总重X（含杠）· 每侧…」、哑铃单只标注、秒数/左右侧按原计划建模；RIR 与配片/热身比例工具收进「调整」折叠区）；(4) 休息页（倒计时＋下一组预告、「开始下一组」/「+30秒」，到时只显示「可以开始」不自动开始）；(5) 「本次计划」全程挂载可展开改任意一组（跳过不打勾、热身/正式进度分开、全正式组保存后进入结束训练、原有 flush/封存保护不变）。服务端/计划/公式/schema/同步/权限均未动；L0.1 例外维持现状；W6.2-LOCAL-DEMO 范围未在本片。
+- 构建方验证证据（合成数据，builder 正式完成报告）：构建审计 pass、隐私扫描（UUID/密钥/本机路径）对新增文件零命中；新增 `validate-guided-flow.mjs` 34/34（真实 ROUTINE_META 上跑真实 warmupStepsFor：五种训练日步数与原文逐字一致、拼接还原原文、空杆 2×12 为单一步骤；保存→推进顺序与 handleGuidedComplete 双击锁、空次数拦截（目标范围永不存为实际）、跳过零写入、杠铃限定配片、哑铃单只、秒数/左右侧、休息不自动开始、早退、服务器事实恢复、热身/正式进度分开、44px；2 项变异实跑——拆分字符破坏、保存/推进乱序——均翻转对应断言）；此前仅存仓库镜像的 4 个验证脚本（validate-autosave 69、validate-finish 98、validate-rest-timer 48、validate-warmup-kind 23）现已入 artifact 树并在树内实跑全过；全量 21 个验证脚本 1,064 项检查 0 失败（含 bun validate-plan-safe 226）。
+- 仓库回灌（线上 `~/workspace/ts-spaces/space-6` 镜像 → 本仓 `workout-log/`）：`validate-guided-flow.mjs`（新）、DATA-PLAN.md 验证附录（单段纯追加，与线上逐字一致）。线上/仓库其余差异沿既有惯例未动：drizzle/0007·0008（既有换行格式化差异）、MUSCLE-MAP.md 与 review-assets（仓库独有）、构建产物/node_modules/audits/app.db/bun.lock。仓库验证（本机实跑，合成数据）：validate-guided-flow 34/34、validate-autosave 69/69、validate-finish 98/98、validate-rest-timer 48/48、validate-warmup-kind 23/23——0 失败。隐私扫描：新增文件零 UUID/密钥/本机路径命中（DATA-PLAN.md 命中「plan version token」为领域术语、非密钥，逐项核实）。
+- 如实保留：审计沙盒写动作为 owner-only，无法以所有者身份亲手点完一整场训练，流程行为由真实生产函数验证＋构建审计覆盖；精确 artifact version 平台未提供；owner 视角实机以本人打开为准（B 类验收口径）。整项待 PM 验收。
+- plans.md `W-TRAIN-FLOW-001` 已补交付登记；本节 [完成] 现覆盖带练 v1 构建与证据交付。Life 进度面板带练 v1 bullet 待同步轮次（或低优派工）改为已交付。
+- 本轮未动 cron。修改文件：plans.md（带练 v1 交付登记）、workout-log/validate-guided-flow.mjs（新）、workout-log/DATA-PLAN.md（验证附录）、本文件。回滚：revert 本提交（线上 space-6 已上线版本不受影响）。
+
 ## 2026-11-01 18 时 PST（muse-life-plans-sync 17:55 轮次：W-TRAIN-FLOW-001 带练 v1 派工＋Life 进度面板同步）
 
 - 本轮 `git pull` 已最新（基线 last_seen_sha f7db5ac == HEAD，无新提交）；PM 按 PAUSE-LIFE-PM-001 暂停，无新 PM bug 单；树干净、无待回传构建。按单队列（P0＞用户直提＞PM 需求/普通返工＞证据尾巴）与推荐执行顺序自取：**`W-TRAIN-FLOW-001` 带练 v1 真实构建**（用户直提 P1，2026-11-01 原话「现在加上热身组搞得好复杂，我就想要个无脑可以按计划来的训练方案」；本节「下一实现轮次开工，目标 2026-11-03 前交第一版带练」；W-WARMUP-WRITE-001/W-WARMUP-KIND-001 的 P0 数据修复已完成回灌，space-6 builder 空闲、无并发构建，W5.3 回灌已沉淀约 1 小时）。

@@ -829,6 +829,28 @@ external source. The default path is now 今天的计划 → 准备热身 →
   validate-muscle-heatmap 22, validate-muscle-receipt 30,
   validate-plan-safe (bun) 226 — 766 checks, 0 failures, plus a
   clean typecheck build.
+- Verification addendum (2026-11-01, scheduled re-dispatch of the
+  same brief): the guided flow was re-audited rule by rule against
+  the 7 default-path rules and found fully in place — no product
+  code changed. The four flow validators that previously lived
+  only in the repo mirror now also live in this tree and pass
+  against it: validate-autosave 69, validate-finish 98,
+  validate-rest-timer 48, validate-warmup-kind 23. A new
+  `validate-guided-flow.mjs` (34 checks) covers the brief's
+  acceptance scenarios directly: the real `warmupStepsFor` over
+  the real `ROUTINE_META` (exact step arrays for all five
+  routines, re-join equals the original text, 空杆卧推 2×12 stays
+  one prep step), save-then-advance ordering and the
+  double-submit lock in `handleGuidedComplete`, empty-reps
+  blocking (a target range is never stored as an actual), skip
+  writing nothing, barbell-only plate text with the 单只 dumbbell
+  label, timed/per-side modelling, the rest screen's no-auto-start
+  rule and early exit, server-fact resume, warmup/formal progress
+  separation, and ≥44px guided targets — with 2 mutation runs
+  (split-character corruption, save/advance reorder) each proven
+  to flip their check. Full tree regression after the addendum:
+  21 validator scripts, 1,064 checks, 0 failures; privacy scan of
+  the added files: zero hits (synthetic fixtures only).
 
 ## Body measurements + trends (W5.3, added 2026-11-01)
 
