@@ -26,6 +26,13 @@ import {
   MUSCLE_MAP_VERSION,
   type MuscleHeatmapWorkout,
 } from "./muscle-heatmap";
+import {
+  buildBodyTrends,
+  convertBodyWeight,
+  type BodyMeasurementInput,
+  type BodyTrainingWeekInput,
+  type BodyTrendUnit,
+} from "./body-trends";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -367,6 +374,59 @@ const muscleMapEntryResponse = z.object({
   secondary: z.array(z.string()),
 });
 
+// W5.3 (additive): one owner-recorded body measurement, exactly as
+// stored (migration 0010). measured_at is an America/Los_Angeles
+// calendar date; body_weight is expressed in the row's own unit
+// (the workout lb/kg口径）; every circumference is in cm and null
+// when the owner did not record it that day — null is passed
+// through, never filled.
+const bodyMeasurementEntryResponse = z.object({
+  measured_at: z.string(),
+  body_weight: z.number(),
+  unit: unitSchema,
+  waist: z.number().nullable(),
+  chest: z.number().nullable(),
+  hips: z.number().nullable(),
+  arm: z.number().nullable(),
+  thigh: z.number().nullable(),
+});
+// W5.3 (additive): the date-aligned comparison series computed by
+// the pure buildBodyTrends in server/src/body-trends.ts — one point
+// per recorded date, each carrying its week's training aggregates
+// (volume / best working-set volume, from workout records only),
+// plus the converted per-week training series. Records and trends
+// only: no conclusion, verdict or advice field exists here.
+const bodyTrendPointResponse = z.object({
+  date: z.string(),
+  body_weight: z.number(),
+  waist: z.number().nullable(),
+  chest: z.number().nullable(),
+  hips: z.number().nullable(),
+  arm: z.number().nullable(),
+  thigh: z.number().nullable(),
+  week_start: z.string(),
+  week_volume: z.number().nullable(),
+  week_best_set_volume: z.number().nullable(),
+});
+const bodyTrendWeekResponse = z.object({
+  week_start: z.string(),
+  week_end: z.string(),
+  volume: z.number().nullable(),
+  best_set_volume: z.number().nullable(),
+});
+const bodyTrendsResponse = z.object({
+  display_unit: unitSchema,
+  points: z.array(bodyTrendPointResponse),
+  weeks: z.array(bodyTrendWeekResponse),
+  trends_version: z.number(),
+});
+const saveBodyMeasurementResponse = z.object({
+  ok: z.boolean(),
+  forbidden: z.boolean(),
+  error: z.string().nullable(),
+  measurement: bodyMeasurementEntryResponse.nullable(),
+});
+
 // W3.5 (additive): one exercise's conservative adjustment /
 // recovery advisory, computed by the pure module in
 // server/src/deload-advisory.ts. Display only: suggested is true
@@ -476,6 +536,14 @@ const dashboardResponse = z.object({
   muscle_heatmap: muscleHeatmapResponse.optional(),
   muscle_map: z.array(muscleMapEntryResponse).optional(),
   muscle_map_version: z.number().optional(),
+  // W5.3 (additive, optional): the owner's manually recorded body
+  // measurements of the last 90 days (raw rows, exactly as stored)
+  // plus the date-aligned comparison series buildBodyTrends
+  // computes from them and the existing training aggregates.
+  // Records and trends only — no conclusion is computed or stored.
+  // Existing consumers （健康看板 sync) ignore both fields.
+  body_measurements: z.array(bodyMeasurementEntryResponse).optional(),
+  body_trends: bodyTrendsResponse.optional(),
 });
 
 const planExerciseResponse = z.object({
@@ -1967,6 +2035,188 @@ function muscleMapEntries(): z.infer<typeof muscleMapEntryResponse>[] {
   }));
 }
 
+// W5.3: the owner's body measurements of the last 90 days (raw
+// rows, exactly as stored, oldest first) plus the date-aligned
+// comparison series. The alignment itself is the pure
+// buildBodyTrends in server/src/body-trends.ts; this loader only
+// gathers its inputs:
+//   - measurement rows with measured_at inside the 90-day window
+//     ending today (America/Los_Angeles dates, compared as date
+//     keys — the same frame laDateKey uses), and
+//   - the EXISTING training aggregates for every Monday-start
+//     week the window touches: per week, volume (weight × reps
+//     over completed sets with both recorded) and the best working
+//     set (largest single completed set's weight × reps), computed
+//     from workout records ONLY and converted per set into the
+//     display unit with the body-trends converter (LB_TO_KG, 0.5
+//     rounding — the server's standing convention). A week with no
+//     such set keeps null aggregates.
+// Display unit: the most recent measurement's own unit when any
+// row exists, else the most recent completed workout's unit, else
+// "lb" — the same "most recent session's unit"口径 the action
+// trends use. Nothing is stored back: the series is recomputed on
+// every read, and no conclusion is derived anywhere.
+async function loadBodyMeasurements(
+  ctx: Ctx,
+  now: Date,
+): Promise<{
+  body_measurements: z.infer<typeof bodyMeasurementEntryResponse>[];
+  body_trends: z.infer<typeof bodyTrendsResponse>;
+}> {
+  const db = ctx.db<typeof schema>();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const todayKey = laDateKey(now);
+  const [ty = 1970, tm = 1, td = 1] = todayKey.split("-").map(Number);
+  const todayMs = Date.UTC(ty, tm - 1, td);
+  const formatKey = (ms: number) => {
+    const d = new Date(ms);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  };
+  // 90 calendar days including today.
+  const windowStartKey = formatKey(todayMs - 89 * DAY_MS);
+  // Monday-start weeks covering the whole window.
+  const mondayMsOf = (ms: number) => ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY_MS;
+  const firstMondayMs = mondayMsOf(todayMs - 89 * DAY_MS);
+  const lastMondayMs = mondayMsOf(todayMs);
+
+  const rows = await db
+    .select()
+    .from(schema.bodyMeasurements)
+    .where(gte(schema.bodyMeasurements.measuredAt, windowStartKey))
+    .orderBy(asc(schema.bodyMeasurements.measuredAt));
+  const measurements: BodyMeasurementInput[] = rows.map((row) => ({
+    measuredAt: row.measuredAt,
+    bodyWeight: row.bodyWeight,
+    unit: row.weightUnit,
+    waist: row.waist,
+    chest: row.chest,
+    hips: row.hips,
+    arm: row.arm,
+    thigh: row.thigh,
+  }));
+
+  // Completed workouts whose LA week falls inside the covered
+  // weeks. The read starts a week before the window so a workout
+  // near the boundary is never truncated by UTC/LA skew; bucketing
+  // below is by LA calendar week and drops anything outside.
+  const readCutoff = new Date(firstMondayMs - 7 * DAY_MS);
+  const workoutRows = await db
+    .select({
+      id: schema.workouts.id,
+      unit: schema.workouts.unit,
+      completedAt: schema.workouts.completedAt,
+    })
+    .from(schema.workouts)
+    .where(and(isNotNull(schema.workouts.completedAt), gte(schema.workouts.completedAt, readCutoff)))
+    .orderBy(desc(schema.workouts.completedAt));
+  const latestRow = measurements[measurements.length - 1];
+  const displayUnit: BodyTrendUnit = latestRow?.unit ?? workoutRows[0]?.unit ?? "lb";
+
+  const setRows = workoutRows.length
+    ? await db
+        .select({
+          workoutId: schema.workoutSets.workoutId,
+          weight: schema.workoutSets.weight,
+          reps: schema.workoutSets.reps,
+          completed: schema.workoutSets.completed,
+        })
+        .from(schema.workoutSets)
+        .where(inArray(schema.workoutSets.workoutId, workoutRows.map((row) => row.id)))
+    : [];
+  const workoutInfo = new Map<number, { weekStart: string; unit: BodyTrendUnit }>();
+  for (const row of workoutRows) {
+    if (!row.completedAt) continue;
+    const weekStart = formatKey(mondayMsOf(dateKeyMsLA(row.completedAt)));
+    workoutInfo.set(row.id, { weekStart, unit: row.unit });
+  }
+  type WeekAcc = { volume: number; best: number } | null;
+  const weekAcc = new Map<string, WeekAcc>();
+  for (const set of setRows) {
+    if (!set.completed || set.weight == null || set.reps == null) continue;
+    const info = workoutInfo.get(set.workoutId);
+    if (!info) continue;
+    const weight = convertBodyWeight(set.weight, info.unit, displayUnit);
+    if (weight == null || weight <= 0) continue;
+    const setVolume = weight * set.reps;
+    const acc = weekAcc.get(info.weekStart) ?? null;
+    weekAcc.set(info.weekStart, {
+      volume: (acc?.volume ?? 0) + setVolume,
+      best: Math.max(acc?.best ?? 0, setVolume),
+    });
+  }
+  const trainingWeeks: BodyTrainingWeekInput[] = [];
+  for (let ms = firstMondayMs; ms <= lastMondayMs; ms += 7 * DAY_MS) {
+    const weekStart = formatKey(ms);
+    const acc = weekAcc.get(weekStart) ?? null;
+    trainingWeeks.push({
+      weekStart,
+      weekEnd: formatKey(ms + 6 * DAY_MS),
+      unit: displayUnit,
+      volume: acc ? acc.volume : null,
+      bestSetVolume: acc ? acc.best : null,
+    });
+  }
+
+  const result = buildBodyTrends({ measurements, trainingWeeks, displayUnit });
+  return {
+    body_measurements: measurements.map((row) => ({
+      measured_at: row.measuredAt,
+      body_weight: row.bodyWeight,
+      unit: row.unit,
+      waist: row.waist,
+      chest: row.chest,
+      hips: row.hips,
+      arm: row.arm,
+      thigh: row.thigh,
+    })),
+    body_trends: {
+      display_unit: result.displayUnit,
+      points: result.points.map((point) => ({
+        date: point.date,
+        body_weight: point.bodyWeight,
+        waist: point.waist,
+        chest: point.chest,
+        hips: point.hips,
+        arm: point.arm,
+        thigh: point.thigh,
+        week_start: point.weekStart,
+        week_volume: point.weekVolume,
+        week_best_set_volume: point.weekBestSetVolume,
+      })),
+      weeks: result.weeks.map((week) => ({
+        week_start: week.weekStart,
+        week_end: week.weekEnd,
+        volume: week.volume,
+        best_set_volume: week.bestSetVolume,
+      })),
+      trends_version: result.trendsVersion,
+    },
+  };
+}
+
+// UTC-midnight ms of an instant's America/Los_Angeles calendar
+// date — the week bucketing frame summarizeWeekSummaries uses.
+function dateKeyMsLA(date: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  let year = 0;
+  let month = 0;
+  let day = 0;
+  for (const part of parts) {
+    if (part.type === "year") year = Number(part.value);
+    else if (part.type === "month") month = Number(part.value);
+    else if (part.type === "day") day = Number(part.value);
+  }
+  return Date.UTC(year, month - 1, day);
+}
+
 // W4.3-D1: the pure per-exercise previous-comparable selection behind
 // the completion receipt. `candidates` is the receipt workout's own
 // routine's completed workouts that finished strictly before it, most
@@ -2531,6 +2781,7 @@ export const Actions = {
         muscle_heatmap: await loadMuscleHeatmap(ctx, now),
         muscle_map: muscleMapEntries(),
         muscle_map_version: MUSCLE_MAP_VERSION,
+        ...(await loadBodyMeasurements(ctx, now)),
         deload_advisory: await loadDeloadAdvisories(ctx, args.readiness_score ?? null),
         ...(receiptFields ?? {}),
         ...(receiptAdviceFields ?? {}),
@@ -3822,6 +4073,82 @@ export const Actions = {
         // the typed verdict (stale / already_resolved).
       }
       return { ok: false, forbidden: false, error: staleError, outcome: "stale" };
+    },
+  }),
+
+  saveBodyMeasurement: defineAction({
+    description: "Save the owner's manually recorded body weight and optional circumferences for one date (same-day upsert: one row per date).",
+    request: z.object({
+      // America/Los_Angeles calendar date (YYYY-MM-DD); omitted
+      // means today in that frame. A future date is rejected.
+      measured_at: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      // Body weight is required; its unit follows the workout
+      // lb/kg口径 chosen at entry.
+      body_weight: z.number().positive().max(1500),
+      unit: unitSchema,
+      // Circumferences in cm, all optional: omitted / null stays
+      // unrecorded (stored NULL), never filled with a guess.
+      waist: z.number().positive().max(300).nullable().optional(),
+      chest: z.number().positive().max(300).nullable().optional(),
+      hips: z.number().positive().max(300).nullable().optional(),
+      arm: z.number().positive().max(200).nullable().optional(),
+      thigh: z.number().positive().max(200).nullable().optional(),
+    }),
+    response: saveBodyMeasurementResponse,
+    async handler(ctx, args): Promise<z.infer<typeof saveBodyMeasurementResponse>> {
+      // Strictly owner-only, like every write in this artifact:
+      // the L0.1 sync-channel exception covers getDashboard's read
+      // only and is NOT widened by this action.
+      if (!isOwner(ctx)) {
+        return { ok: false, forbidden: true, error: null, measurement: null };
+      }
+      const todayKey = laDateKey(new Date());
+      const measuredAt = args.measured_at ?? todayKey;
+      if (measuredAt > todayKey) {
+        return { ok: false, forbidden: false, error: "日期不能晚于今天", measurement: null };
+      }
+      const db = ctx.db<typeof schema>();
+      const values = {
+        bodyWeight: args.body_weight,
+        weightUnit: args.unit,
+        waist: args.waist ?? null,
+        chest: args.chest ?? null,
+        hips: args.hips ?? null,
+        arm: args.arm ?? null,
+        thigh: args.thigh ?? null,
+      };
+      // Same-day upsert: one row per date. Saving a date overwrites
+      // that date's row only; every other date's row is untouched.
+      const existing = await db
+        .select({ id: schema.bodyMeasurements.id })
+        .from(schema.bodyMeasurements)
+        .where(eq(schema.bodyMeasurements.measuredAt, measuredAt))
+        .limit(1);
+      const existingId = existing[0]?.id;
+      if (existingId) {
+        await db
+          .update(schema.bodyMeasurements)
+          .set({ ...values, updatedAt: new Date() })
+          .where(eq(schema.bodyMeasurements.id, existingId));
+      } else {
+        await db.insert(schema.bodyMeasurements).values({ measuredAt, ...values });
+      }
+      ctx.invalidateQueries();
+      return {
+        ok: true,
+        forbidden: false,
+        error: null,
+        measurement: {
+          measured_at: measuredAt,
+          body_weight: values.bodyWeight,
+          unit: values.weightUnit,
+          waist: values.waist,
+          chest: values.chest,
+          hips: values.hips,
+          arm: values.arm,
+          thigh: values.thigh,
+        },
+      };
     },
   }),
 

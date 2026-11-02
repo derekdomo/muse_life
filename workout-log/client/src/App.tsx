@@ -880,6 +880,15 @@ type WeekFrequencyCell = WeekFrequencyEntry["weeks"][number];
 type MuscleHeatmapData = NonNullable<Dashboard["muscle_heatmap"]>;
 type MuscleHeatmapEntry = MuscleHeatmapData["muscles"][number];
 type MuscleMapEntry = NonNullable<Dashboard["muscle_map"]>[number];
+// W5.3: the owner's manually recorded body measurements
+// (body_measurements, raw rows as stored) and the server-computed
+// date-aligned comparison series (body_trends, buildBodyTrends in
+// server/src/body-trends.ts) — the client renders both and
+// computes no trend figure of its own.
+type BodyMeasurementEntry = NonNullable<Dashboard["body_measurements"]>[number];
+type BodyTrendsData = NonNullable<Dashboard["body_trends"]>;
+type BodyTrendPoint = BodyTrendsData["points"][number];
+type BodyTrendWeek = BodyTrendsData["weeks"][number];
 // W3.5: server-computed conservative adjustment / recovery
 // advisories (deload_advisory for the weekly review,
 // receipt_deload_advisory for the completion receipt) — one
@@ -4645,6 +4654,528 @@ function MuscleHeatmap({ data, muscleMap, muscleMapVersion }: {
   );
 }
 
+// --- W5.3: body weight + circumference trends （围度与体重趋势） ---
+// Rendered ONLY from the server's body_measurements (raw recorded
+// rows) and body_trends (buildBodyTrends in
+// server/src/body-trends.ts): one point per recorded date, aligned
+// with that week's training volume and best working set. The
+// client computes no trend value, fills no gap and interpolates
+// nothing: a circumference missing on a date breaks that series
+// there and shows — in the table. Records and trends only — no
+// weight-loss or health conclusion anywhere in this section.
+// Meaning never rides on colour alone (the owner is colour-weak):
+// every series has its own symbol, line style AND text label, and
+// every value is also printed as a number (legend latest values +
+// the full data table).
+
+type CircKey = "waist" | "chest" | "hips" | "arm" | "thigh";
+const CIRC_SERIES: { key: CircKey; label: string; symbol: string; color: string; dash?: string; styleLabel: string }[] = [
+  { key: "waist", label: "腰围", symbol: "■", color: "#0072B2", styleLabel: "实线" },
+  { key: "chest", label: "胸围", symbol: "▲", color: "#E69F00", dash: "7 4", styleLabel: "虚线" },
+  { key: "hips", label: "臀围", symbol: "◆", color: "#009E73", dash: "2 4", styleLabel: "点线" },
+  { key: "arm", label: "臂围", symbol: "▼", color: "#CC79A7", dash: "10 3 2 3", styleLabel: "点划线" },
+  { key: "thigh", label: "腿围", symbol: "★", color: "#56B4E9", dash: "14 5", styleLabel: "长虚线" },
+];
+
+function dateKeyMs(value: string): number {
+  const [y = 1970, m = 1, d = 1] = value.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+
+// Split a series into drawable segments: a null value ENDS the
+// current segment (the gap stays empty — no line is drawn across
+// a missing record). Single-point segments render as markers.
+function seriesSegments<T>(
+  items: readonly T[],
+  get: (item: T) => { x: number; y: number } | null,
+): { x: number; y: number }[][] {
+  const segments: { x: number; y: number }[][] = [];
+  let current: { x: number; y: number }[] = [];
+  for (const item of items) {
+    const point = get(item);
+    if (point == null) {
+      if (current.length > 0) segments.push(current);
+      current = [];
+    } else {
+      current.push(point);
+    }
+  }
+  if (current.length > 0) segments.push(current);
+  return segments;
+}
+
+function scaleFor(values: number[], fallback: [number, number]): [number, number] {
+  if (values.length === 0) return fallback;
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const pad = (max - min) * 0.12;
+  return [min - pad, max + pad];
+}
+
+function formatMeasure(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+// The three-panel comparison chart （分区并列）: body weight,
+// circumferences, and the weekly training aggregates share one
+// date axis but keep separate value scales, so no series is ever
+// read off the wrong axis. Geometry only — every number plotted
+// here comes from body_trends verbatim.
+function BodyTrendChart({ trends }: { trends: BodyTrendsData }) {
+  const points = trends.points;
+  const weeks = trends.weeks;
+  const unit = trends.display_unit;
+  const W = 720;
+  const LEFT = 46;
+  const RIGHT = 76;
+  const PLOT_W = W - LEFT - RIGHT;
+  const PANEL_LABEL_H = 18;
+  const PANEL_H = 88;
+  const PANEL_GAP = 12;
+  const X_LABEL_H = 20;
+  const H = (PANEL_LABEL_H + PANEL_H) * 3 + PANEL_GAP * 2 + X_LABEL_H;
+
+  const firstWeek = weeks[0];
+  const lastWeek = weeks[weeks.length - 1];
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+  const minMs = Math.min(
+    firstWeek ? dateKeyMs(firstWeek.week_start) : Number.POSITIVE_INFINITY,
+    firstPoint ? dateKeyMs(firstPoint.date) : Number.POSITIVE_INFINITY,
+  );
+  const maxMs = Math.max(
+    lastWeek ? dateKeyMs(lastWeek.week_end) : Number.NEGATIVE_INFINITY,
+    lastPoint ? dateKeyMs(lastPoint.date) : Number.NEGATIVE_INFINITY,
+  );
+  const span = Math.max(1, maxMs - minMs);
+  const xFor = (ms: number) => LEFT + ((ms - minMs) / span) * PLOT_W;
+
+  const panelTop = (index: number) => index * (PANEL_LABEL_H + PANEL_H + PANEL_GAP);
+  const yFor = (top: number, scale: [number, number]) => (value: number) =>
+    top + PANEL_LABEL_H + ((scale[1] - value) / (scale[1] - scale[0])) * PANEL_H;
+
+  const weightScale = scaleFor(points.map((point) => point.body_weight), [0, 1]);
+  const circValues: number[] = [];
+  for (const point of points) {
+    for (const series of CIRC_SERIES) {
+      const value = point[series.key];
+      if (value != null) circValues.push(value);
+    }
+  }
+  const circScale = scaleFor(circValues, [0, 100]);
+  const trainingValues: number[] = [];
+  for (const week of weeks) {
+    if (week.volume != null) trainingValues.push(week.volume);
+    if (week.best_set_volume != null) trainingValues.push(week.best_set_volume);
+  }
+  const trainingScale = scaleFor(trainingValues, [0, 1]);
+  if (trainingValues.length > 0) trainingScale[0] = Math.min(0, trainingScale[0]);
+
+  const weightY = yFor(panelTop(0), weightScale);
+  const circY = yFor(panelTop(1), circScale);
+  const trainingY = yFor(panelTop(2), trainingScale);
+  const trainingBase = panelTop(2) + PANEL_LABEL_H + PANEL_H;
+
+  const weightSegments = seriesSegments(points, (point) => ({
+    x: xFor(dateKeyMs(point.date)),
+    y: weightY(point.body_weight),
+  }));
+  const bestSegments = seriesSegments(weeks, (week) =>
+    week.best_set_volume == null
+      ? null
+      : {
+          x: xFor((dateKeyMs(week.week_start) + dateKeyMs(week.week_end)) / 2),
+          y: trainingY(week.best_set_volume),
+        },
+  );
+  const lastWeight = lastPoint ?? null;
+  const xTicks = [minMs, minMs + span / 2, maxMs];
+
+  return (
+    <svg
+      className="body-chart"
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label={`围度与体重趋势图：共 ${points.length} 条记录。体重与围度逐日折线，训练量与最佳工作组按周对照；具体数值见下方图例与数据明细表。`}
+    >
+      {/* Panel 1: body weight */}
+      <text x={LEFT} y={panelTop(0) + 13} className="bt-panel-title">● 体重（{unit}，实线）</text>
+      <text x={LEFT - 6} y={weightY(weightScale[1]) + 4} textAnchor="end" className="bt-axis">{formatMeasure(Math.round(weightScale[1] * 10) / 10)}</text>
+      <text x={LEFT - 6} y={weightY(weightScale[0]) + 4} textAnchor="end" className="bt-axis">{formatMeasure(Math.round(weightScale[0] * 10) / 10)}</text>
+      <line x1={LEFT} x2={LEFT + PLOT_W} y1={panelTop(0) + PANEL_LABEL_H + PANEL_H} y2={panelTop(0) + PANEL_LABEL_H + PANEL_H} className="bt-grid" />
+      {weightSegments.map((segment, i) => (
+        <polyline
+          key={`w-${i}`}
+          points={segment.map((p) => `${p.x},${p.y}`).join(" ")}
+          className="bt-line-weight"
+        />
+      ))}
+      {points.map((point) => (
+        <circle key={`wp-${point.date}`} cx={xFor(dateKeyMs(point.date))} cy={weightY(point.body_weight)} r={3.2} className="bt-dot-weight" />
+      ))}
+      {lastWeight ? (
+        <text x={xFor(dateKeyMs(lastWeight.date)) + 7} y={weightY(lastWeight.body_weight) + 4} className="bt-end-label">
+          {formatMeasure(lastWeight.body_weight)} {unit}
+        </text>
+      ) : null}
+
+      {/* Panel 2: circumferences (cm) — gaps stay gaps */}
+      <text x={LEFT} y={panelTop(1) + 13} className="bt-panel-title">围度（cm，各围度独立线型）</text>
+      <text x={LEFT - 6} y={circY(circScale[1]) + 4} textAnchor="end" className="bt-axis">{formatMeasure(Math.round(circScale[1] * 10) / 10)}</text>
+      <text x={LEFT - 6} y={circY(circScale[0]) + 4} textAnchor="end" className="bt-axis">{formatMeasure(Math.round(circScale[0] * 10) / 10)}</text>
+      {CIRC_SERIES.map((series) => {
+        const segments = seriesSegments(points, (point) => {
+          const value = point[series.key];
+          return value == null ? null : { x: xFor(dateKeyMs(point.date)), y: circY(value) };
+        });
+        let lastRecorded: BodyTrendPoint | null = null;
+        for (const point of points) {
+          if (point[series.key] != null) lastRecorded = point;
+        }
+        const lastValue = lastRecorded ? lastRecorded[series.key] : null;
+        return (
+          <g key={series.key}>
+            {segments.map((segment, i) => (
+              <polyline
+                key={`${series.key}-${i}`}
+                points={segment.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill="none"
+                stroke={series.color}
+                strokeWidth={2}
+                strokeDasharray={series.dash}
+              />
+            ))}
+            {points.map((point) => {
+              const value = point[series.key];
+              return value == null ? null : (
+                <circle key={`${series.key}-${point.date}`} cx={xFor(dateKeyMs(point.date))} cy={circY(value)} r={2.6} fill={series.color} />
+              );
+            })}
+            {lastRecorded && lastValue != null ? (
+              <text x={xFor(dateKeyMs(lastRecorded.date)) + 7} y={circY(lastValue) + 4} className="bt-end-label" fill={series.color}>
+                {series.label} {formatMeasure(lastValue)}
+              </text>
+            ) : null}
+          </g>
+        );
+      })}
+
+      {/* Panel 3: weekly training aggregates （对照） */}
+      <text x={LEFT} y={panelTop(2) + 13} className="bt-panel-title">训练对照（{unit}）：▬ 周训练量（柱） · ◆ 周最佳工作组（虚线）</text>
+      <text x={LEFT - 6} y={trainingY(trainingScale[1]) + 4} textAnchor="end" className="bt-axis">{Math.round(trainingScale[1]).toLocaleString("zh-CN")}</text>
+      <text x={LEFT - 6} y={trainingY(trainingScale[0]) + 4} textAnchor="end" className="bt-axis">{Math.round(trainingScale[0]).toLocaleString("zh-CN")}</text>
+      {weeks.map((week) => {
+        if (week.volume == null) return null;
+        const x1 = xFor(dateKeyMs(week.week_start));
+        const x2 = xFor(dateKeyMs(week.week_end));
+        const y = trainingY(week.volume);
+        return (
+          <rect
+            key={`bar-${week.week_start}`}
+            x={x1 + 1.5}
+            y={y}
+            width={Math.max(2, x2 - x1 - 3)}
+            height={Math.max(0, trainingBase - y)}
+            className="bt-bar-volume"
+          />
+        );
+      })}
+      {bestSegments.map((segment, i) => (
+        <polyline
+          key={`b-${i}`}
+          points={segment.map((p) => `${p.x},${p.y}`).join(" ")}
+          className="bt-line-best"
+        />
+      ))}
+      {weeks.map((week) => {
+        if (week.best_set_volume == null) return null;
+        const cx = xFor((dateKeyMs(week.week_start) + dateKeyMs(week.week_end)) / 2);
+        const cy = trainingY(week.best_set_volume);
+        return (
+          <path
+            key={`bd-${week.week_start}`}
+            d={`M ${cx} ${cy - 4.4} L ${cx + 4.4} ${cy} L ${cx} ${cy + 4.4} L ${cx - 4.4} ${cy} Z`}
+            className="bt-dot-best"
+          />
+        );
+      })}
+      {xTicks.map((ms, i) => (
+        <text
+          key={`tick-${i}`}
+          x={xFor(ms)}
+          y={H - 5}
+          textAnchor={i === 0 ? "start" : i === xTicks.length - 1 ? "end" : "middle"}
+          className="bt-axis"
+        >
+          {formatDateKey(new Date(ms).toISOString().slice(0, 10))}
+        </text>
+      ))}
+    </svg>
+  );
+}
+
+function laTodayKey(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  let year = "";
+  let month = "";
+  let day = "";
+  for (const part of parts) {
+    if (part.type === "year") year = part.value;
+    else if (part.type === "month") month = part.value;
+    else if (part.type === "day") day = part.value;
+  }
+  return `${year}-${month}-${day}`;
+}
+
+function BodyTrendsSection({ measurements, trends }: {
+  measurements?: BodyMeasurementEntry[];
+  trends?: BodyTrendsData;
+}) {
+  const queryClient = useQueryClient();
+  const rows = measurements ?? [];
+  const points = trends?.points ?? [];
+  const displayUnit: Unit = trends?.display_unit ?? "lb";
+  const [date, setDate] = useState<string>(() => laTodayKey());
+  const [unit, setUnit] = useState<Unit>(displayUnit);
+  const [weight, setWeight] = useState("");
+  const [circ, setCirc] = useState<Record<CircKey, string>>({ waist: "", chest: "", hips: "", arm: "", thigh: "" });
+  const [formError, setFormError] = useState<string | null>(null);
+  const [savedNote, setSavedNote] = useState<string | null>(null);
+
+  const existingForDate = rows.find((row) => row.measured_at === date) ?? null;
+  // Prefill the form from the stored row whenever the picked date
+  // changes (or the rows reload): a same-day save is an overwrite,
+  // so the owner edits what is actually stored for that date. A
+  // date with no record starts blank — nothing is pre-guessed.
+  useEffect(() => {
+    if (existingForDate) {
+      setWeight(String(existingForDate.body_weight));
+      setUnit(existingForDate.unit);
+      setCirc({
+        waist: existingForDate.waist == null ? "" : String(existingForDate.waist),
+        chest: existingForDate.chest == null ? "" : String(existingForDate.chest),
+        hips: existingForDate.hips == null ? "" : String(existingForDate.hips),
+        arm: existingForDate.arm == null ? "" : String(existingForDate.arm),
+        thigh: existingForDate.thigh == null ? "" : String(existingForDate.thigh),
+      });
+    } else {
+      setWeight("");
+      setCirc({ waist: "", chest: "", hips: "", arm: "", thigh: "" });
+    }
+    setFormError(null);
+    setSavedNote(null);
+    // existingForDate is derived from rows + date; keying the
+    // effect on the row's identity fields keeps unrelated dashboard
+    // refreshes from clobbering in-progress typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, existingForDate?.measured_at, existingForDate?.body_weight, existingForDate?.unit, existingForDate?.waist, existingForDate?.chest, existingForDate?.hips, existingForDate?.arm, existingForDate?.thigh]);
+
+  const save = useMutation({
+    mutationFn: (args: {
+      measured_at: string;
+      body_weight: number;
+      unit: Unit;
+      waist: number | null;
+      chest: number | null;
+      hips: number | null;
+      arm: number | null;
+      thigh: number | null;
+    }) => api.saveBodyMeasurement(args),
+    onSuccess: (result) => {
+      if (result.ok) {
+        setSavedNote(`已保存 ${result.measurement ? formatDateKey(result.measurement.measured_at) : ""} 的记录`);
+        setFormError(null);
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      } else {
+        setSavedNote(null);
+        setFormError(result.forbidden ? "无权保存此记录" : result.error ?? "保存失败，请重试");
+      }
+    },
+    onError: () => {
+      setSavedNote(null);
+      setFormError("保存失败，请重试");
+    },
+  });
+
+  const handleSave = () => {
+    const parsedWeight = Number(weight.trim());
+    if (weight.trim() === "" || !Number.isFinite(parsedWeight) || parsedWeight <= 0) {
+      setFormError("请填写体重（必填，须为大于 0 的数字）");
+      return;
+    }
+    const parseCirc = (raw: string): number | null => {
+      const trimmed = raw.trim();
+      if (trimmed === "") return null;
+      const value = Number(trimmed);
+      return Number.isFinite(value) && value > 0 ? value : null;
+    };
+    for (const series of CIRC_SERIES) {
+      const raw = circ[series.key].trim();
+      if (raw !== "" && parseCirc(raw) == null) {
+        setFormError(`${series.label}须为大于 0 的数字（单位 cm），或留空不记录`);
+        return;
+      }
+    }
+    save.mutate({
+      measured_at: date,
+      body_weight: parsedWeight,
+      unit,
+      waist: parseCirc(circ.waist),
+      chest: parseCirc(circ.chest),
+      hips: parseCirc(circ.hips),
+      arm: parseCirc(circ.arm),
+      thigh: parseCirc(circ.thigh),
+    });
+  };
+
+  const latestPoint = points[points.length - 1] ?? null;
+  const latestWeek: BodyTrendWeek | null = trends?.weeks[trends.weeks.length - 1] ?? null;
+
+  return (
+    <section className="history-section" aria-labelledby="body-trends-title">
+      <div className="section-heading">
+        <h2 id="body-trends-title">围度与体重趋势</h2>
+        <span>{points.length > 0 ? `近 90 天 · ${points.length} 条记录` : ""}</span>
+      </div>
+      <p className="history-boundary">
+        口径：以下数据均为你手动记录（体重单位随录入时选择，围度单位为 cm），仅作记录与趋势展示，不给出减重或健康结论。没有记录的日期不出现、未记录的围度留空（—），不补算、不推断。训练量与最佳工作组来自已完成的训练记录，按周一至周日的自然周与测量日期对齐，仅供对照，不与手动记录混合计算。
+      </p>
+      {points.length === 0 || !trends ? (
+        <p className="empty-history">尚未记录围度与体重</p>
+      ) : (
+        <>
+          <BodyTrendChart trends={trends} />
+          <ul className="body-legend">
+            <li>
+              <span aria-hidden="true">●</span>
+              <span>体重（实线）{latestPoint ? `：最新 ${formatMeasure(latestPoint.body_weight)} ${trends.display_unit} · ${formatDateKey(latestPoint.date)}` : ""}</span>
+            </li>
+            {CIRC_SERIES.map((series) => {
+              let latest: BodyTrendPoint | null = null;
+              for (const point of points) {
+                if (point[series.key] != null) latest = point;
+              }
+              const value = latest ? latest[series.key] : null;
+              return (
+                <li key={series.key}>
+                  <span aria-hidden="true" style={{ color: series.color }}>{series.symbol}</span>
+                  <span>
+                    {series.label}（{series.styleLabel}）
+                    {latest && value != null ? `：最新 ${formatMeasure(value)} cm · ${formatDateKey(latest.date)}` : "：尚无记录"}
+                  </span>
+                </li>
+              );
+            })}
+            <li>
+              <span aria-hidden="true">▬</span>
+              <span>周训练量（柱，重量 × 次数）{latestWeek?.volume != null ? `：最近一周 ${Math.round(latestWeek.volume).toLocaleString("zh-CN")} ${trends.display_unit}` : "：最近一周无带重量完成的组"}</span>
+            </li>
+            <li>
+              <span aria-hidden="true">◆</span>
+              <span>周最佳工作组（虚线）{latestWeek?.best_set_volume != null ? `：最近一周 ${Math.round(latestWeek.best_set_volume).toLocaleString("zh-CN")} ${trends.display_unit}` : "：最近一周无带重量完成的组"}</span>
+            </li>
+          </ul>
+          <details className="muscle-map-table">
+            <summary>
+              <span>数据明细（表格 · 共 {points.length} 条）</span>
+              <i aria-hidden="true">›</i>
+            </summary>
+            <div>
+              {[...points].reverse().map((point) => (
+                <div key={point.date} className="body-table-row">
+                  <span className="body-table-date">{formatDateKey(point.date)}</span>
+                  <span>● 体重 {formatMeasure(point.body_weight)} {trends.display_unit}</span>
+                  {CIRC_SERIES.map((series) => (
+                    <span key={series.key}>
+                      {series.symbol} {series.label} {point[series.key] != null ? `${formatMeasure(point[series.key] as number)} cm` : "— 未记录"}
+                    </span>
+                  ))}
+                  <span>▬ 该周训练量 {point.week_volume != null ? `${Math.round(point.week_volume).toLocaleString("zh-CN")} ${trends.display_unit}` : "—"}</span>
+                  <span>◆ 该周最佳组 {point.week_best_set_volume != null ? `${Math.round(point.week_best_set_volume).toLocaleString("zh-CN")} ${trends.display_unit}` : "—"}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        </>
+      )}
+
+      <form
+        className="body-form"
+        aria-labelledby="body-form-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          handleSave();
+        }}
+      >
+        <h3 id="body-form-title">记录围度与体重</h3>
+        <div className="body-form-grid">
+          <label className="body-field">
+            <span>日期</span>
+            <input
+              type="date"
+              value={date}
+              max={laTodayKey()}
+              onChange={(event) => setDate(event.target.value)}
+              aria-label="记录日期"
+            />
+          </label>
+          <div className="body-field">
+            <span id="body-unit-label">体重单位（跟随动作显示单位口径）</span>
+            <div className="unit-switch body-unit-switch" role="group" aria-labelledby="body-unit-label">
+              <button type="button" aria-pressed={unit === "lb"} onClick={() => setUnit("lb")}>lb</button>
+              <button type="button" aria-pressed={unit === "kg"} onClick={() => setUnit("kg")}>kg</button>
+            </div>
+          </div>
+          <label className="body-field">
+            <span>体重（必填，{unit}）</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.1"
+              min="0"
+              value={weight}
+              onChange={(event) => setWeight(event.target.value)}
+              aria-label={`体重，单位 ${unit}，必填`}
+              placeholder="例如 176.5"
+            />
+          </label>
+          {CIRC_SERIES.map((series) => (
+            <label key={series.key} className="body-field">
+              <span>{series.symbol} {series.label}（可选，cm）</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="0.1"
+                min="0"
+                value={circ[series.key]}
+                onChange={(event) => setCirc((prev) => ({ ...prev, [series.key]: event.target.value }))}
+                aria-label={`${series.label}，单位 cm，可选`}
+                placeholder="留空 = 未记录"
+              />
+            </label>
+          ))}
+        </div>
+        {existingForDate ? <p className="body-form-note">这一天（{formatDateKey(date)}）已有记录，保存将覆盖当天的记录，其他日期不受影响。</p> : null}
+        {formError ? <p className="error-banner" role="alert">{formError}</p> : null}
+        {savedNote ? <p className="plan-saved" role="status">{savedNote}</p> : null}
+        <button type="submit" className="body-save" disabled={save.isPending}>
+          {save.isPending ? "正在保存…" : "保存记录"}
+        </button>
+        <p className="body-form-note">同一日期只保留一条记录；围度留空即未记录，不会用其他日期的数据填充。</p>
+      </form>
+    </section>
+  );
+}
+
 // --- 2026-10-18 frequency sync: weekly schedule / daily micro-routine /
 // plan editor. All three read the persisted plan (getPlan); the editor
 // edits a local draft only — nothing is written until 保存计划 calls
@@ -5060,7 +5591,7 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory, actionTrends, weekFrequency, muscleHeatmap, muscleMap, muscleMapVersion, receiptId, onCloseReceipt }: {
+function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory, actionTrends, weekFrequency, muscleHeatmap, muscleMap, muscleMapVersion, bodyMeasurements, bodyTrends, receiptId, onCloseReceipt }: {
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
   progressionAdvice?: ProgressionAdviceEntry[];
@@ -5079,6 +5610,11 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
   muscleHeatmap?: MuscleHeatmapData;
   muscleMap?: MuscleMapEntry[];
   muscleMapVersion?: number;
+  // W5.3 (additive): the owner's manually recorded body
+  // measurements (raw rows) plus the server-computed aligned
+  // comparison series; absent on older cached responses.
+  bodyMeasurements?: BodyMeasurementEntry[];
+  bodyTrends?: BodyTrendsData;
   // W4.3-D1: the workoutId this session just finished, or null. The
   // receipt renders non-blockingly at the top of the start page.
   receiptId: number | null;
@@ -5248,10 +5784,11 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
       </details>
 
       <details className="home-details">
-        <summary>历史与趋势 <span>历史记录 · 动作趋势 · 近 4 周频率</span></summary>
+        <summary>历史与趋势 <span>历史记录 · 动作趋势 · 近 4 周频率 · 围度与体重</span></summary>
         <History workouts={earlierWorkouts} focus={historyFocus} />
         <ActionTrends trends={actionTrends} />
         <WeekFrequency data={weekFrequency} />
+        <BodyTrendsSection measurements={bodyMeasurements} trends={bodyTrends} />
       </details>
 
       <details className="home-details">
@@ -5330,6 +5867,8 @@ export function App() {
           muscleHeatmap={dashboard.data.muscle_heatmap}
           muscleMap={dashboard.data.muscle_map}
           muscleMapVersion={dashboard.data.muscle_map_version}
+          bodyMeasurements={dashboard.data.body_measurements}
+          bodyTrends={dashboard.data.body_trends}
           receiptId={receiptId}
           onCloseReceipt={() => setReceiptId(null)}
         />

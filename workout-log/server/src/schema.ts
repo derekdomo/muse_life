@@ -120,6 +120,35 @@ export const planExerciseConflicts = sqliteTable("plan_exercise_conflicts", {
   resolutionSelectedId: integer("resolution_selected_id"),
 });
 
+// Owner-recorded body weight + circumferences (W5.3, migration
+// 0010, additive). One row per measured_at date — an
+// America/Los_Angeles calendar date (YYYY-MM-DD) kept as text, like
+// daily_completions.date_key; saveBodyMeasurement upserts on it, so
+// a same-day save overwrites that day's row and never touches other
+// dates. body_weight is always recorded (required at entry) in
+// weight_unit (the workout_sets lb/kg unit口径）; every circumference
+// (waist / chest / hips / arm / thigh, in cm) is optional and stays
+// NULL when the owner did not record it — NULL means "not
+// recorded", never a value to guess or fill. Manual data only: no
+// external source, and nothing here feeds any score or formula.
+export const bodyMeasurements = sqliteTable("body_measurements", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  measuredAt: text("measured_at").notNull(),
+  bodyWeight: real("body_weight").notNull(),
+  weightUnit: text("weight_unit", { enum: ["lb", "kg"] }).notNull().default("lb"),
+  waist: real("waist"),
+  chest: real("chest"),
+  hips: real("hips"),
+  arm: real("arm"),
+  thigh: real("thigh"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 // Per-day completion of one daily micro-routine item. date_key is the
 // America/Los_Angeles calendar date (YYYY-MM-DD). Purely informational:
 // it never gates starting or finishing a workout.

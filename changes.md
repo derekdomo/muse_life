@@ -3118,3 +3118,12 @@
 - plans.md `W3.5` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。W5.2（配重计算器与热身组生成）为下一顺位，留待后续轮次。
 - 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准。
 - 本轮未动 cron；修改文件：plans.md（W3.5 交付登记）、workout-log 回灌 6 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-6 已上线版本不受影响）。
+
+## 2026-11-01 17 时 PST（muse-life-plans-sync 16:55 轮次：W5.3 仓库回灌＋W5.2 勾选修正）
+- 背景：本轮 git pull 已最新（基线 last_seen_sha == HEAD 8881c0f，无新提交）；PM 仍按 PAUSE-LIFE-PM-001 暂停，无新 PM bug 单。往轮顺延项：W5.3（围度与体重趋势）构建交付已于 16:08 PST 上线 artifact（space-6），但 16:xx 轮次因 artifact 文件访问受限未做仓库回灌，注记待后续轮次经允许通道补齐。
+- 回灌（线上 `~/workspace/ts-spaces/space-6` 镜像 → 本仓 `workout-log/`）：`server/src/body-trends.ts`（新）、`validate-body-trends.mjs`（新）、`drizzle/0010_add_body_measurements.sql`（新，body_measurements 表：一日一行、measured_at＋body_weight（lb/kg 双单位口径沿用既有引擎）＋waist/chest/hips/arm/thigh 可选、缺失留 NULL）、`server/src/schema.ts`、`server/src/actions.ts`（新 action saveBodyMeasurement 当日 upsert＋getDashboard 加法字段 body_measurements/body_trends）、`client/src/App.tsx`、`client/src/theme.css`（body-chart 三区并列图样式）、`DATA-PLAN.md`（W5.3 章节）、`validate-plan-safe.mjs`（迁移序列更新至 0010）、`drizzle/meta/_journal.json`（0010 条目）。回灌前线上/仓库 diff 逐文件核验：差异全部为 W5.3-only 变更；回灌后与线上逐字节一致。**未覆盖**：app.db/构建产物/node_modules/audits/bun.lock、drizzle/0007·0008（既有换行格式化差异，仓库保留原版）、icon.webp、dist 等构建副产物。
+- 仓库验证（本机实跑，合成数据）：validate-body-trends 26/26（真实生产函数：缺失围度保留 null 不结转、跨日周一对齐、lb→kg 换算、双向不混入、同日 last-wins、无结论字段键集；4 项变异实跑全部敏感）；既有回归 node 857 项（autosave 69、rest-timer 48、receipt 37、start 66、finish 98、progression 43、progression-engine 35、week-current 59、week-frequency 16、action-trends 15、muscle-heatmap 22、plate-warmup 27、deload-advisory 36、rir-rpe 103、scroll-restore 26、video-embed 32、muscle-diagram 36、muscle-receipt 30、d1 36、warmup-kind 23）＋bun plan-safe 226/226（@libsql/client 临时软链借线上树 node_modules，验证后已移除，工作区无残留）＝1,109 项检查、0 失败。隐私扫描：新增/改动文件零 UUID/路径/密钥命中。
+- plans.md：`W5.3` 条追加回灌完成登记；`W5.2` 复选框修正为 [完成]（2026-11-01 交付）——其 13:05 PT 交付登记已明确「已在 artifact（space-6）上线并回灌本仓」，plate-warmup.ts 与 validate-plate-warmup.mjs 在仓且本轮复跑 27/27 全过，[ ] 系上轮漏勾的账面状态。
+- 安全：getDashboard 无身份只读通道即用户 2026-10-17 亲自批准的 L0.1 例外，W5.3 只在其后加两个只读字段、未改门禁、维持现状、不重开。
+- 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；本轮未动 cron。整项待 PM 验收。
+- 修改文件：plans.md（W5.3 回灌登记＋W5.2 勾选修正）、workout-log 回灌 10 文件、本文件。回滚：revert 本提交即恢复回灌前状态（线上 space-6 已上线版本不受影响）。
