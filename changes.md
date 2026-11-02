@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-11-01 16 时 PST（muse-life-plans-sync：W5.3 派工＋Life 进度面板同步派工）
+
+- 本轮基线检查：git pull 已最新，HEAD＝last_seen_sha（b5e6f8a），基线..HEAD 无新提交、无新编号条目、无新 PM 记录（PM 仍按 PAUSE-LIFE-PM-001 暂停）。
+- 队列推进（按推荐执行顺序自取）：`W5.3` 围度与体重趋势（调研 T5，借鉴 Hevy / Strong）。14:55 轮次因 W-TRAIN-FLOW-001 带练改版刚落地 35 分钟而顺延；本轮沉淀约 2 小时、space-6 builder 空闲，并发冲突风险已解除；PM 暂停中，按协作准则（实现不等验收）照常派工，非阻塞其他队列。
+- 已向 space-6 builder 派工（artifact.edit，高复杂度、异步回传）：新数据表 body_measurements（drizzle 加法式 migration，按既有序列；字段 measured_at＋body_weight＋waist/chest/hips/arm/thigh 可选、缺失保留 null）＋新 action（saveBodyMeasurement 当日 upsert＋getDashboard 加法字段近 90 天原始点）＋服务端纯函数模块 server/src/body-trends.ts（无 import、全部导出供验证，按日期对齐手动记录与训练量/最佳工作组、只做记录与趋势展示、不给减重或健康结论）＋历史/复盘视图「围度与体重趋势」区块（体重/围度逐日折线与训练量/最佳工作组同图对照、缺失留空不断线、口径页面公开标注）＋手动录入入口（体重必填、围度可选）。约束：写门禁沿既有、色弱规则/44px、L0.1 例外维持现状、不改评分公式、不破坏 W3.1–W5.2 既有导出/签名。交付要求：构建审计 pass＋隐私扫描零命中（合成数据）＋仓库侧新增 validate-body-trends.mjs（真实生产函数断言＋≥2 变异实跑）＋既有回归全过（migration 属 A 类，全套证据）。构建交付与仓库回灌待回传；整项待 PM 验收，不勾选。
+- Life 进度面板（slug life）同步派工（artifact.edit，低复杂度、异步回传）：面板截至 13:10 PT @08b2b61，已落后仓库三轮交付——本轮一并补齐 W-WARMUP-WRITE-001（已交付 14:11 PT，commit 085f912）、W-TRAIN-FLOW-001（已交付 14:21 PT，commit f5dc078）、W-WARMUP-KIND-001（已交付 15:18 PT，commit b5e6f8a）三条 bullet，新增 W5.3 进行中（16:00 PT），页首/页脚截至时间改 2026-11-01 16:05 PT，标题条目计数按实际核对修正。
+- 修改文件：plans.md（W5.3 派工登记）、本文件。回滚：revert 本提交（builder 侧构建如需中止用 artifact.cancel）。
+
 ## 2026-11-01 14 时 PST（muse-life-plans-sync：W-WARMUP-KIND-001 评审结论＋验证、rest-timer 断言维护）
 
 - 需求来源：`W-WARMUP-KIND-001`（P1／A类，热身身份仅本地）——按 plans.md 推荐执行顺序自取；本轮新编号条目／PM 记录：无（git pull 已最新，HEAD `f5dc078`＝基线 `last_seen_sha`）。
