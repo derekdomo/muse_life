@@ -1263,6 +1263,288 @@ export function fireSummaryLine(fire: Dashboard["fire"]): string {
   return `FIRE 进度 ${percent.format(Math.max(0, fire.progress ?? 0))} · 缺口 ${currency.format(fire.gap)} · ${yearsText}`;
 }
 
+// F3.4 目标情景试算 (What-if): pure scenario math for the FIRE
+// tab's what-if panel. The owner edits five inputs on the page
+// （月支出 / 月投入 / 应急金目标 / FIRE 目标 / 购房首付目标）;
+// the estimates below compare the CURRENT values (the panel's
+// existing calibers) against the adjusted ones. Inputs are UI
+// state only — nothing here reads or writes storage, calls an
+// action, or persists anything. Calibers are NOT new formulas:
+// - emergency coverage months = available cash ÷ monthly spend
+//   (the F1.1 definition: only cash-classified balances enter
+//   the numerator); a target shortfall fills linearly at the
+//   monthly contribution pace.
+// - FIRE years use the exact F1.3 fireYearsEstimate expression
+//   (ceil of gap ÷ annual contribution; annual = monthly × 12),
+//   a linear estimate with no investment return; the panel
+//   keeps the 「线性估算，不含投资回报」 label next to it.
+// - down payment: target ÷ monthly contribution, linear from
+//   zero (the dashboard has no separate saved-for-down-payment
+//   caliber, so no existing balance is credited).
+// The three goals are estimated independently — the same
+// monthly contribution is not allocated between them — and
+// the panel prints that assumption next to the results. It
+// outputs dates / month counts and their assumptions only.
+export interface WhatIfInputs {
+  monthlySpend: number | null;
+  monthlyContribution: number | null;
+  emergencyTarget: number | null;
+  fireTarget: number | null;
+  downPaymentTarget: number | null;
+}
+
+export interface WhatIfFacts {
+  availableCash: number | null;
+  firePrincipal: number;
+}
+
+export interface WhatIfGoalEstimate {
+  months: number | null;
+  reached: boolean;
+  blockedReason: string | null;
+}
+
+export interface WhatIfEstimates {
+  emergency: WhatIfGoalEstimate & { coverageMonths: number | null };
+  fire: WhatIfGoalEstimate & { years: number | null };
+  downPayment: WhatIfGoalEstimate;
+}
+
+// Months to cover a shortfall at a fixed monthly pace, linear,
+// no return: ceil(shortfall ÷ pace). A non-positive shortfall
+// is already covered (0); a non-positive or unknown pace can
+// never cover a positive shortfall (null, never a fabricated
+// figure).
+export function whatIfMonthsForShortfall(shortfall: number, monthlyContribution: number | null): number | null {
+  if (shortfall <= 0) return 0;
+  if (monthlyContribution == null || monthlyContribution <= 0) return null;
+  return Math.ceil(shortfall / monthlyContribution);
+}
+
+export function whatIfEstimates(facts: WhatIfFacts, inputs: WhatIfInputs): WhatIfEstimates {
+  const coverageMonths: number | null = facts.availableCash != null && inputs.monthlySpend != null && inputs.monthlySpend > 0
+    ? Math.max(0, facts.availableCash) / inputs.monthlySpend
+    : null;
+  let emergencyMonths: number | null = null;
+  let emergencyReached = false;
+  let emergencyBlocked: string | null = null;
+  if (inputs.emergencyTarget == null || inputs.emergencyTarget <= 0) {
+    emergencyBlocked = "未设定应急金目标金额";
+  } else if (facts.availableCash == null) {
+    emergencyBlocked = "可动用现金未提供（F1.1 口径）";
+  } else {
+    emergencyMonths = whatIfMonthsForShortfall(inputs.emergencyTarget - facts.availableCash, inputs.monthlyContribution);
+    emergencyReached = emergencyMonths === 0;
+    if (emergencyMonths == null) emergencyBlocked = "月投入为 0 或未填，缺口无法按月补足推算";
+  }
+  let fireYears: number | null = null;
+  let fireBlocked: string | null = null;
+  if (inputs.fireTarget == null || inputs.fireTarget <= 0) {
+    fireBlocked = "未设定 FIRE 目标金额";
+  } else {
+    const gap = inputs.fireTarget - Math.max(0, facts.firePrincipal);
+    // F1.3 caliber, verbatim expression from fireYearsEstimate:
+    // gap covered by the contribution pace, ceil to whole years.
+    fireYears = gap <= 0 ? 0 : inputs.monthlyContribution == null || inputs.monthlyContribution <= 0
+      ? null
+      : Math.ceil(gap / (inputs.monthlyContribution * 12));
+    if (fireYears == null) fireBlocked = "月投入为 0 或未填，无法按投入节奏推算";
+  }
+  let downPaymentMonths: number | null = null;
+  let downPaymentBlocked: string | null = null;
+  if (inputs.downPaymentTarget == null || inputs.downPaymentTarget <= 0) {
+    downPaymentBlocked = "未设定购房首付目标金额";
+  } else {
+    downPaymentMonths = whatIfMonthsForShortfall(inputs.downPaymentTarget, inputs.monthlyContribution);
+    if (downPaymentMonths == null) downPaymentBlocked = "月投入为 0 或未填，无法按月积累推算";
+  }
+  return {
+    emergency: { months: emergencyMonths, reached: emergencyReached, blockedReason: emergencyBlocked, coverageMonths },
+    fire: { months: fireYears == null ? null : fireYears * 12, years: fireYears, reached: fireYears === 0, blockedReason: fireBlocked },
+    downPayment: { months: downPaymentMonths, reached: downPaymentMonths === 0, blockedReason: downPaymentBlocked },
+  };
+}
+
+// The projected calendar month for an estimate, counted from
+// the current month. Reached reads 已达标； unestimable reads
+// 无法估算 — a missing figure is never dressed up as a date.
+export function whatIfDateLabel(now: Date, estimate: WhatIfGoalEstimate): string {
+  if (estimate.reached) return "已达标";
+  if (estimate.months == null) return "无法估算";
+  const date = new Date(now.getFullYear(), now.getMonth() + estimate.months, 1);
+  return `${date.getFullYear()} 年 ${date.getMonth() + 1} 月`;
+}
+
+// Change between the current-value and adjusted estimates.
+// Meaning rides on glyph + direction word + month count,
+// never on colour alone (the user is color-weak): ▲ 提前 /
+// ▼ 延后 / ● 无变化 / — 无法比较.
+export function whatIfDeltaLabel(baselineMonths: number | null, scenarioMonths: number | null): string {
+  if (baselineMonths == null || scenarioMonths == null) return "— 无法比较（至少一组无法估算）";
+  const diff = scenarioMonths - baselineMonths;
+  if (diff < 0) return `▲ 提前 ${-diff} 个月`;
+  if (diff > 0) return `▼ 延后 ${diff} 个月`;
+  return "● 无变化（相差 0 个月）";
+}
+
+// One what-if input field: blank, non-numeric or negative text
+// is "not set" (null) — never silently coerced to 0, so an
+// emptied field blocks its estimates honestly instead of
+// fabricating a reached / zero-month result.
+export function parseWhatIfInput(raw: string): number | null {
+  const trimmed = raw.trim().replace(/,/g, "");
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+type WhatIfFieldKey = "monthlySpend" | "monthlyContribution" | "emergencyTarget" | "fireTarget" | "downPaymentTarget";
+
+const WHATIF_FIELDS: Array<{ key: WhatIfFieldKey; label: string }> = [
+  { key: "monthlySpend", label: "月支出（元/月）" },
+  { key: "monthlyContribution", label: "月投入（元/月）" },
+  { key: "emergencyTarget", label: "应急金目标金额（元）" },
+  { key: "fireTarget", label: "FIRE 目标金额（元）" },
+  { key: "downPaymentTarget", label: "购房首付目标金额（元）" },
+];
+
+function whatIfFieldText(value: number | null): string {
+  return value == null ? "" : String(Math.round(value));
+}
+
+function WhatIfGoalBlock({ title, baseline, scenario, now, baselineExtra, scenarioExtra, assumption }: {
+  title: string;
+  baseline: WhatIfGoalEstimate;
+  scenario: WhatIfGoalEstimate;
+  now: Date;
+  baselineExtra?: string | null;
+  scenarioExtra?: string | null;
+  assumption: string;
+}) {
+  const monthsText = (estimate: WhatIfGoalEstimate): string => estimate.reached
+    ? "当前已达到该目标金额（还差 0 个月）"
+    : estimate.months == null
+      ? `无法估算：${estimate.blockedReason ?? "输入不足"}`
+      : `还差 ${estimate.months} 个月`;
+  return (
+    <div className="whatif-goal">
+      <h4>{title}</h4>
+      <div className="whatif-rows">
+        <p>
+          <span>当前值</span>
+          <strong>{whatIfDateLabel(now, baseline)}</strong>
+          <em>{monthsText(baseline)}{baselineExtra ? ` · ${baselineExtra}` : ""}</em>
+        </p>
+        <p>
+          <span>调整后</span>
+          <strong>{whatIfDateLabel(now, scenario)}</strong>
+          <em>{monthsText(scenario)}{scenarioExtra ? ` · ${scenarioExtra}` : ""}</em>
+        </p>
+        <p className="whatif-delta">
+          <span>变化</span>
+          <strong>{whatIfDeltaLabel(baseline.months, scenario.months)}</strong>
+        </p>
+      </div>
+      <p className="whatif-assumption">假设：{assumption}</p>
+    </div>
+  );
+}
+
+// F3.4: the what-if panel at the foot of the FIRE tab. All
+// state is mount-time component state (edited field text);
+// untouched fields fall back to the exact current values, so
+// an unedited panel shows ● 无变化 for every goal.
+function WhatIfPanel({ data, spendBasis }: { data: Dashboard; spendBasis: ReturnType<typeof completeSpendBasis> }) {
+  const baselineInputs: WhatIfInputs = {
+    monthlySpend: spendBasis.averageMonthlySpend,
+    monthlyContribution: data.fire.annualContribution / 12,
+    emergencyTarget: spendBasis.averageMonthlySpend != null ? spendBasis.averageMonthlySpend * 6 : null,
+    fireTarget: data.fire.target > 0 ? data.fire.target : null,
+    downPaymentTarget: null,
+  };
+  const [edited, setEdited] = useState<Partial<Record<WhatIfFieldKey, string>>>({});
+  const facts: WhatIfFacts = { availableCash: data.live.availableCash, firePrincipal: data.live.investment };
+  const scenarioInputs: WhatIfInputs = {
+    monthlySpend: edited.monthlySpend != null ? parseWhatIfInput(edited.monthlySpend) : baselineInputs.monthlySpend,
+    monthlyContribution: edited.monthlyContribution != null ? parseWhatIfInput(edited.monthlyContribution) : baselineInputs.monthlyContribution,
+    emergencyTarget: edited.emergencyTarget != null ? parseWhatIfInput(edited.emergencyTarget) : baselineInputs.emergencyTarget,
+    fireTarget: edited.fireTarget != null ? parseWhatIfInput(edited.fireTarget) : baselineInputs.fireTarget,
+    downPaymentTarget: edited.downPaymentTarget != null ? parseWhatIfInput(edited.downPaymentTarget) : baselineInputs.downPaymentTarget,
+  };
+  const baseline = whatIfEstimates(facts, baselineInputs);
+  const scenario = whatIfEstimates(facts, scenarioInputs);
+  // The FIRE baseline row is the panel's own F1.3 figure
+  // (fireYearsEstimate over the stored gap / annual pace), so
+  // the 当前值 group can never drift from the panel above it.
+  const baselineFireYears = fireYearsEstimate(data.fire);
+  const baselineFire: WhatIfEstimates["fire"] = {
+    months: baselineFireYears == null ? null : baselineFireYears * 12,
+    years: baselineFireYears,
+    reached: baselineFireYears === 0,
+    blockedReason: baselineFireYears == null ? "当前投入节奏不足以估算达标时间" : null,
+  };
+  const now = new Date();
+  const coverageText = (estimate: WhatIfEstimates["emergency"]): string | null => estimate.coverageMonths == null
+    ? "覆盖月数无法计算"
+    : `覆盖月数 ${number.format(estimate.coverageMonths)} 个月`;
+  const fireYearsText = (years: number | null): string | null => years == null ? null : years === 0 ? "已达到目标" : `约 ${years} 年（向上取整到整年）`;
+  const emergencyAssumption = `可动用现金 ${facts.availableCash == null ? "未提供" : currency.format(facts.availableCash)}（F1.1 口径：仅现金类账户余额）保持不变；覆盖月数 = 可动用现金 ÷ 月支出，当前值一组的月支出为近 3 个有效完整月平均支出${spendBasis.usedMonthKeys.length > 0 ? `（所用月份 ${spendBasis.usedMonthKeys.join("、")}）` : ""}；目标缺口按月投入逐月线性补足，不含投资回报。`;
+  const fireAssumption = "线性估算，不含投资回报；与 F1.3 口径一致（同上方面板的 fireYearsEstimate：缺口按年投入 = 月投入 × 12 线性补足、向上取整到整年，达标日期按年数 × 12 个月折算）；本金为当前投资账户余额（与 FIRE 进度同一口径），不随输入变化。";
+  const downPaymentAssumption = "按目标金额与月投入线性推算：从 0 起按月积累，不含投资回报；本看板没有首付已积累金额的独立口径，故不计现有存款与投资余额。";
+  return (
+    <section className="whatif" aria-label="目标情景试算">
+      <h3>目标情景试算（What-if）</h3>
+      <p className="whatif-note">
+        手动调整下方输入，比较三个目标的预计达标日期（当前值 vs 调整后）。输入只在本页试算，不保存、不写入任何数据；
+        三个目标各自独立试算，同一笔月投入未在目标之间分配。预填值：月支出为近 3 个有效完整月平均支出、应急金目标为其 6 倍、
+        月投入为年投入 ÷ 12、FIRE 目标为上方面板的现有目标——均为可改的试算起点。
+      </p>
+      <div className="whatif-inputs">
+        {WHATIF_FIELDS.map((field) => (
+          <label className="whatif-field" key={field.key}>
+            <span>{field.label}</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              value={edited[field.key] ?? whatIfFieldText(baselineInputs[field.key])}
+              onChange={(event) => setEdited((prev) => ({ ...prev, [field.key]: event.target.value }))}
+            />
+          </label>
+        ))}
+      </div>
+      <button type="button" className="whatif-reset" onClick={() => setEdited({})}>恢复当前值</button>
+      <div className="whatif-goals">
+        <WhatIfGoalBlock
+          title="应急金达标"
+          baseline={baseline.emergency}
+          scenario={scenario.emergency}
+          now={now}
+          baselineExtra={coverageText(baseline.emergency)}
+          scenarioExtra={coverageText(scenario.emergency)}
+          assumption={emergencyAssumption}
+        />
+        <WhatIfGoalBlock
+          title="FIRE 达标"
+          baseline={baselineFire}
+          scenario={scenario.fire}
+          now={now}
+          baselineExtra={fireYearsText(baselineFire.years)}
+          scenarioExtra={fireYearsText(scenario.fire.years)}
+          assumption={fireAssumption}
+        />
+        <WhatIfGoalBlock
+          title="购房首付达标"
+          baseline={baseline.downPayment}
+          scenario={scenario.downPayment}
+          now={now}
+          assumption={downPaymentAssumption}
+        />
+      </div>
+    </section>
+  );
+}
+
 function FireProgress({ data }: { data: Dashboard }) {
   const rawProgress = Math.max(0, data.fire.progress ?? 0);
   const ringProgress = Math.min(rawProgress, 1);
@@ -2959,11 +3241,12 @@ function OverviewTab({
 // used to sit folded in the detail tab; only its location
 // and expansion changed. The fire-panel id stays on the
 // panel's root element for deep links.
-function FireTab({ data }: { data: Dashboard }) {
+function FireTab({ data, spendBasis }: { data: Dashboard; spendBasis: ReturnType<typeof completeSpendBasis> }) {
   return (
     <section className="fire-section section-block" id="fire-panel">
       <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
       <FireProgress data={data} />
+      <WhatIfPanel data={data} spendBasis={spendBasis} />
     </section>
   );
 }
@@ -3403,7 +3686,7 @@ function DashboardView({ data, refreshFailed, trading }: { data: Dashboard; refr
           onViewCalendar={viewCalendar}
         />
       ) : activeTab === "fire" ? (
-        <FireTab data={data} />
+        <FireTab data={data} spendBasis={spendBasis} />
       ) : activeTab === "trading" ? (
         <TradingTab trading={trading} />
       ) : (

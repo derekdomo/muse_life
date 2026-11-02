@@ -764,6 +764,29 @@ button.spend-cal__cell { cursor: pointer; }
 .fire-stats span { color: var(--dim); font-size: 10px; font-weight: 720; }
 .fire-stats strong { font-family: "SF Mono", ui-monospace, monospace; font-size: 15px; overflow-wrap: anywhere; }
 .fire-rule { margin: 0; padding: 11px 13px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 720; text-align: center; }
+/* F3.4 what-if panel (FIRE tab foot): inputs are page-local
+   trial state; every control keeps a >= 44px touch target and
+   every delta carries glyph + word + number, never colour
+   alone. */
+.whatif { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); display: grid; gap: 13px; }
+.whatif h3 { margin: 0; font-size: 15px; font-weight: 760; }
+.whatif-note { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.65; }
+.whatif-inputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.whatif-field { display: grid; gap: 6px; }
+.whatif-field > span { color: var(--dim); font-size: 11px; font-weight: 650; }
+.whatif-field input { width: 100%; box-sizing: border-box; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; font-size: 15px; }
+.whatif-field input:focus-visible, .whatif-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.whatif-reset { justify-self: start; min-height: 44px; padding: 10px 18px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+.whatif-goals { display: grid; gap: 10px; }
+.whatif-goal { display: grid; gap: 9px; padding: 14px; border-radius: 12px; background: var(--surface-tint); }
+.whatif-goal h4 { margin: 0; font-size: 13px; font-weight: 760; }
+.whatif-rows { display: grid; gap: 6px; }
+.whatif-rows p { margin: 0; display: grid; grid-template-columns: 52px auto 1fr; align-items: baseline; gap: 8px; font-size: 12px; }
+.whatif-rows p > span { color: var(--dim); font-weight: 650; }
+.whatif-rows p > strong { font-family: "SF Mono", ui-monospace, monospace; font-size: 13px; white-space: nowrap; }
+.whatif-rows p > em { font-style: normal; color: var(--dim); line-height: 1.5; }
+.whatif-delta > strong { color: var(--accent); }
+.whatif-assumption { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.65; border-top: 1px dashed var(--border); padding-top: 8px; }
 
 .holdings-section .section-title, .accounts-section .section-title { margin-bottom: 18px; }
 .holding-list {
