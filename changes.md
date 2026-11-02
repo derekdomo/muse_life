@@ -3241,3 +3241,13 @@
  - 局限：构建报告含一条未解决 content-critique（coverage: source_and_rendered），其完整文本在回传中被截断——原文不可恢复，未编造、未反推；该发现保持开放、待 PM 裁决。精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准。
  - 回滚：revert 本提交即恢复回灌前状态（线上 space-3 已上线版本不受影响）。
  - plans.md `F3.2` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md（F3.1 暂缓登记＋F3.2 派工/交付登记＋勾选）、weekly-finance 回灌 5 文件、DATA-PLAN.md、本文件。
+
+- F3.3 未来现金流日历预测·派工（2026-11-02 11:15 PST 轮次，muse-life-plans-sync）。
+ - 需求编号：plans.md `F3.3`（P2，推荐执行顺序第 7 步；`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`F3.2` 已交付，本轮取 F3.3——F3.2 的周期收支识别正是本条输入）。
+ - 本轮队列核对（独立复核）：基线 2a1ba66 起 0 新提交（`git log --oneline 2a1ba66..HEAD` 为空），工作树干净；P0/P1 可执行队列已空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决、`W-HOMEB-002` 未到 11-16、306 个（需用户确认）条目不动、PM 仍按 PAUSE-LIFE-PM-001 暂停）。
+ - 任务：财务总览（space-3）新增未来现金流日历预测——基于已识别的周期收支与当前存款余额，生成未来 90 天逐日预计余额曲线，标注预计低点与每条假设的来源；必须标注"基于历史周期推断"，不包装成承诺。
+ - 派工：已向 space-3 builder 派工（artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认 space-3 无构建在跑）。规格：服务端新增零 import 纯函数模块 `server/src/cashFlowForecast.ts`（全部导出；`forecastCashFlow({ transactions, depositsBalance, today, horizonDays=90 })`）——周期支出复用 F3.2 `detectRecurringCharges` 口径（不改其行为），周期收入对称口径新识别（金额>0 入账、排除内部互转与退款/冲正、同周期窗口 6–8/27–33/85–95/360–370 天、同证据门槛 周/月/季≥3笔、年≥2笔、不足不列出不编造、未来日期不纳入）；每条周期项自 nextExpectedDate（= 最近日期＋中位间隔）按 medianIntervalDays 等步长向 90 天末日步进，落点金额取最近金额（收入正/支出负）；逐日净 delta 求和、余额自 depositsBalance 累加；返回 `{ days, lowPoint: { date, balance }, assumptions: [{ merchant, kind, cadenceLabel, amount, basisText }] }`（basisText 形如"基于 N 笔历史记录、中位间隔 X 天推断"）。depositsBalance 口径：先核查 artifact 现有 dashboard live 的存款余额事实字段（仓库 copy 为 live.deposits/live.saving 口径），DATA-PLAN.md F3.3 章节须公开所用字段与口径。接线：buildDashboard ingest 时加法计算，dashboardSchema 新增 `cashFlowForecast`（.default(null) 旧载荷兼容），getDashboard description 增补。客户端新增 `CashFlowForecastPanel`（纯渲染、不自算；挂明细页签"订阅与周期支出"面板后）：90/60/30 天范围切换（纯数组截取）、SVG 余额曲线（低点标记＋文字"预计低点 日期 金额"）、假设清单（商户/收支类型/周期/金额/依据）、强制醒目免责声明"基于历史周期推断，不构成承诺"；不输出"资金充足/不足"类结论词。色弱规则（符号＋文字＋数字、预测段虚线＋"预测"文字）/44px。红线：不改 F-ARCH 日刷新链、不改交易同步与口径公式、无 schema/migration；不改 recurringCharges.ts 既有行为；L0.1 例外维持；不提交 app.db/.env/密钥/真实数据。要求交付证据：构建审计 pass＋隐私扫描零命中（合成数据）＋新增 `weekly-finance/validate-cash-flow-forecast.mjs`（真实生产函数断言＋≥2 项变异真实执行翻转）＋既有财务回归全过（.mjs 11 套、.ts 4 套）；DATA-PLAN.md 外科手术式新增 F3.3 章节；回传须含完整回灌包（变更文件清单＋逐字内容）。
+ - 本轮状态：仅派工，`F3.3` 保持 [ ] 不勾选；构建交付后由后续轮次回灌仓库并补交付登记，整项待 PM 验收。
+ - 回滚：构建未交付前无仓库变更可回滚；派工可经 artifact.cancel 取消（本轮未取消）。
+ - 附记：派工时发现 artifact 实际 slug 为 `space-3`（`weekly-finance` 仅为仓库目录名）——首次以 `weekly-finance` 派工返回 "no artifact found"，改用 `space-3` 后派工成功（agent_status pending_init，异步回传）。后续轮次派工直接使用 `space-3`。
+ - plans.md 已更新：`F3.3` 加派工登记。本轮未动 cron；修改文件：plans.md、本文件。
