@@ -1,5 +1,14 @@
 # Changes
 
+## 2026-11-01 18 时 PST（muse-life-plans-sync 17:55 轮次：W-TRAIN-FLOW-001 带练 v1 派工＋Life 进度面板同步）
+
+- 本轮 `git pull` 已最新（基线 last_seen_sha f7db5ac == HEAD，无新提交）；PM 按 PAUSE-LIFE-PM-001 暂停，无新 PM bug 单；树干净、无待回传构建。按单队列（P0＞用户直提＞PM 需求/普通返工＞证据尾巴）与推荐执行顺序自取：**`W-TRAIN-FLOW-001` 带练 v1 真实构建**（用户直提 P1，2026-11-01 原话「现在加上热身组搞得好复杂，我就想要个无脑可以按计划来的训练方案」；本节「下一实现轮次开工，目标 2026-11-03 前交第一版带练」；W-WARMUP-WRITE-001/W-WARMUP-KIND-001 的 P0 数据修复已完成回灌，space-6 builder 空闲、无并发构建，W5.3 回灌已沉淀约 1 小时）。
+- 派工（space-6 artifact.edit，高复杂度、异步回传）：按本节 7 条默认路径规则＋设计交付与验收段实现带练 v1——首页「今天的计划」＋唯一「按计划开始」→ 独立本地准备热身（复用 W-WARMUP-KIND-001 已定分支，永不写工作组）→ 正式训练主屏（当前动作/第几正式组、醒目重量×次数、一句要领、示范入口、「完成这组」）→ 休息页（剩余时间＋下一组、「开始下一组」/「+30秒」）→ 下一组 → 完成；保存/完成语义原样复用 SetSaveMachine、drainSetSaves/createSaveQueue、finishGateDecision（W3.1 教训：禁止重写/替换既有纯函数与 handle 注册表）；默认值显示来源（已存草稿优先、不把引擎建议冒充已执行、未知重量不填0）；配片仅杠铃动作短结果、哑铃单只/总重、器械/自重/秒数型不得套杠铃片算法；不改周计划/动作/组数/次数范围/渐进负荷规则/评分公式/schema/同步/权限；plate-warmup 三套比例计算器只留「调整/训练工具」入口；色弱规则＋44px；320/390px 首屏看清当前任务和主要按钮；L0.1 例外维持现状不扩大；新图接入（W6.2-LOCAL-DEMO-001/002、W6.2-PM-IMG）与本改版解耦、不在本片。交付证据（合成数据）：构建审计 pass＋隐私扫描零命中＋按验收段逐场景流程验证（不以静态文案正则代替流程验收）＋既有回归全过。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收。本节既有 [完成] 标记仅指设计＋P0 修复的交付，带练 v1 上线另行登记。
+- Life 进度面板同步派工（artifact.edit，低复杂度）：新增 W-TRAIN-FLOW-001 带练 v1 进行中 bullet（17:55 PT 派工），条目 91 条，导语/页脚截至 2026-11-01 17:55 PT；构建方回传验证成功（源码计数 90→91、其余条目未动）。
+- 未动项（账面状态保持）：W6.2-LOCAL-DEMO-002（需用户整批过目点头，本轮不执行）、W6.2-LOCAL-DEMO-001（9 组候选图待用户视觉确认）、W6.2-PM-IMG（PM 生成、用户未过目）、W-HOMEB-002（2026-11-16 cron 自动执行）、F1.3（口径未定案，需用户确认）。本轮未动 cron。
+- 安全：未提交 app.db/.env/密钥/个人数据；L0.1 例外维持现状、不扩大。
+- 修改文件：plans.md（W-TRAIN-FLOW-001 派工登记）、本文件。回滚：revert 本提交（space-6 在跑构建如需中断另行 artifact.cancel）。
+
 ## 2026-11-01 16 时 PST（muse-life-plans-sync：W5.3 构建回传交付登记）
 
 - `W5.3` 围度与体重趋势（调研 T5，借鉴 Hevy / Strong）已在 artifact（space-6）上线（builder 16:08 PST 回传成功）。交付内容：新增 `drizzle/0010_add_body_measurements.sql`（body_measurements 表：一日一行、measured_at＋body_weight（lb/kg 双单位，沿用既有引擎口径）＋waist/chest/hips/arm/thigh 可选列、缺失留 NULL）；新 action `saveBodyMeasurement`（owner 门禁、同日 upsert、拒未来日期；非所有者实调 forbidden 且零写入）＋`getDashboard` 加法字段（近 90 天原始记录 body_measurements＋对照序列 body_trends）；服务端新增纯函数模块 `server/src/body-trends.ts`（无 import，导出 buildBodyTrends/convertBodyWeight/bodyTrendWeekStart，LB_TO_KG 与既有引擎一致；每个记录点对齐其周一至周日自然周的训练量与最佳工作组，训练数据与手动数据双向不混入）；历史/趋势页新增「围度与体重趋势」区块（三区并列图：体重／各围度断线留空／周训练量柱＋最佳组虚线、符号＋线型＋数字图例、数据明细表、手动录入表单 44px），页面明示口径「仅记录与趋势展示、不给出减重或健康结论」，空态「尚未记录围度与体重」。
