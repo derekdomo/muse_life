@@ -137,3 +137,24 @@ Imagery not needed: this is a private numeric finance dashboard whose visual sub
   **Why rejected**: The data is account-gated and scheduled; it belongs in validated server actions with cached fallback.
 - **Tried**: Fabricating an initial dashboard when sources are unavailable.
   **Why rejected**: The artifact must show only real user finance data; until the first successful refresh it will show an honest empty/retry state.
+
+## F3.2 订阅与周期支出体检（2026-11-02）
+
+**需求**：从 Plaid 交易识别周期性扣费，列出每项的年化成本、最近一次涨价幅度与下次预计扣费日；只做事实展示与提醒，不提供代取消、代谈判或自动操作。
+
+**实现**（纯加法，不改既有口径/管道）：
+- 服务端新增零 import 纯函数模块 `server/src/recurringCharges.ts`（全部导出）：
+  `detectRecurringCharges(transactions, { today })`。商户归一化（小写/去空格，不剥离订单号后缀）；
+  间隔中位数判定周期（按周 6–8天/按月 27–33天/按季 85–95天/按年 360–370天，不规律不认定）；
+  证据门槛（周/月/季≥3笔、年≥2笔，不足不列出不编造）；年化=最近金额×52/12/4/1；
+  价格变化=最近 vs 上一笔（金额差+百分比+涨价/降价/持平）；下次预计=最近日期+中位数间隔；
+  排除未来日期、入账/退款、pending、本人内部互转。
+- `dashboardSchema` 新增 `recurringCharges`（`z.array(recurringChargeSchema).default([])`，旧载荷兼容）；
+  `buildDashboard` 在 ingest 时由 `plaidTransactions` 计算（`{ today: asOf }`），加法字段。
+- 客户端明细页签末尾新增 `RecurringChargesPanel`（纯渲染）：商户/周期文字/年化成本/
+  价格变化（▲/▼/●配文字+金额百分比）/下次预计日；注记"基于历史交易推断仅供核对"与
+  "只做事实展示不提供代取消/代谈判"；无操作按钮；色弱规则/44px。空数组时诚实显示暂无识别结果。
+- 无 schema/migration 变更；F-ARCH 日刷新链、交易同步、口径公式未动；L0.1 例外维持。
+
+**验证**：`validate-recurring-charges.mjs` 26/26（合成数据；含 2 项变异真实执行翻转——
+年化因子 12→1、证据门槛 3→2）。隐私扫描零命中（合成小额数字，无真实值/密钥/UUID/路径）。

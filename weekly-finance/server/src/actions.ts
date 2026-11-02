@@ -1,6 +1,10 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import * as schema from "./schema";
+import {
+  detectRecurringCharges,
+  type RecurringCharge as RecurringChargeResult,
+} from "./recurringCharges";
 
 const financeTypeSchema = z.enum([
   "investment",
@@ -80,6 +84,25 @@ const plaidTransactionSchema = z.object({
   pending: z.boolean().default(false),
   internalTransfer: z.boolean().default(false),
   transferLike: z.boolean().default(false),
+});
+
+// F3.2 additive: 订阅与周期支出体检。纯函数 detectRecurringCharges 的输出形状；
+// 旧载荷缺字段时 .default([]) 保证可读，下次成功刷新后才有值。
+const recurringChargeSchema = z.object({
+  merchant: z.string(),
+  cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
+  cadenceLabel: z.string(),
+  annualizedCost: z.number(),
+  lastAmount: z.number(),
+  lastDate: z.string(),
+  priceChange: z.object({
+    amountDelta: z.number(),
+    pctDelta: z.number(),
+    direction: z.enum(["up", "down", "flat"]),
+  }),
+  nextExpectedDate: z.string(),
+  occurrences: z.number().int(),
+  medianIntervalDays: z.number(),
 });
 
 const transactionCoverageSchema = z.object({
@@ -1081,6 +1104,10 @@ const dashboardSchema = z.object({
   archDailyIncome: archDailyIncomeSchema.nullable().default(null),
   archDailyInvest: archDailyInvestSchema.nullable().default(null),
   archNetWorthSeries: z.array(z.object({ date: z.string(), total: z.number() })).default([]),
+  // F3.2 additive: 订阅与周期支出体检结果（纯函数 detectRecurringCharges 在
+  // ingest 时由 plaidTransactions 计算）。旧载荷缺字段时默认为空数组，
+  // 客户端在空数组时诚实显示"暂无识别结果"，不编造。
+  recurringCharges: z.array(recurringChargeSchema).default([]),
   sourceMonth: z.string(),
   months: z.array(monthSchema),
   live: z.object({
@@ -4973,6 +5000,19 @@ function buildDashboard(
   // the emergency numerator is the classified cash subset only.
   const availableCashSummary = summarizeAvailableCash(accounts, latestRaw.key);
 
+  // F3.2: 订阅与周期支出体检 — ingest 时由 Plaid 交易计算周期性扣费。
+  // 纯函数，无 import；输入沿用 PlaidTransaction 形状（date/amount/name/pending/internalTransfer）。
+  const recurringCharges: RecurringChargeResult[] = detectRecurringCharges(
+    plaidTransactions.map((t) => ({
+      date: t.date,
+      amount: t.amount,
+      merchant: t.name,
+      pending: t.pending,
+      internalTransfer: t.internalTransfer,
+    })),
+    { today: asOf }
+  );
+
   return {
     asOf,
     archNetWorth: null,
@@ -4980,6 +5020,8 @@ function buildDashboard(
     archDailyIncome: null,
     archDailyInvest: null,
     archNetWorthSeries: [],
+    // F3.2: 订阅与周期支出体检结果；旧载荷无此字段时 schema 默认为 []。
+    recurringCharges,
     sourceMonth: latestRaw.key,
     months,
     live: {

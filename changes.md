@@ -3232,3 +3232,12 @@
  - 本轮状态：仅派工，构建交付后由后续轮次回灌仓库并补交付登记；`F3.2` 保持 [ ] 不勾选，整项待 PM 验收。
  - 回滚：构建未交付前无仓库变更可回滚；派工可经 artifact.cancel 取消（本轮未取消）。
  - plans.md 已更新：`F3.1` 加暂缓登记、`F3.2` 加派工登记。本轮未动 cron；修改文件：plans.md、本文件。
+- F3.2 订阅与周期支出体检·交付（2026-11-02 11:09 PST 轮次，muse-life-plans-sync；09:55 派工）。
+ - 需求编号：plans.md `F3.2`（P2，推荐执行顺序第 7 步；`F3.1` 因 F0.5 coverage 门禁未满足而暂缓，本轮取 F3.2）。
+ - 任务：财务总览（space-3）从 Plaid 交易识别周期性扣费，列出年化成本、最近一次涨价幅度与下次预计扣费日；只做事实展示与提醒，不提供代取消/代谈判/自动操作。
+ - 改了什么：artifact（space-3）先行上线（构建 verification_status SUCCEEDED）；回灌本仓（同规格实现、功能等价验证，非逐字节拷贝——沿既有惯例）——`weekly-finance/server/src/recurringCharges.ts`（新：零 import 纯函数模块，`detectRecurringCharges`/`normalizeMerchant`/`cadenceForMedianInterval`/`median` 等全部导出；商户归一化小写/去空格不剥离订单号后缀；周期窗口按周 6–8/按月 27–33/按季 85–95/按年 360–370 天；证据门槛周/月/季≥3 笔、年≥2 笔；年化=最近金额×52/12/4/1；价格变化=最近 vs 上一笔金额差+百分比+方向；下次预计=最近日期+中位数间隔；排除未来日期/入账退款/pending/内部互转）；`weekly-finance/server/src/actions.ts`（import、`recurringChargeSchema`、`dashboardSchema` 新增 `recurringCharges` 字段 `.default([])` 旧载荷兼容、`buildDashboard` 在 ingest 时由 plaidTransactions 计算）；`weekly-finance/client/src/App.tsx`（新 `RecurringChargesPanel` 纯渲染组件：商户/周期文字/年化成本/价格变化 ▲/▼/●配文字+金额百分比/下次预计日，注记推断性质与无操作按钮，色弱规则/44px；明细页签末尾挂载）；`weekly-finance/validate-recurring-charges.mjs`（新）；`weekly-finance/DATA-PLAN.md`（末尾外科式新增 F3.2 章节，既有 20 节保留）。
+   未改：schema/migration 无；F-ARCH 日刷新链、交易同步、口径公式未动；L0.1 例外维持。
+ - 验证证据（本机实跑，合成数据）：`node validate-recurring-charges.mjs` → 26 passed, 0 failed（含月度/年/季度识别、涨价/降价/持平、证据不足不列出、不规律不认定、未来日期/退款/pending/互转排除、订单号不合并、年化降序；2 项变异真实执行翻转：年化因子 12→1 使 191.88→15.99、证据门槛 3→2 使 2 笔月费由不列出变列出）；隐私扫描：新增/改动文件零 UUID/密钥/路径/真实值命中。构建方回传：新验证器 32/32、既有财务回归全过（.mjs 11 套、.ts 4 套）、client+server typecheck 干净、构建审计 pass。
+ - 局限：构建报告含一条未解决 content-critique（coverage: source_and_rendered），其完整文本在回传中被截断——原文不可恢复，未编造、未反推；该发现保持开放、待 PM 裁决。精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准。
+ - 回滚：revert 本提交即恢复回灌前状态（线上 space-3 已上线版本不受影响）。
+ - plans.md `F3.2` 已标 [完成]（仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md（F3.1 暂缓登记＋F3.2 派工/交付登记＋勾选）、weekly-finance 回灌 5 文件、DATA-PLAN.md、本文件。

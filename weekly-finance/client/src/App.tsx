@@ -3123,6 +3123,45 @@ function ArchDemoPreviewSection({ foldHint }: { foldHint: ReactNode }) {
 // evidence folds, then the ledger folds （口径与来源说明 /
 // trend + range / monthly records / F-ARCH account rows /
 // snapshot account detail).
+// F3.2 订阅与周期支出体检：纯渲染组件，只呈现服务端 recurringCharges 结果。
+// 色弱规则：方向恒用符号▲/▼/●配文字与数字，不只靠颜色。44px 最小触达沿既有样式。
+function RecurringChargesPanel({ charges }: { charges: Dashboard["recurringCharges"] }) {
+  const list = charges ?? [];
+  return (
+    <section aria-label="订阅与周期支出" className="recurring-charges">
+      <h3>订阅与周期支出</h3>
+      <p className="fact-card__note">基于历史交易推断的周期性扣费，仅供核对。</p>
+      <p className="fact-card__note">只做事实展示，不提供代取消、代谈判或自动操作。</p>
+      {list.length === 0 ? (
+        <p className="fact-card__note">暂无识别结果（证据不足或下次成功刷新后更新）。</p>
+      ) : (
+        <div>
+          {list.map((c, i) => {
+            const sym = c.priceChange.direction === "up" ? "▲" : c.priceChange.direction === "down" ? "▼" : "●";
+            const dirWord = c.priceChange.direction === "up" ? "涨价" : c.priceChange.direction === "down" ? "降价" : "持平";
+            const deltaText =
+              c.priceChange.direction === "flat"
+                ? "持平"
+                : `${dirWord} ${c.priceChange.amountDelta > 0 ? "+" : ""}${currency.format(c.priceChange.amountDelta)}（${c.priceChange.pctDelta > 0 ? "+" : ""}${c.priceChange.pctDelta.toFixed(1)}%）`;
+            return (
+              <div className="account-row" key={`${c.merchant}-${i}`}>
+                <div>
+                  <strong>{c.merchant}</strong>
+                  <span>{c.cadenceLabel} · 年化 {currency.format(c.annualizedCost)} · 最近 {currency.format(c.lastAmount)}（{c.lastDate}）</span>
+                </div>
+                <div>
+                  <span aria-label={`价格变化：${dirWord}`}>{sym} {deltaText}</span>
+                  <span> · 下次预计 {c.nextExpectedDate}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function DetailTab({
   data,
   current,
@@ -3241,6 +3280,8 @@ function DetailTab({
           </section>
         </details>
       </div>
+      {/* F3.2 订阅与周期支出体检：明细页签末尾加法式面板 */}
+      <RecurringChargesPanel charges={data.recurringCharges} />
     </>
   );
 }
