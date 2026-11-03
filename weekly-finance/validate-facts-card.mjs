@@ -116,8 +116,8 @@ check("server: two consecutive legal syncs chain the prior", (serverSrc.match(/p
 // asserted at their new location. ---
 check("conclusion card component exists", appSrc.includes("function TotalAssetsConclusionCard"));
 check("card reads live.weeklyDelta via weeklyDeltaView", appSrc.includes("weeklyDeltaView(delta, data.live.netWorth)"));
-check("delta view computed once per rendering home (def + card + caliber detail)",
-  (appSrc.match(/weeklyDeltaView\(/g) ?? []).length === 3);
+check("delta view computed once per rendering home (def + card + caliber detail + F2.1 summary card builder)",
+  (appSrc.match(/weeklyDeltaView\(/g) ?? []).length === 4);
 const cardStart = appSrc.indexOf("function TotalAssetsConclusionCard");
 const cardEnd = appSrc.indexOf("\n}\n", cardStart) + 3;
 const cardSrc = appSrc.slice(cardStart, cardEnd);

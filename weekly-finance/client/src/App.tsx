@@ -724,6 +724,396 @@ export function integrityLabel(integrity: Month["integrity"]): string {
   return "完整性未提供";
 }
 
+// F2.1: the overview tab's top summary strip — at most three
+// fact cards （净资产变化 / 现金覆盖变化 / 当月支出进度）, each
+// carrying its own comparison interval （比较区间） and source
+// completeness （来源完整度） as text. Each card judges its own
+// comparability independently: a card with no comparable fact
+// states 暂无可比 / 无法比较 and never draws a fabricated
+// number or a 0-filled delta, and the strip never pads itself
+// to three comparable cards. Conclusion words are factual
+// only （增加 / 减少 / 持平 / 无法比较） — no advice. Every
+// figure reuses an existing caliber: card 1 is the
+// weeklyDeltaView fact (the same value and percent caliber as
+// the conclusion card's one-liner), card 2 is the F1.1
+// emergencyCoverage figure, card 3 divides the current month's
+// recorded spend by the completeSpendBasis average (the same
+// last-3-valid-complete-months basis). Direction never rides
+// on colour alone: glyph + direction word + signed number.
+export type SummaryCardView = {
+  title: string;
+  comparable: boolean;
+  direction: "增加" | "减少" | "持平" | "无法比较" | null;
+  directionGlyph: string | null;
+  valueLine: string;
+  compareLine: string;
+  sourceLine: string;
+};
+
+// F2.1 card 1 — 净资产变化. The delta and percent come from
+// weeklyDeltaView over live.weeklyDelta / live.netWorth, the exact
+// source the conclusion card uses; no second caliber is
+// computed here. The comparison interval is stated honestly:
+// the previous snapshot's date was never retained （日期未留存）,
+// the same wording the caliber fold carries. Source
+// completeness follows the F0.5 facts-card caliber: the data
+// date (asOf) plus the balance-source composition
+// (balanceSourceSummary). No comparable snapshot keeps the
+// established 暂无可比快照 honest state.
+export function netWorthSummaryCard(delta: number | null, netWorth: number, asOf: string, accounts: Array<{ type: string; live: boolean }>): SummaryCardView {
+  const view = weeklyDeltaView(delta, netWorth);
+  const asOfDate = new Date(asOf);
+  const asOfText = Number.isNaN(asOfDate.getTime()) ? "未提供" : dateLabel.format(asOfDate);
+  const sourceLine = `来源完整度：数据日期 ${asOfText} · 余额来源：${balanceSourceSummary(accounts)}`;
+  if (!view.comparable || delta == null || view.direction == null) {
+    return {
+      title: "净资产变化",
+      comparable: false,
+      direction: "无法比较",
+      directionGlyph: "○",
+      valueLine: "暂无可比快照",
+      compareLine: "比较区间：较上次成功快照 — 无上次成功快照可比（首次同步，或上次快照不可用）",
+      sourceLine,
+    };
+  }
+  const pct = view.percent != null ? `（${view.percent > 0 ? "+" : ""}${percent.format(view.percent)}）` : "";
+  return {
+    title: "净资产变化",
+    comparable: true,
+    direction: view.direction,
+    directionGlyph: trendIndicator(delta),
+    valueLine: `${view.direction} ${trendIndicator(delta)} ${signedCurrency(delta)}${pct}`,
+    compareLine: "比较区间：较上次成功快照（快照日期未留存）· 旧同步口径，与结论卡同一数值来源",
+    sourceLine,
+  };
+}
+
+// F2.1 card 2 — 现金覆盖变化. The current figure is the F1.1
+// emergencyCoverage result （可动用现金 ÷ 近 3 个有效完整月平均
+// 支出）. A change needs the PREVIOUS successful snapshot's
+// coverage as a fact: getDashboard returns no such field, so
+// the caller passes previousMonths = null and the card reads
+// 暂无可比 for the change — the current figure is still shown
+// as a fact with its basis named, and no delta is invented.
+// When a previous figure exists (both non-null), the change
+// is current − previous in months, with the same glyph +
+// word + signed-number channels as card 1.
+export function cashCoverageSummaryCard(currentMonths: number | null, previousMonths: number | null, cashAmount: number | null, averageMonthlySpend: number | null, usedMonthKeys: string[], blockedReason: string | null, trialActive: boolean): SummaryCardView {
+  const basisLine = cashAmount != null && averageMonthlySpend != null
+    ? `来源完整度：可动用现金 ${currency.format(cashAmount)} ÷ 平均月支出 ${currency.format(averageMonthlySpend)}（基期月份 ${usedMonthKeys.join("、")}）· F1.1 口径${trialActive ? " · 本页试算" : ""}`
+    : `来源完整度：${blockedReason ?? "覆盖依据未提供，未输出覆盖"}`;
+  if (currentMonths == null) {
+    return {
+      title: "现金覆盖变化",
+      comparable: false,
+      direction: "无法比较",
+      directionGlyph: "○",
+      valueLine: "覆盖未输出",
+      compareLine: "比较区间：较上次成功快照 — 当前覆盖未输出，变化暂无可比",
+      sourceLine: basisLine,
+    };
+  }
+  if (previousMonths == null) {
+    return {
+      title: "现金覆盖变化",
+      comparable: false,
+      direction: "无法比较",
+      directionGlyph: "○",
+      valueLine: `当前覆盖 ${number.format(currentMonths)} 个月`,
+      compareLine: "比较区间：较上次成功快照 — 上次覆盖率未随数据提供，变化暂无可比",
+      sourceLine: basisLine,
+    };
+  }
+  const diff = currentMonths - previousMonths;
+  const direction = diff > 0 ? "增加" : diff < 0 ? "减少" : "持平";
+  return {
+    title: "现金覆盖变化",
+    comparable: true,
+    direction,
+    directionGlyph: trendIndicator(diff),
+    valueLine: `${direction} ${trendIndicator(diff)} ${diff > 0 ? "+" : ""}${number.format(diff)} 个月 · 当前 ${number.format(currentMonths)} 个月（上次 ${number.format(previousMonths)} 个月）`,
+    compareLine: "比较区间：较上次成功快照的覆盖率（同一 F1.1 口径）",
+    sourceLine: basisLine,
+  };
+}
+
+// F2.1 card 3 — 当月支出进度. The numerator is the current
+// month's recorded spend so far (Month.totalSpend), labelled
+// with its as-of date and its F0.4 integrity (partial /
+// complete / unknown via integrityLabel); the denominator is
+// the completeSpendBasis average over the last 3 valid
+// complete months — the same basis as F1.1. When the sample
+// is short the card names how many months are missing （缺几
+// 月） and outputs NO progress figure; a null current spend
+// （灵活支出待核对） likewise yields no progress. Progress is
+// a ratio fact, not a change, so a comparable card carries no
+// direction word.
+export function monthSpendProgressCard(spent: number | null, asOfDate: string, integrity: Month["integrity"], averageMonthlySpend: number | null, usedMonths: number, missingMonths: number, usedMonthKeys: string[]): SummaryCardView {
+  const sourceLine = `来源完整度：截至 ${asOfDate} · 完整性 ${integrityLabel(integrity)}（F0.4）`;
+  if (spent == null) {
+    return {
+      title: "当月支出进度",
+      comparable: false,
+      direction: "无法比较",
+      directionGlyph: "○",
+      valueLine: "本月已支出未提供（灵活支出待核对）",
+      compareLine: "进度：无法比较 — 本月支出未齐，未输出进度",
+      sourceLine,
+    };
+  }
+  if (missingMonths > 0 || averageMonthlySpend == null) {
+    return {
+      title: "当月支出进度",
+      comparable: false,
+      direction: "无法比较",
+      directionGlyph: "○",
+      valueLine: `本月已支出 ${currency.format(spent)}`,
+      compareLine: `进度：无法比较 — 完整有效月不足：已有 ${usedMonths} 个，缺 ${missingMonths} 个，未输出进度`,
+      sourceLine,
+    };
+  }
+  if (averageMonthlySpend <= 0) {
+    return {
+      title: "当月支出进度",
+      comparable: false,
+      direction: "无法比较",
+      directionGlyph: "○",
+      valueLine: `本月已支出 ${currency.format(spent)}`,
+      compareLine: "进度：无法比较 — 近 3 个有效完整月平均支出为 0，未输出进度",
+      sourceLine,
+    };
+  }
+  const progress = spent / averageMonthlySpend;
+  return {
+    title: "当月支出进度",
+    comparable: true,
+    direction: null,
+    directionGlyph: null,
+    valueLine: `本月已支出 ${currency.format(spent)} · 进度 ${percent.format(progress)}`,
+    compareLine: `比较基期：近 3 个有效完整月平均支出 ${currency.format(averageMonthlySpend)}（基期月份 ${usedMonthKeys.join("、")}）`,
+    sourceLine,
+  };
+}
+
+// F2.2: fact alerts — a client-only presentation layer over
+// facts getDashboard already returns; no server field, formula
+// or caliber is added or changed. Four alert families, each
+// derived and judged independently: an alert whose facts are
+// missing, incomparable or below its stated threshold simply
+// does not appear — never 0-filled, never padded, never given
+// a cause. Every line states only what happened; no action
+// wording of any kind appears in this section's copy. State
+// and direction ride on symbol + word + number together,
+// never on colour alone.
+export type FactAlert = {
+  kind: "stale" | "concentration" | "coverage" | "liabilities";
+  symbol: string;
+  label: string;
+  text: string;
+};
+
+export type FactAlertInput = {
+  asOf: string | null;
+  today: string;
+  sourceMonth: string;
+  months: Array<{ key: string; snapshotDate: string; loans: number | null }>;
+  bankAccounts: Array<{ source: string; balanceDate: string | null }>;
+  holdingsAll: Array<{ ticker: string; name: string; share: number }>;
+  coverageMonths: number | null;
+  previousCoverageMonths: number | null;
+};
+
+// F2.2 thresholds (each judged only on facts already on the
+// page):
+// - snapshot staleness: the last successful snapshot's data
+//   date is more than 7 days before today (the refresh cadence
+//   is weekly, so a longer gap means at least one cycle did
+//   not land — stated as a fact, not a cause).
+// - bank staleness: the server's F1.1 month rule mirrored —
+//   a bank row whose valid balance date falls in a month
+//   earlier than the source month carries an older balance.
+//   Rows without valid date evidence are not treated as
+//   evidence of staleness (the F0.5 ledger states their date
+//   coverage separately).
+// - concentration: a single merged holding strictly above
+//   25% of the F2.3 denominator (every valid non-cash holding,
+//   same ticker merged; cash never enters the denominator).
+// - coverage change: at least 0.5 months between the two
+//   comparable F1.1 figures.
+// - liability change: at least 5% of the earlier balance AND
+//   at least $1,000 between two recorded months (ordinary
+//   monthly mortgage amortisation sits far below both lines).
+export function deriveFactAlerts(input: FactAlertInput): FactAlert[] {
+  const alerts: FactAlert[] = [];
+  const parseDay = (value: string): Date | null => {
+    if (!isRealDateText(value)) return null;
+    return new Date(`${value}T00:00:00`);
+  };
+  const daySpan = (from: Date, to: Date): number => Math.round((to.getTime() - from.getTime()) / 86400000);
+  const balanceMonthEnd = (value: string): string => {
+    if (value.length !== 7) return value;
+    const probe = new Date(`${value}-01T00:00:00`);
+    probe.setMonth(probe.getMonth() + 1, 0);
+    return `${value}-${String(probe.getDate()).padStart(2, "0")}`;
+  };
+  const todayDate = parseDay(input.today);
+  const asOfDayText = input.asOf != null ? input.asOf.slice(0, 10) : "";
+  const asOfDate = asOfDayText !== "" ? parseDay(asOfDayText) : null;
+
+  // 1a. Stale data — the whole snapshot's data date is old.
+  if (asOfDate && todayDate) {
+    const ageDays = daySpan(asOfDate, todayDate);
+    if (ageDays > 7) {
+      alerts.push({
+        kind: "stale",
+        symbol: "▲",
+        label: "数据过期",
+        text: `上次成功快照的数据日期为 ${asOfDayText}，距今 ${ageDays} 天（快照超过 7 天未更新）`,
+      });
+    }
+  }
+
+  // 1b. Stale data — bank balances dated in a month earlier
+  // than the source month, named per source account (the same
+  // bank-row population the F0.5 ledger counts).
+  const sourceMonthKey = /^\d{4}-\d{2}/.test(input.sourceMonth) ? input.sourceMonth.slice(0, 7) : null;
+  if (sourceMonthKey) {
+    const staleRows: string[] = [];
+    for (const account of input.bankAccounts) {
+      const balanceDate = account.balanceDate;
+      if (balanceDate == null || !isValidBalanceDateText(balanceDate)) continue;
+      if (balanceDate.slice(0, 7) >= sourceMonthKey) continue;
+      const endDate = parseDay(balanceMonthEnd(balanceDate));
+      const agePart = endDate && todayDate ? `，距今 ${daySpan(endDate, todayDate)} 天` : "";
+      staleRows.push(`${account.source} 余额日期 ${balanceDate}${agePart}`);
+    }
+    if (staleRows.length > 0) {
+      alerts.push({
+        kind: "stale",
+        symbol: "▲",
+        label: "数据过期",
+        text: `银行余额：${staleRows.join("；")}（余额月份早于来源月份 ${sourceMonthKey}）`,
+      });
+    }
+  }
+
+  // 1c. Missing data — the previous full calendar month has
+  // no snapshot (the same fact monthAvailabilityFacts states
+  // in the status band, derived here from the months alone).
+  if (input.months.length > 0 && todayDate) {
+    const prev = new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1);
+    const prevKey = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+    if (!input.months.some((month) => month.key.slice(0, 7) === prevKey)) {
+      alerts.push({
+        kind: "stale",
+        symbol: "▲",
+        label: "数据缺失",
+        text: `本地月度记录：上一完整月 ${prevKey} 缺失，没有该月快照`,
+      });
+    }
+  }
+
+  // 2. Concentration — merged holdings (F2.3 stored shares,
+  // fixed full-set denominator) strictly above the threshold,
+  // largest first. The stored share is consumed as-is; nothing
+  // is recomputed from a visible subset.
+  const concentrated = input.holdingsAll.filter((holding) => holding.share > 0.25);
+  concentrated.sort((a, b) => b.share - a.share);
+  for (const holding of concentrated) {
+    alerts.push({
+      kind: "concentration",
+      symbol: "●",
+      label: "持仓集中度",
+      text: `${holding.ticker}（${holding.name}）占投资组合 ${percent.format(holding.share)}（分母：全部有效非现金持仓市值，同 ticker 已合并 · F2.3 口径）`,
+    });
+  }
+
+  // 3. Cash-coverage change — F1.1 caliber. A change needs the
+  // previous successful snapshot's coverage as a fact;
+  // getDashboard returns no such field, so the caller passes
+  // previousCoverageMonths = null and this family stays silent
+  // (the F2.1 card states the same 暂无可比 fact) — no delta is
+  // invented. When both figures exist, the change is current
+  // − previous in months, with the interval stated: the
+  // previous snapshot's date was never retained, this
+  // snapshot's data date is named.
+  if (input.coverageMonths != null && input.previousCoverageMonths != null) {
+    const diff = input.coverageMonths - input.previousCoverageMonths;
+    if (Math.abs(diff) >= 0.5) {
+      const direction = diff > 0 ? "增加" : "减少";
+      alerts.push({
+        kind: "coverage",
+        symbol: trendIndicator(diff),
+        label: "现金覆盖变化",
+        text: `现金覆盖由上次 ${number.format(input.previousCoverageMonths)} 个月变为当前 ${number.format(input.coverageMonths)} 个月，${direction} ${trendIndicator(diff)} ${diff > 0 ? "+" : ""}${number.format(diff)} 个月（F1.1 口径；上次快照日期未留存，本次数据日期 ${asOfDayText !== "" ? asOfDayText : "未提供"}）`,
+      });
+    }
+  }
+
+  // 4. Liability change — the last two recorded months whose
+  // liability balance (Month.loans: the month's negative
+  // account balances as a positive total, monthly-snapshot
+  // caliber) is present. A month whose balance was never
+  // recorded (null) is skipped, never read as 0; the two
+  // months' keys and snapshot dates name the interval.
+  const loanMonths = input.months.filter((month) => month.loans != null);
+  const prevLoanMonth = loanMonths.at(-2);
+  const curLoanMonth = loanMonths.at(-1);
+  if (prevLoanMonth && curLoanMonth) {
+    const prevLoans = prevLoanMonth.loans;
+    const curLoans = curLoanMonth.loans;
+    if (prevLoans != null && curLoans != null && prevLoans > 0) {
+      const delta = curLoans - prevLoans;
+      if (delta !== 0 && Math.abs(delta) >= 1000 && Math.abs(delta) / prevLoans >= 0.05) {
+        const direction = delta > 0 ? "增加" : "减少";
+        alerts.push({
+          kind: "liabilities",
+          symbol: trendIndicator(delta),
+          label: "负债变化",
+          text: `负债余额由 ${prevLoanMonth.key.slice(0, 7)} 的 ${currency.format(prevLoans)} 变为 ${curLoanMonth.key.slice(0, 7)} 的 ${currency.format(curLoans)}，${direction} ${trendIndicator(delta)} ${signedCurrency(delta)}（${delta > 0 ? "+" : ""}${percent.format(delta / prevLoans)}；区间 ${prevLoanMonth.snapshotDate || prevLoanMonth.key} 至 ${curLoanMonth.snapshotDate || curLoanMonth.key}，月度快照口径）`,
+        });
+      }
+    }
+  }
+
+  return alerts;
+}
+
+// F2.2 section: renders directly under the F2.1 summary strip
+// on the overview tab, and renders NOTHING when no alert
+// fires — a fresh, unremarkable state needs no box. The
+// previous coverage figure is null by construction (the
+// payload carries no such fact), exactly as the F2.1 card 2
+// wiring passes it.
+function FactAlertsSection({ data, coverageMonths }: { data: Dashboard; coverageMonths: number | null }) {
+  const alerts = deriveFactAlerts({
+    asOf: data.asOf,
+    today: localTodayKey(),
+    sourceMonth: data.sourceMonth,
+    months: data.months,
+    bankAccounts: data.accounts.filter((account) => account.type === "account"),
+    holdingsAll: data.holdingsAll,
+    coverageMonths,
+    previousCoverageMonths: null,
+  });
+  if (alerts.length === 0) return null;
+  return (
+    <section className="fact-alerts" aria-label="提醒">
+      <div className="fact-alerts__heading">
+        <h3>提醒</h3>
+      </div>
+      <ul className="fact-alerts__list">
+        {alerts.map((alert, index) => (
+          <li className="fact-alert" key={`${alert.kind}-${index}`}>
+            <span className="fact-alert__symbol" aria-hidden="true">{alert.symbol}</span>
+            <span className="fact-alert__text"><strong>{alert.label}</strong> · {alert.text}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number; color?: string }>; label?: string }) {
   // F0.6: missing months stay in the series as null so lines break
   // at the gap; a null point must never render as $0 in the tooltip.
@@ -3171,8 +3561,58 @@ function SpendCalendar({ data }: { data: Dashboard }) {
   );
 }
 
+// F2.1: the top summary strip of the overview tab — at most
+// three fact cards （净资产变化 / 现金覆盖变化 / 当月支出进度）
+// rendered above the conclusion card, each built by its pure
+// F2.1 builder above and each judging comparability on its
+// own facts. The cash-coverage change passes previousMonths
+// = null BY CONSTRUCTION: getDashboard returns no previous-
+// snapshot coverage fact, so the card honestly reads 暂无可比
+// for the change instead of inventing a comparison value; no
+// server field or action was added for this. The strip is
+// display-only (no control, nothing to tap), and the FIRE
+// one-liner below keeps its own 「线性估算，不含投资回报」 line.
+function TopSummaryCards({
+  data,
+  current,
+  coverage,
+  spendBasis,
+  trialActive,
+}: {
+  data: Dashboard;
+  current: Month;
+  coverage: ReturnType<typeof emergencyCoverage>;
+  spendBasis: ReturnType<typeof completeSpendBasis>;
+  trialActive: boolean;
+}) {
+  const cards = [
+    netWorthSummaryCard(data.live.weeklyDelta, data.live.netWorth, data.asOf, data.accounts),
+    cashCoverageSummaryCard(coverage.months, null, coverage.cashAmount, spendBasis.averageMonthlySpend, spendBasis.usedMonthKeys, coverage.reason, trialActive),
+    monthSpendProgressCard(current.totalSpend, current.snapshotDate || current.key, current.integrity, spendBasis.averageMonthlySpend, spendBasis.usedMonths, spendBasis.missingMonths, spendBasis.usedMonthKeys),
+  ];
+  return (
+    <section className="summary-cards" aria-label="顶部摘要：净资产变化、现金覆盖变化、当月支出进度">
+      {cards.map((card) => (
+        <article className="summary-card" key={card.title}>
+          <div className="summary-card__heading">
+            <h3>{card.title}</h3>
+            {card.direction != null ? (
+              <span className="summary-card__direction">{card.directionGlyph} {card.direction}</span>
+            ) : null}
+          </div>
+          <p className="summary-card__value">{card.valueLine}</p>
+          <p className="summary-card__meta">{card.compareLine}</p>
+          <p className="summary-card__meta">{card.sourceLine}</p>
+        </article>
+      ))}
+    </section>
+  );
+}
+
 // 「总览」 tab (owner ruling 1, restored 2026-10-24): kept
-// short, conclusion first — total-assets conclusion card →
+// short, conclusion first — F2.1 top summary strip (at most
+// three fact cards) → F2.2 fact alerts (rendered only when
+// at least one alert fires) → total-assets conclusion card →
 // this month's 7 key metrics → data-anomaly strip (never
 // folded) → one-line FIRE summary → net-worth daily series
 // (with its near-7-day change row) → daily-spend summary strip
@@ -3183,6 +3623,7 @@ function OverviewTab({
   current,
   savingsRate,
   coverage,
+  spendBasis,
   emergencyMonths,
   emergencyShortNote,
   anomalyMonths,
@@ -3195,6 +3636,7 @@ function OverviewTab({
   current: Month;
   savingsRate: number | null;
   coverage: ReturnType<typeof emergencyCoverage>;
+  spendBasis: ReturnType<typeof completeSpendBasis>;
   emergencyMonths: number | null;
   emergencyShortNote: string | null;
   anomalyMonths: Month[];
@@ -3204,6 +3646,8 @@ function OverviewTab({
 }) {
   return (
     <>
+      <TopSummaryCards data={data} current={current} coverage={coverage} spendBasis={spendBasis} trialActive={excludedCashSources.size > 0} />
+      <FactAlertsSection data={data} coverageMonths={coverage.months} />
       <TotalAssetsConclusionCard data={data} refreshFailed={refreshFailed} />
       <section className="metric-grid" aria-label="本月关键指标">
         <Metric label="月收入" value={<span title={currency.format(current.income)}>{compactCurrency.format(current.income)}</span>} />
@@ -3870,6 +4314,7 @@ function DashboardView({ data, refreshFailed, trading, txReviewQueue }: { data: 
           current={current}
           savingsRate={savingsRate}
           coverage={coverage}
+          spendBasis={spendBasis}
           emergencyMonths={emergencyMonths}
           emergencyShortNote={emergencyShortNote}
           anomalyMonths={anomalyMonths}

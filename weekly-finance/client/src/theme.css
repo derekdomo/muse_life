@@ -241,6 +241,34 @@ main {
 .fact-card__note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
 .fact-card__stale { margin: 8px 0 0; color: var(--negative); font-size: 11px; font-weight: 700; line-height: 1.5; }
 .fact-card__source { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--border); color: var(--dim); font-size: 10px; line-height: 1.55; }
+
+/* F2.1: top summary strip — at most three fact cards above
+   the conclusion card. Meaning rides on glyph + direction
+   word + signed number (never colour alone); the cards are
+   display-only, and the heading row keeps a 44px touch
+   height so the strip's rhythm matches the tappable rows. */
+.summary-cards { display: grid; gap: 10px; margin-bottom: 10px; }
+@media (min-width: 720px) { .summary-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.summary-card { padding: 14px 16px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.summary-card__heading { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; min-height: 44px; }
+.summary-card__heading h3 { margin: 0; font-size: 14px; letter-spacing: -.01em; }
+.summary-card__direction { font-size: 12px; font-weight: 720; white-space: nowrap; }
+.summary-card__value { margin: 2px 0 0; font-size: 15px; font-weight: 700; line-height: 1.45; overflow-wrap: anywhere; }
+.summary-card__meta { margin: 6px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+
+/* F2.2: fact alerts under the F2.1 summary strip. The section
+   renders only when at least one alert fires. Every row
+   carries symbol + label + fact text (never colour alone);
+   the heading row and each alert row keep a 44px touch
+   height. */
+.fact-alerts { margin-bottom: 10px; padding: 2px 16px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.fact-alerts__heading { display: flex; align-items: center; min-height: 44px; }
+.fact-alerts__heading h3 { margin: 0; font-size: 14px; letter-spacing: -.01em; }
+.fact-alerts__list { display: grid; margin: 0; padding: 0; list-style: none; }
+.fact-alert { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 12px; line-height: 1.55; }
+.fact-alert__symbol { flex: none; width: 16px; text-align: center; font-weight: 720; }
+.fact-alert__text { overflow-wrap: anywhere; }
+.fact-alert__text strong { font-weight: 720; }
 .arch-rows { display: grid; margin-top: 4px; }
 .arch-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; min-height: 40px; border-top: 1px solid var(--border); }
 .arch-row__name { font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
