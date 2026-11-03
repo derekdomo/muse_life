@@ -3349,3 +3349,14 @@
  - 仓库验证（本机实跑，合成数据）：新增 validate-trend-ranges.mjs **34/34**（含 3 项变异真实执行全部敏感：静息心率阈值 3→30 bpm、历史标注抑制、缺失段状态断点移除，每项均翻转对应断言）；既有回归 acwr 31、behavior-impact 27、game-settlement 150、month-review 38、muscle-status 70、readiness-advice 38、rewards 122、sleep-debt 35、sleep-regularity 25、status-mode 38、swim-partial 30、sync-readback 33 全绿；week-review（93/10）与 week-focus-feedback（195/1）为编辑前基线既有漂移（DATA-PLAN 已记录，与本轮 diff 无关）；编辑中一度因返回对象字段顺序触发 month-review 精确字符串检查，已按 H4.5 先例把 trendRanges 移到返回对象末尾修复，未改动任何旧验证器。隐私扫描：新增/改动内容仅含合成 fixture 与口径文字，无真实健康数据、密钥或 app.db 内容。
  - 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；沙箱主路径调用无法直接执行（无所有者身份），主路径由纯模块验证器与类型检查覆盖。
  - plans.md `H2.3` 已标记 [完成]（实现方已交付；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md、本文件。
+
+## 2026-11-02 21 时 PST（muse-life-plans-sync 20:55 轮次：H3.4 派工；space-4）
+
+- H3.4 睡眠/恢复与训练表现的关联探索·派工（2026-11-02 20:55 PST 轮次，muse-life-plans-sync）。
+ - 需求编号：plans.md `H3.4`（P1，周复盘；H3.1–H3.3、H3.5 已交付；H2.1–H2.3 与第 7 步 13 项 P2（F3.1 暂缓、F3.3 阻塞除外）全交付，本轮按 P1 优先取 H3.4）。
+ - 本轮队列核对（独立复核）：基线 `beb8a20` 起 0 新提交（`git log --oneline beb8a20..HEAD` 为空），工作树干净；P0/P1 可执行队列已空（`F0.5` 本体归原 Muse；`AUDIT-03`/`L0.x` 运行待验须本人实机证据；`H-SYNC-DIVERGE-001` 待 PM 裁决；`W-HOMEB-002` 未到 11-16；`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓；`F3.3` 回灌被裁决阻塞；306 个（需用户确认）条目不动；PM 仍按 PAUSE-LIFE-PM-001 暂停；H0/H1 的 readiness 核心公式外科手术属 PM 待验范围、不在分散派工之列）。
+ - 任务：健康看板（space-4）新增「睡眠/恢复与训练表现的关联探索」——训练（经现有训练记录同步通道）配对该训练前一晚的睡眠（H4.3 口径数据源）；有效配对 <6 只显示「样本不足（n/6）」、不渲染分析不下结论；≥6 才呈现描述性分组对比（训练表现用既有训练容量/时长口径）；只说相关不说因果（面板明示观察性相关）、不输出医疗结论、不自动改训练计划、绝不写 workout-log。
+ - 派工：已向 space-4 builder 派工（artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认 space-4 无构建在跑）。约束：服务端新增无 import 纯函数模块（全部导出）＋ getDashboard 加法字段、client 只渲染不自算；不改 readiness 公式与 H-LOAD-001、无 schema/migration、不新建数据源；色弱规则（符号＋文字＋数字）/44px；L0.1 例外维持现状；不提交 app.db/.env/密钥/真实数据；DATA-PLAN.md 外科式新增 H3.4 章节（不得删除既有章节）。
+ - 要求交付：构建审计 pass＋隐私扫描零命中＋新增 validate-sleep-training-correlation.mjs（真实生产函数断言＋≥2 项变异实跑）＋既有回归全过。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，不勾选。
+ - 回滚：构建未交付前无仓库变更可回滚；派工可经 artifact.cancel 取消（本轮未取消）。
+ - plans.md `H3.4` 已加派工登记。本轮未动 cron；修改文件：plans.md、本文件。
