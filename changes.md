@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-11-03 09 时 PST（muse-life-plans-sync 08:55 轮次：`AUDIT-08` 核验勾选；无新派工）
+
+- 本轮队列核对（独立复核）：基线 `e53fc30` 起 0 新提交（`git log --oneline e53fc30..HEAD` 为空），工作树干净；在途构建：无（artifact.status 全仓构建为空）。P0/P1 可执行队列仍空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`W-HOMEB-002` 未到 11-16、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`H-SEASON-TAB-001` 滑雪设计行 2026-11-30 前另行登记（未到期）、`CWEB-LEVEL-001` 四参数待所有者定案、`W6.2-PM-IMG` 待 PM 生成＋所有者整批过目、`LIFE-DESIGN-001` 待 PM 出稿拍板、其余（需用户确认）条目不动、`H0/H1` 核心公式与 `L0.x`/`AUDIT-03` 属 PM 待验范围、`H-FRESH-001` 余项需真实使用遥测；PM 仍按 PAUSE-LIFE-PM-001 暂停；无新的实现方提案待办项）。机械汇总门：本轮汇总（1 项核验勾选、无新派工）与 git 实查一致。
+- 核验勾选（本轮未派新构建；以下 1 项原审计前提已不存在，经仓库源码核查＋本机实跑验证后按惯例翻勾选；此 [完成] 仅表示实现方已核验，PM 结论以其评审记录为准；PM 暂停中）：
+  - `AUDIT-08`（P1，训练重量/次数输入提交时机）：原“只在点击完成按钮时提交”前提已不存在——workout-log/client/src/App.tsx 逐组自动保存链：重量/次数/RIR 输入在 blur/Enter/短 debounce 即 requestSave（onBlurSave/onEnterSave→blur，App.tsx:2577–2669；2598 行完成勾选走同链 editDraft），完成勾选不是独立提交路径；SetSaveMachine 纯状态机（dirty/saving/saved/error＋逐组自增 seq 防旧响应回写）＋createSaveQueue 单写漏斗（drainSetSaves）＋beforeunload 收尾；脏草稿永不被 refetch 覆盖。仓库本机实跑：`node workout-log/validate-autosave.mjs` 69/69 全过。
+- 未动项说明：其余 `AUDIT-0x` 项中，AUDIT-06（健康前端 5 分钟等待，health-dashboard App.tsx:588 仍存）与 AUDIT-11（应急金/FIRE 文案限制）仍需页面级证据，AUDIT-07/09 需 PM 语义复核，AUDIT-03/12 属运行待验/缺 CI 范围；本轮不批量翻勾选。
+- plans.md：`AUDIT-08` 已改 [完成] 并附核验登记。本轮未动 cron；修改文件：plans.md、本文件。
+
 ## 2026-11-03 08 时 PST（muse-life-plans-sync 07:55 轮次：`AUDIT-10` 核验勾选；无新派工）
 
 - 本轮队列核对（独立复核）：基线 `97162ba` 起 0 新提交（`git log --oneline 97162ba..HEAD` 为空），工作树干净；在途构建：无（上轮 W6.1、F1.3 P1 余项均已交付回灌）。P0/P1 可执行队列仍空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`W-HOMEB-002` 未到 11-16、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`H-SEASON-TAB-001` 滑雪设计行 2026-11-30 前另行登记（未到期）、`CWEB-LEVEL-001` 四参数待所有者定案、`W6.2-PM-IMG` 待 PM 生成＋所有者整批过目、`LIFE-DESIGN-001` 待 PM 出稿拍板、其余（需用户确认）条目不动、`H0/H1` 核心公式与 `L0.x`/`AUDIT-03` 属 PM 待验范围、`H-FRESH-001` 余项需真实使用遥测；PM 仍按 PAUSE-LIFE-PM-001 暂停）。机械汇总门：本轮汇总（1 项核验勾选、无新派工）与 git 实查一致。
