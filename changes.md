@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-11-03 10 时 PST（muse-life-plans-sync 09:55 轮次：`AUDIT-11` 核验勾选；无新派工）
+
+- 本轮队列核对（独立复核）：基线 `56bff23` == HEAD，`git log --oneline 56bff23..HEAD` 为空，工作树干净；在途构建：无（上轮 `AUDIT-08` 纯核验勾选、无新派工，changes.md 顶部两轮均无未交付的派工项）。P0/P1 可执行队列仍空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`W-HOMEB-002` 未到 11-16、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`H-SEASON-TAB-001` 滑雪设计行 2026-11-30 前另行登记（未到期）、`CWEB-LEVEL-001` 四参数待所有者定案、`W6.2-PM-IMG` 待 PM 生成＋所有者整批过目、`LIFE-DESIGN-001` 待 PM 出稿拍板、其余（需用户确认）条目不动、`H0/H1` 核心公式与 `L0.x`/`AUDIT-03` 属 PM 待验范围、`H-FRESH-001` 余项需真实使用遥测；PM 仍按 PAUSE-LIFE-PM-001 暂停）。机械汇总门：本轮汇总（1 项核验勾选、无新派工）与 git 实查一致。
+- 核验勾选（本轮未派新构建；以下 1 项原审计前提已不存在，经仓库源码核查＋本机实跑验证后按惯例翻勾选；此 [完成] 仅表示实现方已核验，PM 结论以其评审记录为准；PM 暂停中）：
+  - `AUDIT-11`（P1，财务应急金口径＋FIRE 线性外推文案）：两个原前提均已不存在——(1) 应急金不再用“最新单月支出”：`weekly-finance/client/src/App.tsx` 第 621 行起注释明示 `emergencyCoverage = 可动用现金 ÷ 近 3 个有效完整月平均支出`，`completeSpendBasis`（第 602 行）取近 3 个有效完整月（spendProven 且无异常）平均支出、不足 3 个月时如实报缺失（usedMonths/missingMonths），待核对月永不进分母；(2) FIRE “还差 X 年”主文案已先说明限制：`fireSummaryLine` 直接渲染 `预计还需 ${years} 年（线性估算，不含投资回报）`（第 1652 行），WhatIf 面板（第 2008、2051 行）与 FIRE 页签（第 2134 行）同样带该标注。仓库本机实跑 `node weekly-finance/validate-finance-arch.mjs`：154/154 全过。
+- 未动项说明：其余 `AUDIT-0x` 项中，AUDIT-06（健康前端固定等待，App.tsx:588 仍存）与 AUDIT-07/09 需 PM 语义复核，AUDIT-03/12 属运行待验/缺 CI 范围；本轮不批量翻勾选。
+- plans.md：`AUDIT-11` 已改 [完成] 并附核验登记。本轮未动 cron；修改文件：plans.md、本文件。
+
 ## 2026-11-03 09 时 PST（muse-life-plans-sync 08:55 轮次：`AUDIT-08` 核验勾选；无新派工）
 
 - 本轮队列核对（独立复核）：基线 `e53fc30` 起 0 新提交（`git log --oneline e53fc30..HEAD` 为空），工作树干净；在途构建：无（artifact.status 全仓构建为空）。P0/P1 可执行队列仍空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`W-HOMEB-002` 未到 11-16、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`H-SEASON-TAB-001` 滑雪设计行 2026-11-30 前另行登记（未到期）、`CWEB-LEVEL-001` 四参数待所有者定案、`W6.2-PM-IMG` 待 PM 生成＋所有者整批过目、`LIFE-DESIGN-001` 待 PM 出稿拍板、其余（需用户确认）条目不动、`H0/H1` 核心公式与 `L0.x`/`AUDIT-03` 属 PM 待验范围、`H-FRESH-001` 余项需真实使用遥测；PM 仍按 PAUSE-LIFE-PM-001 暂停；无新的实现方提案待办项）。机械汇总门：本轮汇总（1 项核验勾选、无新派工）与 git 实查一致。
