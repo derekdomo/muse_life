@@ -1653,6 +1653,62 @@ export function fireSummaryLine(fire: Dashboard["fire"]): string {
   return `FIRE 进度 ${percent.format(Math.max(0, fire.progress ?? 0))} · 缺口 ${currency.format(fire.gap)} · ${yearsText}`;
 }
 
+// F1.3 P1: conservative / neutral editable assumptions for the
+// FIRE panel. Both scenarios run the EXACT F1.3 fireYearsEstimate
+// expression (gap ÷ assumed annual contribution, ceil to whole
+// years) over the stored fire figure — the caliber never changes.
+// Each scenario's only input is an editable coefficient on the
+// current contribution pace (neutral defaults to 1.00, i.e. the
+// panel's own figure; conservative defaults to 0.80). The assumed
+// annual pace is rounded to cents before the estimate so an exact
+// division boundary cannot flip on floating-point dust. Inputs are
+// pure UI state in the component; nothing is saved, no schema, no
+// new data source. The panel outputs years / target dates and the
+// assumption numbers only — never advice.
+export type FireAssumptionKey = "neutral" | "conservative";
+
+export interface FireAssumptionScenario {
+  key: FireAssumptionKey;
+  label: string;
+  coefficient: number | null;
+  assumedAnnual: number | null;
+  years: number | null;
+  blockedReason: string | null;
+}
+
+export function fireAssumptionDefault(key: FireAssumptionKey): number {
+  return key === "conservative" ? 0.8 : 1;
+}
+
+export function fireAssumptionLabel(key: FireAssumptionKey): string {
+  return key === "conservative" ? "保守假设" : "中性假设";
+}
+
+export function fireAssumptionScenarios(
+  fire: Dashboard["fire"],
+  coefficients: Record<FireAssumptionKey, number | null>,
+): Array<FireAssumptionScenario> {
+  const order: Array<FireAssumptionKey> = ["neutral", "conservative"];
+  return order.map((key) => {
+    const coefficient = coefficients[key];
+    let assumedAnnual: number | null = null;
+    let years: number | null = null;
+    let blockedReason: string | null = null;
+    if (coefficient == null) {
+      blockedReason = "假设系数未填写";
+    } else if (fire.completeMonthsUsed === 0) {
+      blockedReason = "完整月份不足，暂不估算";
+    } else {
+      // Input rounding (to cents), not a caliber change: the
+      // estimate below is the verbatim F1.3 expression.
+      assumedAnnual = Math.round(fire.annualContribution * coefficient * 100) / 100;
+      years = fireYearsEstimate({ ...fire, annualContribution: assumedAnnual });
+      if (years == null) blockedReason = "按该假设的投入节奏不足以估算达标时间";
+    }
+    return { key, label: fireAssumptionLabel(key), coefficient, assumedAnnual, years, blockedReason };
+  });
+}
+
 // F3.4 目标情景试算 (What-if): pure scenario math for the FIRE
 // tab's what-if panel. The owner edits five inputs on the page
 // （月支出 / 月投入 / 应急金目标 / FIRE 目标 / 购房首付目标）;
@@ -1930,6 +1986,92 @@ function WhatIfPanel({ data, spendBasis }: { data: Dashboard; spendBasis: Return
           now={now}
           assumption={downPaymentAssumption}
         />
+      </div>
+    </section>
+  );
+}
+
+// F1.3 P1: the conservative / neutral assumption panel in the
+// FIRE tab, mounted directly under FireProgress. Two editable
+// coefficients (neutral 1.00 / conservative 0.80 defaults) scale
+// the current contribution pace; each scenario re-runs the exact
+// F1.3 fireYearsEstimate expression. Pure useState, no save, no
+// action, no schema. Years and dates only — no advice wording.
+function FireAssumptionsPanel({ data }: { data: Dashboard }) {
+  const [edited, setEdited] = useState<Partial<Record<FireAssumptionKey, string>>>({});
+  const coefficients: Record<FireAssumptionKey, number | null> = {
+    neutral: edited.neutral != null ? parseWhatIfInput(edited.neutral) : fireAssumptionDefault("neutral"),
+    conservative: edited.conservative != null ? parseWhatIfInput(edited.conservative) : fireAssumptionDefault("conservative"),
+  };
+  const scenarios = fireAssumptionScenarios(data.fire, coefficients);
+  const now = new Date();
+  const assumptionLine = `年投入假设 = 当前年投入（${currency.format(data.fire.annualContribution)}）× 系数；缺口按 F1.3 口径（缺口 ÷ 年投入，向上取整到整年）线性补足；线性估算，不含投资回报；系数清空或投入为 0 时不编造年限。`;
+  return (
+    <section className="whatif" aria-label="FIRE 假设情景">
+      <h3>FIRE 假设情景（保守 / 中性）</h3>
+      <p className="whatif-note">
+        在当前投入节奏上试算两种假设：中性假设按当前节奏（系数 1.00，可改），保守假设按其折减（系数 0.80，可改）。
+        输入只在本页试算，不保存、不写入任何数据；清空输入则该组诚实显示未填写，不编造数字。
+      </p>
+      <div className="whatif-inputs">
+        {(["neutral", "conservative"] as Array<FireAssumptionKey>).map((key) => (
+          <label className="whatif-field" key={key}>
+            <span>{fireAssumptionLabel(key)}系数</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="0.05"
+              value={edited[key] ?? String(fireAssumptionDefault(key))}
+              onChange={(event) => setEdited((prev) => ({ ...prev, [key]: event.target.value }))}
+            />
+          </label>
+        ))}
+      </div>
+      <button type="button" className="whatif-reset" onClick={() => setEdited({})}>恢复默认系数</button>
+      <div className="whatif-goals">
+        {scenarios.map((scenario) => {
+          const estimate: WhatIfGoalEstimate = {
+            months: scenario.years == null ? null : scenario.years * 12,
+            reached: scenario.years === 0,
+            blockedReason: scenario.blockedReason,
+          };
+          const yearsText = scenario.years == null
+            ? "无法估算"
+            : scenario.years === 0
+              ? "已达到目标"
+              : `约 ${scenario.years} 年`;
+          return (
+            <div className="whatif-goal" key={scenario.key}>
+              <h4>{scenario.label}（系数 {scenario.coefficient == null ? "未填写" : number.format(scenario.coefficient)}）</h4>
+              <div className="whatif-rows">
+                <p>
+                  <span>预计年限</span>
+                  <strong>{yearsText}</strong>
+                  <em>向上取整到整年 · 线性估算，不含投资回报</em>
+                </p>
+                <p>
+                  <span>预计达标</span>
+                  <strong>{whatIfDateLabel(now, estimate)}</strong>
+                  <em>按年数 × 12 个月折算</em>
+                </p>
+                <p>
+                  <span>假设年投入</span>
+                  <strong>{scenario.assumedAnnual == null ? "—" : currency.format(scenario.assumedAnnual)}</strong>
+                  <em>{scenario.coefficient == null ? "系数未填写" : `当前年投入 × ${number.format(scenario.coefficient)}`}</em>
+                </p>
+                {scenario.blockedReason != null ? (
+                  <p>
+                    <span>说明</span>
+                    <strong>—</strong>
+                    <em>{scenario.blockedReason}</em>
+                  </p>
+                ) : null}
+              </div>
+              <p className="whatif-assumption">假设：{assumptionLine}</p>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -3690,6 +3832,7 @@ function FireTab({ data, spendBasis }: { data: Dashboard; spendBasis: ReturnType
     <section className="fire-section section-block" id="fire-panel">
       <SectionTitle title="FIRE 进度" meta={data.fire.completeMonthsUsed > 0 ? `4% 规则 · 近 ${data.fire.completeMonthsUsed} 个完整有效月` : "4% 规则 · 完整月份不足"} />
       <FireProgress data={data} />
+      <FireAssumptionsPanel data={data} />
       <WhatIfPanel data={data} spendBasis={spendBasis} />
     </section>
   );

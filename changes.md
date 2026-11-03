@@ -3508,3 +3508,21 @@
  - 仓库验证（本机实跑，全合成数据）：validate-plan-coverage **19/19**（含 3 项变异真实执行翻转 6/2/4）；node 回归 23 套全绿（action-trends 15、autosave 69、body-trends 26、d1 36、deload-advisory 36、finish 98、guided-flow 34、muscle-diagram 36、muscle-heatmap 22、muscle-receipt 30、plate-warmup 27、progression-engine 35、progression 43、readiness-tip 23、receipt 37、rest-timer 48、rir-rpe 103、scroll-restore 26、start 66、video-embed 32、warmup-kind 23、week-current 59、week-frequency 16）；bun 的 plan-safe/plan-versioning 本机缺 node_modules/@libsql/client 未能执行（既有环境限制，构建方环境 226/226、34/34，沿前例记录）；隐私扫描：新增/改动文件零密钥/UUID/路径命中。
  - 如实保留：(a) 仓库 actions.ts 第 981 行模板字面量含 1 个刻意 null 字节作复合键分隔符（既有，非本轮引入）；(b) 精确 artifact version 平台未提供；(c) 审计沙箱非 owner，owner 视角实机以本人打开为准。
  - plans.md `W6.1` 已标记 [完成]（实现方已交付；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md、本文件、workout-log/server/src/plan-coverage.ts（新）、workout-log/validate-plan-coverage.mjs（新）、workout-log/server/src/actions.ts、workout-log/client/src/App.tsx、workout-log/client/src/theme.css、workout-log/DATA-PLAN.md。
+
+## 2026-11-03 08:05 PST · `F1.3` P1 余项（FIRE 保守/中性可编辑假设）交付并回灌本仓
+- 需求：plans.md `F1.3` — FIRE 达标年限标注「线性估算，不含投资回报」已于 2026-10-25 交付；本轮交付 P1 可选的保守/中性两种可编辑假设。用户直提优先项，按上轮顺延记录本轮首位实施。
+- 任务：FIRE 页签新增「FIRE 假设情景（保守 / 中性）」面板——两个可编辑系数（中性默认 1.00、保守默认 0.80）乘以当前年投入，逐字复用 `fireYearsEstimate`（缺口 ÷ 年投入，向上取整到整年）得出预计年限与达标年月；纯 UI 态、不持久化、不改口径。
+- 改了什么（纯加法，只改 client；线上版本以 artifact（space-3）为准，本仓由 builder 按工件落盘代码编写）：
+ - `weekly-finance/client/src/App.tsx`（+143）：`fireSummaryLine` 之后、F3.4 注释块之前新增 `FireAssumptionKey`/`FireAssumptionScenario` 类型、`fireAssumptionDefault`（中性 1.00/保守 0.80）、`fireAssumptionLabel`（中性假设/保守假设）、`fireAssumptionScenarios`（系数 × 当前年投入→四舍五入到分；年投入为 0→null 不编造；完整月份不足→阻断；逐字调用 `fireYearsEstimate`）；`WhatIfPanel` 之后新增组件 `FireAssumptionsPanel`（useState 挂载态文本系数、parseWhatIfInput 解析、年数 × 12 个月经 `whatIfDateLabel` 输出预计达标年月、「恢复默认系数」按钮、每组结果块末尾「假设：年投入假设 = 当前年投入 × 系数；…线性估算，不含投资回报；…」；系数未填→「假设系数未填写」不编造）；`FireTab` 挂载顺序 FireProgress → FireAssumptionsPanel → WhatIfPanel。`theme.css` 零改动（复用既有 `.whatif*` 类，输入/按钮已有 44px 触达）。
+ - `weekly-finance/validate-fire-assumptions.mjs`（新）：真实生产函数提取实跑。
+ - `weekly-finance/DATA-PLAN.md`：末尾新增 F1.3 P1 余项章节（口径/位置/诚实阻断/色弱与 44px/验证矩阵）。
+ - 未改：`fireYearsEstimate` 口径、`recurringCharges.ts`、`schema`、服务端；`cashFlowForecast.ts` 本仓不存在；不提交 app.db/.env/密钥/真实数据。
+- 验证证据（本机实跑，全合成数据；identity：Xiangyu Sun）：
+ - validate-fire-assumptions **53/53**：默认系数与标签、口径等价矩阵 5 组（中性(1.00)与面板自身数字恒等、保守(0.80)假设年投入 80000/年限 13、浮点尘埃边界 7700/11000×0.7→1 年）、三种诚实阻断（完整月份不足/系数未填写/假设年投入为 0）、已达标 gap=0、顺序 [neutral, conservative]、日期标签与输入解析复用；3 项变异真实执行全部翻转（M1 ceil→floor：11→10；M2 保守默认 0.8→1.2：13→9；M3 去掉分取整：1→2，证实取整守卫必要）。
+ - 既有回归全绿：alerts 46、arch-preview 149、color-vision 20、design-b1a 235、finance-arch 154、recurring-charges 26、summary-cards 42、whatif 52。
+ - 9 套既有环境失败（available-cash/cashflow/check-progress/facts-card/holdings/investment-performance/monthly-facts/payload/tx-review）与 9 个 .ts 套件：node_modules 缺 typescript（stash 前后一致、非本轮引入；构建方环境全过，沿前例）。
+ - 隐私扫描：新增/改动行零密钥/UUID/路径命中；禁建议措辞（建议/推荐/应当/买入/卖出）0 命中；新代码区无 localStorage/app.db/.env 引用；挂载顺序经源码抽查确认。
+ - 构建方回执：space-3 artifact.edit verification_status SUCCEEDED（构建 2026-11-03 15:01 UTC）；构建审计由工件构建方执行，本机无该工具链。
+- 局限：精确 artifact version 平台未提供；回灌代码与工件的逐字核对由 builder 落盘保证，repo 侧只做了接线/顺序/文案抽查与真实函数断言，未逐字核对线上工作树字节；构建审计/typecheck 以构建方回传为准；owner 视角实机以本人打开为准。
+- 回滚：revert 本次提交即可（纯加法文件变更）；app.db 未触碰。
+- plans.md `F1.3` 已标记 [完成]（实现方已交付；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md、本文件、weekly-finance/client/src/App.tsx、weekly-finance/validate-fire-assumptions.mjs（新）、weekly-finance/DATA-PLAN.md。
