@@ -41,6 +41,19 @@ import {
   type ReadinessTip,
   type ReadinessTipAdviceInput,
 } from "./readiness-tip";
+import {
+  buildVersionList,
+  computeVersionMigration,
+  normalizePlanUnit,
+  normalizeRestSeconds,
+  PLAN_VERSION_FIRST,
+  REST_SECONDS_MAX,
+  REST_SECONDS_MIN,
+  validateRestSeconds,
+  type PlanVersionEntry,
+  type VersionedExerciseInput,
+  type VersionedScheduleInput,
+} from "./plan-versioning";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -49,7 +62,16 @@ export const ROUTINE_KEYS = ["push", "pull", "legs", "home_posture", "home_snowb
 export type RoutineKey = (typeof ROUTINE_KEYS)[number];
 export const SCHEDULE_CODES = [...ROUTINE_KEYS, "swim", "rest"] as const;
 
-export type PlanExercise = { key: string; name: string; sets: number; target: string };
+export type PlanExercise = {
+  key: string;
+  name: string;
+  sets: number;
+  target: string;
+  // W4.1 (additive): per-exercise unit and default rest seconds for
+  // the rest timer (null = the timer's own default).
+  unit: "lb" | "kg";
+  restSeconds: number | null;
+};
 export type PlanTemplateMap = Record<RoutineKey, PlanExercise[]>;
 
 // Default plan (2026-10-18 frequency sync, approved by the user):
@@ -58,7 +80,11 @@ export type PlanTemplateMap = Record<RoutineKey, PlanExercise[]>;
 // snowboard 1x/week. These constants are ONLY the idempotent seed and
 // the fallback when the plan tables are unreadable — the live plan is
 // the persisted rows, editable through updatePlan.
-export const DEFAULT_PLAN_TEMPLATES: PlanTemplateMap = {
+// The seed shape predates W4.1: unit defaults to "lb" and
+// rest_seconds to NULL at the database level, so the seed rows carry
+// neither field.
+export type SeedPlanExercise = { key: string; name: string; sets: number; target: string };
+export const DEFAULT_PLAN_TEMPLATES: Record<RoutineKey, SeedPlanExercise[]> = {
   push: [
     { key: "barbell-bench", name: "杠铃卧推", sets: 4, target: "6–8" },
     { key: "overhead-press", name: "站姿推举", sets: 3, target: "8–10" },
@@ -131,6 +157,10 @@ const setResponse = z.object({
   // W3.1 (additive): per-set RIR 0–5, null = not recorded.
   rir: z.number().nullable(),
   completed: z.boolean(),
+  // W4.1 (additive): the planned default rest seconds snapshotted
+  // at session creation. Null = the plan had no custom default for
+  // this exercise when the session was built.
+  rest_seconds: z.number().nullable(),
 });
 
 const workoutResponse = z.object({
@@ -184,6 +214,9 @@ async function loadWorkout(ctx: Ctx, workoutId: number) {
       reps: row.reps,
       rir: row.rir,
       completed: row.completed,
+      // W4.1: the session snapshot — history renders from this, not
+      // from the live template.
+      rest_seconds: row.restSeconds,
     })),
   };
 }
@@ -588,6 +621,11 @@ const planExerciseResponse = z.object({
   name: z.string(),
   sets: z.number(),
   target: z.string(),
+  // W4.1 (additive, optional): per-exercise unit and default rest
+  // seconds. Older payloads omit both; readers default unit to
+  // "lb" and rest_seconds to null.
+  unit: z.enum(["lb", "kg"]).optional(),
+  rest_seconds: z.number().nullable().optional(),
 });
 const planRoutineResponse = z.object({
   routine: routineSchema,
@@ -683,6 +721,18 @@ const planResponse = z.object({
   // present the empty body as the plan. A successful read omits the
   // field entirely, exactly as before.
   read_error: z.string().optional(),
+  // W4.1 (additive, optional): the template version the live plan
+  // rows are stamped with, plus the full version registry (newest
+  // first, each with created_at and a current/read-only mark).
+  // Present on every successful owner read; a pre-W4.1 client
+  // ignores both fields.
+  plan_version: z.number().optional(),
+  plan_versions: z.array(z.object({
+    version: z.number(),
+    created_at: z.string(),
+    note: z.string(),
+    current: z.boolean(),
+  })).optional(),
 });
 const updatePlanResponse = z.object({
   ok: z.boolean(),
@@ -867,13 +917,39 @@ async function loadPlanTemplates(ctx: Ctx): Promise<PlanTemplateMap> {
         name: row.exerciseName,
         sets: row.sets,
         target: row.targetReps,
+        // W4.1: per-exercise unit and default rest seconds travel
+        // with the template; the session snapshot binds them at
+        // creation time.
+        unit: normalizePlanUnit(row.unit),
+        restSeconds: row.restSeconds,
       });
     }
   }
   for (const routine of ROUTINE_KEYS) {
-    if (templates[routine].length === 0) templates[routine] = [...DEFAULT_PLAN_TEMPLATES[routine]];
+    if (templates[routine].length === 0) {
+      templates[routine] = DEFAULT_PLAN_TEMPLATES[routine].map((exercise) => ({
+        ...exercise,
+        unit: "lb" as const,
+        restSeconds: null as number | null,
+      }));
+    }
   }
   return templates;
+}
+
+// W4.1: the live template version is the max version stamped on the
+// plan tables (they are always written together, one version per
+// save). Falls back to the plan_versions registry, then to 0 when no
+// versioned plan exists yet.
+async function readLivePlanVersion(ctx: Ctx): Promise<number> {
+  const db = ctx.db<typeof schema>();
+  try {
+    const rows = await db.select({ version: schema.planVersions.version }).from(schema.planVersions);
+    if (rows.length > 0) return Math.max(...rows.map((row) => row.version));
+  } catch {
+    // Pre-0012 database: the registry table does not exist yet.
+  }
+  return 0;
 }
 
 // W-PLAN-SAFE-001 follow-up (conflict visibility): every
@@ -971,7 +1047,20 @@ async function loadPlanConflicts(
 // exactly once with known codes; daily items 1–10 with unique keys
 // and non-empty titles.
 export function validatePlanInput(input: {
-  routines: { routine: string; exercises: { key: string; name: string; sets: number; target: string }[] }[];
+  routines: {
+    routine: string;
+    exercises: {
+      key: string;
+      name: string;
+      sets: number;
+      target: string;
+      // W4.1 (additive, optional): per-exercise unit and default
+      // rest seconds. Absent = keep old behavior (unit "lb", no
+      // custom rest default).
+      unit?: string;
+      rest_seconds?: number | null;
+    }[];
+  }[];
   schedule: { day_index: number; routine_code: string; note: string }[];
   daily_items: { key: string; title: string; detail: string }[];
 }): string | null {
@@ -993,6 +1082,14 @@ export function validatePlanInput(input: {
         return `组数需要在 1–10 之间：${exercise.name}`;
       }
       if (exercise.target.trim() === "" || exercise.target.length > 30) return `目标次数不能为空：${exercise.name}`;
+      // W4.1: unit must be lb/kg when given; rest seconds, when
+      // given, must be an integer 15–600 (validated by the pure
+      // plan-versioning module — rejected here, never clamped).
+      if (exercise.unit !== undefined && exercise.unit !== "lb" && exercise.unit !== "kg") {
+        return `单位不合法：${exercise.name}`;
+      }
+      const restError = validateRestSeconds(exercise.rest_seconds ?? null);
+      if (restError) return `${restError}：${exercise.name}`;
     }
   }
   if (input.schedule.length !== 7) return "周安排需要正好 7 天";
@@ -2943,9 +3040,16 @@ export const Actions = {
       // initializing = 1 and stays invisible/unwritable (getDashboard
       // and every mutation exclude initializing rows) until the
       // single conditional UPDATE at the end flips it ready.
+      // W4.1: the session binds the template version at
+      // creation — the version stamp travels on the workout row so
+      // history always knows which template built it. Read before
+      // the sets are created; a concurrent save landing between the
+      // read and the insert can only make the stamp trail the very
+      // latest template by one save, never corrupt the snapshot.
+      const templateVersion = await readLivePlanVersion(ctx);
       const inserted = await db
         .insert(schema.workouts)
-        .values({ routine: args.routine, unit: args.unit, initializing: 1 })
+        .values({ routine: args.routine, unit: args.unit, initializing: 1, planVersion: templateVersion })
         .returning({ id: schema.workouts.id });
       const workoutId = inserted[0]?.id;
       if (!workoutId) throw new Error("未能开始训练");
@@ -3027,9 +3131,14 @@ export const Actions = {
           return {
             workoutId,
             exerciseKey: exercise.key,
+            // W4.1: the name, target and planned default rest are a
+            // snapshot of the template AT CREATION. Later template
+            // edits create a new version and never touch these rows,
+            // so history renders what was actually planned.
             exerciseName: exercise.name,
             setNumber: index + 1,
             targetReps: exercise.target,
+            restSeconds: exercise.restSeconds,
             weight: suggestedWeight,
             reps: suggestedReps,
           };
@@ -3330,11 +3439,11 @@ export const Actions = {
       // initializing workout gains no sets. RETURNING is the verdict:
       // zero rows, zero inserted.
       const insertedRows = await db.all(sql`
-        INSERT INTO workout_sets (workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, completed, created_at, updated_at)
-        SELECT id, ${previous.exerciseKey}, ${previous.exerciseName}, ${previous.setNumber + 1}, ${previous.targetReps}, ${previous.weight}, NULL, 0, ${nowMs}, ${nowMs}
+        INSERT INTO workout_sets (workout_id, exercise_key, exercise_name, set_number, target_reps, rest_seconds, weight, reps, completed, created_at, updated_at)
+        SELECT id, ${previous.exerciseKey}, ${previous.exerciseName}, ${previous.setNumber + 1}, ${previous.targetReps}, ${previous.restSeconds}, ${previous.weight}, NULL, 0, ${nowMs}, ${nowMs}
         FROM workouts
         WHERE id = ${args.workout_id} AND completed_at IS NULL AND initializing = 0
-        RETURNING id, workout_id, exercise_key, exercise_name, set_number, target_reps, weight, reps, rir, completed
+        RETURNING id, workout_id, exercise_key, exercise_name, set_number, target_reps, rest_seconds, weight, reps, rir, completed
       `);
       const row = insertedRows[0] as
         | {
@@ -3344,6 +3453,7 @@ export const Actions = {
             exercise_name: string;
             set_number: number;
             target_reps: string;
+            rest_seconds: number | null;
             weight: number | null;
             reps: number | null;
             rir: number | null;
@@ -3361,6 +3471,9 @@ export const Actions = {
           exercise_name: row.exercise_name,
           set_number: row.set_number,
           target_reps: row.target_reps,
+          // W4.1: an added set inherits the session snapshot of the
+          // exercise it copies.
+          rest_seconds: row.rest_seconds,
           weight: row.weight,
           reps: row.reps,
           // W3.1: a freshly added set has no RIR recorded yet.
@@ -3491,6 +3604,9 @@ export const Actions = {
       let scheduleRows: (typeof schema.planSchedule.$inferSelect)[] = [];
       let dailyRows: (typeof schema.planDailyItems.$inferSelect)[] = [];
       let conflicts: z.infer<typeof planConflictResponse>[] = [];
+      // W4.1: the template version registry, read inside the same
+      // bracket so the list always belongs to the plan above.
+      let versionRows: { version: number; createdAt: Date; note: string }[] = [];
       let consistent = false;
       for (let attempt = 0; attempt < PLAN_READ_MAX_ATTEMPTS; attempt++) {
         const versionBefore = await readPlanVersion(ctx);
@@ -3511,6 +3627,20 @@ export const Actions = {
         // version as the routines above. The bracket's version is
         // stamped onto the conflict entries for decision binding.
         conflicts = await loadPlanConflicts(ctx, versionBefore);
+        try {
+          versionRows = await db
+            .select({
+              version: schema.planVersions.version,
+              createdAt: schema.planVersions.createdAt,
+              note: schema.planVersions.note,
+            })
+            .from(schema.planVersions)
+            .orderBy(desc(schema.planVersions.version));
+        } catch {
+          // Pre-0012 database: no registry table yet — the response
+          // simply omits the version list.
+          versionRows = [];
+        }
         const versionAfter = await readPlanVersion(ctx);
         if (versionBefore === versionAfter) {
           consistent = true;
@@ -3536,6 +3666,7 @@ export const Actions = {
         .select()
         .from(schema.dailyCompletions)
         .where(eq(schema.dailyCompletions.dateKey, dateKey));
+      const liveVersion = versionRows.length > 0 ? versionRows[0].version : 0;
       return {
         forbidden: false,
         routines: ROUTINE_KEYS.map((routine) => ({ routine, exercises: templates[routine] })),
@@ -3550,6 +3681,23 @@ export const Actions = {
         // No unconfirmed conflict → both fields omitted, so the
         // response is byte-for-byte the pre-fix shape.
         ...(conflicts.length > 0 ? { conflicts, conflict_count: conflicts.length } : {}),
+        // W4.1 (additive): the live template version plus the full
+        // registry (newest first, current/read-only marked). A
+        // pre-0012 database returns plan_version 0 and an empty list.
+        plan_version: liveVersion,
+        plan_versions: buildVersionList(
+          versionRows.map((row) => ({
+            version: row.version,
+            createdAt: row.createdAt,
+            note: row.note,
+          })),
+          liveVersion,
+        ).map((entry) => ({
+          version: entry.version,
+          created_at: entry.createdAt instanceof Date ? entry.createdAt.toISOString() : String(entry.createdAt),
+          note: entry.note,
+          current: entry.current,
+        })),
       };
     },
   }),
@@ -3566,6 +3714,11 @@ export const Actions = {
               name: z.string(),
               sets: z.number(),
               target: z.string(),
+              // W4.1 (additive, optional): per-exercise unit and
+              // default rest seconds. Absent = unit "lb", no custom
+              // rest default.
+              unit: z.enum(["lb", "kg"]).optional(),
+              rest_seconds: z.number().nullable().optional(),
             }),
           ),
         }),
@@ -3602,30 +3755,73 @@ export const Actions = {
       // and increment the internal plan version token in the SAME
       // batch — so the token and the tables can never drift apart,
       // which is what makes getPlan's bracketed version check sound.
+      //
+      // W4.1 (template versioning): the batch is extended with the
+      // archive step. Before the live tables are replaced, the
+      // outgoing rows are cloned verbatim into plan_exercise_history
+      // / plan_schedule_history stamped with the old version; the
+      // new rows are stamped with the new version and one
+      // plan_versions row registers it. The pure plan-versioning
+      // module computes the whole migration — this handler only
+      // executes it. History tables are append-only: no later save
+      // ever edits them, so an old template's names and targets
+      // survive any later rename.
       try {
-        await db.batch([
+        const [liveExercises, liveSchedule, liveVersion] = await Promise.all([
+          db.select().from(schema.planExercises),
+          db.select().from(schema.planSchedule),
+          readLivePlanVersion(ctx),
+        ]);
+        const migration = computeVersionMigration({
+          oldVersion: liveVersion,
+          oldExercises: liveExercises.map((row) => ({
+            routine: row.routine,
+            sortOrder: row.sortOrder,
+            exerciseKey: row.exerciseKey,
+            exerciseName: row.exerciseName,
+            sets: row.sets,
+            targetReps: row.targetReps,
+            unit: normalizePlanUnit(row.unit),
+            restSeconds: row.restSeconds,
+          })),
+          oldSchedule: liveSchedule.map((row) => ({
+            dayIndex: row.dayIndex,
+            routineCode: row.routineCode,
+            note: row.note,
+          })),
+          newExercises: args.routines.flatMap((entry) =>
+            entry.exercises.map((exercise, index) => ({
+              routine: entry.routine,
+              sortOrder: index,
+              exerciseKey: exercise.key,
+              exerciseName: exercise.name.trim(),
+              sets: exercise.sets,
+              targetReps: exercise.target.trim(),
+              unit: normalizePlanUnit(exercise.unit),
+              restSeconds: normalizeRestSeconds(exercise.rest_seconds ?? null),
+            })),
+          ),
+          newSchedule: args.schedule.map((entry) => ({
+            dayIndex: entry.day_index,
+            routineCode: entry.routine_code,
+            note: entry.note,
+          })),
+          createdAt: new Date(),
+          note: "",
+        });
+        const statements: BatchItem[] = [];
+        if (migration.exerciseHistory.length > 0) {
+          statements.push(db.insert(schema.planExerciseHistory).values(migration.exerciseHistory));
+        }
+        if (migration.scheduleHistory.length > 0) {
+          statements.push(db.insert(schema.planScheduleHistory).values(migration.scheduleHistory));
+        }
+        statements.push(
           db.delete(schema.planExercises),
           db.delete(schema.planSchedule),
           db.delete(schema.planDailyItems),
-          db.insert(schema.planExercises).values(
-            args.routines.flatMap((entry) =>
-              entry.exercises.map((exercise, index) => ({
-                routine: entry.routine,
-                sortOrder: index,
-                exerciseKey: exercise.key,
-                exerciseName: exercise.name.trim(),
-                sets: exercise.sets,
-                targetReps: exercise.target.trim(),
-              })),
-            ),
-          ),
-          db.insert(schema.planSchedule).values(
-            args.schedule.map((entry) => ({
-              dayIndex: entry.day_index,
-              routineCode: entry.routine_code,
-              note: entry.note,
-            })),
-          ),
+          db.insert(schema.planExercises).values(migration.stamped.exercises),
+          db.insert(schema.planSchedule).values(migration.stamped.schedule),
           db.insert(schema.planDailyItems).values(
             args.daily_items.map((item, index) => ({
               itemKey: item.key,
@@ -3634,9 +3830,15 @@ export const Actions = {
               sortOrder: index,
             })),
           ),
+          db.insert(schema.planVersions).values({
+            version: migration.stamped.version,
+            createdAt: migration.stamped.versionRow.createdAt,
+            note: migration.stamped.versionRow.note,
+          }),
           db.insert(schema.planMeta).values({ key: PLAN_META_SEEDED_KEY, value: "1" }).onConflictDoNothing(),
           planVersionIncrement(db),
-        ]);
+        );
+        await db.batch(statements);
       } catch {
         // The batch rolled back: the old plan is untouched. Report a
         // retryable failure instead of throwing — the editor keeps

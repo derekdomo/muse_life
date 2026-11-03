@@ -870,3 +870,30 @@ external source. The default path is now 今天的计划 → 准备热身 →
 - Display: start page `ReadinessTipPanel` renders tier symbol + label + level (第 N 档）, headline, the first evidence sentence, and a meta line (status / score / signal count / confidence, each honestly — / 暂无 when null). The ONLY control is a 44px 「重新同步」 button (owner only) that spawns a fresh sync task; the client polls the dashboard on a persistent-state completion signal (cached readStartedAt advancing past the tap instant) with a ~2 min timeout, never a fixed-duration pretense.
 - Validation: `validate-readiness-tip.mjs` runs the real production module (pure-function extraction) over synthetic data only — tier meta pinning, verbatim pass-through, missing/invalid → 数据不足 with null (not 0) score/signalCount, canReadinessTipModifyPlan pinned false, version-decision matrix (apply/duplicate/ignore incl. NaN guards), save-wiring source checks (compare-and-write SQL, read-only gate, no plan/workout/set writes in the save path) — with 3 real mutations each proven to flip the suite. Full regression after this slice: all validators green; validate-plan-safe's migration-sequence expectation extended 0001..0010 → 0001..0011.
 - Honest limitation: the cross-artifact sync task itself cannot be executed end-to-end from the sandbox action channel (the derived task runs outside it); the wiring is covered by source assertions + the pure-module suite + type checks, and the start page honestly shows the data-insufficient state until the first sync lands.
+
+## Plan template versioning (W4.1, added 2026-11-02)
+
+The owner edits the training plan (training-day schedule, exercise
+add/delete/reorder, set counts, target rep ranges, per-exercise unit
+lb/kg, per-exercise default rest seconds 15–600) through the plan
+editor; every save creates a new template version:
+
+- `plan_versions` registers one row per version (1, 2, 3, … with the
+  save instant). The live `plan_exercises` / `plan_schedule` rows are
+  stamped with the current version.
+- Before the live tables are replaced, the outgoing rows are cloned
+  verbatim into the read-only `plan_exercise_history` /
+  `plan_schedule_history` tables stamped with the old version — all
+  in ONE atomic `db.batch`, so a version is never half-archived.
+  History tables are append-only; no later save edits them.
+- New sessions bind the template version at creation
+  (`workouts.plan_version`); every created `workout_sets` row
+  snapshots the exercise name / target reps / rest seconds as they
+  were then. History and receipts render from the session's own
+  snapshot and are never rewritten by a new template.
+- The rest timer adopts the exercise's snapshotted default rest when
+  a set completes (null snapshot keeps the timer's own default).
+- Migration 0012 is purely additive (3 new tables + 5 new columns);
+  existing rows default to version 1 / unit 'lb' / null rest, and a
+  backfill registers version 1 for databases that already hold a
+  plan. Edit entry stays owner-only; non-owner writes are forbidden.

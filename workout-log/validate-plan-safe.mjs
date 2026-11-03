@@ -124,11 +124,12 @@ const MIGRATION_FILES = readdirSync(new URL('./drizzle', import.meta.url))
   .sort();
 // Updated for the additive migrations that landed after the
 // plan-safe slice (0007/0008 annotations, 0009 W3.1 fields, 0010
-// W5.3 body_measurements, 0011 W4.2 readiness_tip_cache): the
-// invariant is the contiguous ordered sequence from 0001, with the
-// plan-safe pair 0005/0006 still in place — not a frozen file count.
-check('migrations: contiguous sequence 0001..0011 present, plan-safe pair in place',
-  MIGRATION_FILES.length === 11
+// W5.3 body_measurements, 0011 W4.2 readiness_tip_cache, 0012 W4.1
+// plan versioning): the invariant is the contiguous ordered
+// sequence from 0001, with the plan-safe pair 0005/0006 still in
+// place — not a frozen file count.
+check('migrations: contiguous sequence 0001..0012 present, plan-safe pair in place',
+  MIGRATION_FILES.length === 12
     && MIGRATION_FILES.every((f, i) => f.startsWith(`${String(i + 1).padStart(4, '0')}_`))
     && MIGRATION_FILES[4].startsWith('0005_') && MIGRATION_FILES[5].startsWith('0006_'),
   MIGRATION_FILES.join(','));

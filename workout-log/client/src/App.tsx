@@ -120,7 +120,9 @@ const SCHEDULE_CODE_LABELS: Record<string, string> = {
 
 type Plan = ApiResponse<typeof api, "getPlan">;
 type PlanRoutineEntry = Plan["routines"][number];
-type PlanExerciseDraft = { key: string; name: string; sets: number; target: string };
+// W4.1: per-exercise unit and default rest seconds (null = the
+// rest timer's own default). Optional so older drafts keep working.
+type PlanExerciseDraft = { key: string; name: string; sets: number; target: string; unit?: "lb" | "kg"; rest_seconds?: number | null };
 
 // W2.2 scroll restore (client presentation only; no server writes):
 // each top-level view saves its window.scrollY under its own view
@@ -2871,7 +2873,9 @@ function ExerciseBlock({ workout, exercise, previous, suggestedTarget, suggested
   headInfo: ExerciseHeadInfo;
   onSelect: () => void;
   onChanged: () => void;
-  onSetCompleted: () => void;
+  // W4.1: carries the exercise's snapshotted planned default rest
+  // seconds (null = the plan had no custom default).
+  onSetCompleted: (plannedRestSeconds: number | null) => void;
   onOpenGuide: (guide: ExerciseGuide, key: string) => void;
   onRegisterSet: (id: number, handle: SetSaveHandle | null) => void;
   // W-FINISH-001: an in-flight add registers its promise (which only
@@ -2969,7 +2973,7 @@ function ExerciseBlock({ workout, exercise, previous, suggestedTarget, suggested
               locked={entryLocked}
               onSaved={onChanged}
               onRegister={onRegisterSet}
-              onCompleted={onSetCompleted}
+              onCompleted={() => onSetCompleted(exercise.sets[0]?.rest_seconds ?? null)}
               onEnterNext={(field) => onEnterNextSet(set.id, field)}
             />
           ))}
@@ -3171,7 +3175,14 @@ function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCo
   const [restTimer, setRestTimer] = useState<RestTimerState>(() => initRestTimer());
   const [restNow, setRestNow] = useState(() => Date.now());
 
-  const handleSetCompleted = useCallback(() => {
+  // W4.1: a completed set adopts the exercise's planned default
+  // rest (snapshotted at session creation) as the timer duration; a
+  // null snapshot keeps the timer's own default. Duration-only: it
+  // never starts the timer by itself (W-TIMER-001 semantics stay).
+  const handleSetCompleted = useCallback((plannedRestSeconds: number | null) => {
+    if (plannedRestSeconds != null) {
+      setRestTimer((state) => setRestDuration(state, plannedRestSeconds));
+    }
     // W-TIMER-001: with auto off, completing a set neither starts nor
     // restarts the timer (an already-running countdown is untouched);
     // with auto on this behaves exactly as before.
@@ -4139,7 +4150,7 @@ function ActiveWorkout({ workout, recent, weekSummaries, progressionAdvice, onCo
                 }
               }}
               onChanged={refresh}
-              onSetCompleted={handleSetCompleted}
+              onSetCompleted={(restSeconds) => handleSetCompleted(restSeconds)}
               onOpenGuide={(guide, key) => setSelectedGuide({ guide, key })}
               onRegisterSet={registerSet}
               onRegisterPendingAdd={registerPendingAdd}
@@ -5366,6 +5377,8 @@ function PlanEditor({ plan }: { plan: Plan }) {
         if (exercise.name.trim() === "") return "动作名称不能为空";
         if (exercise.target.trim() === "") return `目标次数不能为空：${exercise.name}`;
         if (!Number.isInteger(exercise.sets) || exercise.sets < 1 || exercise.sets > 10) return `组数需要在 1–10 之间：${exercise.name}`;
+        if (exercise.unit !== undefined && exercise.unit !== "lb" && exercise.unit !== "kg") return `单位不合法：${exercise.name}`;
+        if (exercise.rest_seconds != null && (!Number.isInteger(exercise.rest_seconds) || exercise.rest_seconds < 15 || exercise.rest_seconds > 600)) return `默认休息需要是 15–600 秒的整数：${exercise.name}`;
         if (keys.has(exercise.key)) return `同一训练日内动作重复：${exercise.name}`;
         keys.add(exercise.key);
       }
@@ -5431,7 +5444,7 @@ function PlanEditor({ plan }: { plan: Plan }) {
         suffix += 1;
         key = `custom-${suffix}`;
       }
-      return { ...entry, exercises: [...entry.exercises, { key, name: "新动作", sets: 3, target: "10–12" }] };
+      return { ...entry, exercises: [...entry.exercises, { key, name: "新动作", sets: 3, target: "10–12", unit: "lb" as const, rest_seconds: null }] };
     }));
   }
 
@@ -5474,6 +5487,33 @@ function PlanEditor({ plan }: { plan: Plan }) {
                       aria-label={`${exercise.name}目标次数`}
                       value={exercise.target}
                       onChange={(event) => updateExercise(entry.routine, index, { target: event.target.value })}
+                    />
+                  </label>
+                  <label className="plan-field plan-field-unit">
+                    <span>单位</span>
+                    <select
+                      aria-label={`${exercise.name}单位`}
+                      value={exercise.unit ?? "lb"}
+                      onChange={(event) => updateExercise(entry.routine, index, { unit: event.target.value as "lb" | "kg" })}
+                    >
+                      <option value="lb">lb</option>
+                      <option value="kg">kg</option>
+                    </select>
+                  </label>
+                  <label className="plan-field plan-field-rest">
+                    <span>默认休息（秒，留空=默认）</span>
+                    <input
+                      aria-label={`${exercise.name}默认休息秒数`}
+                      type="number"
+                      min="15"
+                      max="600"
+                      step="1"
+                      placeholder="默认"
+                      value={exercise.rest_seconds ?? ""}
+                      onChange={(event) => {
+                        const raw = event.target.value.trim();
+                        updateExercise(entry.routine, index, { rest_seconds: raw === "" ? null : Number(raw) });
+                      }}
                     />
                   </label>
                   <div className="plan-row-actions">
@@ -5585,9 +5625,37 @@ function PlanEditor({ plan }: { plan: Plan }) {
             {save.isPending ? "正在保存…" : "保存计划"}
           </button>
           <p className="plan-editor-note">修改只保存在这里的草稿里，点保存后才生效；已完成的历史记录不会被改动。</p>
+          <PlanVersionList plan={plan} />
         </div>
       </details>
     </section>
+  );
+}
+
+// W4.1: template version list. Every save registers a new version;
+// the list is newest-first, the live version is marked 当前, all
+// others are read-only history. Text-first (version number + date +
+// state words), never color alone.
+function PlanVersionList({ plan }: { plan: Plan }) {
+  const versions = plan.plan_versions ?? [];
+  if (versions.length === 0) return null;
+  return (
+    <div className="plan-version-list">
+      <h3>模板版本</h3>
+      <p className="plan-version-note">
+        每次保存生成一个新版本（当前 v{plan.plan_version ?? "—"}）；历史版本只读，旧版本里的动作名称与目标会一直保留，已完成的历史记录按当时的快照显示、不会被新模板改写。
+      </p>
+      <ul>
+        {versions.map((entry) => (
+          <li key={entry.version} className={entry.current ? "plan-version-current" : "plan-version-archived"}>
+            <span className="plan-version-tag">{entry.current ? "● 当前" : "○ 历史"}</span>
+            <span>v{entry.version}</span>
+            <span>{new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(entry.created_at))}</span>
+            {entry.note ? <span>{entry.note}</span> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

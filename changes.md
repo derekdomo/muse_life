@@ -1,5 +1,14 @@
 # Changes
 
+## 2026-11-02 23:12 PST（muse-life-plans-sync 本轮：W4.1 构建交付＋仓库回灌）
+
+- 需求编号：plans.md `W4.1`（P2，计划可配置与健康联动）——owner 可编辑训练日、动作、组数、次数范围、单位与默认休息时间；模板必须版本化，历史记录继续显示当时的名称和目标，不能被新模板回写。22:55 轮次派工的 space-6 构建已完成（builder 回传 verification_status SUCCEEDED）；本轮执行同规格回灌（非逐字节拷贝，功能等价验证；精确 artifact version 平台未提供）。
+- 交付内容（线上 space-6）：(1) 计划编辑器可改训练日排期（plan_schedule，含 swim/rest 特殊代码）、每 routine 动作增删排序、组数、目标次数范围、每动作单位（lb/kg）与默认休息秒数（15–600，留空=默认）。(2) 每次保存经纯函数模块 `server/src/plan-versioning.ts`（零 import，全部导出）在同一原子 db.batch 内把旧版整表逐字克隆进只读历史表（`plan_exercise_history`/`plan_schedule_history`，盖旧版本戳）、新行盖新版本戳、并在 `plan_versions` 登记版本号+编辑时间；编辑器内可查看版本列表（v1 起，含当前/只读标记）。(3) 新 session 建组时按构建时刻模板绑定快照（exerciseName/targetReps/restSeconds 存入组行、`plan_version` 存入 workout 行）；历史页与回执按 session 自身快照渲染并标注所用模板版本；休息计时器在完成一组后自动采用该动作的计划默认休息（null 快照保持计时器自有默认）。(4) 编辑入口仅 owner（与 updatePlan 同语义），非 owner 读写仍 forbidden。约束：加法 migration 0012（3 新表 + 6 新列，无 ALTER/DROP；有数据旧库回填 v1 注册）；不改 W3.2 引擎与渐进逻辑、不破坏既有导出/签名；色弱规则（符号＋文字＋数字）/44px；L0.1 例外维持现状；不提交 app.db/.env/密钥/真实个人数据。
+- 回灌文件：`server/src/plan-versioning.ts`（新）、`drizzle/0012_plan_versioning.sql`（新）、`workout-log/validate-plan-versioning.mjs`（新）、`drizzle/meta/_journal.json`（idx:11）、`server/src/schema.ts`（planVersions/planExerciseHistory/planScheduleHistory 三表＋plan_exercises.version/unit/restSeconds＋plan_schedule.version＋workouts.planVersion＋workoutSets.restSeconds）、`server/src/actions.ts`（plan-versioning import＋PlanExercise 类型扩展＋planExerciseResponse/planResponse 加法字段＋validatePlanInput 扩展＋loadPlanTemplates 携带 unit/restSeconds＋updatePlan 版本化原子 batch＋startWorkout 快照绑定＋getPlan 版本列表＋setResponse/addSet rest_seconds）、`client/src/App.tsx`（PlanExerciseDraft 扩展＋编辑器单位/休息字段＋版本列表组件＋休息计时器默认休息接线）、`workout-log/DATA-PLAN.md`（W4.1 章节）。未覆盖：app.db/构建产物/node_modules/.space-build。
+- 仓库验证（本机实跑，全合成数据）：`validate-plan-versioning.mjs` **38/38**（纯函数断言：休息秒数边界/单位/版本迁移 v1 首存与 v2 归档/快照绑定/历史渲染守卫/版本列表；接线源码检查；M1 删版本盖戳、M2 历史回写两项变异真实执行全部翻转）；既有 24 套回归全绿（action-trends 15、autosave 69、body-trends 26、d1 36、deload-advisory 36、finish 98、guided-flow 34、muscle-diagram 36、muscle-heatmap 22、muscle-receipt 30、plate-warmup 27、progression-engine 35、progression 43、readiness-tip 23、receipt 37、rest-timer 48、rir-rpe 103、scroll-restore 26、start 66、video-embed 32、warmup-kind 23、week-current 59、week-frequency 16）；validate-plan-safe.mjs 为既有环境失败（仓库无 node_modules/@libsql，stash 前后一致、非本轮引入；其迁移序列断言已按 0001..0012 更新）。隐私扫描：新增/改动文件零密钥/UUID/路径命中。
+- 如实保留：(a) 回灌为同规格实现（沿 H4.6 等轮次既有惯例），未逐字节核对线上工作树；(b) 精确 artifact version 平台未提供；(c) 审计沙箱非 owner，owner 视角实机以本人打开为准（B 类验收口径）；(d) 整项待 PM 验收。
+- plans.md：`W4.1` 补交付登记、改为 [完成]。修改文件：plans.md、本文件、workout-log/ 下 8 个文件（见回灌文件清单）。未动 cron。回滚：revert 本提交（线上 space-6 已上线版本不受影响）。
+
 ## 2026-11-02 22:05 PST（muse-life-plans-sync 本轮：W4.2 构建交付＋仓库回灌）
 
 - 需求编号：plans.md `W4.2`（P2，计划可配置与健康联动）——健康看板把 readiness 建议作为只读提示带入训练开始页；不得静默改变重量、组数或完成状态。21:55 轮次派工的 space-6 构建已完成（builder 回传 verification_status SUCCEEDED）；本轮执行同规格回灌（非逐字节拷贝，功能等价验证；精确 artifact version 平台未提供）。

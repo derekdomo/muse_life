@@ -26,6 +26,10 @@ export const workouts = sqliteTable("workouts", {
   sessionRpe: integer("session_rpe"),
   painFlags: text("pain_flags"),
   sessionNotes: text("session_notes"),
+  // W4.1 (migration 0012, additive): the template version that built
+  // this session. NULL for sessions created before versioning
+  // existed — never backfilled with a guess.
+  planVersion: integer("plan_version"),
 });
 
 export const workoutSets = sqliteTable("workout_sets", {
@@ -44,6 +48,10 @@ export const workoutSets = sqliteTable("workout_sets", {
   // RIR never feeds any calculation (prefill / progression / volume).
   rir: integer("rir"),
   completed: integer("completed", { mode: "boolean" }).notNull().default(false),
+  // W4.1 (migration 0012, additive): per-set snapshot of the planned
+  // default rest seconds at session creation. NULL = the plan had no
+  // custom default for this exercise when the session was built.
+  restSeconds: integer("rest_seconds"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -55,6 +63,13 @@ export const workoutSets = sqliteTable("workout_sets", {
 // Editable training plan (2026-10-18 frequency sync): routine templates
 // are persisted rows, not code constants. startWorkout builds a session
 // from these rows; the plan editor rewrites them through updatePlan.
+//
+// W4.1 (migration 0012): every save stamps the live rows with the new
+// template version and clones the outgoing rows into the read-only
+// history tables first — all in one atomic batch, so a version is
+// never half-archived. Each exercise row also carries its unit
+// (lb/kg) and an optional default rest-seconds for the rest timer
+// (NULL = the timer's own default).
 export const planExercises = sqliteTable("plan_exercises", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   routine: text("routine").notNull(),
@@ -63,12 +78,57 @@ export const planExercises = sqliteTable("plan_exercises", {
   exerciseName: text("exercise_name").notNull(),
   sets: integer("sets").notNull(),
   targetReps: text("target_reps").notNull(),
+  version: integer("version").notNull().default(1),
+  unit: text("unit", { enum: ["lb", "kg"] }).notNull().default("lb"),
+  restSeconds: integer("rest_seconds"),
 });
 
 // One row per weekday (day_index 0 = Monday … 6 = Sunday). routine_code
 // is a workout routine key or the non-workout codes "swim" / "rest".
+// W4.1: stamped with the template version like plan_exercises.
 export const planSchedule = sqliteTable("plan_schedule", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  dayIndex: integer("day_index").notNull(),
+  routineCode: text("routine_code").notNull(),
+  note: text("note").notNull().default(""),
+  version: integer("version").notNull().default(1),
+});
+
+// Template version registry (W4.1, migration 0012, additive). One row
+// per saved version: version 1, 2, 3, ... with the save instant and
+// an optional note. Written by updatePlan in the same atomic batch as
+// the plan rows themselves.
+export const planVersions = sqliteTable("plan_versions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  version: integer("version").notNull().unique(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  note: text("note").notNull().default(""),
+});
+
+// Read-only archive of superseded plan_exercises rows (W4.1). Cloned
+// verbatim from the outgoing live rows before each save, stamped
+// with the version they lived under. Never edited afterwards — an
+// old template's names and targets survive any later rename.
+export const planExerciseHistory = sqliteTable("plan_exercise_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  version: integer("version").notNull(),
+  routine: text("routine").notNull(),
+  sortOrder: integer("sort_order").notNull(),
+  exerciseKey: text("exercise_key").notNull(),
+  exerciseName: text("exercise_name").notNull(),
+  sets: integer("sets").notNull(),
+  targetReps: text("target_reps").notNull(),
+  unit: text("unit", { enum: ["lb", "kg"] }).notNull().default("lb"),
+  restSeconds: integer("rest_seconds"),
+});
+
+// Read-only archive of superseded plan_schedule rows (W4.1). Same
+// verbatim-clone discipline as plan_exercise_history.
+export const planScheduleHistory = sqliteTable("plan_schedule_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  version: integer("version").notNull(),
   dayIndex: integer("day_index").notNull(),
   routineCode: text("routine_code").notNull(),
   note: text("note").notNull().default(""),
