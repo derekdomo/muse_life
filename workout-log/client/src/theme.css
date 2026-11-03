@@ -648,3 +648,18 @@ select:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 55%, 
 .muscle-swatch-secondary { background: repeating-linear-gradient(45deg, #0072b2 0 2px, rgba(0, 114, 178, .14) 2px 6px); border: 1px solid #0072b2; }
 .muscle-legend p.muscle-legend-unplaced { font-size: 11px; }
 .muscle-diagram-empty { margin: 10px 0 0; color: var(--dim); font-size: 12px; }
+
+/* W4.2: read-only readiness tip from 健康看板. Symbol + text + number
+   always render together (color-vision rule); the re-sync button meets
+   the 44px touch target. */
+.readiness-tip { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line, #e2e2e2); border-radius: 10px; background: var(--surface); }
+.readiness-tip-tier { display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px; font-size: 15px; font-weight: 700; }
+.readiness-tip-symbol { font-size: 18px; }
+.readiness-tip-level { margin-left: auto; font-size: 12px; font-weight: 600; color: var(--dim); }
+.readiness-tip-headline { margin: 0 0 6px; font-size: 14px; }
+.readiness-tip-evidence { margin: 0 0 6px; font-size: 12px; color: var(--dim); line-height: 1.5; }
+.readiness-tip-meta { margin: 0 0 10px; font-size: 12px; color: var(--dim); }
+.readiness-tip-empty { margin: 0 0 10px; font-size: 13px; color: var(--dim); }
+.readiness-tip-resync { min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid var(--line, #d8d8d8); background: var(--bg); font-size: 14px; font-weight: 600; }
+.readiness-tip-resync:disabled { opacity: .6; }
+.readiness-tip-note { margin: 8px 0 0; font-size: 12px; color: var(--dim); }

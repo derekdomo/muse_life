@@ -5591,7 +5591,100 @@ function PlanEditor({ plan }: { plan: Plan }) {
   );
 }
 
-function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory, actionTrends, weekFrequency, muscleHeatmap, muscleMap, muscleMapVersion, bodyMeasurements, bodyTrends, receiptId, onCloseReceipt }: {
+// W4.2: read-only readiness tip from 健康看板 (space-4). The panel
+// renders the synced tip (tier symbol + label + level, headline, one
+// evidence sentence) and offers exactly one control: a 44px re-sync
+// button. It never writes to the plan, the workout, or any set —
+// the tip is display-only by construction (no prop, state, or
+// callback in this component can reach a mutation).
+function ReadinessTipPanel({ tip }: {
+  tip: NonNullable<Dashboard["readiness_tip"]> | null | undefined;
+}) {
+  const queryClient = useQueryClient();
+  const [syncing, setSyncing] = useState(false);
+  const [syncNote, setSyncNote] = useState<string | null>(null);
+  const refresh = useMutation({
+    mutationFn: () => api.refreshReadinessTip({}),
+    onSuccess: (result) => {
+      if (result.forbidden || !result.accepted) {
+        setSyncNote(result.message || "同步未启动");
+        setSyncing(false);
+        return;
+      }
+      setSyncNote("正在同步健康建议…");
+      setSyncing(true);
+      // Poll the dashboard (a persistent-state completion signal, not
+      // a fixed duration): stop when the cached tip's readStartedAt is
+      // newer than the tap instant, or after ~2 minutes.
+      const baseline = tip?.readStartedAt ?? null;
+      const startedAt = Date.now();
+      const timer = setInterval(() => {
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] }).then(() => {
+          const data = queryClient.getQueryData<Dashboard>(["dashboard"]);
+          const current = data?.readiness_tip?.readStartedAt ?? null;
+          const advanced = baseline === null ? current !== null : (current !== null && current > baseline);
+          if (advanced || Date.now() - startedAt > 120_000) {
+            clearInterval(timer);
+            setSyncing(false);
+            setSyncNote(advanced ? null : "同步超时，可重试");
+          }
+        });
+      }, 4000);
+    },
+    onError: () => {
+      setSyncNote("同步启动失败，可重试");
+      setSyncing(false);
+    },
+  });
+
+  if (tip == null) {
+    return (
+      <section className="readiness-tip" aria-label="恢复提示">
+        <p className="readiness-tip-empty">恢复提示：数据不足——尚未同步健康看板的训练建议。</p>
+        <button
+          type="button"
+          className="readiness-tip-resync"
+          disabled={refresh.isPending || syncing}
+          onClick={() => refresh.mutate()}
+        >
+          {refresh.isPending || syncing ? "同步中…" : "重新同步"}
+        </button>
+        {syncNote ? <p className="readiness-tip-note">{syncNote}</p> : null}
+      </section>
+    );
+  }
+
+  return (
+    <section className="readiness-tip" aria-label="恢复提示">
+      <p className="readiness-tip-tier">
+        <span className="readiness-tip-symbol" aria-hidden="true">{tip.symbol}</span>
+        <span className="readiness-tip-label">{tip.label}</span>
+        <span className="readiness-tip-level">第 {tip.level} 档</span>
+      </p>
+      <p className="readiness-tip-headline">{tip.headline}</p>
+      {tip.reasons.length > 0 ? (
+        <p className="readiness-tip-evidence">{tip.reasons[0]}</p>
+      ) : null}
+      <p className="readiness-tip-meta">
+        恢复状态「{tip.status}」
+        {tip.score !== null ? ` · 准备度 ${Number.isInteger(tip.score) ? tip.score : tip.score.toFixed(1)}/10` : " · 分数暂无"}
+        {tip.signalCount !== null ? ` · 可用信号 ${tip.signalCount} 项` : " · 信号数暂无"}
+        {` · 置信度${tip.confidence}`}
+      </p>
+      <button
+        type="button"
+        className="readiness-tip-resync"
+        disabled={refresh.isPending || syncing}
+        onClick={() => refresh.mutate()}
+      >
+        {refresh.isPending || syncing ? "同步中…" : "重新同步"}
+      </button>
+      {syncNote ? <p className="readiness-tip-note">{syncNote}</p> : null}
+    </section>
+  );
+}
+
+function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory, actionTrends, weekFrequency, muscleHeatmap, muscleMap, muscleMapVersion, bodyMeasurements, bodyTrends, readinessTip, receiptId, onCloseReceipt }: {
   recent: Workout[];
   weekSummaries?: readonly WeekSummary[] | null;
   progressionAdvice?: ProgressionAdviceEntry[];
@@ -5615,6 +5708,10 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
   // comparison series; absent on older cached responses.
   bodyMeasurements?: BodyMeasurementEntry[];
   bodyTrends?: BodyTrendsData;
+  // W4.2 (additive): the read-only readiness tip synced from
+  // 健康看板; null/undefined when never synced — the panel then
+  // shows its honest data-insufficient state.
+  readinessTip?: Dashboard["readiness_tip"];
   // W4.3-D1: the workoutId this session just finished, or null. The
   // receipt renders non-blockingly at the top of the start page.
   receiptId: number | null;
@@ -5672,6 +5769,10 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
           <button type="button" aria-pressed={unit === "kg"} onClick={() => setUnit("kg")}>kg</button>
         </div>
       </section>
+
+      {/* W4.2: read-only readiness tip from 健康看板 — display only,
+          never feeds the plan or any workout control. */}
+      <ReadinessTipPanel tip={readinessTip} />
 
       {planReadFailed ? (
         <p className="error-banner" role="alert">
@@ -5869,6 +5970,7 @@ export function App() {
           muscleMapVersion={dashboard.data.muscle_map_version}
           bodyMeasurements={dashboard.data.body_measurements}
           bodyTrends={dashboard.data.body_trends}
+          readinessTip={dashboard.data.readiness_tip}
           receiptId={receiptId}
           onCloseReceipt={() => setReceiptId(null)}
         />

@@ -161,3 +161,22 @@ export const dailyCompletions = sqliteTable("daily_completions", {
     .notNull()
     .$defaultFn(() => new Date()),
 });
+
+// Readiness tip cache (W4.2, migration 0011, additive). Single row
+// (id = 1) holding the latest tip synced from 健康看板 (space-4):
+// payload is the JSON tip, source_read_started_at is the version (the
+// instant the space-4 read began — the L1-RACE-001 contract, so an
+// older read can never overwrite a newer tip). Read-only data: it is
+// rendered on the start page and never feeds any plan, weight, set,
+// or completion logic.
+export const readinessTipCache = sqliteTable("readiness_tip_cache", {
+  id: integer("id").primaryKey(),
+  payload: text("payload").notNull(),
+  sourceReadStartedAt: text("source_read_started_at").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});

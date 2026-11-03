@@ -33,6 +33,14 @@ import {
   type BodyTrainingWeekInput,
   type BodyTrendUnit,
 } from "./body-trends";
+import {
+  buildReadinessTip,
+  canReadinessTipModifyPlan,
+  decideReadinessTipSave,
+  validateReadinessAdvice,
+  type ReadinessTip,
+  type ReadinessTipAdviceInput,
+} from "./readiness-tip";
 
 const routineSchema = z.enum(["push", "pull", "legs", "home_posture", "home_snowboard"]);
 const unitSchema = z.enum(["lb", "kg"]);
@@ -483,6 +491,26 @@ const receiptDeloadAdvisoryEntryResponse = z.object({
   advisory_version: z.number(),
 });
 
+// W4.2: the readiness tip as stored and returned. The tier/label/
+// symbol/level/headline pin space-4's H2.1 contract; score and
+// signalCount stay null (never 0) when the source had none; reasons
+// and missingSignals pass through verbatim; readStartedAt is the
+// version (the instant the space-4 read began).
+const readinessTipResponse = z.object({
+  tier: z.enum(["normal", "reduced", "recovery", "insufficient"]),
+  label: z.string(),
+  symbol: z.string(),
+  level: z.number().int(),
+  headline: z.string(),
+  status: z.string(),
+  score: z.number().nullable(),
+  confidence: z.string(),
+  signalCount: z.number().nullable(),
+  reasons: z.array(z.string()),
+  missingSignals: z.array(z.string()),
+  readStartedAt: z.string(),
+});
+
 const dashboardResponse = z.object({
   forbidden: z.boolean(),
   active_workout: workoutResponse.nullable(),
@@ -544,6 +572,15 @@ const dashboardResponse = z.object({
   // Existing consumers （健康看板 sync) ignore both fields.
   body_measurements: z.array(bodyMeasurementEntryResponse).optional(),
   body_trends: bodyTrendsResponse.optional(),
+  // W4.2 (additive, optional): the read-only readiness tip synced from
+  // 健康看板 (space-4) — its H2.1 readinessAdvice passed through
+  // verbatim plus the read-start version stamp. Null when no tip has
+  // been synced yet (the start page then shows its honest
+  // data-insufficient state). Display only: the client renders it and
+  // never feeds it into any plan, weight, set, or completion logic
+  // (canReadinessTipModifyPlan is pinned false). Existing consumers
+  // （健康看板 sync) ignore the field; the forbidden response omits it.
+  readiness_tip: readinessTipResponse.nullable().optional(),
 });
 
 const planExerciseResponse = z.object({
@@ -2056,6 +2093,71 @@ function muscleMapEntries(): z.infer<typeof muscleMapEntryResponse>[] {
 // "lb" — the same "most recent session's unit"口径 the action
 // trends use. Nothing is stored back: the series is recomputed on
 // every read, and no conclusion is derived anywhere.
+// W4.2: load the cached readiness tip (the single id = 1 row), or
+// null when no tip has ever been synced. The payload is parsed and
+// re-validated on read — a corrupt row is treated as missing, never
+// rendered half-parsed.
+async function loadReadinessTip(
+  ctx: Ctx,
+): Promise<z.infer<typeof readinessTipResponse> | null> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select({
+        payload: schema.readinessTipCache.payload,
+        sourceReadStartedAt: schema.readinessTipCache.sourceReadStartedAt,
+      })
+      .from(schema.readinessTipCache)
+      .where(eq(schema.readinessTipCache.id, 1))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    const parsed = JSON.parse(row.payload) as ReadinessTip;
+    if (validateReadinessAdvice(parsed) !== null) return null;
+    if (parsed.readStartedAt !== row.sourceReadStartedAt) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export type ReadinessTipPersistOutcome = "applied" | "duplicate" | "conflict" | "ignored";
+
+// W4.2: atomic compare-and-write for the tip cache, mirroring the
+// strength snapshot's L1-RACE-001 contract. The write is versioned by
+// the read-start instant: a newer read always wins; the same instant
+// with an identical payload is a duplicate, with a different payload
+// a conflict (first writer wins); an older instant is ignored so a
+// slow sync task can never roll the panel back to stale advice.
+async function persistReadinessTip(
+  ctx: Ctx,
+  tip: ReadinessTip,
+): Promise<ReadinessTipPersistOutcome> {
+  const decision = decideReadinessTipSave(null, tip.readStartedAt);
+  if (decision === "ignore") return "ignored";
+  const db = ctx.db<typeof schema>();
+  const now = new Date();
+  const payload = JSON.stringify(tip);
+  const written = await db
+    .insert(schema.readinessTipCache)
+    .values({ id: 1, payload, sourceReadStartedAt: tip.readStartedAt, createdAt: now, updatedAt: now })
+    .onConflictDoUpdate({
+      target: schema.readinessTipCache.id,
+      set: { payload, sourceReadStartedAt: tip.readStartedAt, updatedAt: now },
+      setWhere: sql`excluded.source_read_started_at > ${schema.readinessTipCache.sourceReadStartedAt}`,
+    })
+    .returning({ id: schema.readinessTipCache.id });
+  if (written.length === 0) {
+    const existing = await loadReadinessTip(ctx);
+    if (existing && existing.readStartedAt === tip.readStartedAt) {
+      return JSON.stringify({ ...existing }) === payload ? "duplicate" : "conflict";
+    }
+    return "ignored";
+  }
+  ctx.invalidateQueries(["dashboard"]);
+  return "applied";
+}
+
 async function loadBodyMeasurements(
   ctx: Ctx,
   now: Date,
@@ -2637,6 +2739,21 @@ async function loadReceiptDeloadAdvisories(
   return entries;
 }
 
+// W4.2: derived sync task that carries 健康看板's readiness advice
+// into 训练记录 as a read-only tip. The task reads space-4's
+// published getDashboard action, takes its readinessAdvice field
+// verbatim (never recomputed, never edited), and saves it through the
+// saveReadinessTip callback exactly once after a successful read.
+// Version contract: BEFORE calling getDashboard on 健康看板, record
+// the current instant as readStartedAt, and stamp the payload with
+// that read-start instant — never the finish instant. The save
+// applies an atomic compare-and-write on readStartedAt, so a read
+// that started earlier can never overwrite a newer tip even when it
+// finishes later. A response with forbidden: true counts as a failed
+// read, not as an empty source: do not replace the last good tip
+// with an empty one. Do not invent advice, scores, or signal counts.
+const READINESS_TIP_SYNC_PROMPT = `Read today's training advice from the user's existing web artifact named 健康看板 (slug space-4). Use its published getDashboard action and take ONLY its readinessAdvice field — pass it through verbatim: tier, label, symbol, level, headline, status, score, confidence, signalCount, reasons, missingSignals. Never recompute readiness, never edit the advice, never invent a tier, score, or signal count. If readinessAdvice is null or missing, pass null (do not fabricate). Version contract: BEFORE you call getDashboard on 健康看板, record the current instant as readStartedAt, and stamp the payload with that read-start instant — the moment the source read began. Never stamp the finish instant. If the source cannot be read, or returns forbidden: true, do not replace the last good tip: report the failure and save nothing. Call the expected save action exactly once only after a successful source read.`;
+
 export const Actions = {
   getDashboard: defineAction({
     description: "Read the workout dashboard: the active workout, recent completed workouts, week summaries, comparable history, and optionally one completion receipt read back by id.",
@@ -2783,6 +2900,10 @@ export const Actions = {
         muscle_map_version: MUSCLE_MAP_VERSION,
         ...(await loadBodyMeasurements(ctx, now)),
         deload_advisory: await loadDeloadAdvisories(ctx, args.readiness_score ?? null),
+        // W4.2 (additive): the read-only readiness tip synced from
+        // 健康看板; null when never synced — the start page then shows
+        // its honest data-insufficient state.
+        readiness_tip: await loadReadinessTip(ctx),
         ...(receiptFields ?? {}),
         ...(receiptAdviceFields ?? {}),
         ...(receiptDeloadFields ?? {}),
@@ -4192,6 +4313,76 @@ export const Actions = {
       }
       ctx.invalidateQueries();
       return { ok: true, forbidden: false };
+    },
+  }),
+
+  // W4.2: expectsAction callback for this artifact's own readiness-tip
+  // sync tasks. The task return channel carries no viewer (see
+  // isOwnerOrSyncChannel); a present non-owner viewer is forbidden
+  // with zero write. The tip is saved through the atomic
+  // compare-and-write in persistReadinessTip — an older read can
+  // never overwrite a newer tip.
+  saveReadinessTip: defineAction({
+    description: "保存同步任务回传的健康看板训练建议（所有者或内部同步通道，只读提示）。",
+    request: z.object({
+      payload: readinessTipResponse,
+      read_started_at: z.string().min(1),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      forbidden: z.boolean(),
+      outcome: z.enum(["applied", "duplicate", "conflict", "ignored", "forbidden"]),
+    }),
+    async handler(ctx, args): Promise<{
+      ok: boolean;
+      forbidden: boolean;
+      outcome: "applied" | "duplicate" | "conflict" | "ignored" | "forbidden";
+    }> {
+      if (!isOwnerOrSyncChannel(ctx)) return { ok: false, forbidden: true, outcome: "forbidden" };
+      // The read-only red line is enforced at the type level too:
+      // nothing in this handler touches plans, workouts, or sets.
+      if (canReadinessTipModifyPlan()) {
+        return { ok: false, forbidden: false, outcome: "ignored" };
+      }
+      const verdict = validateReadinessAdvice(args.payload);
+      if (verdict !== null) return { ok: false, forbidden: false, outcome: "ignored" };
+      const tip: ReadinessTip = { ...args.payload, readStartedAt: args.read_started_at };
+      const outcome = await persistReadinessTip(ctx, tip);
+      return { ok: outcome === "applied" || outcome === "duplicate", forbidden: false, outcome };
+    },
+  }),
+
+  // W4.2: start one derived sync task that reads 健康看板's
+  // getDashboard.readinessAdvice and saves it as the read-only tip
+  // (owner only). No dedupeKey and allowParallel: an explicit tap
+  // must always start a fresh read, never be folded into an earlier
+  // task.
+  refreshReadinessTip: defineAction({
+    description: "启动一次从健康看板同步训练建议的任务（仅所有者，只读）。",
+    request: z.object({}),
+    response: z.object({
+      forbidden: z.boolean(),
+      accepted: z.boolean(),
+      taskId: z.string().nullable(),
+      message: z.string(),
+    }),
+    async handler(ctx): Promise<{
+      forbidden: boolean;
+      accepted: boolean;
+      taskId: string | null;
+      message: string;
+    }> {
+      if (!isOwner(ctx)) {
+        return { forbidden: true, accepted: false, taskId: null, message: "训练建议仅所有者可同步" };
+      }
+      const task = await ctx.agent.spawnTask(READINESS_TIP_SYNC_PROMPT, {
+        expectsAction: "saveReadinessTip",
+        allowParallel: true,
+      });
+      if (!task.ok) {
+        return { forbidden: false, accepted: false, taskId: null, message: "建议同步任务暂时无法启动" };
+      }
+      return { forbidden: false, accepted: true, taskId: task.taskId, message: "已开始同步健康建议" };
     },
   }),
 } satisfies ActionsModule;
