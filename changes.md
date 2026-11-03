@@ -1,5 +1,11 @@
 # Changes
 
+## 2026-11-03 00:55 PST（muse-life-plans-sync 本轮：HH0.4＋HH0.5 派工，space-2）
+
+- 需求编号：plans.md `HH0.4`（P0，挂牌状态核验时间与状态分级）＋`HH0.5`（P0，排名 rubric 与分项分），同一 app 合并一次构建。本轮队列：git pull 已最新，基线 `320cb20` 起 0 新提交、工作树干净；P0/P1 可执行队列独立复核——`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`F3.1` 因 F0.5 coverage 门禁暂缓、`W-HOMEB-002` 未到 11-16、（需用户确认）条目不动、PM 仍按 PAUSE-LIFE-PM-001 暂停；此前轮次"H4/W5/F3＋H2/H3＋W4.1/W4.2 全交付"盘点遗漏了看房节 HH0.4/HH0.5 两项 P0（自 2026-10-17 起顺延、无阻塞记录；本轮实查仓库代码：listings 无 status_verified_at 字段、score 为单一总分无 rubric 分解，确认为未实现项）。按 P0 先行取本条。
+- 派工内容（space-2 builder，artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认无构建在跑）：(1) HH0.4——listings 加法新增 status_verified_at（可空，老行兼容）；状态枚举扩展 sold/off_market；sold/off-market 不得出现在推荐列表（ingest 或 getReport 层过滤、留库可查不删历史）；pending/contingent 分区降级展示（独立分区标题＋降级徽章＋"非可直接行动"文字说明）；每条房源展示状态时同时展示核验时间、缺失诚实标"核验时间未知"。(2) HH0.5——listings 加法新增六个可空分项分字段（hard_criteria/environment/school/age_condition/space/price_comps，0–100 或 null，老行 null 兼容）；总分由分项分按公开权重/规则计算（权重与公式写入 DATA-PLAN 公开），服务端新增零 import 纯函数模块（全部导出）、client 只渲染不自算；每条房源展示分项分明细（可展开）；研究 agent 回传必须给出分项分、分项缺失记 null 且总分诚实降级（缺项不得用 0 冒充）；排名按总分重算 rank。红线：只做加法 migration、不改 HH0.1–HH0.3 已关闭判据、不改刷新/同步路径与权限门禁；色弱规则/44px；不提交 app.db/.env/密钥/真实数据；DATA-PLAN.md 外科式新增章节。要求交付：构建审计 pass＋隐私扫描零命中（合成数据）＋新增 validate-house-status-rubric.mjs（真实生产函数断言＋≥2 项变异实跑）＋既有回归全过。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，不勾选。
+- 本轮改动：plans.md（`HH0.4`/`HH0.5` 补派工登记、`H-SLEEP-REG-001` 漏翻勾选修正为 [完成]，2026-10-24 交付、本轮仓库独立复跑 validate-sleep-regularity 25/25）、本文件。未动 cron。回滚：revert 本提交（space-2 构建为异步派工，尚未落地；可经 artifact.cancel 取消）。
+
 ## 2026-11-02 23:55 PST（muse-life-plans-sync 本轮：H2.3 服务端回灌＋H3.4 样式回灌＋面板核对修正）
 
 - 需求编号：plans.md `H2.3`（P1，趋势 7/30 天切换＋三类日期标记）——补做服务端代码回灌。`health-dashboard/server/src/trend-ranges.ts`（新，20KB，零 import 纯函数模块，32 导出，逐字）、`health-dashboard/validate-trend-ranges.mjs`（新，16KB，逐字）、`server/src/actions.ts` 外科手术式接线（import＋trendRangesSchema/trendSeriesPointSchema/trendMetricSeriesSchema/trendWindowSchema＋buildTrendRanges＋dashboardSchema 加法字段 `trendRanges`＋三条返回路径：非所有者/无快照为 null、主路径 await buildTrendRanges）、`health-dashboard/DATA-PLAN.md` 末尾外科式新增 H2.3 章节（逐字，12 行）。未动 drift 区（import 缩进、monthReview 注释改写等 H-SYNC-DIVERGE-001 范畴保持仓库版）。
