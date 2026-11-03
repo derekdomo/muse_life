@@ -34,6 +34,8 @@ type Acwr = DashboardResponse["acwr"];
 type BehaviorImpact = DashboardResponse["behaviorImpact"];
 type BehaviorImpactItem = BehaviorImpact["items"][number];
 type SleepDebt = DashboardResponse["sleepDebt"];
+type SleepTraining = DashboardResponse["sleepTraining"];
+type SleepTrainingGroup = NonNullable<NonNullable<SleepTraining>["goodGroup"]>;
 type StatusModeData = DashboardResponse["statusMode"];
 type MonthReview = DashboardResponse["monthReview"];
 type MonthReviewMetric = NonNullable<MonthReview>["metrics"][number];
@@ -5296,6 +5298,85 @@ function BehaviorImpactPanel({ behaviorImpact }: { behaviorImpact: BehaviorImpac
   );
 }
 
+// H3.4 睡眠与训练表现的关联： renders ONLY the server-computed result
+// (getDashboard.sleepTraining, from the pure server module) — the
+// client never recomputes a pairing, a mean, a difference, or the
+// sample gate. Below the hard gate (6 valid pairs) the panel shows
+// only 样本不足（当前 n/6) with its counts and NO association numbers.
+// Direction is always symbol + word + signed number together
+// (color-vision rule), and the panel states plainly that this is
+// observational correlation only — never causation, never a medical
+// judgement. Display only: nothing here changes a training plan.
+function sleepTrainingDiffText(diff: number | null, format: (value: number) => string): string {
+  if (diff === null) return "— 数据不足";
+  const symbol = diff > 0 ? "▲" : diff < 0 ? "▼" : "●";
+  const word = diff > 0 ? "较高" : diff < 0 ? "较低" : "持平";
+  const sign = diff > 0 ? "+" : diff < 0 ? "−" : "";
+  return `${symbol} ${word} ${sign}${format(Math.abs(diff))}`;
+}
+
+function SleepTrainingPanel({ sleepTraining }: { sleepTraining: SleepTraining }) {
+  if (!sleepTraining) {
+    return (
+      <section className="sleep-training-panel" aria-labelledby="sleep-training-title">
+        <div className="history-intro"><p className="section-kicker">训练记录 · 前一晚睡眠</p><h2 id="sleep-training-title">睡眠与训练表现的关联</h2></div>
+        <p className="empty-inline">力量训练与睡眠记录同步后，这里会把每次训练与前一晚的睡眠配对，探索两者的关联。</p>
+      </section>
+    );
+  }
+  const { threshold, pairedCount, totalWorkouts, unpairedCount, baselineNights, baselineHours, sufficient, goodGroup, poorGroup } = sleepTraining;
+  const volumeText = (value: number): string => volumeLabel(value);
+  const groupLine = (label: string, group: SleepTrainingGroup | null): string => {
+    if (!group) return `${label} —`;
+    const sleepPart = group.sleepMeanHours === null ? "平均睡眠 —" : `平均睡眠 ${group.sleepMeanHours.toFixed(1)} 小时`;
+    const volumePart = group.volumeMean === null ? "平均容量 —" : `平均容量 ${volumeLabel(group.volumeMean)} ${sleepTraining.displayUnit}`;
+    const durationPart = group.durationMeanMinutes === null ? "平均时长 —（无时长记录）" : `平均时长 ${Math.round(group.durationMeanMinutes)} 分钟（${group.durationPairs} 次有时长）`;
+    const readinessPart = group.readinessMean === null ? "当日准备度 —（无存档）" : `当日准备度均值 ${group.readinessMean.toFixed(1)} 分（${group.readinessPairs} 次有存档）`;
+    return `${label} ${group.pairs} 次 · ${sleepPart} · ${volumePart} · ${durationPart} · ${readinessPart}`;
+  };
+  return (
+    <section className="sleep-training-panel" aria-labelledby="sleep-training-title">
+      <div className="history-intro">
+        <p className="section-kicker">训练记录 · 前一晚睡眠</p>
+        <h2 id="sleep-training-title">睡眠与训练表现的关联</h2>
+        <p>把每次已完成力量训练与它前一晚的主睡眠配对，按前一晚睡眠相对个人基线分组，比较两组的训练容量与时长均值。本面板仅为观察性相关、不能证明睡眠/恢复导致训练表现变化，也不是医疗判断；纯展示，不改动任何训练计划与记录。</p>
+      </div>
+      {!sufficient ? (
+        <>
+          <p className="empty-inline">样本不足（当前 {pairedCount}/{threshold}）：有效配对满 {threshold} 次后才呈现分组对比，目前不渲染任何关联分析、不下任何结论。</p>
+          <p className="sleep-training-sample-note">样本说明：已完成训练共 {totalWorkouts} 次，其中 {unpairedCount} 次缺前一晚主睡眠记录、未进入配对（缺失按缺失处理，不按 0 小时计）。</p>
+        </>
+      ) : baselineHours === null || !goodGroup || !poorGroup ? (
+        <>
+          <p className="empty-inline">已配对 {pairedCount} 次，达到样本门槛；但个人睡眠基线需要至少 8 晚记录（目前 {baselineNights} 晚），基线未成立，暂不分组比较。</p>
+          <p className="sleep-training-sample-note">样本说明：已完成训练共 {totalWorkouts} 次，其中 {unpairedCount} 次缺前一晚主睡眠记录、未进入配对（缺失按缺失处理，不按 0 小时计）。</p>
+        </>
+      ) : (
+        <>
+          <p className="sleep-training-groupdef">分组定义：个人基线 = 最近 {baselineNights} 晚实际睡眠均值 {baselineHours.toFixed(1)} 小时；前一晚睡眠 ≥ 基线为「睡得好组」，低于基线为「睡得差组」。有效配对 {pairedCount} 次（已完成训练 {totalWorkouts} 次，缺前一晚睡眠剔除 {unpairedCount} 次）。</p>
+          <div className="sleep-training-rows">
+            <div className="sleep-training-row">
+              <div className="sleep-training-row-head"><span>训练容量平均差（睡得好组 − 睡得差组）</span><strong>{sleepTrainingDiffText(sleepTraining.volumeDiff, volumeText)} {sleepTraining.displayUnit}</strong></div>
+              <p>{groupLine("睡得好组", goodGroup)}</p>
+              <p>{groupLine("睡得差组", poorGroup)}</p>
+            </div>
+            <div className="sleep-training-row">
+              <div className="sleep-training-row-head"><span>训练时长平均差（睡得好组 − 睡得差组）</span><strong>{sleepTrainingDiffText(sleepTraining.durationDiff, (value) => `${Math.round(value)} 分钟`)}</strong></div>
+              <p>时长只统计有记录的配对：睡得好组 {goodGroup.durationPairs} 次、睡得差组 {poorGroup.durationPairs} 次；缺时长的配对（共 {sleepTraining.durationMissingPairs} 次）不计入时长均值，缺失不按 0 分钟计。</p>
+            </div>
+            <div className="sleep-training-row">
+              <div className="sleep-training-row-head"><span>当日准备度平均差（睡得好组 − 睡得差组）</span><strong>{sleepTrainingDiffText(sleepTraining.readinessDiff, (value) => `${value.toFixed(1)} 分`)}</strong></div>
+              <p>当日恢复信号取训练当日的准备度存档分：睡得好组均值 {goodGroup.readinessMean === null ? "—" : `${goodGroup.readinessMean.toFixed(1)} 分`}（{goodGroup.readinessPairs} 次有存档）· 睡得差组均值 {poorGroup.readinessMean === null ? "—" : `${poorGroup.readinessMean.toFixed(1)} 分`}（{poorGroup.readinessPairs} 次有存档）；无存档的配对（共 {sleepTraining.readinessMissingPairs} 次）不计入。</p>
+            </div>
+          </div>
+          <p className="sleep-training-sample-note">以上只是分组均值的描述性对比：样本小、未控制其他因素，只能看作观察性相关，不能据此推断睡眠或恢复造成了训练表现变化。</p>
+        </>
+      )}
+      <p className="sleep-training-method">计算口径：配对 = 一次已完成力量训练 + 其前一晚的主睡眠（以训练日为起床日的主睡眠，实际睡眠 = 核心＋深睡＋REM，与睡眠债同一口径）；训练容量沿用力量汇总口径（已完成组的重量 × 次数，按场次单位以 1 lb = 0.45359237 kg 换算到 {sleepTraining.displayUnit}），时长为该次训练的记录时长。有效配对少于 {threshold} 次只显示样本不足，不显示任何差值。方向始终以符号＋文字＋数字呈现，不只靠颜色区分。</p>
+    </section>
+  );
+}
+
 function monthMetricValue(metric: MonthReviewMetric): string {
   if (metric.monthMean === null) return "—";
   return `${metric.monthMean.toFixed(metric.digits)} ${metric.unit}`;
@@ -5349,7 +5430,7 @@ function MonthReviewPanel({ monthReview }: { monthReview: MonthReview }) {
   );
 }
 
-function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, monthReview }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; monthReview: MonthReview }) {
+function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt, sleepTraining, statusMode, monthReview }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; sleepTraining: SleepTraining; statusMode: StatusModeData; monthReview: MonthReview }) {
   const history = useMemo(() => snapshot.historyDaily.slice(-30).map((row) => ({ ...row, label: dateLabel(row.date) })), [snapshot.historyDaily]);
   const marks = statusMarkMap(statusMode);
   const trendHasStatusDay = snapshot.trends.some((point) => marks.has(point.date));
@@ -5377,6 +5458,8 @@ function TrendsView({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, mon
       <SleepDebtPanel sleepDebt={sleepDebt} />
 
       <BehaviorImpactPanel behaviorImpact={behaviorImpact} />
+
+      <SleepTrainingPanel sleepTraining={sleepTraining} />
 
       <MonthReviewPanel monthReview={monthReview} />
 
@@ -6865,7 +6948,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, monthReview, readiness, readinessAdvice, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; monthReview: MonthReview; readiness: Readiness | null; readinessAdvice: ReadinessAdvice | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, sleepTraining, statusMode, monthReview, readiness, readinessAdvice, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; sleepTraining: SleepTraining; statusMode: StatusModeData; monthReview: MonthReview; readiness: Readiness | null; readinessAdvice: ReadinessAdvice | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   // H3.5 training entry: the review window the owner asked to inspect
   // from the week-review focus card. Set when they tap 查看这段训练
@@ -7092,7 +7175,7 @@ function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, mont
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
         <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessAdvice={readinessAdvice} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} statusMode={statusMode} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} statusMode={statusMode} monthReview={monthReview} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} statusMode={statusMode} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessAdvice={readinessAdvice} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} statusMode={statusMode} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} sleepTraining={sleepTraining} statusMode={statusMode} monthReview={monthReview} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} statusMode={statusMode} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -7176,7 +7259,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} statusMode={dashboard.data.statusMode} monthReview={dashboard.data.monthReview} readiness={dashboard.data.readiness} readinessAdvice={dashboard.data.readinessAdvice} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} sleepTraining={dashboard.data.sleepTraining} statusMode={dashboard.data.statusMode} monthReview={dashboard.data.monthReview} readiness={dashboard.data.readiness} readinessAdvice={dashboard.data.readinessAdvice} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}

@@ -11,6 +11,10 @@ import {
   type BehaviorImpactItem,
 } from "./behavior-impact";
 import { computeSleepDebt, type SleepDebtResult } from "./sleep-debt";
+import {
+computeSleepTrainingCorrelation,
+type SleepTrainingCorrelationResult,
+} from "./sleep-training-correlation";
 import { computeMonthReview, type MonthReviewResult } from "./month-review";
 import {
   STATUS_MODES,
@@ -1223,6 +1227,94 @@ function buildSleepDebt(snapshot: Snapshot, readinessDate: string): SleepDebtRes
   return computeSleepDebt(nights, readinessDate);
 }
 
+// H3.4 睡眠/恢复与训练表现的关联探索 (sleep/recovery ↔ training
+// performance correlation): the server-computed descriptive grouping
+// of completed strength workouts by the previous night's main sleep
+// against the personal baseline. All math lives in the pure module
+// server/src/sleep-training-correlation.ts; the client only renders
+// this result. Correlation only — no causal claim, no medical
+// judgement, and nothing here ever writes a training record. Null
+// for non-owners, whenever no usable health snapshot exists, and
+// whenever the strength snapshot holds no completed workout.
+const sleepTrainingGroupSchema = z.object({
+  pairs: z.number().int().nonnegative(),
+  sleepMeanHours: z.number().nullable(),
+  volumeMean: z.number().nullable(),
+  durationPairs: z.number().int().nonnegative(),
+  durationMeanMinutes: z.number().nullable(),
+  readinessPairs: z.number().int().nonnegative(),
+  readinessMean: z.number().nullable(),
+});
+
+const sleepTrainingCorrelationSchema = z.object({
+  displayUnit: z.enum(["lb", "kg"]),
+  threshold: z.number().int().positive(),
+  totalWorkouts: z.number().int().nonnegative(),
+  pairedCount: z.number().int().nonnegative(),
+  unpairedCount: z.number().int().nonnegative(),
+  durationMissingPairs: z.number().int().nonnegative(),
+  readinessMissingPairs: z.number().int().nonnegative(),
+  baselineNights: z.number().int().nonnegative(),
+  baselineHours: z.number().nullable(),
+  sufficient: z.boolean(),
+  goodGroup: sleepTrainingGroupSchema.nullable(),
+  poorGroup: sleepTrainingGroupSchema.nullable(),
+  volumeDiff: z.number().nullable(),
+  durationDiff: z.number().nullable(),
+  readinessDiff: z.number().nullable(),
+  pairs: z.array(z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    sleepHours: z.number().nonnegative(),
+    volume: z.number().nonnegative(),
+    durationMinutes: z.number().nonnegative().nullable(),
+    readinessScore: z.number().nullable(),
+    group: z.enum(["good", "poor"]).nullable(),
+  })).max(20),
+});
+
+// Derive the sleep-training correlation from the merged snapshot:
+// completed workouts from the effective strength snapshot (the same
+// stored totalVolume / durationMinutes calibers ACWR reads), one
+// main sleep per wake-up date via the same CWEB-SLEEP-001 selection
+// and totalSleepHours caliber the sleep-debt panel uses, and the
+// day's recovery signal from the readiness_history archive. Returns
+// null when the strength snapshot holds no completed workout (无训练
+// 数据） or when the archive read fails — the panel then honestly
+// shows its empty state instead of a fabricated exploration.
+async function loadSleepTrainingCorrelation(
+  ctx: Ctx,
+  snapshot: Snapshot,
+): Promise<SleepTrainingCorrelationResult | null> {
+  const strength = snapshot.strengthTraining;
+  if (!strength || !strength.workouts.some((workout) => workout.status === "completed")) return null;
+  try {
+    const db = ctx.db<typeof schema>();
+    const readinessRows = await db
+      .select({ date: schema.readinessHistory.date, score: schema.readinessHistory.score })
+      .from(schema.readinessHistory);
+    const sleepsByDate = new Map<string, SleepHistoryRow[]>();
+    for (const row of snapshot.historySleeps) {
+      const rows = sleepsByDate.get(row.date);
+      if (rows) rows.push(row);
+      else sleepsByDate.set(row.date, [row]);
+    }
+    const nights = [];
+    for (const [date, rows] of sleepsByDate) {
+      const main = selectMainSleep(rows);
+      if (!main) continue;
+      nights.push({ date, hours: totalSleepHours(main, main.totalHours) });
+    }
+    return computeSleepTrainingCorrelation(
+      strength.workouts,
+      nights,
+      readinessRows.map((row) => ({ date: row.date, score: row.score })),
+      strength.displayUnit,
+    );
+  } catch {
+    return null;
+  }
+}
+
 // H4.5 月度回顾与长期基线漂移 (monthly review vs long-term
 // baseline): the previous complete calendar month's HRV /
 // resting-HR / sleep / steps means against their long-term
@@ -1393,6 +1485,13 @@ const getDashboardResponse = z.object({
   // suggested sleep, and suggested bedtime (pure module). Null for
   // non-owners and whenever no usable health snapshot exists.
   sleepDebt: sleepDebtSchema.nullable(),
+  // H3.4 additive: server-computed sleep/recovery ↔ training
+  // performance correlation (pure module) — completed workouts paired
+  // with the previous night's main sleep, grouped against the
+  // personal baseline, hard-gated at 6 valid pairs. Null for
+  // non-owners, whenever no usable health snapshot exists, and
+  // whenever the strength snapshot holds no completed workout.
+  sleepTraining: sleepTrainingCorrelationSchema.nullable(),
   // H4.4 additive: the owner's status periods and the derived
   // status-mode view (active period for the readiness date,
   // suppression flag + status note, and symbol+text marks over the
@@ -3701,10 +3800,10 @@ async function handleGetRedemptionReceipt(ctx: Ctx, args: { requestId: string })
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "读取健康看板：健康快照、readiness、今日训练建议、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、状态模式、月度回顾与长期基线漂移、数据状态与统一时间线（仅所有者）。",
+    description: "读取健康看板：健康快照、readiness、今日训练建议、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、睡眠与训练表现的关联探索、月度回顾与长期基线漂移、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, statusMode: EMPTY_STATUS_MODE, monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, sleepTraining: null, statusMode: EMPTY_STATUS_MODE, monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3729,7 +3828,7 @@ export const Actions = {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
         const behaviorImpact = await loadBehaviorImpact(ctx, null, null, []);
-        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, sleepTraining: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3804,6 +3903,11 @@ export const Actions = {
       // loaded snapshot's main sleeps, anchored at the readiness
       // date. Computed here, rendered only.
       const sleepDebt = buildSleepDebt(snapshot, readinessDate);
+      // H3.4: sleep/recovery ↔ training performance correlation over
+      // the same merged snapshot (strength workouts + main sleeps)
+      // and the readiness archive. Computed here, rendered only —
+      // display-only, it never modifies a training plan or record.
+      const sleepTraining = await loadSleepTrainingCorrelation(ctx, snapshot);
       // H4.4: the status-mode view for this readiness date. The marks
       // window reaches 41 days back — far enough to cover the 30-day
       // daily history, the 14-day unified timeline, the 7-day trend
@@ -3830,7 +3934,7 @@ export const Actions = {
         components: readiness.components,
         suppressed: readinessSuppressed,
       });
-      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory, readiness, readinessAdvice, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory, readiness, readinessAdvice, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback, sleepTraining };
     },
   }),
 
