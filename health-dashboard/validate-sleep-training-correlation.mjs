@@ -48,13 +48,14 @@ check('source: correlation module has no imports (pure module)', !/^import /m.te
 check('source: server imports computeSleepTrainingCorrelation from the pure module',
   serverSrc.includes('computeSleepTrainingCorrelation') && serverSrc.includes('from "./sleep-training-correlation"'));
 // 回灌适配（2026-11-02 21:30 PST）：仓库尚未回灌 H2.3（actions.ts 无 trendRanges
-// 接线），主返回对象尾部为 `focusFeedback, sleepTraining }` 而非构件的
-// `trendRanges, sleepTraining }`；断言按本仓主返回键序适配（沿 H2.1/H2.2 前例）。
+// 接线），主返回对象尾部为 `focusFeedback, trendRanges, sleepTraining }`
+// （H2.3 回灌后 trendRanges 插入 sleepTraining 之前）；断言按本仓主返回键序适配
+// （沿 H2.1/H2.2/H4.5 前例）。
 check('source: getDashboard response carries the additive nullable sleepTraining field on all three return paths',
   serverSrc.includes('sleepTraining: sleepTrainingCorrelationSchema.nullable()')
   && (serverSrc.match(/sleepTraining: null/g) ?? []).length === 2
   && serverSrc.includes('const sleepTraining = await loadSleepTrainingCorrelation(ctx, snapshot);')
-  && serverSrc.includes('focusFeedback, sleepTraining }'));
+  && serverSrc.includes('focusFeedback, trendRanges, sleepTraining }'));
 check('source: the loader reuses the existing calibers (main sleep, totalSleepHours, readiness archive)',
   serverSrc.includes('loadSleepTrainingCorrelation')
   && serverSrc.includes('selectMainSleep(rows)') && serverSrc.includes('readinessRows.map((row) => ({ date: row.date, score: row.score }))'));

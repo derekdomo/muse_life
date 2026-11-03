@@ -1,5 +1,25 @@
 # Changes
 
+## 2026-11-02 23:55 PST（muse-life-plans-sync 本轮：H2.3 服务端回灌＋H3.4 样式回灌＋面板核对修正）
+
+- 需求编号：plans.md `H2.3`（P1，趋势 7/30 天切换＋三类日期标记）——补做服务端代码回灌。`health-dashboard/server/src/trend-ranges.ts`（新，20KB，零 import 纯函数模块，32 导出，逐字）、`health-dashboard/validate-trend-ranges.mjs`（新，16KB，逐字）、`server/src/actions.ts` 外科手术式接线（import＋trendRangesSchema/trendSeriesPointSchema/trendMetricSeriesSchema/trendWindowSchema＋buildTrendRanges＋dashboardSchema 加法字段 `trendRanges`＋三条返回路径：非所有者/无快照为 null、主路径 await buildTrendRanges）、`health-dashboard/DATA-PLAN.md` 末尾外科式新增 H2.3 章节（逐字，12 行）。未动 drift 区（import 缩进、monthReview 注释改写等 H-SYNC-DIVERGE-001 范畴保持仓库版）。
+- 需求编号：plans.md `H3.4`（P1，睡眠/恢复与训练表现关联）——补做遗留样式回灌。`health-dashboard/client/src/theme.css` 末尾追加 `.sleep-training-*` 样式块 10 条（逐字，含 H3.4 注释头）；服务端代码与客户端面板已于 37321fc 回灌，本轮补齐后 H3.4 代码回灌完整。
+- 验证（本机实跑，合成数据）：validate-trend-ranges **33/34**——33 项生产函数断言全过（含窗口边界/序列形状/null 不当 0/「仅 X 天数据」/基线门限/缺失段合并/状态断点/双源训练标记/四指标偏离阈值边界/存档 readiness/事后排除＋3 项变异真实执行翻转）；唯一失败为客户端 UI 源码检查（7/30 切换 UI 未回灌——与 drift 区交织 742 行 diff，留待 H-SYNC-DIVERGE-001 裁决后或独立客户端回灌轮次）。既有回归：sleep-training-correlation 30/30（主返回键序钉住已跟随 H2.3 更新为 `focusFeedback, trendRanges, sleepTraining`）、month-review 38/38、readiness-advice 38/38、acwr 31/31、behavior-impact 27/27、status-mode 38/38、week-load 47/47、units 25/25 全绿。隐私扫描：新增/改动文件零密钥/UUID/路径命中。
+- 面板核对修正（本轮只读 inspection 7d2fedfd 发现）：「Life 进度」面板 H2.3 条目曾误标「已合入 main / 已上线并回灌仓库」（仓库当时无 trend-ranges.ts），根因为 badge 把 plans.md [完成]（惯例=实现方已交付）直接映射为「已合入 main」；本轮服务端回灌后条目改为如实表述（服务端已回灌、客户端 UI 待补）。changes.md 补记此前遗漏的 H2.3（20:06）、H3.4（21:05）交付与 37321fc 回灌轮条目（见下）。
+- 局限：H2.3 客户端 App.tsx（7/30 切换＋三类标记 UI）未回灌；精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准。整项待 PM 验收。
+
+## 2026-11-02 21:05 PST（H3.4 构建交付登记，muse-life-plans-sync 20:55 轮次派工）
+
+- 需求编号：plans.md `H3.4`（P1，睡眠/恢复与训练表现关联探索）——space-4 builder 回传构建成功（verification_status SUCCEEDED）。服务端新增零 import 纯函数模块 `server/src/sleep-training-correlation.ts`（全部导出）；`getDashboard` 加法字段 `sleepTraining`；趋势页新增「睡眠与训练表现的关联」面板。构建证据：validate-sleep-training-correlation.mjs 30/30（含 3 项变异真实执行翻转）；既有回归与改动前基线一致。回灌待后续轮次（37321fc 轮次已执行，见下）。整项待 PM 验收。（本条目为补记——原 21:05 轮次仅在 plans.md 登记，changes.md 遗漏。）
+
+## 2026-11-02 20:55 PST（H3.4 回灌本仓＋仓库验证，commit 37321fc）
+
+- 需求编号：plans.md `H3.4`——21:05 交付的构建已回灌本仓：`sleep-training-correlation.ts`（新）、`validate-sleep-training-correlation.mjs`（新）、`server/src/actions.ts`（sleepTraining 接线）、`client/src/App.tsx`（关联面板）、`DATA-PLAN.md`（H3.4 章节）。仓库验证 30/30。plans.md H3.4 翻转为 [完成]。遗留：`theme.css` `.sleep-training-*` 样式未回灌（已于 23:55 轮次补齐）。（本条目为补记——原 37321fc 轮次未在 changes.md 留条目。）
+
+## 2026-11-02 20:06 PST（H2.3 构建交付登记，muse-life-plans-sync 19:55 轮次派工）
+
+- 需求编号：plans.md `H2.3`（P1，趋势 7/30 天切换＋三类日期标记）——space-4 builder 回传构建成功（verification_status SUCCEEDED）。服务端新增零 import 纯函数模块 `server/src/trend-ranges.ts`（全部导出）；`getDashboard` 加法字段 `trendRanges`；趋势页 7/30 天切换＋三类日期标记 UI；DATA-PLAN.md H2.3 章节。构建证据：validate-trend-ranges.mjs 34/34（含 3 项变异真实执行翻转）；既有回归全绿。回灌待后续轮次（23:55 轮次已执行服务端回灌，见上；客户端 UI 待补）。整项待 PM 验收。（本条目为补记——原 20:06 轮次仅在 plans.md 登记，changes.md 遗漏。）
+
 ## 2026-11-02 23:12 PST（muse-life-plans-sync 本轮：W4.1 构建交付＋仓库回灌）
 
 - 需求编号：plans.md `W4.1`（P2，计划可配置与健康联动）——owner 可编辑训练日、动作、组数、次数范围、单位与默认休息时间；模板必须版本化，历史记录继续显示当时的名称和目标，不能被新模板回写。22:55 轮次派工的 space-6 构建已完成（builder 回传 verification_status SUCCEEDED）；本轮执行同规格回灌（非逐字节拷贝，功能等价验证；精确 artifact version 平台未提供）。

@@ -822,3 +822,17 @@ details.game-panel > section { margin-top: 10px; }
 .readiness-advice-entry { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .readiness-advice-entry-btn { min-height: 44px; padding: 10px 18px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--text); font-size: 13px; font-weight: 800; cursor: pointer; }
 .readiness-advice-entry-note { margin: 10px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+
+/* H3.4 睡眠与训练表现的关联： mirrors the behaviour panel rhythm;
+   differences are symbol + word + signed number, never color alone,
+   and the below-gate state shows counts only, no numbers. */
+.sleep-training-panel { margin-top: 38px; }
+.sleep-training-groupdef { margin: 14px 0 0; color: var(--text); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.sleep-training-rows { display: grid; gap: 12px; margin-top: 16px; }
+.sleep-training-row { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.sleep-training-row-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.sleep-training-row-head span { font-size: 14px; font-weight: 800; }
+.sleep-training-row-head strong { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+.sleep-training-row p { margin: 7px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sleep-training-sample-note { margin: 10px 0 0; color: var(--dim); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.sleep-training-method { margin: 12px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }

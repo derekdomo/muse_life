@@ -27,6 +27,7 @@ import {
   type StatusPeriod,
 } from "./status-mode";
 import { buildReadinessAdvice } from "./readiness-advice";
+import { computeTrendRanges, type TrendRangesResult } from "./trend-ranges";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
 
@@ -1355,6 +1356,121 @@ function buildMonthReview(snapshot: Snapshot, readinessDate: string, statusPerio
   });
 }
 
+// H2.3 趋势 7/30 天切换与三类日期标记 (trend windows + date marks):
+// the server-computed 7-day and 30-day windows over the SAME snapshot
+// every other panel reads, with per-metric series, readiness archive
+// points, missing segments, training days, and baseline-deviation
+// marks. All math lives in the pure module server/src/trend-ranges.ts;
+// the client only renders this result and switches between the two
+// precomputed windows. Null for non-owners and whenever no usable
+// health snapshot exists.
+const trendSeriesPointSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  value: z.number().nullable(),
+});
+
+const trendMetricSeriesSchema = z.object({
+  key: z.enum(["hrv", "restingHr", "sleep", "steps"]),
+  label: z.string(),
+  unit: z.string(),
+  digits: z.number().int().nonnegative(),
+  points: z.array(trendSeriesPointSchema).max(30),
+  baseline: z.number().nullable(),
+  baselineDays: z.number().int().nonnegative(),
+  baselineSufficient: z.boolean(),
+});
+
+const trendWindowSchema = z.object({
+  days: z.union([z.literal(7), z.literal(30)]),
+  windowStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  windowEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  observedDays: z.number().int().nonnegative(),
+  historyNote: z.string().nullable(),
+  metrics: z.array(trendMetricSeriesSchema).max(4),
+  readiness: z.array(trendSeriesPointSchema).max(30),
+  missingSegments: z.array(z.object({
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    days: z.number().int().positive(),
+  })).max(30),
+  missingDates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(30),
+  trainingDays: z.array(z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    strength: z.boolean(),
+    hkWorkout: z.boolean(),
+  })).max(30),
+  deviations: z.array(z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    metric: z.enum(["hrv", "restingHr", "sleep", "steps"]),
+    label: z.string(),
+    symbol: z.string(),
+    word: z.string(),
+    value: z.number(),
+    baseline: z.number(),
+    offset: z.number(),
+    unit: z.string(),
+    digits: z.number().int().nonnegative(),
+  })).max(120),
+});
+
+const trendRangesSchema = z.object({
+  anchorDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  dataDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  windows: z.array(trendWindowSchema).max(2),
+});
+
+// Derive the trend-ranges input from the loaded snapshots and
+// compute both windows server-side. Readiness points come from the
+// readiness_history archive (all rows — the 30-day window reaches
+// further back than the 7-point trend); an archive read failure
+// degrades to archive gaps rather than breaking the dashboard, the
+// same failure isolation loadReadinessTrendPoints uses. Nights are
+// one main sleep per wake-up date via the same CWEB-SLEEP-001
+// selection and totalSleepHours caliber as sleep debt / month
+// review. Training days come from the EXISTING sync snapshots only:
+// completed strength sessions (训练记录 channel) and HealthKit
+// workout sessions — no new data source.
+async function buildTrendRanges(
+  ctx: Ctx,
+  snapshot: Snapshot,
+  readinessDate: string,
+  statusPeriods: readonly StatusPeriod[],
+): Promise<TrendRangesResult | null> {
+  let readinessRows: Array<{ date: string; score: number | null }> = [];
+  try {
+    const db = ctx.db<typeof schema>();
+    readinessRows = await db
+      .select({ date: schema.readinessHistory.date, score: schema.readinessHistory.score })
+      .from(schema.readinessHistory);
+  } catch {
+    readinessRows = [];
+  }
+  const sleepsByDate = new Map<string, SleepHistoryRow[]>();
+  for (const row of snapshot.historySleeps) {
+    const rows = sleepsByDate.get(row.date);
+    if (rows) rows.push(row);
+    else sleepsByDate.set(row.date, [row]);
+  }
+  const nights = [];
+  for (const [date, rows] of sleepsByDate) {
+    const main = selectMainSleep(rows);
+    if (!main) continue;
+    nights.push({ date, hours: totalSleepHours(main, main.totalHours) });
+  }
+  return computeTrendRanges({
+    daily: snapshot.historyDaily.map((row) => ({ date: row.date, steps: row.steps, restingHr: row.restingHr, hrvMs: row.hrvMs })),
+    nights,
+    readiness: readinessRows,
+    strengthTrainingDates: snapshot.strengthTraining.workouts
+      .filter((workout) => workout.status === "completed")
+      .map((workout) => workout.date),
+    hkWorkoutDates: snapshot.historyWorkouts.map((workout) => workout.date),
+    statusDates: statusDatesInWindow(statusPeriods, shiftDate(snapshot.dataDate, -40), snapshot.dataDate),
+    anchorDate: readinessDate,
+    dataDate: snapshot.dataDate,
+    partialDate: snapshot.morningReference?.date ?? null,
+  });
+}
 // H4.4 状态模式 (status mode): the owner's declared status periods
 // （生病 / 受伤 / 旅行 + inclusive start/end dates) and everything the
 // dashboard derives from them, computed by the pure module
@@ -1502,6 +1618,9 @@ const getDashboardResponse = z.object({
   // means vs their long-term baselines (pure module). Null for
   // non-owners and whenever no usable health snapshot exists.
   monthReview: monthReviewSchema.nullable(),
+  // H2.3 additive: precomputed 7/30-day trend windows with date marks.
+  // Null for non-owners and whenever no usable health snapshot exists.
+  trendRanges: trendRangesSchema.nullable(),
   // H2.1 additive: today's training advice derived from the
   // readiness result (see readinessAdviceSchema above). Null on
   // every path that carries no usable readiness.
@@ -3803,7 +3922,7 @@ export const Actions = {
     description: "读取健康看板：健康快照、readiness、今日训练建议、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、睡眠与训练表现的关联探索、月度回顾与长期基线漂移、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, sleepTraining: null, statusMode: EMPTY_STATUS_MODE, monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, sleepTraining: null, statusMode: EMPTY_STATUS_MODE, monthReview: null, trendRanges: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3828,7 +3947,7 @@ export const Actions = {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
         const behaviorImpact = await loadBehaviorImpact(ctx, null, null, []);
-        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, sleepTraining: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, sleepTraining: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), monthReview: null, trendRanges: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3919,6 +4038,7 @@ export const Actions = {
       // validate-sleep-debt.mjs's exact-string pin follows the same
       // live order (H4.4 precedent).
       const monthReview = buildMonthReview(snapshot, readinessDate, statusPeriods);
+      const trendRanges = await buildTrendRanges(ctx, snapshot, readinessDate, statusPeriods);
       // H2.1: today's training advice is a pure derivation over the
       // readiness result exactly as displayed (post-suppression):
       // the pure module maps the readiness status to one of the four
@@ -3934,7 +4054,7 @@ export const Actions = {
         components: readiness.components,
         suppressed: readinessSuppressed,
       });
-      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory, readiness, readinessAdvice, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback, sleepTraining };
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory, readiness, readinessAdvice, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback, trendRanges, sleepTraining };
     },
   }),
 
