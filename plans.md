@@ -555,7 +555,7 @@
 - [ ] `AUDIT-07 / P1` 健康使用一个全局 `coverageIncomplete` 决定字段显示“还没同步完/当天没戴表”，不能真正做到按字段区分缺失原因。
 - [ ] `AUDIT-08 / P1` 训练重量/次数输入只在点击完成按钮时提交；编辑已完成组后直接离开可能丢失，且为了保存需要先取消完成。
 - [ ] `AUDIT-09 / P1` 训练 mutation 只按传入 ID 更新/删除，未验证 active workout 归属；完成不存在或已结束 workout 仍可能返回成功。并发 start 也没有数据库唯一约束或事务兜底。
-- [ ] `AUDIT-10 / P1` 自动预填按最近一次全部达到上限就加重，周复盘却要求连续两周全部达到上限，两个“下次建议”规则不一致。
+- [完成] `AUDIT-10 / P1` 自动预填按最近一次全部达到上限就加重，周复盘却要求连续两周全部达到上限，两个“下次建议”规则不一致。（实现方核验登记 2026-11-03：原不一致已不存在——周复盘 `reviewRecommendation`（workout-log/client/src/App.tsx:969）直接消费服务端 `progression_advice`（W3.2/W1-CONSISTENCY-001），与 startWorkout 自动预填为同一 `evaluateProgression` 引擎、同一 per-routine 可比历史选择；周复盘页面口径已与引擎一致（“负荷建议只看最近一次可比训练：全部组完成且都达到次数上限才增重”）；代码库中已无“连续两周才加重”的下次建议规则（仅存 deload-advisory 的连续下滑门与“连续两周持平”展示文案，均非下次建议规则）。仓库验证：validate-progression-engine 35/35、validate-progression 43/43 全过。此 [完成] 仅表示实现方已核验，PM 结论以其评审记录为准；PM 暂停中。）
 - [ ] `AUDIT-11 / P1` 财务应急金使用最新单月支出，最新快照可能是月中或异常；FIRE “还差 X 年”是忽略投资回报的线性外推，但主文案未先说明限制。
 - [ ] `AUDIT-12 / P2` 四个 app 尚缺公式 fixture、action 自动测试及可追溯 runtime 回归证据。（2026-10-14 PM 勘误：`ddb105c` 已新增确定性 Handoff Gate，本地执行通过；旧“没有 CI”描述失效。该 Gate 不检查业务公式、身份矩阵或 artifact，不能据此关闭本项。）
 
