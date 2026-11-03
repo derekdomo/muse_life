@@ -882,6 +882,12 @@ type WeekFrequencyCell = WeekFrequencyEntry["weeks"][number];
 type MuscleHeatmapData = NonNullable<Dashboard["muscle_heatmap"]>;
 type MuscleHeatmapEntry = MuscleHeatmapData["muscles"][number];
 type MuscleMapEntry = NonNullable<Dashboard["muscle_map"]>[number];
+// W6.1: server-computed planned weekly muscle-group coverage of
+// the current plan (plan_coverage on getPlan, buildPlanCoverage in
+// server/src/plan-coverage.ts) — the client renders it and
+// computes no coverage figure of its own.
+type PlanCoverageData = NonNullable<Plan["plan_coverage"]>;
+type PlanCoverageEntry = PlanCoverageData["muscles"][number];
 // W5.3: the owner's manually recorded body measurements
 // (body_measurements, raw rows as stored) and the server-computed
 // date-aligned comparison series (body_trends, buildBodyTrends in
@@ -4665,6 +4671,84 @@ function MuscleHeatmap({ data, muscleMap, muscleMapVersion }: {
   );
 }
 
+// --- W6.1: planned weekly muscle-group coverage （计划肌群覆盖） ---
+// Rendered ONLY from the server's plan_coverage (buildPlanCoverage
+// in server/src/plan-coverage.ts): per muscle group, the sets per
+// week the CURRENT plan templates + weekly schedule plan for it
+// (primary / synergist attribution kept apart), the coverage state
+// and the contributing exercise names. This is the plan-level
+// counterpart of the W5.1 heatmap above (which reports what was
+// actually trained): it answers "what does this plan not cover at
+// all" before the week starts. The client computes no coverage
+// figure of its own, and the section changes nothing — editing
+// stays in the plan editor below. Meaning never rides on colour
+// alone (the owner is colour-weak): every row carries a symbol
+// (✓ 有主要动作 / ◐ 仅协同带到 / ○ 未安排）, a text state and the
+// planned set numbers themselves.
+function planCoverageState(entry: PlanCoverageEntry): { symbol: string; label: string } {
+  if (entry.state === "primary") return { symbol: "✓", label: "有主要动作" };
+  if (entry.state === "secondary_only") return { symbol: "◐", label: "仅协同带到" };
+  return { symbol: "○", label: "未安排" };
+}
+
+function PlanCoverage({ data }: { data?: PlanCoverageData }) {
+  const muscles = data?.muscles ?? [];
+  const uncoveredNames = muscles.filter((entry) => entry.state === "none").map((entry) => entry.muscle);
+  return (
+    <section className="history-section" aria-labelledby="plan-coverage-title">
+      <div className="section-heading">
+        <h2 id="plan-coverage-title">计划肌群覆盖</h2>
+        <span>{data ? "按当前计划推算 · 每周计划组数" : ""}</span>
+      </div>
+      <p className="history-boundary">
+        口径：按当前计划模板与周安排推算——每个动作的每周计划组数 = 模板组数 × 它所在训练日每周出现的次数；一个动作的组数同时计入它的每个主要肌群与协同肌群（重复归属，各肌群组数不可相加为全身总量）。这里只列计划本身的安排，不看实际完成记录，不计算恢复或疲劳；实际练了多少看上方「肌群恢复热力图」。想补上未安排的肌群，在下方「编辑训练计划」里调整即可，这里不改计划。
+      </p>
+      {muscles.length === 0 ? (
+        <p className="empty-history">计划读出来后，这里会按肌群列出每周计划组数与未安排的肌群。</p>
+      ) : (
+        <>
+          <div className="plan-coverage-list">
+            {muscles.map((entry) => {
+              const state = planCoverageState(entry);
+              return (
+                <div
+                  key={entry.muscle}
+                  className="plan-coverage-row"
+                  aria-label={`${entry.muscle}：${state.label}，每周计划共 ${entry.planned_total_sets} 组（主要 ${entry.planned_primary_sets} 组、协同 ${entry.planned_secondary_sets} 组）`}
+                >
+                  <div className="plan-coverage-head">
+                    <strong>{entry.muscle}</strong>
+                    <span className="plan-coverage-state">{state.symbol} {state.label}</span>
+                  </div>
+                  <p className="plan-coverage-sets">
+                    每周计划 <strong>{entry.planned_total_sets}</strong> 组 · 主要 {entry.planned_primary_sets} 组 · 协同 {entry.planned_secondary_sets} 组
+                  </p>
+                  {entry.primary_exercises.length > 0 ? (
+                    <p className="plan-coverage-detail">主要动作：{entry.primary_exercises.join("、")}</p>
+                  ) : null}
+                  {entry.secondary_exercises.length > 0 ? (
+                    <p className="plan-coverage-detail">协同动作：{entry.secondary_exercises.join("、")}</p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+          {data && data.uncovered_count > 0 ? (
+            <p className="history-boundary plan-coverage-uncovered">
+              ○ 未安排的肌群共 {data.uncovered_count} 个：{uncoveredNames.join("、")}——当前计划没有动作把它们列为主要或协同肌群。
+            </p>
+          ) : null}
+          {data && data.unmapped_exercises.length > 0 ? (
+            <p className="history-boundary plan-coverage-uncovered">
+              尚无映射（未计入任何肌群）：{data.unmapped_exercises.join("、")}
+            </p>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}
+
 // --- W5.3: body weight + circumference trends （围度与体重趋势） ---
 // Rendered ONLY from the server's body_measurements (raw recorded
 // rows) and body_trends (buildBodyTrends in
@@ -5963,6 +6047,11 @@ function StartScreen({ recent, weekSummaries, progressionAdvice, deloadAdvisory,
       <details className="home-details">
         <summary>肌群分析 <span>近 7 天肌群热度</span></summary>
         <MuscleHeatmap data={muscleHeatmap} muscleMap={muscleMap} muscleMapVersion={muscleMapVersion} />
+      </details>
+
+      <details className="home-details">
+        <summary>计划覆盖 <span>当前计划每周肌群组数</span></summary>
+        <PlanCoverage data={planData?.plan_coverage} />
       </details>
 
       {planData ? (

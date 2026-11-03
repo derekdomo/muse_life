@@ -240,6 +240,15 @@ button.current-week-row { cursor: pointer; font: inherit; font-size: 12px; }
 .muscle-heat-bar { height: 5px; margin: 8px 0; background: var(--surface-2); overflow: hidden; }
 .muscle-heat-bar span { display: block; height: 100%; background: var(--accent); }
 .muscle-heat-detail { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.plan-coverage-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 8px; }
+.plan-coverage-row { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 10px 12px 12px; }
+.plan-coverage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.plan-coverage-head strong { font-size: 14px; font-weight: 800; }
+.plan-coverage-state { color: var(--dim); font-size: 11px; font-weight: 750; white-space: nowrap; }
+.plan-coverage-sets { margin: 6px 0 0; color: var(--dim); font-size: 12px; line-height: 1.55; }
+.plan-coverage-sets strong { font: 800 18px/1 "DIN Alternate", sans-serif; color: var(--text); }
+.plan-coverage-detail { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.plan-coverage-uncovered { margin-top: 10px; }
 .muscle-heat-unmapped { margin-top: 10px; }
 .muscle-map-table { margin-top: 16px; border-top: 1px solid var(--border); }
 .muscle-map-table summary { list-style: none; min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; font-size: 13px; font-weight: 750; }

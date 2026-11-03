@@ -897,3 +897,170 @@ editor; every save creates a new template version:
   existing rows default to version 1 / unit 'lb' / null rest, and a
   backfill registers version 1 for databases that already hold a
   plan. Edit entry stays owner-only; non-owner writes are forbidden.
+
+## OpenGym 参考研究 + 计划肌群覆盖 (W6.1, added 2026-11-03)
+
+Research-only borrowing of design ideas and information
+architecture from OpenGym (https://github.com/DuarteSantos8/openGym —
+self-hosted gym & body-weight tracker, AGPL-3.0). NO OpenGym code,
+text, exercise data or media was copied: the AGPL-3.0 boundary in
+the brief is honoured by borrowing ideas only, re-implemented from
+scratch in this artifact's own style. Sources read for this round
+(2026-11-03): the project's README as mirrored verbatim at
+https://gitea.com/DuarteSantos/openGym (Features → Planning /
+Training / Progress; "How it works" — training logic in pure
+functions under `frontend/src/lib/`), plus two independent
+write-ups read for cross-checking counts and framing:
+https://frontiernow.dev/en/github/opengym/ and
+https://runany.dev/blog/opengym/. Where the sources disagree
+(exercise-library size: README "over 5,600 exercises" vs the
+1,324 animated-exercise figure in the write-ups) both figures are
+recorded and neither is relied on.
+
+### (1) Research conclusions — four dimensions, each with its source position
+
+- Plan arrangement / routine structure (README, Features →
+  Planning): one routine per weekday over a searchable exercise
+  library; four starter plans (Push/Pull/Legs, Upper/Lower, Full
+  Body, 5×5) load as ordinary editable routines; a session can be
+  moved to another day without touching the weekly plan; week
+  start is Monday or Sunday by choice; as an alternative to
+  weekdays, a ROTATION (A, B, C, A, …) where the next session is
+  simply the next undone one; supersets, warm-up sets, drop sets,
+  rest-pause, timed exercises, cardio by time/speed, per-exercise
+  rest and planned deloads are all plan-level concepts; custom
+  exercises carry the user's own photo/GIF/video.
+- Progression rules (README, Features → Progress; Frontier Now
+  summary): rules attach per routine or per exercise — linear,
+  Greyskull LP, double progression through a visible rep range,
+  triple progression (reps, then sets, then load), or adding
+  time; EACH TARGET EXPLAINS WHY IT IS THAT NUMBER; missed reps
+  never add load; stalls trigger a deload; alongside sit an
+  estimated-1RM curve and Structural Balance ratios (Poliquin,
+  Thibaudeau, ATG).
+- Muscle training / fatigue / detraining map (README, Features →
+  Progress; runany.dev TL;DR): ONE muscle map in THREE modes —
+  where your volume went, what is still recovering, and what has
+  gone untrained — the trained / fatigued / detrained separation
+  is a derived value computed from recent history, meant to answer
+  "what should I train today".
+- Exercise-library organisation (README, Features → Planning;
+  Frontier Now): a large library (5,600+ entries per README;
+  1,324 with animated demos per the write-ups — see the
+  disagreement note above), each entry with an animated demo,
+  SEARCHABLE and BROWSABLE BY MUSCLE ON A BODY MAP, FILTERABLE BY
+  THE EQUIPMENT THE USER OWNS; user-built custom exercises are
+  first-class entries.
+
+### (2) Borrowable points, ranked by value to the existing plan × change cost
+
+1. Muscle map's third mode applied to the PLAN — a per-muscle
+   "what does this plan not cover" view computed from the current
+   templates + schedule. Borrow: the mode separation (volume /
+   recovering / untrained) as information architecture, at plan
+   level. Do NOT borrow: any recovery/fatigue score — W5.1's
+   facts-only caliber stands. → IMPLEMENTED this round (below).
+2. Progression targets that explain themselves, per exercise.
+   Borrow: the explainability principle — already half-present
+   (W3.2 reasons). Do NOT borrow: the rule-type system (linear /
+   Greyskull / double / triple as selectable per-exercise rules)
+   — that replaces the single W3.2 engine and its口径， a
+   structural change; NOT done, left for a later round to decide.
+3. Rotation scheduling (A, B, C, next-undone) as an alternative
+   to weekday assignment. Borrow: the concept for travel /
+   irregular weeks. Do NOT borrow now: it rewrites the
+   plan_schedule weekday model (W4.1 versioning included) — a
+   structural change; NOT done, left for a later round to decide.
+4. Move-a-session-to-another-day without touching the weekly
+   plan. Borrow: the one-off override idea. Do NOT borrow now:
+   it needs a new override record + startWorkout resolution
+   rules — a schema/behaviour change beyond a pure-additive step.
+5. Starter plans loading as ordinary editable routines. Borrow:
+   nothing needed — this artifact's seeded templates (W4.1 v1)
+   already ARE ordinary editable routines; no change.
+6. Equipment filter + body-map browsing for the exercise
+   library. Borrow: the filter-by-what-you-own idea if the plan
+   ever grows a library picker. Do NOT borrow: the library
+   itself (5,600+ entries, animated media with disputed
+   ownership per Frontier Now) and any of its data — the plan
+   here is a fixed, owner-curated 31-key set with verified demos.
+7. Supersets / drop sets / rest-pause as plan-level set kinds.
+   Borrow: nothing this round. Do NOT borrow now: set-kind
+   modelling touches workout_sets semantics and the guided flow
+   — a structural change; NOT done, left for a later round to
+   decide.
+
+### (3) The shipped step — planned weekly muscle-group coverage （计划肌群覆盖）
+
+Rank 1, purely additive: no schema change, no migration, no plan
+structure change, no existing export or signature changed, the
+W3.2 progression engine and every existing formula/口径 untouched.
+All computation lives in the new pure server module
+`server/src/plan-coverage.ts` (NO imports, all logic exported for
+validation): `buildPlanCoverage`, `PLAN_COVERAGE_VERSION` (= 1).
+`getPlan` additively returns `plan_coverage`, computed inside the
+handler from the SAME version-bracketed templates + schedule rows
+the response itself returns (weekly sessions per routine = the
+count of that code's schedule rows), with the ONE shared
+`MUSCLE_MAP` / `MUSCLE_GROUPS` from `server/src/muscle-heatmap.ts`
+passed into the builder — the module carries no second copy of
+the map, so it can never drift from the guide diagram / receipt /
+W5.1 heatmap map. The forbidden and read_error responses omit the
+field, exactly like the plan body; `getPlan` stays strictly
+owner-only (the L0.1 exception is unchanged and not widened).
+
+Caliber (stated verbatim on the page): an exercise's planned
+weekly sets = template sets × its routine's weekly sessions;
+those sets count under EACH of its muscle groups — planned
+primary sets under primary groups, synergist （协同） sets under
+secondary groups (the standing duplicate-attribution rule, so
+per-group planned sets never sum to a whole-body total); the
+coverage state restates the counts (primary > 0 → 有主要动作；
+secondary only → 仅协同带到； nothing → 未安排）; a routine the
+schedule never places contributes nothing at all; an unmapped
+contributing exercise is listed once under 尚无映射 and never
+guessed into a group; groups the map names beyond the caller's
+list are appended, never dropped. Plan facts only: the module
+reads NO workout history and computes NO recovery / fatigue /
+detraining judgement — it is the plan-level counterpart of
+W5.1's history heatmap, and the section changes nothing (editing
+stays in the plan editor).
+
+Presentation (start page, 计划覆盖 details block — its summary
+is the existing ≥44px `.home-details` control): every row is
+symbol + text label + numbers (✓ 有主要动作 / ◐ 仅协同带到 /
+○ 未安排， plus planned total / primary / synergist sets and the
+contributing exercise names), never colour alone; a closing line
+names the uncovered groups with their count from the server
+(`uncovered_count`). The client renders the server figures only
+and computes no coverage of its own.
+
+### A-class evidence (W6.1)
+
+- `validate-plan-coverage.mjs` (new, node): evaluates the REAL
+  plan-coverage module verbatim over synthetic data only — a
+  behavioral suite of 13 assertions (weekly multiplication,
+  primary + synergist attribution, secondary-only state,
+  unscheduled-routine zero contribution incl. no exercise names,
+  map-only group appended, uncovered count, unmapped listed once,
+  exact seven-field fact shape, duplicate-entry summing with the
+  name listed once, empty plan, zero-set exercise suppressed)
+  plus module checks (import-free, version 1, no copied map) and
+  9 wiring checks — 19 checks total, all passing.
+- Mutation sensitivity, actually executed: 3 mutants of the
+  module source (weekly-sessions multiplication deleted;
+  synergist attribution deleted; primary-state threshold 0 → 999)
+  each make the behavioral suite fail (6 / 2 / 4 assertions),
+  proving the suite is not vacuous.
+- Full regression re-run 2026-11-03, all green: 24 validator
+  scripts, 1,151 checks, 0 failures (validate-plan-coverage 19,
+  validate-plan-safe (bun) 226, validate-plan-versioning (bun)
+  34, and all 21 earlier suites unchanged and passing). Privacy
+  scan of the new/changed files: zero hits (validators use
+  synthetic fixtures only; no real training data anywhere in
+  this round's files).
+- Standing disclosure (unchanged by this round): `getDashboard`'s
+  viewer-less sync channel remains the owner's L0.1 exception of
+  2026-10-17; W6.1 added one read-only computed field behind
+  `getPlan`'s existing strict owner-only gate and did not widen
+  any channel.

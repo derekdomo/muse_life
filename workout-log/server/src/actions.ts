@@ -22,10 +22,15 @@ import {
 } from "./deload-advisory";
 import {
   buildMuscleHeatmap,
+  MUSCLE_GROUPS,
   MUSCLE_MAP,
   MUSCLE_MAP_VERSION,
   type MuscleHeatmapWorkout,
 } from "./muscle-heatmap";
+import {
+  buildPlanCoverage,
+  type PlanCoverageExerciseInput,
+} from "./plan-coverage";
 import {
   buildBodyTrends,
   convertBodyWeight,
@@ -627,6 +632,28 @@ const planExerciseResponse = z.object({
   unit: z.enum(["lb", "kg"]).optional(),
   rest_seconds: z.number().nullable().optional(),
 });
+// W6.1 (additive): one muscle group's planned weekly coverage
+// under the CURRENT plan templates + schedule, computed by the pure
+// buildPlanCoverage in server/src/plan-coverage.ts. Plan facts
+// only: planned sets per week (primary / synergist attribution kept
+// apart), the coverage state restating those counts, and the
+// contributing exercise names — no history, no recovery / fatigue
+// judgement, and nothing here ever changes a plan.
+const planCoverageEntryResponse = z.object({
+  muscle: z.string(),
+  planned_primary_sets: z.number(),
+  planned_secondary_sets: z.number(),
+  planned_total_sets: z.number(),
+  state: z.enum(["primary", "secondary_only", "none"]),
+  primary_exercises: z.array(z.string()),
+  secondary_exercises: z.array(z.string()),
+});
+const planCoverageResponse = z.object({
+  muscles: z.array(planCoverageEntryResponse),
+  unmapped_exercises: z.array(z.string()),
+  uncovered_count: z.number(),
+  coverage_version: z.number(),
+});
 const planRoutineResponse = z.object({
   routine: routineSchema,
   exercises: z.array(planExerciseResponse),
@@ -733,6 +760,13 @@ const planResponse = z.object({
     note: z.string(),
     current: z.boolean(),
   })).optional(),
+  // W6.1 (additive, optional): the planned weekly muscle-group
+  // coverage of the plan body above, computed from the SAME
+  // bracketed templates + schedule rows this response returns, so
+  // it can never describe a different saved version. Present on
+  // every successful read; omitted on the forbidden and read_error
+  // responses, exactly like the plan body itself.
+  plan_coverage: planCoverageResponse.optional(),
 });
 const updatePlanResponse = z.object({
   ok: z.boolean(),
@@ -3667,6 +3701,34 @@ export const Actions = {
         .from(schema.dailyCompletions)
         .where(eq(schema.dailyCompletions.dateKey, dateKey));
       const liveVersion = versionRows.length > 0 ? versionRows[0].version : 0;
+      // W6.1 (additive): planned weekly muscle-group coverage,
+      // computed from the SAME bracketed templates + schedule rows
+      // returned below — weekly sessions per routine are the count
+      // of schedule rows carrying its code (swim / rest rows name
+      // no template exercises, so they contribute nothing). The one
+      // shared MUSCLE_MAP / MUSCLE_GROUPS (muscle-heatmap.ts) are
+      // passed into the pure builder; the plan itself is untouched.
+      const weeklySessions: Record<string, number> = {};
+      for (const row of scheduleRows) {
+        weeklySessions[row.routineCode] = (weeklySessions[row.routineCode] ?? 0) + 1;
+      }
+      const coverageExercises: PlanCoverageExerciseInput[] = [];
+      for (const routine of ROUTINE_KEYS) {
+        for (const exercise of templates[routine]) {
+          coverageExercises.push({
+            routine,
+            exerciseKey: exercise.key,
+            exerciseName: exercise.name,
+            sets: exercise.sets,
+          });
+        }
+      }
+      const coverage = buildPlanCoverage({
+        exercises: coverageExercises,
+        weeklySessions,
+        muscleMap: MUSCLE_MAP,
+        muscleGroups: MUSCLE_GROUPS,
+      });
       return {
         forbidden: false,
         routines: ROUTINE_KEYS.map((routine) => ({ routine, exercises: templates[routine] })),
@@ -3698,6 +3760,24 @@ export const Actions = {
           note: entry.note,
           current: entry.current,
         })),
+        // W6.1 (additive): the planned weekly muscle-group coverage
+        // computed above, serialized to the snake_case response
+        // shape. Omitted nowhere on success — it rides the same
+        // bracketed read as the plan body.
+        plan_coverage: {
+          muscles: coverage.muscles.map((entry) => ({
+            muscle: entry.muscle,
+            planned_primary_sets: entry.plannedPrimarySets,
+            planned_secondary_sets: entry.plannedSecondarySets,
+            planned_total_sets: entry.plannedTotalSets,
+            state: entry.state,
+            primary_exercises: entry.primaryExercises,
+            secondary_exercises: entry.secondaryExercises,
+          })),
+          unmapped_exercises: coverage.unmappedExercises,
+          uncovered_count: coverage.uncoveredCount,
+          coverage_version: coverage.coverageVersion,
+        },
       };
     },
   }),
