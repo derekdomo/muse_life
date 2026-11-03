@@ -3567,3 +3567,21 @@
 - 局限：精确 artifact version 平台未提供；回灌代码与工件的逐字核对由 builder 落盘保证，repo 侧只做了接线/顺序/文案抽查与真实函数断言，未逐字核对线上工作树字节；构建审计/typecheck 以构建方回传为准；owner 视角实机以本人打开为准。
 - 回滚：revert 本次提交即可（纯加法文件变更）；app.db 未触碰。
 - plans.md `F1.3` 已标记 [完成]（实现方已交付；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md、本文件、weekly-finance/client/src/App.tsx、weekly-finance/validate-fire-assumptions.mjs（新）、weekly-finance/DATA-PLAN.md。
+
+## 2026-11-03 13:55 PST · `H-SEASON-TAB-001` 滑雪版设计一行登记（提前至 11-30 期限前）
+- 需求：plans.md `H-SEASON-TAB-001` — 游泳版已于 2026-10-24 交付上线；本轮交付原定的 2026-11-30 前登记项：滑雪版设计一行。
+- 任务：本轮 P0/P1 可执行队列已空（`F0.5` 归原 Muse、`AUDIT-03`/`L0.x`/`H0.x`/`H1.x` 运行待验须本人实机证据、`H-SYNC-DIVERGE-001` 待 PM 裁决、`F3.1` 因 F0.5 coverage 门禁暂缓、`F3.3` 回灌被裁决阻塞、`W-HOMEB-002` 未到 11-16、（需用户确认）条目不动、PM 仍按 PAUSE-LIFE-PM-001 暂停），按队列规则取 P1 明确可执行项 `H-SEASON-TAB-001` 滑雪版设计行提前执行。`AUDIT-07` 本轮经仓库源码核查前提仍存在（`health-dashboard/client/src/App.tsx:2332`、`health-dashboard/server/src/actions.ts:479` 仍用全局 `coverageIncomplete` 决定逐字段缺失标签），属 genuine 缺陷但修复须逐字段覆盖证据（快照管线当前仅提供全局标志，属 `H-SOURCE-001` 运行待验的平台证据范围），不虚构半修，本条保持 [ ]、待上游证据再定。
+- 做了什么（纯设计登记，不含代码改动，artifact 无需改动）：
+  - plans.md `H-SEASON-TAB-001` 已标记 [完成]（2026-11-03；仅表示实现方已交付，PM 暂停中、待验收），并登记滑雪版设计一行：
+    1. 版面：季节专项 tab 冬季切为滑雪版；游泳历史不删，沉入该 tab 历史区保留可查。
+    2. 雪日卡（按雪日）：日期／场次／雪道数／总时长／垂直落差／最高速度／平均速度／距离／平均心率／峰值心率——以 HealthKit snow sports workout（`workout_type` snow-sports 类）记录的真实字段为准；缺失字段整行标「缺」，不得编造、不得用游泳口径折算；分段（上山/下山）以 record 的 segments 真实条目为准，缺则整段标缺。
+    3. 比较维度同游泳版：逐次趋势（总时长/垂直落差/距离）＋个人最佳标记（最长总时长/最大垂直落差/最快平均速度）＋最近一次 vs 近 30 天均值差值行；色弱规则（数字＋▲▼符号＋文字）；compounding 呈现看得见进步曲线。
+    4. 口径标注：来源 Apple Health 雪上运动 workout；本仓当前 `workout_type` 源码映射仅覆盖 swimming/cycling/elliptical（`health-dashboard/DATA-PLAN.md` 第 94 行、本机核查无 snow 条目），snow-sports 标签映射须在首个雪日记录到达时按真实 `workout_type` 枚举值补入并在此条回记。
+    5. 切换触发：出现首个滑雪 workout（或 12 月初出行前）时提一行确认即启动实现；实现另立条目，本条不再打开。
+- 验证证据：
+  - 本机源码核查（`grep -rhoE` 全树）：`workout_type` 仅 swimming/cycling/elliptical 三类标签，无 snow/snowSports 条目；`health-dashboard/server/src/actions.ts:4648` 的刷新 prompt 查询 `workout sessions ... with fields id,start_datetime,...,workout_type,...` 未限定类型——首个 snow-sports 记录可直接入 `historyWorkouts`，标签映射待真实枚举值回记（登记含此待办）。
+  - 无代码改动：构建审计/验证脚本/隐私扫描不适用（无新增文件、无数据入库、无个人数据）。
+  - 设计字段逐项与本条原条目 2026-10-24 规格（场次/雪道数/总时长/垂直落差/最高/平均速度/距离/心率）逐字对齐，未新增未删减。
+- 局限：HealthKit snow-sports 实际 `workout_type` 枚举值未在审计沙箱核实（无真实数据通道），已按「缺字段标缺不编造」登记待验证；精确 artifact version 不适用；owner 视角以本人打开为准。
+- 回滚：revert 本次提交即可（纯文档变更）。
+- 修改文件：plans.md、本文件。
