@@ -14,6 +14,11 @@ export const reports = sqliteTable("reports", {
   rateSource: text("rate_source").notNull(),
   rateUrl: text("rate_url").notNull(),
   summary: text("summary").notNull(),
+  // HH1.5: the date the mortgage-rate source was published/observed
+  // (ISO date or datetime, as supplied by the research agent).
+  // Nullable: legacy rows honestly show "日期未知" and are never
+  // backfilled with an invented date.
+  rateAsOf: text("rate_as_of"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -55,6 +60,20 @@ export const listings = sqliteTable("listings", {
   scoreSpace: integer("score_space"),
   scorePriceComps: integer("score_price_comps"),
   schoolSummary: text("school_summary").notNull(),
+  // HH1.5: provenance of the school ratings quoted in schoolSummary —
+  // source name and its date, both nullable. Legacy rows and listings
+  // whose ratings could not be sourced stay null and the UI says
+  // "来源未知 / 日期未知" instead of inventing provenance.
+  schoolSource: text("school_source"),
+  schoolAsOf: text("school_as_of"),
+  // HH1.3: this listing's price / listing status in the PREVIOUS
+  // published report, recorded by ingest only when the value actually
+  // changed versus that issue (matched by the stable address+city
+  // key). Null means "no change recorded" (including first
+  // appearance); the UI shows explicit 价格变化 / 状态变化 markers
+  // only when these are non-null.
+  prevPrice: integer("prev_price"),
+  prevStatus: text("prev_status"),
   environmentSummary: text("environment_summary").notNull(),
   conditionSummary: text("condition_summary").notNull(),
   verdict: text("verdict").notNull(),
@@ -84,4 +103,18 @@ export const refreshState = sqliteTable("refresh_state", {
   // settles the refresh state, so a half-written candidate report is
   // never visible.
   publishedReportId: integer("published_report_id"),
+});
+
+// HH1.3 owner decisions, keyed by the listing's stable identity
+// (normalized address + city — see listingStableKey in
+// server/src/decision.ts), NOT by report-scoped listing id: a weekly
+// re-issue creates brand-new listing rows, and the owner's
+// favorite / excluded / viewed state must carry over by stable key.
+// Pure additive table; decision is null when the owner cleared the
+// state (the row may remain as a tombstone or be deleted — reads
+// treat both the same).
+export const listingUserStates = sqliteTable("listing_user_states", {
+  stableKey: text("stable_key").primaryKey(),
+  decision: text("decision", { enum: ["favorite", "excluded", "viewed"] }),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });

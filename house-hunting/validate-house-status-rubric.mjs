@@ -116,8 +116,8 @@ check("getReport splits actionable vs degraded and renders verification label se
   && actionsSrc.includes("statusVerifiedLabel: formatStatusVerifiedAt(row.statusVerifiedAt)"));
 check("research prompt requires statusVerifiedAt + subScores with null-for-missing",
   actionsSrc.includes("statusVerifiedAt（你最后一次打开该房源页面确认其挂牌状态的时刻") && actionsSrc.includes("不得用 0 冒充"));
-check("every action carries a v26 description",
-  (actionsSrc.match(/defineAction\(\{\s*\n\s*description: "/g) ?? []).length === 4);
+check("every action carries a v26 description (five actions since HH1 added setListingDecision)",
+  (actionsSrc.match(/defineAction\(\{\s*\n\s*description: "/g) ?? []).length === 5);
 
 // --- wiring: client renders tiers, verification text, sub-scores ---
 check("client shows status label + verification text on every row",

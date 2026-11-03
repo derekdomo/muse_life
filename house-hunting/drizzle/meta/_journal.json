@@ -29,6 +29,13 @@
       "when": 1793696839215,
       "tag": "0004_add_status_verified_at_and_rubric_subscores",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1793697420000,
+      "tag": "0005_add_hh1_decision_support_fields",
+      "breakpoints": true
     }
   ]
 }

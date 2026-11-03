@@ -10,6 +10,12 @@ import {
   statusTier,
   type SubScores,
 } from "./rubric";
+import {
+  buildViewingChecklist,
+  diffListingChanges,
+  listingStableKey,
+  sourceFreshness,
+} from "./decision";
 
 const citySchema = z.enum(["Santa Clara", "Sunnyvale", "Cupertino"]);
 // HH0.4: sold / off_market join the original four statuses.
@@ -53,14 +59,44 @@ const listingInputSchema = z.object({
   // when absent entirely the stored agent score remains authoritative.
   subScores: subScoresInputSchema.nullable().optional(),
   schoolSummary: z.string().min(2).max(500),
+  // HH1.5: school-rating provenance. Optional for legacy-shaped
+  // callbacks; absent stays null and the UI says 来源未知/日期未知.
+  schoolSource: z.string().min(1).max(200).nullable().optional(),
+  schoolAsOf: z.string().min(4).max(40).nullable().optional(),
   environmentSummary: z.string().min(2).max(500),
   conditionSummary: z.string().min(2).max(500),
   verdict: z.string().min(2).max(500),
   caution: z.string().max(500).nullable(),
 });
 
-const listingOutputSchema = listingInputSchema.omit({ subScores: true }).extend({
+const checklistItemSchema = z.object({
+  key: z.enum(["noise", "road", "light", "renovation", "roofHvacElectrical", "lotHoa"]),
+  label: z.string(),
+  state: z.enum(["from-report", "unverified"]),
+  detail: z.string(),
+});
+
+const listingOutputSchema = listingInputSchema.omit({ subScores: true, schoolSource: true, schoolAsOf: true }).extend({
   id: z.number(),
+  // HH1.3: stable identity (normalized address + city) the UI uses
+  // for comparison selection and owner-decision writes.
+  stableKey: z.string(),
+  // HH1.5 school-rating provenance, verbatim from storage (null =
+  // honestly unknown) plus the server-computed freshness against the
+  // 7-day stale threshold.
+  schoolSource: z.string().nullable(),
+  schoolAsOf: z.string().nullable(),
+  schoolFreshness: z.enum(["fresh", "stale", "unknown"]),
+  // HH1.3: previous issue's price / status when they changed versus
+  // this issue; null when unchanged or first appearance.
+  previousPrice: z.number().nullable(),
+  previousStatus: z.string().nullable(),
+  // HH1.3: the owner's decision for this listing, owner-only — always
+  // null for non-owner readers (their decisions are private state).
+  decision: z.enum(["favorite", "excluded", "viewed"]).nullable(),
+  // HH1.4: the fixed viewing checklist, built server-side so the
+  // report-vs-unverified posture is identical for every reader.
+  checklist: z.array(checklistItemSchema),
   statusVerifiedAt: z.number().int().positive().nullable(),
   // Server-rendered status text (symbol + words, e.g. "● 在售") and
   // "状态核验于 MM-DD HH:mm" / "核验时间未知" verification text; the
@@ -78,6 +114,10 @@ const listingOutputSchema = listingInputSchema.omit({ subScores: true }).extend(
 });
 
 const reportResponseSchema = z.object({
+  // HH1.3: whether the current reader is the owner. Decision
+  // controls render only for the owner; decision values themselves
+  // are additionally withheld from non-owner responses.
+  viewerIsOwner: z.boolean(),
   report: z.object({
     id: z.number(),
     asOf: z.string(),
@@ -85,6 +125,10 @@ const reportResponseSchema = z.object({
     rateLabel: z.string(),
     rateSource: z.string(),
     rateUrl: z.string(),
+    // HH1.5: the rate source's own date plus its freshness against
+    // the 7-day stale threshold. rateAsOf null = 日期未知.
+    rateAsOf: z.string().nullable(),
+    rateFreshness: z.enum(["fresh", "stale", "unknown"]),
     summary: z.string(),
     createdAt: z.string(),
     // Actionable (active) listings only, in rank order.
@@ -339,24 +383,23 @@ export function decideIngestCallback(input: {
 // Generation gate (HH0.2, PM generation contract). refreshReport mints
 // a generation id when a refresh starts and stores it on refresh_state;
 // the research task must echo it back in its ingestResearch callback,
-// success and failure alike. A callback arriving on the task-return
-// channel is bound to that generation:
-//  - While a refresh is running, a missing or mismatched generation
-//    means the callback belongs to an older (or foreign) task and must
-//    be ignored without touching state — the pre-contract defect was an
-//    old generation's failure callback, which carries no asOf to
-//    compare, settling the new generation's running state.
-//  - Once a generation has settled (idle/error), it is spent: a task
-//    callback can settle its own still-running generation exactly
-//    once, so a late or replayed task return — same generation with a
-//    newer asOf, or a foreign generation — must never publish or
-//    settle again (PM 2026-10-18 03:10 repro: the pre-fix gate passed
-//    every non-running state, and decideIngestCallback then let a
-//    newer-asOf success re-publish over the settled report).
+// success and failure alike. A task-channel callback may settle its own
+// generation exactly once, and only while that generation is still
+// running and unsettled:
+//  - While the stored generation is running, the callback must echo it
+//    exactly: a missing or mismatched generation means the callback
+//    belongs to an older (or foreign) task and must be ignored without
+//    touching state — the pre-contract defect was an old generation's
+//    failure callback, which carries no asOf to compare, settling the
+//    new generation's running state.
+//  - Once the stored generation has settled (idle/error), it can never
+//    be settled or published again: same-generation and foreign-
+//    generation success/failure callbacks alike are ignored, so a
+//    settled generation's late success cannot publish a second time.
 // Legacy state rows (generation null, written before this contract)
 // keep the previous decide-only behaviour, and callbacks on any other
-// channel are not gated here (the owner channel is the explicit-import
-// path; the claim arbitration below still binds it).
+// channel are not gated here (the owner's explicit import path stays
+// open; the claim arbitration below still binds it).
 export function decideGenerationGate(input: {
   fromTaskChannel: boolean;
   refreshStatus: "idle" | "running" | "error" | null | undefined;
@@ -413,27 +456,25 @@ async function setRefreshState(
   }
 }
 
-// HH0.2 spawn-tail CAS (PM 2026-10-18 03:10 repro): refreshReport's
-// post-spawn writes may only attach to the generation they started,
-// and only while that generation is still running and unsettled. The
-// pre-fix tail wrote unconditionally, so a spawn that returned late —
-// after its own generation's callback had already settled it, or after
-// a stale-aged restart had minted a new generation — resurrected the
-// settled state to "running" or overwrote/errored the new generation.
-// One conditional UPDATE matching (id, this generation, still
-// "running"); zero matched rows means this spawn's outcome no longer
-// owns the state row and nothing is written. The patch never touches
-// generation/claimedGeneration/publishedReportId, so an in-flight
-// ingest claim or publish of the same generation is undisturbed.
+// HH0.2 late-spawn guard: refreshReport's post-spawn writes are a
+// compare-and-swap on the generation this call minted — a single
+// conditional UPDATE that lands only while the state row still holds
+// this generation AND is still "running". While spawnTask was in
+// flight the generation may already have been settled by its own
+// callback, or superseded by a newer generation; in both cases the
+// CAS matches zero rows and the late spawn result must not resurrect
+// the settled generation or touch the newer one's row.
 async function casSpawnTailState(
   ctx: Ctx,
   generation: string,
-  patch: { status: "idle" | "running" | "error"; taskId: string | null; message: string | null },
+  status: "running" | "error",
+  taskId: string | null,
+  message: string | null,
 ): Promise<boolean> {
   const db = ctx.db<typeof schema>();
   const rows = await db
     .update(schema.refreshState)
-    .set({ status: patch.status, taskId: patch.taskId, message: patch.message, updatedAt: new Date() })
+    .set({ status, taskId, message, updatedAt: new Date() })
     .where(
       and(
         eq(schema.refreshState.id, 1),
@@ -445,17 +486,44 @@ async function casSpawnTailState(
   return rows.length === 1;
 }
 
+// When the post-spawn CAS misses, the refresh state belongs to someone
+// else now; re-read it and report what is actually true instead of
+// this call's intended outcome: a newer generation still running is
+// "already_running", this generation already settled by its callback
+// to idle is reported as completed (never as error/running), and a
+// settled error is reported as error.
+async function refreshOutcomeAfterCasMiss(
+  ctx: Ctx,
+  fallback: "started" | "error",
+): Promise<{ ok: boolean; status: "started" | "already_running" | "error"; message: string }> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
+  const cur = rows[0];
+  if (cur?.status === "running") {
+    return { ok: true, status: "already_running", message: "刷新已经在进行中" };
+  }
+  if (cur?.status === "idle") {
+    return { ok: true, status: "started", message: "刷新已完成，报告已更新" };
+  }
+  if (cur?.status === "error") {
+    return { ok: false, status: "error", message: cur.message ?? "刷新未完成，请稍后重试" };
+  }
+  return fallback === "started"
+    ? { ok: true, status: "started", message: "已开始刷新，完成后会自动更新" }
+    : { ok: false, status: "error", message: "刷新任务未能启动" };
+}
+
 type ReportRow = typeof schema.reports.$inferSelect;
 
-// HH0.3: the visible report is the one the publish pointer names. The
-// pointer is authoritative when it names a published report; the
-// published flag (backfilled by the 0003 migration for pre-pointer
-// legacy data) is the only fallback. There is deliberately NO "newest
-// report row" fallback: on a first-run database whose only report is
-// a still-unpublished candidate (published=0), that fallback exposed
-// the half-written candidate — and kept exposing it after its write
-// failed (PM 2026-10-18 03:10 repro). With no published report this
-// returns undefined and getReport honestly reports report=null.
+// HH0.3: the visible report is a PUBLISHED report only — the one the
+// publish pointer names (and which carries published=1), or otherwise
+// the newest published report. There is deliberately no fallback to
+// the newest row overall: an unpublished candidate (published=0) must
+// never become visible, not mid-write, not after a failed write, and
+// not after a newer generation supersedes it. When nothing has been
+// published yet this returns undefined and getReport reports an honest
+// empty state. Legacy rows are covered by the 0003 migration, which
+// backfills published=1 and the pointer for pre-existing data.
 async function loadPublishedReport(ctx: Ctx): Promise<ReportRow | undefined> {
   const db = ctx.db<typeof schema>();
   const stateRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
@@ -475,7 +543,7 @@ async function loadPublishedReport(ctx: Ctx): Promise<ReportRow | undefined> {
 
 export const Actions = {
   getReport: defineAction({
-    description: "Read the current published weekly South Bay home report: ranked actionable listings, the degraded (contingent/pending) section, rubric sub-scores, status verification times, and refresh state.",
+    description: "Read the current published weekly South Bay home report: ranked actionable listings, the degraded (contingent/pending) section, rubric sub-scores, status verification times, viewing checklists, school/rate source dates with stale flags, previous-issue price/status change markers, the owner's listing decisions (owner readers only), and refresh state.",
     request: z.object({}),
     response: reportResponseSchema,
     async handler(ctx): Promise<z.infer<typeof reportResponseSchema>> {
@@ -493,11 +561,24 @@ export const Actions = {
       const state = stateRows[0];
       if (!report) {
         return {
+          viewerIsOwner: owner,
           report: null,
           refresh: presentRefreshState(state, owner),
         };
       }
       const rows = await db.select().from(schema.listings).where(eq(schema.listings.reportId, report.id)).orderBy(schema.listings.rank);
+      // HH1.3: owner decisions live outside the report (keyed by the
+      // stable address+city identity) so they survive weekly
+      // re-issues. They are the owner's private state: only an owner
+      // reader's response carries them; everyone else gets null.
+      const decisionByKey = new Map<string, "favorite" | "excluded" | "viewed">();
+      if (owner) {
+        const stateRowsAll = await db.select().from(schema.listingUserStates);
+        for (const s of stateRowsAll) {
+          if (s.decision) decisionByKey.set(s.stableKey, s.decision);
+        }
+      }
+      const nowMs = Date.now();
       // HH0.4: sold / off_market rows stay in the database (history is
       // never deleted) but are filtered out HERE, at the getReport
       // layer, so the recommendation surface only ever carries
@@ -516,8 +597,22 @@ export const Actions = {
         };
         const rubric = computeRubricScore(subScores);
         const hasSubScores = rubric.presentCount > 0;
+        const stableKey = listingStableKey(row.address, row.city);
         return {
           id: row.id,
+          stableKey,
+          schoolSource: row.schoolSource,
+          schoolAsOf: row.schoolAsOf,
+          schoolFreshness: sourceFreshness(row.schoolAsOf, nowMs),
+          previousPrice: row.prevPrice,
+          previousStatus: row.prevStatus,
+          decision: decisionByKey.get(stableKey) ?? null,
+          checklist: buildViewingChecklist({
+            environmentSummary: row.environmentSummary,
+            conditionSummary: row.conditionSummary,
+            lotSqft: row.lotSqft,
+            hoaMonthly: row.hoaMonthly,
+          }),
           rank: row.rank,
           score: row.score,
           address: row.address,
@@ -550,6 +645,7 @@ export const Actions = {
       };
       const visibleRows = rows.filter((row) => !isExcludedStatus(row.status));
       return {
+        viewerIsOwner: owner,
         report: {
           id: report.id,
           asOf: report.asOf,
@@ -557,6 +653,8 @@ export const Actions = {
           rateLabel: report.rateLabel,
           rateSource: report.rateSource,
           rateUrl: report.rateUrl,
+          rateAsOf: report.rateAsOf,
+          rateFreshness: sourceFreshness(report.rateAsOf, nowMs),
           summary: report.summary,
           createdAt: report.createdAt.toISOString(),
           listings: visibleRows.filter((row) => statusTier(row.status) === "actionable").map(presentListing),
@@ -564,6 +662,47 @@ export const Actions = {
         },
         refresh: presentRefreshState(state, owner),
       };
+    },
+  }),
+
+  setListingDecision: defineAction({
+    description: "Owner-only: set or clear the owner's favorite / excluded / viewed decision for one listing, keyed by its stable address+city identity so it survives weekly re-issues.",
+    request: z.object({
+      stableKey: z.string().min(3).max(240),
+      decision: z.enum(["favorite", "excluded", "viewed"]).nullable(),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      status: z.enum(["saved", "forbidden"]),
+      decision: z.enum(["favorite", "excluded", "viewed"]).nullable(),
+    }),
+    async handler(ctx, args) {
+      // HH1.3 owner gate, checked BEFORE any write: a non-owner or
+      // anonymous caller is forbidden and writes nothing. Decisions
+      // are mutually exclusive — one stored state per listing.
+      if (!isOwner(ctx)) {
+        return { ok: false, status: "forbidden" as const, decision: null };
+      }
+      const db = ctx.db<typeof schema>();
+      const existing = await db
+        .select()
+        .from(schema.listingUserStates)
+        .where(eq(schema.listingUserStates.stableKey, args.stableKey))
+        .limit(1);
+      if (existing[0]) {
+        await db
+          .update(schema.listingUserStates)
+          .set({ decision: args.decision, updatedAt: new Date() })
+          .where(eq(schema.listingUserStates.stableKey, args.stableKey));
+      } else {
+        await db.insert(schema.listingUserStates).values({
+          stableKey: args.stableKey,
+          decision: args.decision,
+          updatedAt: new Date(),
+        });
+      }
+      ctx.invalidateQueries();
+      return { ok: true, status: "saved" as const, decision: args.decision };
     },
   }),
 
@@ -629,55 +768,29 @@ export const Actions = {
       });
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
-        `为一个南湾每周看房报告做一次完整刷新。研究当前在售的 Santa Clara、Sunnyvale、Cupertino 独栋住宅，预算 $2,000,000–$3,000,000，至少 3 卧。核心排序维度：性价比、安静住宅环境（排除紧邻高速或主要干道）、房龄/翻新状态、室内面积、学校质量或靠谱私校距离。必须打开并核对每个保留房源的真实页面和地图/道路背景，优先 Redfin，保持每个公开 URL 原样。给出 8–15 套有理由的短名单并排序，不能编造缺失字段；已 pending/contingent 可保留但必须标注。另查找有日期的当前 30 年 jumbo 固定按揭利率（若无 jumbo，才使用 30 年固定全国平均，并写清标签和来源 URL）。为每套写简洁中文 schoolSummary、environmentSummary、conditionSummary、verdict、caution。每套必须给出 status（active / contingent / pending / unknown / sold / off_market 之一）和 statusVerifiedAt（你最后一次打开该房源页面确认其挂牌状态的时刻，Unix 毫秒时间戳；确实无法确认时给 null，不得编造）。每套必须给出 subScores 分项分（0–100 整数）：hardCriteria 硬条件（3+ 卧、独栋、预算内等硬性达标程度）、environment 环境（安静程度与道路远近）、school 学校/私校、ageCondition 房龄/状态、space 空间、priceComps 价格/可比成交性价比；某一项确实无法评估时该项给 null，不得用 0 冒充；score 字段给出你的综合参考分即可，最终总分由服务端按公开权重用分项分计算。asOf 使用带时区 ISO 时间。若研究无法完成，回传失败状态与中文错误说明。回传 ingestResearch 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略）。`,
+        `为一个南湾每周看房报告做一次完整刷新。研究当前在售的 Santa Clara、Sunnyvale、Cupertino 独栋住宅，预算 $2,000,000–$3,000,000，至少 3 卧。核心排序维度：性价比、安静住宅环境（排除紧邻高速或主要干道）、房龄/翻新状态、室内面积、学校质量或靠谱私校距离。必须打开并核对每个保留房源的真实页面和地图/道路背景，优先 Redfin，保持每个公开 URL 原样。给出 8–15 套有理由的短名单并排序，不能编造缺失字段；已 pending/contingent 可保留但必须标注。另查找有日期的当前 30 年 jumbo 固定按揭利率（若无 jumbo，才使用 30 年固定全国平均，并写清标签和来源 URL）。为每套写简洁中文 schoolSummary、environmentSummary、conditionSummary、verdict、caution。每套必须给出 status（active / contingent / pending / unknown / sold / off_market 之一）和 statusVerifiedAt（你最后一次打开该房源页面确认其挂牌状态的时刻，Unix 毫秒时间戳；确实无法确认时给 null，不得编造）。每套必须给出 subScores 分项分（0–100 整数）：hardCriteria 硬条件（3+ 卧、独栋、预算内等硬性达标程度）、environment 环境（安静程度与道路远近）、school 学校/私校、ageCondition 房龄/状态、space 空间、priceComps 价格/可比成交性价比；某一项确实无法评估时该项给 null，不得用 0 冒充；score 字段给出你的综合参考分即可，最终总分由服务端按公开权重用分项分计算。asOf 使用带时区 ISO 时间。若研究无法完成，回传失败状态与中文错误说明。回传 ingestResearch 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略）。另外，每套房源如能确认学校评分的来源，给出 schoolSource（来源名称，如评分机构或学校官网）与 schoolAsOf（该来源数据的日期，ISO 日期）；报告级给出 rateAsOf（所采用按揭利率来源的发布日期，ISO 日期）。确实无法确认时一律给 null，不得编造来源或日期。`,
         { expectsAction: "ingestResearch", dedupeKey: "weekly-south-bay-home-report" },
       );
+      // HH0.2: both post-spawn writes go through the generation CAS.
+      // The initial "running" write above stays unconditional (it IS
+      // this generation's start), but by the time spawnTask returns
+      // the state may no longer be this generation's to write: its
+      // callback may already have settled it, or a newer generation
+      // may have started over a stale row. A CAS miss writes nothing
+      // and the response is derived from the re-read current state.
       if (!task.ok) {
-        // Spawn-tail CAS: settle to error only if this generation is
-        // still the running one; a late spawn failure must not error
-        // a generation that already settled or a newer generation.
-        const settled = await casSpawnTailState(ctx, generation, {
-          status: "error",
-          taskId: null,
-          message: "刷新任务未能启动，请稍后重试",
-        });
+        const applied = await casSpawnTailState(ctx, generation, "error", null, "刷新任务未能启动，请稍后重试");
         ctx.invalidateQueries();
-        if (settled) {
+        if (applied) {
           return { ok: false, status: "error" as const, message: "刷新任务未能启动" };
         }
-        const nowRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
-        const nowState = nowRows[0];
-        if (nowState?.status === "running") {
-          return { ok: true, status: "already_running" as const, message: "刷新已经在进行中" };
-        }
-        if (nowState?.status === "idle") {
-          return { ok: true, status: "started" as const, message: "刷新已完成，报告已更新" };
-        }
-        return { ok: false, status: "error" as const, message: nowState?.message ?? "刷新任务未能启动" };
+        return refreshOutcomeAfterCasMiss(ctx, "error");
       }
-      // Spawn-tail CAS: record the task id only on this generation's
-      // still-running row. If the callback already settled this
-      // generation (or a new generation replaced it) while spawnTask
-      // was in flight, the state row belongs to that outcome now —
-      // leave it exactly as it is and answer from the actual state.
-      const attached = await casSpawnTailState(ctx, generation, {
-        status: "running",
-        taskId: task.taskId,
-        message: "正在核对房源、街道环境、学校与利率",
-      });
-      if (attached) {
+      const applied = await casSpawnTailState(ctx, generation, "running", task.taskId, "正在核对房源、街道环境、学校与利率");
+      if (applied) {
         return { ok: true, status: "started" as const, message: "已开始刷新，完成后会自动更新" };
       }
-      const nowRows = await db.select().from(schema.refreshState).where(eq(schema.refreshState.id, 1)).limit(1);
-      const nowState = nowRows[0];
-      ctx.invalidateQueries();
-      if (nowState?.status === "running") {
-        return { ok: true, status: "already_running" as const, message: "刷新已经在进行中" };
-      }
-      if (nowState?.status === "idle") {
-        return { ok: true, status: "started" as const, message: "刷新已完成，报告已更新" };
-      }
-      return { ok: false, status: "error" as const, message: nowState?.message ?? "刷新未能完成，请稍后重试" };
+      return refreshOutcomeAfterCasMiss(ctx, "started");
     },
   }),
 
@@ -701,6 +814,9 @@ export const Actions = {
         rateLabel: z.string().min(2).max(120),
         rateSource: z.string().min(2).max(120),
         rateUrl: z.string().url(),
+        // HH1.5: the rate source's own date (ISO). Optional for
+        // legacy-shaped callbacks; absent stays null (日期未知).
+        rateAsOf: z.string().min(4).max(40).nullable().optional(),
         summary: z.string().min(10).max(1000),
         listings: z.array(listingInputSchema).min(3).max(20),
       }),
@@ -715,13 +831,15 @@ export const Actions = {
       if (!isOwner(ctx) && !isTaskReturnCallback(ctx)) return { ok: false, saved: 0 };
       // Generation binding + idempotency (HH0.2) and whole-issue atomic
       // visibility (HH0.3), in order:
-      //  1. Generation gate: a task-channel callback arriving while a
-      //     refresh runs must echo the stored generation; a missing or
-      //     mismatched generation is an old generation's late return
-      //     (its failure callbacks carry no asOf, so decideIngestCallback
-      //     alone cannot tell them apart) — ignore, state untouched.
-      //     A task-channel callback arriving after its generation has
-      //     settled is likewise ignored: a generation settles once.
+      //  1. Generation gate: a task-channel callback may settle only
+      //     its own still-running generation — while it runs the
+      //     callback must echo the stored generation (a missing or
+      //     mismatched generation is an old generation's late return;
+      //     its failure callbacks carry no asOf, so decideIngestCallback
+      //     alone cannot tell them apart), and once the generation has
+      //     settled, same- and foreign-generation callbacks alike are
+      //     ignored so it can never settle or publish twice — in both
+      //     cases: ignore, state untouched.
       //  2. decideIngestCallback filters provably stale callbacks
       //     against the published report: a success no newer than it, a
       //     success stamped before this refresh started, any late
@@ -909,6 +1027,19 @@ export const Actions = {
       // the state. A failure anywhere in this block leaves at most an
       // invisible candidate behind; the state settles to error and the
       // refresh can be retried.
+      // HH1.3: snapshot the CURRENT published issue's listings by
+      // stable key before the candidate is written, so each new row
+      // can record its previous price / status when they changed.
+      // Owner decisions need no copying: they live in
+      // listing_user_states keyed by the same stable identity.
+      const previousReport = await loadPublishedReport(ctx);
+      const previousByKey = new Map<string, { price: number; status: string }>();
+      if (previousReport) {
+        const prevRows = await db.select().from(schema.listings).where(eq(schema.listings.reportId, previousReport.id));
+        for (const r of prevRows) {
+          previousByKey.set(listingStableKey(r.address, r.city), { price: r.price, status: r.status });
+        }
+      }
       let candidateId: number | null = null;
       try {
         const inserted = await db.insert(schema.reports).values({
@@ -918,6 +1049,7 @@ export const Actions = {
           rateLabel: args.rateLabel,
           rateSource: args.rateSource,
           rateUrl: args.rateUrl,
+          rateAsOf: args.rateAsOf ?? null,
           summary: args.summary,
         }).returning({ id: schema.reports.id });
         const report = inserted[0];
@@ -946,7 +1078,15 @@ export const Actions = {
           (entry) => entry.score,
         );
         const excludedEntries = scored.filter((entry) => isExcludedStatus(entry.status));
-        const toInsertRow = (entry: ScoredListing, rank: number, score: number) => ({
+        const toInsertRow = (entry: ScoredListing, rank: number, score: number) => {
+          // HH1.3: mark price / status changes against the previous
+          // published issue (same stable key). Unchanged or
+          // first-appearance listings store null — no marker shown.
+          const change = diffListingChanges(
+            previousByKey.get(listingStableKey(entry.address, entry.city)),
+            entry,
+          );
+          return {
           rank,
           score,
           address: entry.address,
@@ -964,6 +1104,10 @@ export const Actions = {
           hoaMonthly: entry.hoaMonthly,
           status: entry.status,
           statusVerifiedAt: entry.statusVerifiedAt ?? null,
+          schoolSource: entry.schoolSource ?? null,
+          schoolAsOf: entry.schoolAsOf ?? null,
+          prevPrice: change.previousPrice,
+          prevStatus: change.previousStatus,
           scoreHardCriteria: entry.subScores?.hardCriteria ?? null,
           scoreEnvironment: entry.subScores?.environment ?? null,
           scoreSchool: entry.subScores?.school ?? null,
@@ -976,7 +1120,8 @@ export const Actions = {
           verdict: entry.verdict,
           caution: entry.caution,
           reportId: report.id,
-        });
+          };
+        };
         const rowsToInsert = [
           ...rankedVisible.map((entry) => toInsertRow(entry.item, entry.rank, entry.score)),
           ...excludedEntries.map((entry, index) =>
