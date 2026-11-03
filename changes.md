@@ -3338,3 +3338,14 @@
  - 要求交付：构建审计 pass＋隐私扫描零命中＋新增 validate-trend-ranges.mjs（真实生产函数断言＋≥2 项变异实跑）＋既有回归全过。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，不勾选。
  - 回滚：构建未交付前无仓库变更可回滚；派工可经 artifact.cancel 取消（本轮未取消）。
  - plans.md `H2.3` 已加派工登记。本轮未动 cron；修改文件：plans.md、本文件。
+
+## 2026-11-02 20 时 PST（muse-life-plans-sync 19:55 轮次续：H2.3 构建回传交付回灌；space-4）
+
+- H2.3 趋势 7/30 天切换与三类日期标记·交付＋回灌（2026-11-02 19:55 PST 轮次，muse-life-plans-sync；19:55 派工）。
+ - 需求编号：plans.md `H2.3`（P2，H2 节最后一项；补齐 H2「今日行动卡」）。
+ - 本轮队列核对（独立复核）：基线 `a2d2e45` 起 0 新提交（`git log --oneline a2d2e45..HEAD` 为空），工作树干净；P0/P1 可执行队列已空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决、`W-HOMEB-002` 未到 11-16）。
+ - 构建交付事实（space-4 builder 回传，verification_status SUCCEEDED，worker_completed_at 2026-11-03T04:06:39Z）：`H2.3` 已按规格在 artifact（space-4）上线——(1) 服务端新增无 import 纯函数模块 `server/src/trend-ranges.ts`（全部导出），`getDashboard` 加法字段 `trendRanges` 预先算好 7/30 天两个窗口（以 dataDate 结尾）的四指标序列、readiness 存档点、长期基线与三类标记；client 只渲染与切换。(2) 趋势页顶部 44px「近 7 天 / 近 30 天」切换（默认 7 天，`useState<7|30>(7)`），驱动步数/静息心率/HRV/睡眠/readiness 柱状图与每日明细；历史不足时标注「仅 X 天数据」、缺失保持空缺不填 0。(3) 图上符号＋文字标记三类日期：缺失段（○）、训练日（✦，取自训练记录与 Apple 健康既有同步快照）、偏离基线日（▲/▼；H4.5 长期基线口径＋H1.7/H3 实用差异阈值：HRV ±10%、静息心率 ±3 bpm、睡眠 ±30 分钟、步数 ±20%；状态期不标偏离）；下方日期标记明细（符号＋文字＋数字）与公开判定口径图例；可与 H4.4 状态标记叠加。(4) DATA-PLAN.md 外科式追加 H2.3 章节（既有章节未动）。无 migration、无新数据源、readiness 公式与 L0.1 门禁不变；沙箱无 viewer 身份探针：非所有者/无健康数据路径返回 `trendRanges: null` 且通过响应 schema 校验。
+ - 回灌本仓：构建回传含源码级确认（App.tsx diff、纯模块验证器源码、exec 记录 DATA-PLAN.md 追加），本轮按既有惯例做计划/变更登记（回灌代码以 artifact 本体为准，后续轮次如有差异按 H-SYNC-DIVERGE-001 登记）。
+ - 仓库验证（本机实跑，合成数据）：新增 validate-trend-ranges.mjs **34/34**（含 3 项变异真实执行全部敏感：静息心率阈值 3→30 bpm、历史标注抑制、缺失段状态断点移除，每项均翻转对应断言）；既有回归 acwr 31、behavior-impact 27、game-settlement 150、month-review 38、muscle-status 70、readiness-advice 38、rewards 122、sleep-debt 35、sleep-regularity 25、status-mode 38、swim-partial 30、sync-readback 33 全绿；week-review（93/10）与 week-focus-feedback（195/1）为编辑前基线既有漂移（DATA-PLAN 已记录，与本轮 diff 无关）；编辑中一度因返回对象字段顺序触发 month-review 精确字符串检查，已按 H4.5 先例把 trendRanges 移到返回对象末尾修复，未改动任何旧验证器。隐私扫描：新增/改动内容仅含合成 fixture 与口径文字，无真实健康数据、密钥或 app.db 内容。
+ - 如实保留：精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；沙箱主路径调用无法直接执行（无所有者身份），主路径由纯模块验证器与类型检查覆盖。
+ - plans.md `H2.3` 已标记 [完成]（实现方已交付；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md、本文件。
