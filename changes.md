@@ -3485,3 +3485,14 @@
  - 仓库验证（本机实跑，全合成数据）：validate-house-hh1 **67/67**、validate-house-refresh **76/76**、validate-house-status-rubric **58/58** 全过；validate-house-ingest 本机因缺 node_modules/drizzle-orm 未能执行（构建方环境 72/72，沿前例记录）；隐私扫描：新增/改动文件零密钥/UUID/路径命中；journal JSON 合法；0005 迁移 6 语句/5 breakpoints 与 0004 格式一致；decision.ts 零 import。
  - 如实保留：(a) **转录分歧已裁决**——inspect 回传的 App.tsx 转录本第 157 行（保险行）为 `cost.propertyTaxMonthly`，随后派发的低复杂度修复构建对 live 源码直接 grep，确认该行实际为 `cost.insuranceMonthly`（44/45/50/51/156 行两边转录一致，仅该 token 分歧；修复构建 verification_status SUCCEEDED、「页面已符合要求、无需改动」）。按声明-证据对纪律采信更直接的 live grep：转录环节的单 token 笔误，不代表构建产物有 bug；repo 该行已按 live 源码置为 `insuranceMonthly`，与线上一致、无漂移；(b) HH0.4 状态核验语义、HH0.5 rubric 口径、HH0.2/HH0.3 刷新发布机制未动；全部 schema 变更为加法；(c) 审计沙箱非 owner，owner 视角实机以本人打开为准。
  - plans.md `HH1.1`–`HH1.5` 已标记 [完成]（实现方已交付；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md、本文件、house-hunting/server/src/decision.ts（新）、house-hunting/server/src/schema.ts、house-hunting/server/src/actions.ts、house-hunting/client/src/App.tsx、house-hunting/client/src/theme.css、house-hunting/DATA-PLAN.md、house-hunting/drizzle/0005_add_hh1_decision_support_fields.sql（新）、house-hunting/drizzle/meta/_journal.json、house-hunting/validate-house-hh1.mjs（新）、house-hunting/validate-house-status-rubric.mjs。
+
+## 2026-11-03 05 时 PST（muse-life-plans-sync 05:55 轮次：W6.1 派工；space-6）
+
+- W6.1 训练计划参考 OpenGym·派工（2026-11-03 05:55 PST 轮次，muse-life-plans-sync）。
+ - 需求编号：plans.md `W6.1`（用户直提 2026-10-18，训练计划参考 OpenGym）。
+ - 本轮队列核对（独立复核）：基线 `c25f2a1` 起 0 新提交（`git log --oneline c25f2a1..HEAD` 为空），工作树干净；P0/P1 可执行队列为空——`F0.5` 本体归原 Muse、`AUDIT-03`/`L0.x`/`H0.x`/`H1.x` 运行待验须本人实机证据、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`W-HOMEB-002` 未到 11-16、`H-SEASON-TAB-001` 滑雪设计行 2026-11-30 前另行登记未到期、`CWEB-LEVEL-001` 四参数/路径与 `W6.2-PM-IMG` 整批过目为（需用户确认）项、`LIFE-DESIGN-001` 待 PM 出稿、`H-FRESH-001·PHASE-1`/`H-UI-002` 已于 2026-10-24 交付、plans 仍 [ ] 系待 PM/owner 运行验收（不重开工、不伪造验收）；PM 仍按 PAUSE-LIFE-PM-001 暂停。
+ - 任务：研读 OpenGym（`github.com/DuarteSantos8/openGym`，AGPL-3.0）四维度（计划编排/进阶规则/肌群训练·疲劳·脱训图/动作库组织），注明来源位置；产出按"价值×改动成本"排序的可借鉴点清单；落实排序第一的纯加法小步（不动现有计划结构与既有导出/签名——若第一名涉结构改动，本轮只交付研究＋排序清单并回传说明）。硬性边界：只借鉴设计思想与信息架构、绝不复制代码（AGPL-3.0）；与健身房 PPL＋居家体态/滑雪例程＋每日微例程衔接，不推翻已存计划结构；涉及计划结构大改先报所有者。
+ - 派工：已向 space-6 builder 派工（artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认 space-6 无构建在跑）。约束：服务端新增无 import 纯函数模块（全部导出）＋client 只渲染不自算；不改渐进负荷引擎与既有公式/口径；无 schema/migration 优先；色弱规则（符号＋文字＋数字）/44px；L0.1 例外维持现状；不提交 app.db/.env/密钥/真实数据。要求交付：构建审计 pass＋隐私扫描零命中＋新增 validate-*.mjs（真实生产函数断言＋≥2 项变异真实执行翻转）＋既有回归全过＋DATA-PLAN.md 外科式新增 W6.1 章节；回传须含完整回灌包。
+ - 本轮状态：仅派工，`W6.1` 保持 [ ] 不勾选；构建交付后由后续轮次回灌仓库并补交付登记，整项待 PM 验收。回滚：构建未交付前无仓库变更可回滚；派工可经 artifact.cancel 取消（本轮未取消）。
+ - 顺延（按吞吐规则记录）：`F1.3` 余项（P1，FIRE 保守/中性两种可编辑假设）为本轮另一明确可执行项——单项构建确实耗时，顺延至下一轮首位（届时向 space-3 派工：FIRE 面板加保守/中性两种可编辑假设输入，纯 UI 态、不持久化、不改 `fireYearsEstimate` 口径、保留「线性估算，不含投资回报」标注、假设与结果并列、不输出建议），本轮不派工。
+ - plans.md `W6.1` 已加派工登记与顺延登记。本轮未动 cron；修改文件：plans.md、本文件。
