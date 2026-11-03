@@ -1,5 +1,11 @@
 # Changes
 
+## 2026-11-02 19:55 PST（muse-life-plans-sync 本轮：H2.1＋H2.2 派工，space-4「今日训练建议」行动卡）
+
+- 需求编号：plans.md `H2.1`（P1，readiness 下非医疗可执行训练建议）＋`H2.2`（P1，训练建议只提供「打开训练记录」入口、不动 workout-log）。本轮基线 `ca9799a` 起 0 新提交、工作树干净、PM 按 PAUSE-LIFE-PM-001 暂停；队列核对：`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`F3.1` 因 F0.5 coverage 门禁暂缓、`W-HOMEB-002` 未到 11-16、306 个（需用户确认）条目不动；第 7 步 13 项 P2 盘点已全交付（F3.1 暂缓、F3.3 阻塞除外）。按 P1 优先、`H2.1` 与 `H2.2` 为同一今日行动卡，合并一次构建派工。
+- 派工内容（artifact.edit，space-4 builder，高复杂度、异步回传；派工前经 artifact.status 确认 space-4 无构建在跑）：(1) 服务端新增零 import 纯函数模块 `server/src/readiness-advice.ts`（全部导出）——输入当日 readiness（status/score/components/adjustments/confidence/缺失原因），输出四档：正常计划（准备就绪/全力以赴）／降强度（量力而行）／恢复日（恢复）／数据不足；每档附触发依据清单（触发组件/调整项、分数、置信度、缺失信号点名）；状态期（H4.4 口径）不给建议。(2) `getDashboard` 加法字段 `readinessAdvice`（三条返回路径；非所有者/无快照时 null），client 只渲染不自算；今日页 readiness 旁新增「今日训练建议」卡（建议档＋触发依据逐条＋「打开训练记录」入口——`H2.2` 同包；平台无深链能力不编造，沿 H-UI-001 前例诚实呈现；绝不写 workout-log，两个 app 独立）。(3) 红线：不改 readiness 公式与 H-LOAD-001、无 schema/migration；色弱规则（符号＋文字＋数字）/44px；L0.1 例外维持；不提交 app.db/.env/密钥/真实数据。要求交付：构建审计 pass＋隐私扫描零命中（合成数据）＋新增 validate-readiness-advice.mjs（真实生产函数断言＋≥2 项变异实跑）＋既有回归全过＋DATA-PLAN.md 外科式新增 H2.1 章节。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，本轮不勾选。
+- plans.md：`H2.1` 追加派工登记、`H2.2` 标注并入同次构建。修改文件：plans.md、本文件。未动 cron。回滚：本轮仅派工＋文档登记，无仓库代码变更可回滚；构建未交付前可经 artifact.cancel 取消派工。
+
 ## 2026-11-02 18:55 PST（muse-life-plans-sync 本轮：F2.1 交付回灌＋F2.2 回灌补齐）
 
 - 需求编号：plans.md `F2.1`（P2，总览页签顶部最多三条摘要）＋`F2.2`（P2，只做事实型提醒）。本轮基线 `37fa3ed` 起 0 新提交、工作树干净、PM 按 PAUSE-LIFE-PM-001 暂停；队列：`F0.5` 归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决、`F3.1` 因 F0.5 coverage 门禁暂缓、`F3.3` 回灌被 H-SYNC-DIVERGE-001 阻塞、`W-HOMEB-002` 未到 11-16、（需用户确认）条目不动。15:55 轮次派工的 `F2.1` 构建已在 artifact（space-3）落盘完成，但 18:05 轮次结束时构建回传未到（记录「delivery still pending」）；本轮改走树内实证回灌，不虚构回传。`F2.2` 18:05 已登记构建回传成功但同轮未做 artifact→repo 拷贝，本轮一并补齐。
