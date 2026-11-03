@@ -1,5 +1,11 @@
 # Changes
 
+## 2026-11-02 21:55 PST（muse-life-plans-sync 本轮：W4.2 派工，space-6 训练开始页只读恢复提示）
+
+- 需求编号：plans.md `W4.2`（P2，计划可配置与健康联动）——健康看板把 readiness 建议作为只读提示带入训练开始页；不得静默改变重量、组数或完成状态。本轮队列：基线 `37321fc` 起 0 新提交、工作树干净；P0/P1 可执行队列已空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决、`F3.1` 因 F0.5 coverage 门禁暂缓、`F3.3` 回灌被裁决阻塞、`W-HOMEB-002` 未到 11-16、（需用户确认）条目不动、PM 仍按 PAUSE-LIFE-PM-001 暂停）；第 7 步 13 项 P2 盘点已全交付（F3.1 暂缓、F3.3 阻塞除外）、H2.1–H2.3、H3.1–H3.5 全交付。按推荐执行顺序取 `W4.2`（W4.1 的模板版本化属重型 schema 变更、排后）。
+- 派工内容（space-6 builder，artifact.edit，高复杂度、异步回传；派工前 artifact.status 确认无构建在跑）：训练开始页新增只读「恢复提示」区——只读消费 space-4 已交付 H2.1 readiness 建议（`health-dashboard/server/src/readiness-advice.ts` 四档 normal/reduced/recovery/insufficient，对应 准备就绪/量力而行/恢复/数据不足；`getDashboard.readinessAdvice` 加法字段），经现有内部同步通道以加法只读字段带入 workout-log，呈现档位（符号＋文字＋数字）与触发依据一句话；无建议/数据不足诚实显示缺项、不编造。红线：只读不改重量/组数/完成状态/预填/渐进负荷引擎；不改 readiness 公式与 H2.1 契约；不新建数据源、不在 workout-log 侧重算；色弱规则/44px；L0.1 例外维持；不提交 app.db/.env/密钥/真实数据。要求交付证据：构建审计 pass＋隐私扫描零命中＋新增 `workout-log/validate-readiness-tip.mjs`（真实生产函数断言＋≥2 变异实跑）＋既有回归全过＋DATA-PLAN.md 外科式新增 W4.2 章节。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，不勾选。
+- 本轮改动：plans.md（`W4.2` 补派工登记）、本文件。未动 cron。回滚：revert 本提交（space-6 构建为异步派工，尚未落地）。
+
 ## 2026-11-02 19:40 PST（muse-life-plans-sync 本轮：H2.1＋H2.2 构建交付＋仓库回灌）
 
 - 需求编号：plans.md `H2.1`（P1，readiness 下非医疗可执行训练建议）＋`H2.2`（P1，「打开训练记录」入口、不动 workout-log）。18:55 轮次派工的 space-4 构建已完成（builder 回传 verification_status SUCCEEDED，~19:05 UTC）；本轮执行 artifact→repo 回灌。
