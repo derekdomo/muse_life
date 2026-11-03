@@ -1,5 +1,19 @@
 # Changes
 
+## 2026-11-03 02 时 PST（muse-life-plans-sync 02:55 轮次：漏翻勾选核验 7 项；无新派工）
+
+- 本轮队列核对（独立复核）：基线 `6f35abd` 起 0 新提交（`git log --oneline 6f35abd..HEAD` 为空），工作树干净；P0/P1 可执行队列已空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`W-HOMEB-002` 未到 11-16、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、306 个（需用户确认）条目不动、`H0/H1` readiness 核心公式外科手术属 PM 待验范围、`AUDIT-03`/`L0.x` 运行待验须本人实机证据、`LIFE-DESIGN-001` 待 PM 出稿、`W6.2-PM-IMG`/`W6.2-LOCAL-DEMO-002` 待用户整批视觉确认；PM 仍按 PAUSE-LIFE-PM-001 暂停）。机械汇总门：本轮汇总（7 项核验勾选、无新派工）与 git 实查一致（`git log --oneline 6f35abd..HEAD` 空、`git status --short` 干净）。
+- 漏翻勾选核验（本轮未派新构建；以下 7 项实质均已交付在位，经仓库本机实跑验证后按惯例翻勾选；此 [完成] 仅表示实现方已交付，PM 结论以其评审记录为准；PM 暂停中，待验收）：
+  - `W2.1`（休息计时器）：需求已由 `W-TIMER-001`[完成] 覆盖——仓库 `workout-log/validate-rest-timer.mjs` 本机实跑 48/48；`W4.1`[完成] 另已实现"完成一组后自动采用该动作的计划默认休息"（按动作可配置默认）。
+  - `W2.2`（单手操作/滚动恢复）：2026-11-01 交付登记的 `useViewScrollRestore` 在仓库在位（`workout-log/client/src/App.tsx` 3 处引用），`validate-scroll-restore.mjs` 本机实跑 26/26。
+  - `W4.3`（训练结束回执）：需求已由 `W4.3-D1`[完成] 覆盖——`workout-log/validate-receipt.mjs` 本机实跑 37/37（完成率、动作级对比、建议依据、下一次调整）。
+  - `H-SEASON-TAB-001`（季节专项·游泳版）：tab 与游泳版在仓库在位（`health-dashboard/client/src/App.tsx`：`season` tab、`seasonSwimSessions`/`seasonSwimSummary` 等），`validate-season-swim.mjs` 本机实跑 51/51。此前 2026-10-24 交付登记后漏翻勾选。
+  - `F1.1`（应急金覆盖口径）：`weekly-finance/client/src/App.tsx`——`completeSpendBasis` 取近 3 个有效完整月平均支出；`emergencyCoverage`＝可动用现金 ÷ 近 3 个有效完整月平均支出（代码注释明示 F1.1 口径）；`excludedSources` 为所有者页面试算选择（可配置）；现金覆盖变化文案标注"（F1.1 口径）"。
+  - `F1.4`（贷款符号语义）：`weekly-finance/server/src/actions.ts`——`liveNetWorth = liveInvestment + liveDeposits - liveLoans`（净资产按负债扣减）；贷款余额以正数归集与展示（`Math.abs`）。
+  - `F1.5`（异常月说明）：`weekly-finance/client/src/App.tsx` 第 1198、1466 行展示 `anomalyReason` 并附触发原因说明（支出图表断点、不进入 FIRE 计算）。
+- 未动项说明：`H-UI-001`/`H-LOAD-001`/`W-UI-001` 在旧 PM 评审表（2026-10-15/17）中记"已交付"，但当前"用户可见交付批次"仍列 [ ]——状态冲突，本轮不擅自翻勾选亦不派重建，留待用户或 PM 裁决后处理；`F1.3` 的 P1 部分（保守/中性可编辑假设）未做，继续 [ ]。
+- plans.md：上述 7 项已改 [完成] 并附核验登记。本轮未动 cron；修改文件：plans.md、本文件。
+
 ## 2026-11-03 01:15 PST（muse-life-plans-sync 本轮续：HH0.4＋HH0.5 构建交付＋仓库回灌）
 
 - 需求编号：plans.md `HH0.4`（P0，挂牌状态核验时间与状态分级）＋`HH0.5`（P0，排名 rubric 与分项分）——00:55 轮次派工的 space-2 构建已完成（builder 回传 verification_status SUCCEEDED）；本轮执行回灌。回灌方式：构建产物已随交付落盘本仓工作树（与线上镜像逐文件 diff 一致），实现方补齐 drizzle journal idx:3 缺口后独立验证。
