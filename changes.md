@@ -3293,3 +3293,11 @@
  - 如实保留：(a) 验证器的真实 action handler 在内存库断言段（15 项：guest/同步通道 save 被拒零写入、owner 保存归一化与 upsert、空值拒绝、删除门禁与幂等、getDashboard 三条路径、经真实 full 发布喂入源表、规则保存/删除后队列进出）因本机无 node_modules（缺 drizzle-orm）且 @hatch/space-sdk 为私有包无法安装，未能独立复跑——构建方环境 58/58 全过取自构建回传（verification_status SUCCEEDED），未独立复验；(b) 回灌包 validator 接线断言中第三喂入腿的检查字串以 verbatim call point（`recordTxReviewRows(ctx, txns, "upsert")`）为准，与回灌后仓库代码一致；(c) `.forecast-subhead` 类借自 F3.3（其样式因 F3.3 回灌被 H-SYNC-DIVERGE-001 阻塞未进仓库），已在 F3.5 CSS 块内给出自包含定义并如实标注，F3.3 回灌时以该版本为准；(d) 精确 artifact version 平台未提供；审计沙箱非 owner，owner 视角实机以本人打开为准；(e) evidence baseline 快照滞后（同 F3.5 诊断报告所述），未做机械字节 diff，以 F3.5 标记块逐字提取＋回灌后仓库验证为准。
  - 回滚：revert 本提交即恢复回灌前状态（线上 space-3 已上线版本不受影响）。
  - plans.md `F3.5` 已标记 [完成]（实现方已交付；PM 暂停中，待验收）。本轮未动 cron；修改文件：plans.md（F3.5 派工登记＋交付登记＋勾选）、本文件、9 个回灌文件。
+
+## 2026-11-02（muse-life-plans-sync 15:55 轮次：F2.1 派工、F2.3 去重登记；space-3）
+- 本轮队列：git pull 已是最新（`db245f1`，基线起 0 新提交、工作树干净）；`git log --oneline <baseline>..HEAD` 空、`git status --short` 干净，汇总与 git 实查一致。P0/P1 可执行队列已空：`F0.5` 服务端逐源 coverage 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（PM 仍按 PAUSE-LIFE-PM-001 暂停）、`W-HOMEB-002` 未到 11-16、（需用户确认）条目不动。
+- `F3.1` 因 F0.5 coverage 显式数据门禁未满足继续暂缓（此时强行构建只能回退为已交付的 `F1.2`「本次余额差」，属空壳交付）；`F3.3` 已上线、回灌仍被 `H-SYNC-DIVERGE-001`（recurringCharges merchant/annual vs name/yearly）裁决阻塞；`F3.2`/`F3.4`/`F3.5` 已交付。推荐执行顺序 F3 段之后本轮取 `F2.1`。
+- 需求编号：plans.md `F2.1`（P2）。已向 space-3 builder 派工（artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认 space-3 无构建在跑）：总览页签顶部最多三条摘要——净资产变化（复用 F2.1-D1 `BalanceDeltaCard` 口径，补比较区间与来源完整度标注）／现金覆盖变化（只用 getDashboard 已返回字段派生、不可比时诚实缺省）／当月支出进度（截至日期与 F0.4 完整性）；每条独立可比性判断，不编造、不按 0 填充；纯 client 呈现层，不改服务端公式/口径/schema/F-ARCH 日刷新链，无 migration；漂移红线：不触碰 `recurringCharges.ts` 与 `cashFlowForecast.ts`（裁决中）；色弱规则/44px；L0.1 例外维持现状；不提交 app.db/.env/密钥/真实数据。要求交付：构建审计 pass＋隐私扫描零命中（合成数据）＋新增 `weekly-finance/validate-summary-cards.mjs`（真实生产函数断言＋≥2 项变异实跑）＋既有财务回归全过＋DATA-PLAN.md 外科式新增 F2.1 章节。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，本轮不勾选。
+- `F2.2` 顺延下一轮——单项构建确实耗时，按吞吐规则记录顺延。
+- 需求编号：plans.md `F2.3`（实现方去重，非新构建）：本条三项要求已由「沿 `F2.3` 产品推进」（第 399 行、[完成]，PM 06:12/12:15 源码返工已验证关闭）覆盖——同 ticker 合并、全部有效非现金正市值为集中度分母、现金类单列、Top10 之外长尾不丢、详情显示账户覆盖/日期与分母、搜索不改变分母；本独立条目属重复登记，已标注 [完成]，不另行派工、不建仓库验证器、不虚构新交付证据。此 [完成] 仅表示实现方已交付，PM 结论以其评审记录为准。
+- 修改文件：plans.md（F2.1 派工登记、F2.3 去重登记＋勾选）、本文件。未动 cron。
