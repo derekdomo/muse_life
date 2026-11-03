@@ -22,6 +22,7 @@ import {
   suppressReadinessForStatus,
   type StatusPeriod,
 } from "./status-mode";
+import { buildReadinessAdvice } from "./readiness-advice";
 
 const statusSchema = z.enum(["正常", "偏低", "偏高", "数据缺失"]);
 
@@ -1333,6 +1334,28 @@ const monthReviewSchema = z.object({
   metrics: z.array(monthReviewMetricSchema),
 });
 
+// H2.1 今日训练建议 (additive): the readiness-advice view derived by
+// the pure module server/src/readiness-advice.ts from the day's
+// readiness result alone — tier (symbol + label + numeric level),
+// the one-sentence headline, and the trigger basis naming the
+// components, adjustments, score, confidence, and every missing
+// signal. Null for non-owners, whenever no usable health snapshot
+// exists, and on status-period days (H4.4 suppression: no training
+// advice is given while readiness is suppressed).
+const readinessAdviceSchema = z.object({
+  tier: z.enum(["normal", "reduced", "recovery", "insufficient"]),
+  label: z.string().min(1),
+  symbol: z.string().min(1),
+  level: z.number().int().min(0).max(3),
+  headline: z.string().min(1),
+  status: z.enum(["恢复", "量力而行", "准备就绪", "全力以赴", "数据不足"]),
+  score: z.number().min(0).max(10).nullable(),
+  confidence: z.enum(["高", "中", "低"]),
+  signalCount: z.number().int().nonnegative(),
+  reasons: z.array(z.string().min(1)).max(24),
+  missingSignals: z.array(z.string().min(1)).max(6),
+});
+
 const statusPeriodMutationResponse = z.object({
   ok: z.boolean(),
   forbidden: z.boolean(),
@@ -1380,6 +1403,10 @@ const getDashboardResponse = z.object({
   // means vs their long-term baselines (pure module). Null for
   // non-owners and whenever no usable health snapshot exists.
   monthReview: monthReviewSchema.nullable(),
+  // H2.1 additive: today's training advice derived from the
+  // readiness result (see readinessAdviceSchema above). Null on
+  // every path that carries no usable readiness.
+  readinessAdvice: readinessAdviceSchema.nullable(),
   readiness: readinessSchema.nullable(),
   // H3.5: the owner's feedback on the current review window's focus
   // (current) and the most recent feedback row belonging to any other
@@ -3674,10 +3701,10 @@ async function handleGetRedemptionReceipt(ctx: Ctx, args: { requestId: string })
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "读取健康看板：健康快照、readiness、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、状态模式、月度回顾与长期基线漂移、数据状态与统一时间线（仅所有者）。",
+    description: "读取健康看板：健康快照、readiness、今日训练建议、ACWR 训练负荷平衡、行为—恢复影响、睡眠债与今晚睡眠需求、状态模式、月度回顾与长期基线漂移、数据状态与统一时间线（仅所有者）。",
     request: z.object({}), response: getDashboardResponse,
     async handler(ctx): Promise<z.infer<typeof getDashboardResponse>> {
-      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, statusMode: EMPTY_STATUS_MODE, monthReview: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
+      if (!isOwner(ctx)) return { forbidden: true, snapshot: null, acwr: null, behaviorImpact: EMPTY_BEHAVIOR_IMPACT, sleepDebt: null, statusMode: EMPTY_STATUS_MODE, monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId: null, dataStatus: null, unifiedTimeline: [], healthState: "missing", strengthState: "missing", strength: null, focusFeedback: { current: null, previous: null, readFailed: false } };
       // Independent per-source loads (H-SOURCE-001): each snapshot is read
       // and validated on its own, so a missing or corrupt health snapshot
       // can no longer swallow a valid strength snapshot (or vice versa),
@@ -3702,7 +3729,7 @@ export const Actions = {
         // Never fabricate a health snapshot: snapshot and readiness stay
         // null, while the strength side is returned exactly as it loaded.
         const behaviorImpact = await loadBehaviorImpact(ctx, null, null, []);
-        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), monthReview: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
+        return { forbidden: false, snapshot: null, acwr: buildAcwr(strength, null), behaviorImpact, sleepDebt: null, statusMode: buildStatusModeView(statusPeriods, null, null, null), monthReview: null, readinessAdvice: null, readiness: null, readinessHistory: [], strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback: { current: null, previous: null, readFailed: false } };
       }
       const health = healthLoad.snapshot;
       // Merge for the combined views: a valid standalone strength snapshot
@@ -3788,7 +3815,22 @@ export const Actions = {
       // validate-sleep-debt.mjs's exact-string pin follows the same
       // live order (H4.4 precedent).
       const monthReview = buildMonthReview(snapshot, readinessDate, statusPeriods);
-      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory, readiness, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
+      // H2.1: today's training advice is a pure derivation over the
+      // readiness result exactly as displayed (post-suppression):
+      // the pure module maps the readiness status to one of the four
+      // tiers and names the trigger basis; a suppressed (status
+      // period) day yields null — no training advice. No readiness
+      // formula, archive, or training record is touched here.
+      const readinessAdvice = buildReadinessAdvice({
+        status: readiness.status,
+        score: readiness.score,
+        confidence: readiness.confidence,
+        signalCount: readiness.signalCount,
+        adjustments: readiness.adjustments,
+        components: readiness.components,
+        suppressed: readinessSuppressed,
+      });
+      return { forbidden: false, snapshot, acwr: buildAcwr(snapshot.strengthTraining, snapshot.dataDate), behaviorImpact, sleepDebt, statusMode, monthReview, readinessHistory, readiness, readinessAdvice, strengthSyncTaskId, dataStatus, unifiedTimeline, healthState: healthLoad.state, strengthState: strengthLoad.state, strength, focusFeedback };
     },
   }),
 

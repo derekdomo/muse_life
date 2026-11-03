@@ -1,5 +1,14 @@
 # Changes
 
+## 2026-11-02 19:40 PST（muse-life-plans-sync 本轮：H2.1＋H2.2 构建交付＋仓库回灌）
+
+- 需求编号：plans.md `H2.1`（P1，readiness 下非医疗可执行训练建议）＋`H2.2`（P1，「打开训练记录」入口、不动 workout-log）。18:55 轮次派工的 space-4 构建已完成（builder 回传 verification_status SUCCEEDED，~19:05 UTC）；本轮执行 artifact→repo 回灌。
+- 交付内容（线上 space-4）：(1) 服务端新增零 import 纯函数模块 `server/src/readiness-advice.ts`（全部导出）——当日 readiness 状态映射四档：准备就绪/全力以赴→正常计划（✓ 第3档）／量力而行→降强度（▼ 第2档）／恢复→恢复日（○ 第1档）／数据不足→数据不足（— 第0档）；每档附触发依据（状态/分数/置信度/信号数/全部保守修正原文/触发组件/缺失信号逐项点名）；状态期（H4.4 压制）返回 null 不给建议；文案非医疗单句、不含重量/组数/动作处方。(2) `getDashboard` 加法字段 `readinessAdvice`（三条返回路径）；action description 增补「今日训练建议」；readiness 公式与 H-LOAD-001 未动，无 schema/migration。(3) 客户端 `ReadinessAdviceCard` 挂今日页 ReadinessPanel 之后（只渲染服务端字段、符号＋文字＋档位＋分数）；「打开训练记录」44px 诚实入口按钮（不编造深链、建议不写入训练记录）。
+- 回灌方式（外科手术式，非整树覆盖）：新文件 `server/src/readiness-advice.ts`、`validate-readiness-advice.mjs` 逐字拷贝；actions.ts（import＋readinessAdviceSchema＋dashboardSchema 字段＋description＋三条返回路径＋主路径 `buildReadinessAdvice` 调用）、App.tsx（type＋ReadinessAdviceCard＋TodayView/Dashboard/App 三级透传）、theme.css（H2.1 样式块追加）、DATA-PLAN.md（H2.1/H2.2 章节追加）只取 H2.1/H2.2 增量。线上树在 H4.5/H4.6 区存在与本仓无关的漂移（注释改写、monthReview 样式与校验器字面差异），属 H-SYNC-DIVERGE-001 范畴，本轮逐项核对、未动、未回灌。
+- 仓库验证（本机实跑，全合成数据）：validate-readiness-advice 38/38（4 档映射边界/触发依据点名/状态期双信号无建议/数据不足分支/缺失逐项点名/处方措辞扫描/接线源码检查；3 项变异真实执行翻转）；回灌适配 1 项——接线断言 `readiness, readinessAdvice, statusMode` 按本仓主返回键序改为 `readinessHistory, readiness, readinessAdvice,`（H4.5 钉住的 `statusMode, monthReview, readinessHistory,` 键序保持）。回归：month-review 38、sleep-debt 35、status-mode 38、acwr 31、behavior-impact 27、muscle-status 71 全绿；全套 24 个验证脚本 1289 通过、design-b1b 37/3、rewards 41/1、seven-day-facts 51/1、swim-vis 41/1 与 stash 前逐项一致（改前既有漂移/环境，非本轮引入）；validate-source.mjs 仍为既有环境崩溃（沿前例）。隐私扫描：新增/改动文件零密钥/UUID/路径命中。
+- 如实保留：(a) builder attested_over_findings 含一条未解决 [P1] content-critique（构建审计称「既有健康回归全过」未达成——本轮在仓库独立复跑已证伪：week-review 103/103、week-focus-feedback 196/196 全绿；其余 4 套失败为改前既有漂移，与本轮 diff 无关，留待 PM 裁决）；(b) 精确 artifact version 平台未提供；(c) 审计沙箱非 owner，owner 视角实机以本人打开为准（B 类验收口径）；(d) 整项待 PM 验收。
+- plans.md：`H2.1` 补交付登记、改为 [完成]；`H2.2` 补交付登记、改为 [完成]。修改文件：plans.md、health-dashboard/server/src/readiness-advice.ts（新）、health-dashboard/validate-readiness-advice.mjs（新）、health-dashboard/server/src/actions.ts、health-dashboard/client/src/App.tsx、health-dashboard/client/src/theme.css、health-dashboard/DATA-PLAN.md、本文件。未动 cron。回滚：revert 本提交（线上 space-4 已上线版本不受影响）。
+
 ## 2026-11-02 19:55 PST（muse-life-plans-sync 本轮：H2.1＋H2.2 派工，space-4「今日训练建议」行动卡）
 
 - 需求编号：plans.md `H2.1`（P1，readiness 下非医疗可执行训练建议）＋`H2.2`（P1，训练建议只提供「打开训练记录」入口、不动 workout-log）。本轮基线 `ca9799a` 起 0 新提交、工作树干净、PM 按 PAUSE-LIFE-PM-001 暂停；队列核对：`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`F3.1` 因 F0.5 coverage 门禁暂缓、`W-HOMEB-002` 未到 11-16、306 个（需用户确认）条目不动；第 7 步 13 项 P2 盘点已全交付（F3.1 暂缓、F3.3 阻塞除外）。按 P1 优先、`H2.1` 与 `H2.2` 为同一今日行动卡，合并一次构建派工。

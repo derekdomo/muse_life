@@ -807,3 +807,18 @@ details.game-panel > section { margin-top: 10px; }
 .month-review-method-summary { min-height: 44px; display: flex; align-items: center; font-size: 13px; font-weight: 700; cursor: pointer; }
 .month-review-method { margin-top: 12px; }
 .month-review-method p { margin: 8px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; }
+/* H2.1 今日训练建议 (training advice card): the tier is symbol +
+   text label + numeric level + readiness score together — meaning
+   never rides on color alone (the owner's color-vision rule). The
+   training-log entry is a 44px touch target that honestly explains
+   the platform has no cross-app deep link instead of fabricating
+   one (H2.2). */
+.readiness-advice-panel { margin-top: 16px; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.readiness-advice-tier { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; margin: 12px 0 0; font-size: 20px; font-weight: 800; }
+.readiness-advice-tier small { color: var(--dim); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.readiness-advice-headline { margin: 8px 0 0; font-size: 15px; font-weight: 700; line-height: 1.6; }
+.readiness-advice-reasons { display: grid; gap: 6px; margin: 14px 0 0; padding: 12px 0 0; border-top: 1px solid var(--border); list-style: none; }
+.readiness-advice-reasons li { color: var(--dim); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.readiness-advice-entry { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.readiness-advice-entry-btn { min-height: 44px; padding: 10px 18px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--text); font-size: 13px; font-weight: 800; cursor: pointer; }
+.readiness-advice-entry-note { margin: 10px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }

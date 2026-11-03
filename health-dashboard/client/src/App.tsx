@@ -37,6 +37,7 @@ type SleepDebt = DashboardResponse["sleepDebt"];
 type StatusModeData = DashboardResponse["statusMode"];
 type MonthReview = DashboardResponse["monthReview"];
 type MonthReviewMetric = NonNullable<MonthReview>["metrics"][number];
+type ReadinessAdvice = NonNullable<DashboardResponse["readinessAdvice"]>;
 type StatusPeriodView = StatusModeData["periods"][number];
 type StatusMarkMap = Map<string, { mode: StatusPeriodView["mode"]; symbol: string }>;
 
@@ -4978,7 +4979,38 @@ function DataStatusPanel({ dataStatus, unifiedTimeline, displayUnit, marks }: { 
   );
 }
 
-function TodayView({ snapshot, readiness, readinessHistory, behaviorImpact, statusMode, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, syncAttempt, onGoToWeekReview, onGoToDataStatus }: { snapshot: Snapshot; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; behaviorImpact: BehaviorImpact; statusMode: StatusModeData; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; syncAttempt: SyncAttemptState | null; onGoToWeekReview?: () => void; onGoToDataStatus?: () => void }) {
+// H2.1 今日训练建议 card: renders ONLY the server's readinessAdvice
+// (getDashboard) — the tier mapping, the trigger basis, and the
+// missing-signal naming are all computed by the pure server module;
+// this component never derives a tier from the readiness score or
+// status itself. The tier is symbol + text label + numeric level +
+// readiness score together, never color alone. H2.2: the 打开训练记录
+// entry is honest about the platform having no cross-app deep link —
+// it never fabricates a URL; tapping it explains that 训练记录 is a
+// separate app to open from the app list, and that this advice is
+// never written into the training log. The two apps stay independent.
+function ReadinessAdviceCard({ advice }: { advice: ReadinessAdvice }) {
+  const [entryNoteOpen, setEntryNoteOpen] = useState(false);
+  return (
+    <section className="readiness-advice-panel" aria-labelledby="readiness-advice-title">
+      <div className="section-heading">
+        <div><p className="section-kicker">今日训练建议</p><h2 id="readiness-advice-title">今天练什么强度</h2></div>
+        <span className="status-chip status-ok"><span aria-hidden="true">{advice.symbol}</span> {advice.label} · 第 {advice.level} 档</span>
+      </div>
+      <p className="readiness-advice-tier"><span aria-hidden="true">{advice.symbol}</span> {advice.label} · 第 {advice.level} 档<small>{advice.score !== null ? `准备度 ${advice.score}/10 · 状态「${advice.status}」` : `状态「${advice.status}」 · 暂无分数`}</small></p>
+      <p className="readiness-advice-headline">{advice.headline}</p>
+      <ul className="readiness-advice-reasons" aria-label="触发依据">
+        {advice.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+      </ul>
+      <div className="readiness-advice-entry">
+        <button type="button" className="readiness-advice-entry-btn" aria-label="打开训练记录" aria-expanded={entryNoteOpen} onClick={() => setEntryNoteOpen((open) => !open)}>打开训练记录</button>
+        {entryNoteOpen ? <p className="readiness-advice-entry-note" role="status">「训练记录」是另一个独立应用，本看板无法直接跳转（平台暂不支持应用间深链，这里不编造链接）。请从应用列表打开「训练记录」查看或记录训练；这条建议只作参考，不会写入训练记录。</p> : null}
+      </div>
+    </section>
+  );
+}
+
+function TodayView({ snapshot, readiness, readinessAdvice, readinessHistory, behaviorImpact, statusMode, onSyncHealth, onSyncStrength, strengthSyncing, syncing, dataStatus, syncAttempt, onGoToWeekReview, onGoToDataStatus }: { snapshot: Snapshot; readiness: Readiness | null; readinessAdvice: ReadinessAdvice | null; readinessHistory: ReadinessHistoryPoint[]; behaviorImpact: BehaviorImpact; statusMode: StatusModeData; onSyncHealth: () => void; onSyncStrength: () => void; strengthSyncing: boolean; syncing: boolean; dataStatus: DataStatus | null; syncAttempt: SyncAttemptState | null; onGoToWeekReview?: () => void; onGoToDataStatus?: () => void }) {
   const [readinessOpen, setReadinessOpen] = useState(false);
   const openReadinessBasis = () => {
     setReadinessOpen(true);
@@ -5012,6 +5044,7 @@ function TodayView({ snapshot, readiness, readinessHistory, behaviorImpact, stat
       {missing ? <div className="missing-note"><span aria-hidden="true" />{snapshot.dataDate} {missing}无记录 · {snapshot.coverageIncomplete ? "还没同步完" : "当天没戴表"}</div> : null}
       <WeekLoadBlock snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} statusMode={statusMode} />
       {readiness ? <ReadinessPanel readiness={readiness} behaviorImpact={behaviorImpact} statusMode={statusMode} compact open={readinessOpen} onOpenChange={setReadinessOpen} /> : null}
+      {readinessAdvice ? <ReadinessAdviceCard advice={readinessAdvice} /> : null}
       <StatusModePanel statusMode={statusMode} />
       <section className="kpi-board" aria-label="关键健康指标">
         <Kpi label="步数" value={numberLabel(snapshot.steps.value)} detail={snapshot.steps.baseline === null ? `基线数据不足 · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km` : `基线约 ${numberLabel(snapshot.steps.baseline)} · ${snapshot.steps.distanceKm?.toFixed(2) ?? "—"} km`} status={stepStatus} />
@@ -6832,7 +6865,7 @@ function GameView() {
   );
 }
 
-function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, monthReview, readiness, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; monthReview: MonthReview; readiness: Readiness | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
+function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, monthReview, readiness, readinessAdvice, readinessHistory, dataStatus, unifiedTimeline, autoSyncFailureNote, focusFeedback, focusReadFailed }: { snapshot: Snapshot; acwr: Acwr; behaviorImpact: BehaviorImpact; sleepDebt: SleepDebt; statusMode: StatusModeData; monthReview: MonthReview; readiness: Readiness | null; readinessAdvice: ReadinessAdvice | null; readinessHistory: ReadinessHistoryPoint[]; dataStatus: DataStatus | null; unifiedTimeline: UnifiedDay[]; autoSyncFailureNote: string | null; focusFeedback: FocusFeedbackData; focusReadFailed: boolean }) {
   const [tab, setTab] = useState<Tab>("today");
   // H3.5 training entry: the review window the owner asked to inspect
   // from the week-review focus card. Set when they tap 查看这段训练
@@ -7059,7 +7092,7 @@ function Dashboard({ snapshot, acwr, behaviorImpact, sleepDebt, statusMode, mont
         <button type="button" className={tab === "game" ? "selected" : ""} aria-current={tab === "game" ? "page" : undefined} onClick={() => setTab("game")}>角色</button>
         <button type="button" className={tab === "season" ? "selected" : ""} aria-current={tab === "season" ? "page" : undefined} onClick={() => setTab("season")}>季节专项</button>
       </nav>
-      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} statusMode={statusMode} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} statusMode={statusMode} monthReview={monthReview} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} statusMode={statusMode} />}
+      {tab === "today" ? <TodayView snapshot={snapshot} readiness={readiness} readinessAdvice={readinessAdvice} readinessHistory={readinessHistory} behaviorImpact={behaviorImpact} statusMode={statusMode} onSyncHealth={startFullSync} onSyncStrength={startStrengthSync} strengthSyncing={isSyncing} syncing={isSyncing} dataStatus={dataStatus} syncAttempt={syncAttempt} onGoToWeekReview={() => goToHistoryPanel("week-review-panel")} onGoToDataStatus={() => goToHistoryPanel("data-status-panel")} /> : tab === "trends" ? <TrendsView snapshot={snapshot} acwr={acwr} behaviorImpact={behaviorImpact} sleepDebt={sleepDebt} statusMode={statusMode} monthReview={monthReview} /> : tab === "game" ? <GameView /> : tab === "season" ? <SeasonSwimView snapshot={snapshot} /> : <HistoryView snapshot={snapshot} unifiedTimeline={unifiedTimeline} focusRange={historyFocusRange} focusContext={historyFocusContext} currentFocusKey={currentFocusKey} onReturnToFocus={backToFocus} onViewCurrentFocus={() => goToHistoryPanel("week-review-panel")} onClearFocusRange={clearHistoryFocusRange} dataStatus={dataStatus} focusFeedback={focusFeedback} focusReadFailed={focusReadFailed} onViewTraining={viewTrainingRange} statusMode={statusMode} />}
       {syncMessage ? <p className="refresh-note" role="status">{syncMessage}</p> : null}
     </>
   );
@@ -7143,7 +7176,7 @@ export function App() {
   const [emptyView, setEmptyView] = useState<"health" | "game">("health");
   return (
     <div className="app-shell"><SafeAreaTopScrim backgroundColor="var(--bg)" /><main>
-      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} statusMode={dashboard.data.statusMode} monthReview={dashboard.data.monthReview} readiness={dashboard.data.readiness} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
+      {dashboard.isPending ? <div className="loading" role="status"><span /><p>正在读取健康数据…</p></div> : dashboard.isError ? <div className="empty-state" role="alert"><h1>暂时无法读取数据</h1><p>请稍后重新打开看板。</p></div> : dashboard.data.forbidden ? <div className="empty-state"><h1>健康数据仅所有者可查看</h1><p>此看板包含所有者的个人健康记录，当前访问身份无权查看。</p></div> : dashboard.data.snapshot ? <Dashboard snapshot={dashboard.data.snapshot} acwr={dashboard.data.acwr} behaviorImpact={dashboard.data.behaviorImpact} sleepDebt={dashboard.data.sleepDebt} statusMode={dashboard.data.statusMode} monthReview={dashboard.data.monthReview} readiness={dashboard.data.readiness} readinessAdvice={dashboard.data.readinessAdvice} readinessHistory={dashboard.data.readinessHistory} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} autoSyncFailureNote={polling.failureNote} focusFeedback={dashboard.data.focusFeedback} focusReadFailed={dashboard.data.focusFeedback.readFailed} /> : dashboard.data.strength ? (
         <>
           <StrengthOnlyView strength={dashboard.data.strength} healthState={dashboard.data.healthState} dataStatus={dashboard.data.dataStatus} unifiedTimeline={dashboard.data.unifiedTimeline} onSyncHealth={() => firstSync.mutate()} healthSyncing={firstSyncing} onSyncStrength={() => strengthRefresh.mutate()} strengthSyncing={strengthSyncing} />
           {polling.failureNote ? <p className="refresh-note" role="status">{polling.failureNote}</p> : firstSync.data ? <p className="refresh-note" role="status">{polling.syncing ? `${firstSync.data.message}，完成后会自动更新` : firstSync.data.message}</p> : null}
