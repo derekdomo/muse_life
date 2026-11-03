@@ -1,5 +1,15 @@
 # Changes
 
+## 2026-11-03 15 时 PST（muse-life-plans-sync 14:55 轮次：`W0.1`/`W0.2` 漏翻勾选核验；无新派工）
+
+- 本轮队列核对（独立复核）：`git pull` 已最新；基线 `8fba277` == HEAD，`git log --oneline 8fba277..HEAD` 为空，工作树干净；在途构建：无（上一轮 13:55 为 plans.md 设计登记、无构建派工）。P0/P1 可执行队列仍空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`W-HOMEB-002` 未到 11-16、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`H-SEASON-TAB-001` 滑雪版设计行已于 13:55 提前登记翻勾选、`CWEB-LEVEL-001` 四参数待所有者定案、`W6.2-PM-IMG` 待 PM 生成＋所有者整批过目、`LIFE-DESIGN-001` 待 PM 出稿拍板、其余（需用户确认）条目不动、`H0/H1` 核心公式与 `L0.x` 属 PM 待验范围、`H-FRESH-001` 余项需真实使用遥测、`H-UI-001`/`H-UI-002`/`W-UI-001`（父批次状态冲突、留待裁决）、`AUDIT-07` 前提仍存、`AUDIT-12` 属 CI 范围；PM 仍按 PAUSE-LIFE-PM-001 暂停）。机械汇总门：本轮汇总（2 项核验勾选、无新派工）与 git 实查一致。
+- 漏翻勾选核验（本轮未派新构建；以下 2 项实质均已交付在位，经仓库源码核查＋本机实跑验证后按惯例翻勾选；此 [完成] 仅表示实现方已核验，PM 结论以其评审记录为准；PM 暂停中，待验收）：
+  - `W0.1`（逐组自动保存）：`workout-log/client/src/App.tsx:1797` 注释明示 "W-UI-001 / W0.1 / W0.2: per-set autosave state machine"，`onBlurSave`（2577）/`onEnterSave`（2582）接线重量/次数输入，blur/Enter/短 debounce 即 requestSave；Enter 只 blur 不翻完成态，完成勾选不是独立提交路径。仓库本机实跑 `node workout-log/validate-autosave.mjs` 69/69。
+  - `W0.2`（逐组保存四态＋失败重试＋结束/切页提醒）：`App.tsx:1905-1908` 四态显式文字（未保存/保存中…/保存失败/已保存，非颜色单独）、1984-2001 汇总态（「有 N 组保存失败」/「有未保存的修改」/「全部已保存」）、4052 失败保输入「未保存，输入已保留，重试即可」；切页走 beforeunload 收尾；结束训练前 `flushAllHandles`（3392）全量刷写＋`finishGateDecision`（2320）对未保存快照判 reason:"unsaved" 拒绝结束。仓库本机实跑 `node workout-log/validate-autosave.mjs` 69/69。
+- 未动项说明：`W-UI-001` 父批次本体仍 [ ]（旧 PM 评审表记已交付、当前批次列 [ ] 的状态冲突未裁决），本轮仅翻 `W0.1`/`W0.2` 两个可独立证伪的子项；`W0.3`/`W0.4`/`W0.5` 此前已 [完成]。
+- plans.md：`W0.1`、`W0.2` 已改 [完成] 并附核验登记。本轮未动 cron；修改文件：plans.md、本文件。
+
+
 ## 2026-11-03 13 时 PST（muse-life-plans-sync 12:55 轮次：`AUDIT-06`/`AUDIT-09` 核验勾选；无新派工）
 
 - 本轮队列核对（独立复核）：`git pull` 已最新；基线 `2726899` == HEAD，`git log --oneline 2726899..HEAD` 为空，工作树干净；在途构建：无（artifact.status 全仓构建为空）。P0/P1 可执行队列仍空（`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`W-HOMEB-002` 未到 11-16、`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓、`H-SEASON-TAB-001` 滑雪设计行 2026-11-30 前另行登记（未到期）、`CWEB-LEVEL-001` 四参数待所有者定案、`W6.2-PM-IMG` 待 PM 生成＋所有者整批过目、`LIFE-DESIGN-001` 待 PM 出稿拍板、其余（需用户确认）条目不动、`H0/H1` 核心公式与 `L0.x` 属 PM 待验范围、`H-FRESH-001` 余项需真实使用遥测、`H-UI-001/H-UI-002` 等待 PM 复核与运行证据、`W-UI-001` 等待 W-UI 保存闭环返工复核；PM 仍按 PAUSE-LIFE-PM-001 暂停）。机械汇总门：本轮汇总（2 项核验勾选、无新派工）与 git 实查一致。
