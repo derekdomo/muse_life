@@ -1,5 +1,14 @@
 # Changes
 
+## 2026-11-03 01:15 PST（muse-life-plans-sync 本轮续：HH0.4＋HH0.5 构建交付＋仓库回灌）
+
+- 需求编号：plans.md `HH0.4`（P0，挂牌状态核验时间与状态分级）＋`HH0.5`（P0，排名 rubric 与分项分）——00:55 轮次派工的 space-2 构建已完成（builder 回传 verification_status SUCCEEDED）；本轮执行回灌。回灌方式：构建产物已随交付落盘本仓工作树（与线上镜像逐文件 diff 一致），实现方补齐 drizzle journal idx:3 缺口后独立验证。
+- 交付内容（线上 space-2）：(1) HH0.4——listings 加法新增 `status_verified_at`（可空 Unix 毫秒；migration 0004 纯 ADD COLUMN 7 列）；状态枚举扩展 sold/off_market；研究 prompt 要求每条房源回传 status（六值之一）与 statusVerifiedAt（无法确认给 null 不得编造）；sold/off_market 在 getReport 层过滤（行保留在库、rank 尾随，理由写入 DATA-PLAN）；pending/contingent/unknown 为 degraded 层独立分区（「N 套待成交 / 未确认房源」标题＋「降级展示 · 非可直接行动」徽章＋说明）；每条房源展示服务端渲染的状态文字（●/◐ 符号＋文字）与「状态核验于 MM-DD HH:mm」/「核验时间未知」。(2) HH0.5——六个可空分项分字段；服务端零 import 纯函数模块 `server/src/rubric.ts`（全部导出）：公开权重 20/20/20/15/10/15，总分按已提供分项重归一加权平均，缺项记 null 永不当 0，全缺总分 null；`rankListings` 按总分重算 rank（degraded 恒排 actionable 之后）；ingest 落库一并存分项分与总分；client 只渲染分项明细（「查看判断依据」展开区）与完整度。(3) 平台 v26 升级：四个 action 补 description。
+- 回灌文件：`server/src/rubric.ts`（新）、`drizzle/0004_add_status_verified_at_and_rubric_subscores.sql`（新）、`drizzle/meta/_journal.json`（补 idx:3）、`server/src/schema.ts`、`server/src/actions.ts`、`client/src/App.tsx`、`client/src/theme.css`、house-hunting/`DATA-PLAN.md`（HH0.4/HH0.5 章节）、`validate-house-status-rubric.mjs`（新）。未覆盖：app.db/构建产物/node_modules。
+- 仓库验证（本机实跑，全合成数据）：`validate-house-status-rubric.mjs` **58/58**（权重合计与公式、缺项重归一、全缺→null、越界/NaN 按缺项、状态分级、核验时间格式与未知诚实显示、rankListings 排序/降级垫后/sold+off_market 剔除/老行回退；M1 变异真实执行——去掉重归一除数改 100，翻转 3 项断言，恢复后 58/58）；既有回归 `validate-house-refresh.mjs` **76/76** 全过；migration 0004 经 python sqlite3 实测 7 列齐备、老行 null 兼容；隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+- 如实保留：(a) 精确 artifact version 平台未提供；(b) 构建方线上探针：现存 10-31 报告 9 active / 4 pending 正确分级、老行 subScores=null 诚实降级；(c) 审计沙箱非 owner，owner 视角实机以本人打开为准（B 类验收口径）；(d) 整项待 PM 验收。
+- plans.md：`HH0.4`、`HH0.5` 改为 [完成]（实现方已交付；PM 暂停中，待验收）。修改文件：plans.md、本文件、house-hunting/ 下 10 个文件（见回灌文件清单）。未动 cron。回滚：revert 本提交（线上 space-2 已上线版本不受影响）。
+
 ## 2026-11-03 00:55 PST（muse-life-plans-sync 本轮：HH0.4＋HH0.5 派工，space-2）
 
 - 需求编号：plans.md `HH0.4`（P0，挂牌状态核验时间与状态分级）＋`HH0.5`（P0，排名 rubric 与分项分），同一 app 合并一次构建。本轮队列：git pull 已最新，基线 `320cb20` 起 0 新提交、工作树干净；P0/P1 可执行队列独立复核——`F0.5` 本体归原 Muse、`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌继续阻塞）、`F3.1` 因 F0.5 coverage 门禁暂缓、`W-HOMEB-002` 未到 11-16、（需用户确认）条目不动、PM 仍按 PAUSE-LIFE-PM-001 暂停；此前轮次"H4/W5/F3＋H2/H3＋W4.1/W4.2 全交付"盘点遗漏了看房节 HH0.4/HH0.5 两项 P0（自 2026-10-17 起顺延、无阻塞记录；本轮实查仓库代码：listings 无 status_verified_at 字段、score 为单一总分无 rubric 分解，确认为未实现项）。按 P0 先行取本条。

@@ -41,7 +41,45 @@ function formatAsOf(value: string) {
   }).format(parsed);
 }
 
-function ListingRow({ listing, rate, downPayment }: { listing: Listing; rate: number; downPayment: number }) {
+const SUBSCORE_FIELDS = [
+  ["hardCriteria", "硬条件"],
+  ["environment", "环境"],
+  ["school", "学校/私校"],
+  ["ageCondition", "房龄/状态"],
+  ["space", "空间"],
+  ["priceComps", "价格/可比成交"],
+] as const;
+
+function SubScoreDetail({ listing }: { listing: Listing }) {
+  if (!listing.subScores) {
+    return (
+      <div className="subscore-block">
+        <span>分项分</span>
+        <p>本房源尚无分项评分，总分沿用综合评分，未按分项权重计算。</p>
+      </div>
+    );
+  }
+  return (
+    <div className="subscore-block">
+      <span>分项分（总分 {listing.score} 分）</span>
+      <ul className="subscore-list">
+        {SUBSCORE_FIELDS.map(([key, label]) => (
+          <li key={key}>
+            <span>{label}</span>
+            <strong>{listing.subScores?.[key] ?? "未评分"}</strong>
+          </li>
+        ))}
+      </ul>
+      {listing.scoreComplete ? (
+        <p>六项齐全，总分按公开权重加权计算。</p>
+      ) : (
+        <p>分项不完整（已评 {listing.scorePresentCount}/6），总分按已提供分项加权计算，缺项未按 0 分计。</p>
+      )}
+    </div>
+  );
+}
+
+function ListingRow({ listing, rate, downPayment, degraded = false }: { listing: Listing; rate: number; downPayment: number; degraded?: boolean }) {
   const payment = monthlyPayment(listing.price, downPayment, rate);
   const loan = listing.price * (1 - downPayment / 100);
 
@@ -66,6 +104,12 @@ function ListingRow({ listing, rate, downPayment }: { listing: Listing; rate: nu
           </div>
         </div>
 
+        <p className="status-line">
+          <span className="status-chip">{listing.statusLabel}</span>
+          <span className="status-verified">{listing.statusVerifiedLabel}</span>
+          {degraded ? <span className="degraded-badge">降级展示 · 非可直接行动</span> : null}
+        </p>
+
         <p className="verdict">{listing.verdict}</p>
 
         <dl className="fact-strip">
@@ -89,6 +133,7 @@ function ListingRow({ listing, rate, downPayment }: { listing: Listing; rate: nu
             <div><span>房屋状态</span><p>{listing.conditionSummary}</p></div>
             {listing.caution ? <div className="caution"><span>要确认</span><p>{listing.caution}</p></div> : null}
           </div>
+          <SubScoreDetail listing={listing} />
         </details>
 
         <div className="listing-footer">
@@ -132,6 +177,13 @@ export function App() {
   const filtered = useMemo(() => {
     if (!report) return [];
     return report.listings.filter((item) => {
+      const cityMatches = city === "全部" || item.city === city;
+      return cityMatches && item.sqft >= minSqft;
+    });
+  }, [report, city, minSqft]);
+  const filteredDegraded = useMemo(() => {
+    if (!report) return [];
+    return report.degradedListings.filter((item) => {
       const cityMatches = city === "全部" || item.city === city;
       return cityMatches && item.sqft >= minSqft;
     });
@@ -267,6 +319,19 @@ export function App() {
             </div>
           )}
         </section>
+
+        {filteredDegraded.length > 0 ? (
+          <section className="results degraded-section" aria-labelledby="degraded-heading">
+            <div className="section-heading">
+              <h2 id="degraded-heading">{filteredDegraded.length} 套待成交 / 未确认房源</h2>
+              <p>降级展示</p>
+            </div>
+            <p className="degraded-note">以下房源为 ◐ 已有条件成交、◐ 待成交或 ◐ 状态未确认，非可直接行动：可能已有买家在推进，或状态尚未核实。它们不进入上面的推荐排名；如仍感兴趣，先向经纪确认最新状态。</p>
+            <div className="listing-list">
+              {filteredDegraded.map((item) => <ListingRow key={item.id} listing={item} rate={rate} downPayment={downPayment} degraded />)}
+            </div>
+          </section>
+        ) : null}
 
         <footer>
           <p>月供仅含本金与利息，不含地税、房屋保险和 HOA。挂牌状态与利率会变化，出价前请向贷款方和房产经纪再次确认。</p>

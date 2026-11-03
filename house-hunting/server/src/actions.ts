@@ -1,9 +1,33 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import * as schema from "./schema";
+import {
+  computeRubricScore,
+  formatStatusVerifiedAt,
+  isExcludedStatus,
+  rankListings,
+  statusLabel,
+  statusTier,
+  type SubScores,
+} from "./rubric";
 
 const citySchema = z.enum(["Santa Clara", "Sunnyvale", "Cupertino"]);
-const statusSchema = z.enum(["active", "contingent", "pending", "unknown"]);
+// HH0.4: sold / off_market join the original four statuses.
+const statusSchema = z.enum(["active", "contingent", "pending", "unknown", "sold", "off_market"]);
+
+const subScoreSchema = z.number().int().min(0).max(100).nullable();
+
+// HH0.5: the research agent returns one sub-score object per listing.
+// Every dimension is nullable — a dimension the agent could not assess
+// stays null (never 0) and the rubric renormalizes over the rest.
+const subScoresInputSchema = z.object({
+  hardCriteria: subScoreSchema,
+  environment: subScoreSchema,
+  school: subScoreSchema,
+  ageCondition: subScoreSchema,
+  space: subScoreSchema,
+  priceComps: subScoreSchema,
+});
 
 const listingInputSchema = z.object({
   rank: z.number().int().min(1).max(30),
@@ -22,6 +46,12 @@ const listingInputSchema = z.object({
   priceChange: z.number().int().nullable(),
   hoaMonthly: z.number().int().min(0).nullable(),
   status: statusSchema,
+  // HH0.4: epoch ms when the agent last verified this listing's
+  // status. Optional for legacy-shaped callbacks; absent stays null.
+  statusVerifiedAt: z.number().int().positive().nullable().optional(),
+  // HH0.5: rubric sub-scores. Optional for legacy-shaped callbacks;
+  // when absent entirely the stored agent score remains authoritative.
+  subScores: subScoresInputSchema.nullable().optional(),
   schoolSummary: z.string().min(2).max(500),
   environmentSummary: z.string().min(2).max(500),
   conditionSummary: z.string().min(2).max(500),
@@ -29,7 +59,23 @@ const listingInputSchema = z.object({
   caution: z.string().max(500).nullable(),
 });
 
-const listingOutputSchema = listingInputSchema.extend({ id: z.number() });
+const listingOutputSchema = listingInputSchema.omit({ subScores: true }).extend({
+  id: z.number(),
+  statusVerifiedAt: z.number().int().positive().nullable(),
+  // Server-rendered status text (symbol + words, e.g. "● 在售") and
+  // "状态核验于 MM-DD HH:mm" / "核验时间未知" verification text; the
+  // client displays both verbatim.
+  statusLabel: z.string(),
+  statusVerifiedLabel: z.string(),
+  // HH0.4 tier: actionable | degraded (excluded never leaves the server).
+  statusTier: z.enum(["actionable", "degraded"]),
+  // HH0.5: stored sub-scores verbatim (null = not assessed) plus the
+  // rubric completeness of the stored total, so the client renders
+  // without recomputing anything.
+  subScores: subScoresInputSchema.nullable(),
+  scoreComplete: z.boolean(),
+  scorePresentCount: z.number().int().min(0).max(6),
+});
 
 const reportResponseSchema = z.object({
   report: z.object({
@@ -41,7 +87,12 @@ const reportResponseSchema = z.object({
     rateUrl: z.string(),
     summary: z.string(),
     createdAt: z.string(),
+    // Actionable (active) listings only, in rank order.
     listings: z.array(listingOutputSchema),
+    // HH0.4 degraded tier (contingent / pending / unknown), shown in
+    // its own section as not directly actionable. sold / off_market
+    // rows are filtered out server-side and never appear here.
+    degradedListings: z.array(listingOutputSchema),
   }).nullable(),
   refresh: z.object({
     status: z.enum(["idle", "running", "error"]),
@@ -424,6 +475,7 @@ async function loadPublishedReport(ctx: Ctx): Promise<ReportRow | undefined> {
 
 export const Actions = {
   getReport: defineAction({
+    description: "Read the current published weekly South Bay home report: ranked actionable listings, the degraded (contingent/pending) section, rubric sub-scores, status verification times, and refresh state.",
     request: z.object({}),
     response: reportResponseSchema,
     async handler(ctx): Promise<z.infer<typeof reportResponseSchema>> {
@@ -446,6 +498,57 @@ export const Actions = {
         };
       }
       const rows = await db.select().from(schema.listings).where(eq(schema.listings.reportId, report.id)).orderBy(schema.listings.rank);
+      // HH0.4: sold / off_market rows stay in the database (history is
+      // never deleted) but are filtered out HERE, at the getReport
+      // layer, so the recommendation surface only ever carries
+      // actionable and degraded listings. Filtering at read time —
+      // rather than at ingest — keeps the ingest acceptance contract
+      // (HH0.2/HH0.3) untouched and lets a later status correction
+      // revive a row without re-research. See DATA-PLAN (HH0.4).
+      const presentListing = (row: (typeof rows)[number]) => {
+        const subScores: SubScores = {
+          hardCriteria: row.scoreHardCriteria,
+          environment: row.scoreEnvironment,
+          school: row.scoreSchool,
+          ageCondition: row.scoreAgeCondition,
+          space: row.scoreSpace,
+          priceComps: row.scorePriceComps,
+        };
+        const rubric = computeRubricScore(subScores);
+        const hasSubScores = rubric.presentCount > 0;
+        return {
+          id: row.id,
+          rank: row.rank,
+          score: row.score,
+          address: row.address,
+          city: row.city,
+          url: row.url,
+          price: row.price,
+          bedrooms: row.bedrooms,
+          bathrooms: row.bathrooms,
+          sqft: row.sqft,
+          lotSqft: row.lotSqft,
+          yearBuilt: row.yearBuilt,
+          daysOnMarket: row.daysOnMarket,
+          pricePerSqft: row.pricePerSqft,
+          priceChange: row.priceChange,
+          hoaMonthly: row.hoaMonthly,
+          status: row.status,
+          statusVerifiedAt: row.statusVerifiedAt,
+          statusLabel: statusLabel(row.status),
+          statusVerifiedLabel: formatStatusVerifiedAt(row.statusVerifiedAt),
+          statusTier: statusTier(row.status) === "actionable" ? ("actionable" as const) : ("degraded" as const),
+          subScores: hasSubScores ? subScores : null,
+          scoreComplete: rubric.complete,
+          scorePresentCount: rubric.presentCount,
+          schoolSummary: row.schoolSummary,
+          environmentSummary: row.environmentSummary,
+          conditionSummary: row.conditionSummary,
+          verdict: row.verdict,
+          caution: row.caution,
+        };
+      };
+      const visibleRows = rows.filter((row) => !isExcludedStatus(row.status));
       return {
         report: {
           id: report.id,
@@ -456,30 +559,8 @@ export const Actions = {
           rateUrl: report.rateUrl,
           summary: report.summary,
           createdAt: report.createdAt.toISOString(),
-          listings: rows.map((row) => ({
-            id: row.id,
-            rank: row.rank,
-            score: row.score,
-            address: row.address,
-            city: row.city,
-            url: row.url,
-            price: row.price,
-            bedrooms: row.bedrooms,
-            bathrooms: row.bathrooms,
-            sqft: row.sqft,
-            lotSqft: row.lotSqft,
-            yearBuilt: row.yearBuilt,
-            daysOnMarket: row.daysOnMarket,
-            pricePerSqft: row.pricePerSqft,
-            priceChange: row.priceChange,
-            hoaMonthly: row.hoaMonthly,
-            status: row.status,
-            schoolSummary: row.schoolSummary,
-            environmentSummary: row.environmentSummary,
-            conditionSummary: row.conditionSummary,
-            verdict: row.verdict,
-            caution: row.caution,
-          })),
+          listings: visibleRows.filter((row) => statusTier(row.status) === "actionable").map(presentListing),
+          degradedListings: visibleRows.filter((row) => statusTier(row.status) === "degraded").map(presentListing),
         },
         refresh: presentRefreshState(state, owner),
       };
@@ -487,6 +568,7 @@ export const Actions = {
   }),
 
   initializeReport: defineAction({
+    description: "Owner-only one-time seeding of the initial September 19 snapshot report when the database is still empty.",
     request: z.object({}),
     response: z.object({ ok: z.boolean(), created: z.boolean() }),
     async handler(ctx) {
@@ -513,6 +595,7 @@ export const Actions = {
   }),
 
   refreshReport: defineAction({
+    description: "Start a weekly refresh: spawns the research task that re-verifies listings, statuses, schools, and the mortgage rate, then calls back into ingestResearch.",
     request: z.object({}),
     response: z.object({ ok: z.boolean(), status: z.enum(["started", "already_running", "error", "forbidden"]), message: z.string() }),
     async handler(ctx) {
@@ -546,7 +629,7 @@ export const Actions = {
       });
       ctx.invalidateQueries();
       const task = await ctx.agent.spawnTask(
-        `为一个南湾每周看房报告做一次完整刷新。研究当前在售的 Santa Clara、Sunnyvale、Cupertino 独栋住宅，预算 $2,000,000–$3,000,000，至少 3 卧。核心排序维度：性价比、安静住宅环境（排除紧邻高速或主要干道）、房龄/翻新状态、室内面积、学校质量或靠谱私校距离。必须打开并核对每个保留房源的真实页面和地图/道路背景，优先 Redfin，保持每个公开 URL 原样。给出 8–15 套有理由的短名单并排序，不能编造缺失字段；已 pending/contingent 可保留但必须标注。另查找有日期的当前 30 年 jumbo 固定按揭利率（若无 jumbo，才使用 30 年固定全国平均，并写清标签和来源 URL）。为每套写简洁中文 schoolSummary、environmentSummary、conditionSummary、verdict、caution。asOf 使用带时区 ISO 时间。若研究无法完成，回传失败状态与中文错误说明。回传 ingestResearch 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略）。`,
+        `为一个南湾每周看房报告做一次完整刷新。研究当前在售的 Santa Clara、Sunnyvale、Cupertino 独栋住宅，预算 $2,000,000–$3,000,000，至少 3 卧。核心排序维度：性价比、安静住宅环境（排除紧邻高速或主要干道）、房龄/翻新状态、室内面积、学校质量或靠谱私校距离。必须打开并核对每个保留房源的真实页面和地图/道路背景，优先 Redfin，保持每个公开 URL 原样。给出 8–15 套有理由的短名单并排序，不能编造缺失字段；已 pending/contingent 可保留但必须标注。另查找有日期的当前 30 年 jumbo 固定按揭利率（若无 jumbo，才使用 30 年固定全国平均，并写清标签和来源 URL）。为每套写简洁中文 schoolSummary、environmentSummary、conditionSummary、verdict、caution。每套必须给出 status（active / contingent / pending / unknown / sold / off_market 之一）和 statusVerifiedAt（你最后一次打开该房源页面确认其挂牌状态的时刻，Unix 毫秒时间戳；确实无法确认时给 null，不得编造）。每套必须给出 subScores 分项分（0–100 整数）：hardCriteria 硬条件（3+ 卧、独栋、预算内等硬性达标程度）、environment 环境（安静程度与道路远近）、school 学校/私校、ageCondition 房龄/状态、space 空间、priceComps 价格/可比成交性价比；某一项确实无法评估时该项给 null，不得用 0 冒充；score 字段给出你的综合参考分即可，最终总分由服务端按公开权重用分项分计算。asOf 使用带时区 ISO 时间。若研究无法完成，回传失败状态与中文错误说明。回传 ingestResearch 时必须原样带回本代标识：在回传参数中包含 generation 字段，值固定为 ${generation}（成功与失败两种回传都必须带；缺失或不一致的回传会被忽略）。`,
         { expectsAction: "ingestResearch", dedupeKey: "weekly-south-bay-home-report" },
       );
       if (!task.ok) {
@@ -599,6 +682,7 @@ export const Actions = {
   }),
 
   ingestResearch: defineAction({
+    description: "Callback for the refresh research task: validates, rubric-scores, ranks, and atomically publishes a refreshed report, or settles the refresh to error on failure.",
     request: z.discriminatedUnion("success", [
       z.object({
         success: z.literal(false),
@@ -842,7 +926,64 @@ export const Actions = {
           return { ok: false, saved: 0 };
         }
         candidateId = report.id;
-        await db.insert(schema.listings).values(clean.map((item, index) => ({ ...item, rank: index + 1, reportId: report.id })));
+        // HH0.5: the stored total is computed from the sub-scores by
+        // the rubric (weighted renormalized mean — see rubric.ts and
+        // DATA-PLAN); the agent's own score is only a fallback for
+        // listings that carry no sub-scores at all. rankListings
+        // re-ranks by that total (actionable tier first, degraded
+        // after, price as tie-break). HH0.4: sold / off_market rows
+        // are still inserted — history is never deleted — with ranks
+        // trailing the visible list; getReport filters them out of
+        // the recommendation surface.
+        type ScoredListing = (typeof clean)[number] & { rubricTotal: number | null };
+        const scored: ScoredListing[] = clean.map((item) => ({
+          ...item,
+          rubricTotal: item.subScores ? computeRubricScore(item.subScores).total : null,
+        }));
+        const rankedVisible = rankListings(
+          scored,
+          (entry) => entry.rubricTotal,
+          (entry) => entry.score,
+        );
+        const excludedEntries = scored.filter((entry) => isExcludedStatus(entry.status));
+        const toInsertRow = (entry: ScoredListing, rank: number, score: number) => ({
+          rank,
+          score,
+          address: entry.address,
+          city: entry.city,
+          url: entry.url,
+          price: entry.price,
+          bedrooms: entry.bedrooms,
+          bathrooms: entry.bathrooms,
+          sqft: entry.sqft,
+          lotSqft: entry.lotSqft,
+          yearBuilt: entry.yearBuilt,
+          daysOnMarket: entry.daysOnMarket,
+          pricePerSqft: entry.pricePerSqft,
+          priceChange: entry.priceChange,
+          hoaMonthly: entry.hoaMonthly,
+          status: entry.status,
+          statusVerifiedAt: entry.statusVerifiedAt ?? null,
+          scoreHardCriteria: entry.subScores?.hardCriteria ?? null,
+          scoreEnvironment: entry.subScores?.environment ?? null,
+          scoreSchool: entry.subScores?.school ?? null,
+          scoreAgeCondition: entry.subScores?.ageCondition ?? null,
+          scoreSpace: entry.subScores?.space ?? null,
+          scorePriceComps: entry.subScores?.priceComps ?? null,
+          schoolSummary: entry.schoolSummary,
+          environmentSummary: entry.environmentSummary,
+          conditionSummary: entry.conditionSummary,
+          verdict: entry.verdict,
+          caution: entry.caution,
+          reportId: report.id,
+        });
+        const rowsToInsert = [
+          ...rankedVisible.map((entry) => toInsertRow(entry.item, entry.rank, entry.score)),
+          ...excludedEntries.map((entry, index) =>
+            toInsertRow(entry, rankedVisible.length + index + 1, entry.rubricTotal ?? entry.score),
+          ),
+        ];
+        await db.insert(schema.listings).values(rowsToInsert);
       } catch {
         await settleClaimed("error", "报告保存失败，保留上一期报告");
         ctx.invalidateQueries();

@@ -35,7 +35,25 @@ export const listings = sqliteTable("listings", {
   pricePerSqft: integer("price_per_sqft"),
   priceChange: integer("price_change"),
   hoaMonthly: integer("hoa_monthly"),
-  status: text("status", { enum: ["active", "contingent", "pending", "unknown"] }).notNull(),
+  // HH0.4: status vocabulary extended with sold / off_market. SQLite
+  // text does not enforce the enum; the drizzle-level enum documents
+  // the accepted values and legacy rows keep working unchanged.
+  status: text("status", { enum: ["active", "contingent", "pending", "unknown", "sold", "off_market"] }).notNull(),
+  // HH0.4: when the listing's status was last verified by the research
+  // agent (epoch milliseconds). Nullable: legacy rows and unverifiable
+  // statuses stay null and the UI says "核验时间未知" instead of
+  // inventing a time.
+  statusVerifiedAt: integer("status_verified_at"),
+  // HH0.5 rubric sub-scores (0–100, nullable; null = not assessed,
+  // never 0). The stored `score` is the rubric total computed from
+  // these by server/src/rubric.ts; it stays the agent-supplied score
+  // only for legacy rows that carry no sub-scores at all.
+  scoreHardCriteria: integer("score_hard_criteria"),
+  scoreEnvironment: integer("score_environment"),
+  scoreSchool: integer("score_school"),
+  scoreAgeCondition: integer("score_age_condition"),
+  scoreSpace: integer("score_space"),
+  scorePriceComps: integer("score_price_comps"),
   schoolSummary: text("school_summary").notNull(),
   environmentSummary: text("environment_summary").notNull(),
   conditionSummary: text("condition_summary").notNull(),
