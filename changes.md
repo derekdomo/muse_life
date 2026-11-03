@@ -3360,3 +3360,11 @@
  - 要求交付：构建审计 pass＋隐私扫描零命中＋新增 validate-sleep-training-correlation.mjs（真实生产函数断言＋≥2 项变异实跑）＋既有回归全过。构建交付后由后续轮次回灌仓库并补交付登记；整项待 PM 验收，不勾选。
  - 回滚：构建未交付前无仓库变更可回滚；派工可经 artifact.cancel 取消（本轮未取消）。
  - plans.md `H3.4` 已加派工登记。本轮未动 cron；修改文件：plans.md、本文件。
+
+## 2026-11-02 21 时 PST（muse-life-plans-sync 20:55 轮次续：H3.4 构建回传交付登记；space-4）
+
+- H3.4 睡眠/恢复与训练表现的关联探索·交付登记（20:55 派工的构建回传）。
+ - 构建交付事实（space-4 builder 回传，verification_status SUCCEEDED，worker_completed_at 2026-11-03T05:05:26Z）：`H3.4` 已按规格在 artifact（space-4）上线——(1) 服务端新增无 import 纯函数模块 `server/src/sleep-training-correlation.ts`（全部导出）：已完成力量训练配对前一晚主睡眠（CWEB-SLEEP-001 主睡眠＋H4.3 实际睡眠口径）与当日准备度存档；按个人基线（近 ≤14 晚均值、≥8 晚）分睡得好/睡得差组，呈现训练容量与时长（既有口径）的组均值与均值差。(2) 有效配对 <6 硬门槛只显示「样本不足（当前 n/6）」与配对计数，不渲染任何关联数字；缺睡眠/缺时长/缺准备度一律按缺失剔除并计数、绝不按 0 计。(3) `getDashboard` 新增可空字段 `sleepTraining`（非所有者/无健康快照/无已完成训练时为 null），客户端只渲染；趋势页新增「睡眠与训练表现的关联」面板（行为—恢复影响旁），明示「仅为观察性相关、不能证明睡眠/恢复导致训练表现变化」，符号＋文字＋数字三通道。无 schema/migration、无新数据源、未改 readiness 公式；DATA-PLAN.md 末尾外科式新增 H3.4 章节。
+ - 构建证据（取自回传）：validate-sleep-training-correlation.mjs 30/30（门槛边界、配对对齐、缺失不当 0、基线门槛、3 项真实变异实跑翻转）；既有 15 个验证器回归与改动前基线逐项一致（仅 week-review 10 项、week-focus-feedback 1 项为 DATA-PLAN 记录的既有陈旧漂移，未新增失败；一处本改动引起的 sleep-debt 键序钉住失配已修复、恢复 35/35）；服务端 tsc 通过、平台构建成功、sandbox 主路径调用 forbidden 形态且 `sleepTraining: null` 字段存在；隐私扫描零命中（全合成数据）。客户端 tsc 一处既有未用类型 TrendPoint 报错（改动前即存在，与本次无关，平台构建不受影响）。
+ - 回灌状态：回传未附源码全文，仓库回灌待经既有只读通道取回 `sleep-training-correlation.ts`、`validate-sleep-training-correlation.mjs`、DATA-PLAN.md H3.4 章节与 sleepTraining 接线 diff 后执行；本轮先做交付登记，`H3.4` 保持 [ ] 不勾选（须回灌＋仓库验证后由下一轮登记），整项待 PM 验收。
+ - plans.md `H3.4` 已补交付登记。本轮未动 cron；修改文件：plans.md、本文件。
