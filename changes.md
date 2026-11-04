@@ -3689,3 +3689,13 @@
 - 任务执行：按 08:55 轮次顺延记录，本轮首位取 `F3.3` 双端契约核对。已向 space-3 builder 派工（artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认 space-3 无构建在跑）——只读核对 space-3 生产 schema→调用方→消费者链（recurringCharges/cashFlowForecast 定义、buildDashboard ingest 接线、CashFlowForecastPanel/RecurringChargesPanel），记录 merchant/annual 与 name/yearly 在线上的实际映射及适配选择（以线上事实为准），同组合成 fixture 验证两端兼容＋F3.2 周期识别＋F3.3 预测回归（全合成数据）；回传映射报告、适配方案与供后续轮次在仓库侧执行的精确安全回灌方案。红线：本轮不改 artifact 任何代码、不 submit、不触碰 recurringCharges.ts 既有行为、不改 F-ARCH 链、不提交 app.db/.env/密钥/真实数据。plans.md 的 `F3.3` 条目已追加派工登记（保持 [ ] 不勾选）；构建回传到达后由后续轮次执行仓库侧安全回灌并补交付登记。构建未交付前无仓库变更可回滚。
 - 进度面板核对：「Life 进度」（slug life）经 artifact.status 确认无构建在跑（本轮 space-3 派工为 pending_init 的核对构建，无面板相关状态变更）；仓库实质自 `10c1853` 后仅轮次登记与本轮 plans.md 派工登记附注、无编号条目状态或数据变化，面板与仓库现状一致，无需改动（截至 2026-11-01 18:05 PT）。面板刷新本身按规则不单独向用户汇报。
 - plans.md：本轮改动（`F3.3` 条目追加派工登记）。本轮未动 cron；修改文件：plans.md、本文件。
+
+## 2026-11-04 10 时 PST（muse-life-plans-sync 09:55 轮次续：`F3.3` 双端契约核对构建回传＋交付登记；无面板改动）
+
+- 任务完成：`F3.3` 双端契约只读核对（财务分项执行注 2026-11-04）。构建方回传 verification_status SUCCEEDED（worker_completed_at 2026-11-04T18:01:40Z）；artifact 未被改动任何代码、无数据写入、未读 app.db。
+- 核对结论：线上 recurringCharges 输入用 `name`、输出用 `merchant`，周期枚举 `weekly|monthly|quarterly|yearly`；真正接线在 `ingestFinanceData`（detectRecurringCharges→buildDashboard，随后 forecastCashFlow 用 `dashboard.live.deposits` 回填）。实际映射——仓库输入 `merchant` ↔ 线上输入 `name`、仓库枚举 `annual` ↔ 线上 `yearly`、输出侧两端同名 `merchant` 无需映射；线上输入/输出字段名不对称（入 name、出 merchant）是逐字回灌最易翻车点。
+- 验证证据（全合成数据）：validate-recurring-charges 32/32、validate-cash-flow-forecast 41/41（与 d731858f 的 41 断言一致）；跨契约 9/9——线上直通检出月付＋年付（cadence='yearly'），经适配（merchant→name、annual→yearly）结果与直通逐字相同，不加适配直接喂仓库形行→0 项检出，不兼容点被复现且仅此两点。
+- 后续轮次仓库侧安全回灌方案（线上零改动）：文件清单＝仓库 `weekly-finance/server/src/recurringCharges.ts`、`cashFlowForecast.ts`（新增回灌）、两套 validate-*.mjs；适配改动点——(1) 仓库输入处 merchant→name 映射（输出 merchant 不变）；(2) cadence 枚举在导出边界 annual↔yearly 单点转换，内部窗口/门槛/因子不动；(3) cashFlowForecast.ts import 符号清单与适配后导出逐一对齐；回归验证项——仓库侧两套 validator 全过、同一合成 fixture 双端 JSON 全等、annual 专项（365 天×2 笔）双端一致。
+- 独立复核补缺失证据：builder 席位无仓库文件系统；本轮 sync 侧已打开仓库 `weekly-finance/server/src/recurringCharges.ts` 实测确认输入/输出确为 `merchant`（第 28/46/169/200 行）、枚举确为 `annual`（第 20/77/85/93/100/140 行），与 builder 结论一致；仓库侧确无 `cashFlowForecast.ts`。本轮动作仅登记、无仓库代码改动。`F3.3` 保持 [ ] 不勾选——核对完成不等于回灌生效，整项仍待 PM 验收，原期限保留。
+- 进度面板：「Life 进度」（slug life）无条目状态或数据变化（`F3.3` 仍 [ ]），依规则跳过不改（截至 2026-11-01 18:05 PT 仍有效）。面板刷新本身按规则不单独向用户汇报。
+- plans.md：本轮改动（`F3.3` 条目追加交付登记）。本轮未动 cron；修改文件：plans.md、本文件。
