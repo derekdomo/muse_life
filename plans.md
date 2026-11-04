@@ -3621,3 +3621,22 @@ W4.3-D1 queuedAt=2026-10-18T01:07:00Z、Muse原10-19，父W4.3旧P1上限10-20/W
 **交接事实与度量**：本条仅为已复现的返工入队，尚无本轮 Muse 接单/修复或工件生效证据。当前工具无 Muse builder/直接消息入口，最近 50 聊天没有可辨认 Muse LIFE 执行目标；以远端 plans 为实际交接，未即时通知，不向 PM/无关聊天发送。队列缺统一 actualStartedAt，无法计算中位等待时长；本轮可见增量 1，不把需求文档计为产品交付。
 
 - **实现方登记 2026-11-03 17 时 PST（muse-life-plans-sync 17:55 轮次，基线＝HEAD 3df4cdf，git pull 已最新、0 新提交、工作树干净）**：本轮无交付、用户可见增量 0 组。P0/P1 可执行队列独立复核仍为空：`F0.5` 本体归原 Muse、`AUDIT-07` 保持 [ ]（源码前提仍存在，但逐字段覆盖证据属 H-SOURCE-001 运行待验的平台证据范围，不虚构半修）、`AUDIT-03`/`L0.x`/`H0.x`/`H1.x` 运行待验须本人实机证据、`H-SYNC-DIVERGE-001` 待 PM 裁决、`F3.1` 因 F0.5 coverage 门禁暂缓、`F3.3` 回灌被裁决阻塞、`W-HOMEB-002` 未到 11-16、`H-SEASON-TAB-001` 滑雪设计行 11-30 前另行登记未到期、`LIFE-DESIGN-001` 待 PM 出稿、（需用户确认）条目不动；PM 仍按 PAUSE-LIFE-PM-001 暂停。本日上午已交付 `W6.1`（space-6 计划肌群覆盖）与 `F1.3` P1 余项（space-3 FIRE 保守/中性假设），两轮顺延链已闭环。「Life 进度」面板（slug life）存在、无构建在跑、内容与仓库现状（plans.md 评审记录/changes.md/HEAD）一致、本轮不改。`F0.7` 已按所有者裁决彻底关闭，本轮不再续查。此登记仅为实现方记录，PM 结论以其评审记录为准。
+
+
+## Life × Firance 独立日任务 · 2026-11-03 23 时 PST 增量反馈
+
+- **范围、版本与权限**：以本任务前游标 `b90938c` → `1a14b85` 比较安全源码/资源与需求状态。三小时 PM 的暂停状态、配置与记忆不动；本任务按所有者授权维护财务相关 plans，Life 业务实现仍由 Muse 负责。不运行 Life 本地 build，不访问 .space-build/app.db、不读真实账本。新独立需求 0，新复现 bug 0；沿原编号推进，已交付分项不重开。
+- **`F-ARCH-001·INCR-1` 独立复验：源码分项已修，运行层级分账**（A 类 / Muse / 原返工目标 2026-11-01 18:00 PST）：已收到 `9f3d9d8` 修复与 `ade86e9` 工件回灌。对当前 actions.ts 实际两路 incremental helper、summarize、date/day matcher、当前版本选择器去 TS，复用上轮两反例与控制，34/34 通过：synthetic A 在 10-20（支出 -50 / 收入 +50）、B 在 10-26（支出 -20 / 收入 +20），发 10-23..26 日片，旧 10-20/21/22 的 partial 全部与完整重算一致；只送 10-23..24 却声明 through=10-26，两路返回 incremental_tail_gap 且不进入 publish。显式连续 0 尾段可发布，金额/总额/非法日/stale_base 拒绝仍在 publish 前阻断。仅关闭这两处已修的源码反馈，不重开旧问题。
+- **证据限制**：独立命令 `node life-incremental-probe.mjs`；fixture 是明确合成数据，内存行读取适配、stored safeParse 透传、publish 捕获，新增 F3.5 recordTxReviewRows 为无操作边界。未运行 SDK/Zod/Drizzle/SQL/完整公共 action/getDashboard→React/线上或 owner 视角。Muse 的 Bun/SQLite 56/56、工件回灌与 22:55 exit 审计闭环属实现方登记；本机无 Bun，未冒称独立复跑或所有者确认。原四项交付勾选不等于本任务全链路验收。源码确认／工件提交生效申报／owner 本人打开确认分别记账。
+- **收到的新财务交付**：`F2.1` 摘要（比较区间/来源完整度）、`F2.2` 事实提醒、`F3.2` 周期支出、`F3.4` 只读试算与 `F1.3` 可编辑假设均有当前源码；独立执行 `node weekly-finance/validate-summary-cards.mjs` 42/42、`validate-alerts.mjs` 46/46、`validate-recurring-charges.mjs` 26/26、`validate-whatif.mjs` 52/52、`validate-fire-assumptions.mjs` 53/53，共 219 项通过（实际纯函数/源接线与脚本变异，不是 React/平台/owner 实测）。F3.5 源码已收到，但 validate-tx-review.mjs 要求 bun:sqlite，本机 Node 报 ERR_UNSUPPORTED_ESM_URL_SCHEME，独立未运行；不将工具依赖不足登记成产品 bug。F1.3 旧“口径待定”状态由本次已交付取代，无需重复立同义需求。
+
+### 原队列推进：F0.5 先交付，财务回灌不以 PM 签字为技术前置
+
+- **用户问题与比较证据**：Firance 当前已验证可逐端查看金额/日期分母、来源日期和未核实状态；Life F2.1 已能诚实显示来源完整度，却仍无法由前端补出未留存的服务端逐源 coverage/最后成功事实。本轮源码增量没有交付 F0.5 本体；“归原 Muse”说明负责人，不是技术阻塞或全队列已空的依据。
+- **`F0.5` 原单 / P0 / A 类 / 负责人 Muse / 原目标 2026-10-18 保留（已逾期）**：请按原范围交付 Firance、Plaid account、holdings、transactions 四源服务端台账首片，不扩大账户/同步权限。一次列齐沿原判据：各源明确成功证据与 coverage/数据日期、最后成功时间；本次尝试结果与最后可用事实分列；交易失败不覆盖旧成功事实、不阻断余额刷新；依赖交易的推断明确降级；空库/缺失/无效日期不填成功或 0；真实 0、部分/过期、失败保旧及合法保存读回都用合成 fixture；保留 L0.1 所有者已批准例外。通过相关 Handoff Gate 与 builder plan→build→audit→submit，changes 记录具体版本、命令/结果和回滚；所有者本人打开另记，不增加例行 PM 审批。
+- **`F-ARCH-001` / `F0.6` / `F1.6`**：INCR-1 两处修复不关闭其余迁移。P1、Muse、原 2026-10-25 18:00 首片目标不重置；异常阈值待定只阻相应决策。`F3.1` 的 F0.5 coverage 技术依赖仍成立，不交付永远回退的空壳。
+- **`H-SYNC-DIVERGE-001` 财务分项 / `F3.3` 沿原单与原期限**：当前仓库实际 recurringCharges 输入 merchant、周期 annual，与工件 name/yearly 的差异仍仅有 Muse 的双端检查登记；本任务无工件源码访问，不能伪造已裁定或已回灌。所需下一步是 Muse 在现有 builder 内明确实际生产 schema、调用方和消费者契约，以同组合成周期项验证兼容并安全回灌，不把“PM 暂停/待签字”当作 routine 交付前置。真实双端契约未核实仍如实阻塞；不授权重写健康业务或改变所有者决定。
+- **分工落地**：借鉴 Life F2.1 的“每条摘要带比较区间及来源完整度”，本任务实际改进 Firance Home：余额差旁显示精确双端快照区间，展开全宽证据列两端金额有效 x/y、日期已知 x/y、未核实/未知计数及不可比原因。复用既有金额/账户范围守卫，不把旧余额差改成收益、不补核实或写账本；其源码、临时 profile/Electron 合成验证及已测 dist 同步落在本地 Firance，不修改 Life 业务代码。
+- **交接事实**：本反馈以远端 plans 队列为可用交接；当前工具无 Muse builder/直接消息入口，最近 50 聊天无可辨认 Muse LIFE 执行目标，未向 PM 或无关聊天发送。INCR-1 已有实际 Muse 接单/修复源码与工件申报；本轮 F0.5 催办/契约推进只算重新明确原队列，不冒称新增接单、即时通知或已实现。新增 owner 确认 0；本轮 Firance 可见增量 1 组，文档不计产品增量；队列缺统一 actualStartedAt，中位等待不可算。F0.7 按所有者裁决彻底关闭，不续查、不触发、不重问。
+
+- **本次 Handoff Gate**：plans-only 交接 Gate 通过（1 文档 / 0 脚本 / 0 实现）。完整 b90938c→本轮区间 Gate 在 git diff --check 被两处本轮之外的新范围格式拦下：health-dashboard/DATA-PLAN.md:357 末尾空行、workout-log/validate-rest-timer.mjs:82 行尾空格。未修改这些健康/训练文件，也未绕过 Gate 宣称全区间通过；这是 B 类交付格式尾项，不冒充新产品 bug 或阻塞本次已过检查的文档交接。Firance 最终 lint、78/78 单元、snapshot parser、Vite、真实 Electron 临时 profile/synthetic 新增18项及原净资产15项、smoke均通过；1360/900合成截图已查看，双端证据使用全宽展开避免摘要卡被长文撑高，不称手机或 owner 实测。
