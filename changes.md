@@ -3682,3 +3682,10 @@
 - 验证证据：构建方环境 `validate-source-ledger.mjs` 52/52（真实生产纯函数断言＋真实 getDashboard 内存库读回：guest/同步通道 null、空库空台账、合法保存读回、error 后事实不变＋3 项变异真实执行翻转）；既有回归 17 个 .mjs 套件＋alerts 46＋9 个 .ts 套件全绿、client+server typecheck 干净（取自构建回传）；隐私扫描零命中（全合成数据）。本机因缺 node_modules（drizzle-orm/bun-sqlite）未能复跑验证器（既有环境限制，沿前例记录）；回灌完整性以逐文件 sha256 与工件一致为准。
 - 局限：精确 artifact version 平台未提供；owner 视角实机以本人打开为准；`F0.5` 整项待 PM 验收，本轮不勾选。回滚：本轮提交前仓库无其他未提交改动，回滚即 revert 本轮提交。
 - 进度面板：「Life 进度」（slug life）无构建在跑；本轮交付为 `F0.5` 本体首片（条目仍 [ ]），面板条目状态无变化，依规则跳过不改。
+
+## 2026-11-04 09 时 PST（muse-life-plans-sync 09:55 轮次：`F3.3` 双端契约核对已派工；无面板改动）
+
+- 本轮队列核对（独立复核）：`git pull` 已最新（Already up to date）；基线 `10c1853` == HEAD，`git log --oneline 10c1853..HEAD` 零输出（机械汇总门通过）、`git status --short` 干净。新增编号条目 0，新增 PM 记录 0，PM 仍按 PAUSE-LIFE-PM-001 暂停。P0/P1 可执行队列仍空：`F0.5` 本体首片已交付并回灌（`10c1853`），本条保持 [ ] 待 PM 验收与所有者本人打开确认、后续片归主聊天 job；`F3.1` 因 F0.5 coverage 门禁未齐备继续暂缓；`H-SYNC-DIVERGE-001` 待 PM 裁决（`F3.3` 回灌不再以此为 routine 前置）；`W-HOMEB-002` 未到 11-16（今日 11-04）；`L0.x`/`L1.x`/`H0.x`/`H1.x`/`L1-RACE-001`/`H-UNITS-001`/`H-SOURCE-001`/`H-WORKOUTS-001`/`AUDIT-07` 运行待验须本人实机/平台证据；`CWEB-LEVEL-001`、`W6.2-PM-IMG`、`W6.2-LOCAL-DEMO-002`（需用户确认）、`H-SEASON-TAB-001`（11-30 未到期）、`LIFE-DESIGN-001`（待 PM 出稿）、`AUDIT-12`（P2 证据尾巴）不动；`F0.7` 已按所有者裁决彻底关闭，不再续查。
+- 任务执行：按 08:55 轮次顺延记录，本轮首位取 `F3.3` 双端契约核对。已向 space-3 builder 派工（artifact.edit，高复杂度、异步回传；派工前经 artifact.status 确认 space-3 无构建在跑）——只读核对 space-3 生产 schema→调用方→消费者链（recurringCharges/cashFlowForecast 定义、buildDashboard ingest 接线、CashFlowForecastPanel/RecurringChargesPanel），记录 merchant/annual 与 name/yearly 在线上的实际映射及适配选择（以线上事实为准），同组合成 fixture 验证两端兼容＋F3.2 周期识别＋F3.3 预测回归（全合成数据）；回传映射报告、适配方案与供后续轮次在仓库侧执行的精确安全回灌方案。红线：本轮不改 artifact 任何代码、不 submit、不触碰 recurringCharges.ts 既有行为、不改 F-ARCH 链、不提交 app.db/.env/密钥/真实数据。plans.md 的 `F3.3` 条目已追加派工登记（保持 [ ] 不勾选）；构建回传到达后由后续轮次执行仓库侧安全回灌并补交付登记。构建未交付前无仓库变更可回滚。
+- 进度面板核对：「Life 进度」（slug life）经 artifact.status 确认无构建在跑（本轮 space-3 派工为 pending_init 的核对构建，无面板相关状态变更）；仓库实质自 `10c1853` 后仅轮次登记与本轮 plans.md 派工登记附注、无编号条目状态或数据变化，面板与仓库现状一致，无需改动（截至 2026-11-01 18:05 PT）。面板刷新本身按规则不单独向用户汇报。
+- plans.md：本轮改动（`F3.3` 条目追加派工登记）。本轮未动 cron；修改文件：plans.md、本文件。
