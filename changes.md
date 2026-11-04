@@ -3699,3 +3699,22 @@
 - 独立复核补缺失证据：builder 席位无仓库文件系统；本轮 sync 侧已打开仓库 `weekly-finance/server/src/recurringCharges.ts` 实测确认输入/输出确为 `merchant`（第 28/46/169/200 行）、枚举确为 `annual`（第 20/77/85/93/100/140 行），与 builder 结论一致；仓库侧确无 `cashFlowForecast.ts`。本轮动作仅登记、无仓库代码改动。`F3.3` 保持 [ ] 不勾选——核对完成不等于回灌生效，整项仍待 PM 验收，原期限保留。
 - 进度面板：「Life 进度」（slug life）无条目状态或数据变化（`F3.3` 仍 [ ]），依规则跳过不改（截至 2026-11-01 18:05 PT 仍有效）。面板刷新本身按规则不单独向用户汇报。
 - plans.md：本轮改动（`F3.3` 条目追加交付登记）。本轮未动 cron；修改文件：plans.md、本文件。
+
+## 2026-11-04 11 时 PST（muse-life-plans-sync 10:55 轮次：`F3.3` 仓库侧安全回灌执行；回灌完成、`F3.3` 保持 [ ] 待 PM 验收）
+
+- 任务：`F3.3` 未来现金流日历预测 —— 按 09:55 轮次注册的双端契约映射＋安全回灌方案，执行本仓安全回灌（线上零改动）。派工前经 artifact.status 确认 space-3 无构建在跑；回灌源码经 artifact.inspect（repair_authorized=false，inspection 2f3f4bb7，只读）从工件正本逐字读回。
+- 改了什么：
+  (1) `weekly-finance/server/src/recurringCharges.ts`（改，加法）：`RecurringChargeInput` 加可选 `name` 别名，分组键取 `t.name ?? t.merchant` 归一（仅传 merchant 的既有调用逐字不变）；末尾新增「双端契约适配」节——`RecurringCadence`（在线枚举）、`RecurringTransactionInput`（在线形状）、`OnlineRecurringCharge`、`toOnlineCadence`/`toWarehouseCadence`（annual↔yearly 导出边界单点转换）、helper 包装（normalizeMerchantName/isValidDateKey/daysBetweenDateKeys/addDaysToDateKey/medianNumber/roundMoney/systemTodayKey/classifyCadence）、`detectRecurringChargesOnline`（在线契约入口：Plaid 金额口径翻转→本仓口径、name 归一、内部窗口/门槛/因子逐字复用、输出 cadence 单点转换、merchant 取最新一笔 name.trim()）。
+  (2) `weekly-finance/server/src/cashFlowForecast.ts`（新增回灌）：生产侧源码逐字回灌，仅一处适配 (D1)——import 的 `detectRecurringCharges` 改为 `detectRecurringChargesOnline`（文件头注明适配点与 deviations）。
+  (3) `weekly-finance/validate-cash-flow-forecast.mjs`（新增）：88 断言（见验证证据）。
+  (4) `weekly-finance/DATA-PLAN.md`：外科手术式新增 F3.3 章节（双端适配说明＋depositsBalance=live.deposits 口径）。
+  未动：`actions.ts`/`dashboardSchema` 接线与客户端面板（仍只在生产侧；本轮回灌范围为两纯函数模块＋验证器，接线待后续轮次/PM 决定）；F3.2 既有行为。
+- 独立复核发现的方案外分歧（已如实纳入适配）：金额口径亦分歧——本仓 F3.2 为流出为负，生产侧为 Plaid 口径（流出为正/入账为负）；09:55 轮次注册方案未点名此项，已在 `detectRecurringChargesOnline` 入口做翻转适配并在此留痕。
+- 验证证据（本机实跑，全合成数据，无真实值/密钥入库）：
+  - `validate-cash-flow-forecast` **88/88**：forecastCadenceLabel×4、forecastBasisText/formatIntervalDays、isOutflowTransaction×10/isIncomeTransaction×6 判定矩阵、detectRecurringIncome（3 笔月薪识别/扣费商户退款排除/2 笔不列出/年收入 2 笔→yearly）、detectRecurringChargesOnline（name 字段＋Plaid 口径识别/输出 merchant 取最新 name.trim/annual 专项 365 天×2 笔→yearly 且下次=2027-10-10/2 笔月费不列出/本仓 name 别名）、枚举与工具适配（toOnline/toWarehouse 双向、classifyCadence 含笔数门槛与窗外 null、日期/金额工具）、recurringLandingDates（含退化间隔不死循环）、forecastCashFlow 端到端（90 天逐日余额 10000→14984.01→19968.02→24952.03、低点=起点、假设按金额排序收入在前、依据文案逐字）、horizon 钳制（500→366、0→1）、非法余额归零、纯支出低点落在末次落点；2 项变异真实执行翻转——M1 删收入识别终值 24952.03→9952.03 且假设剩 1 条、M2 反转低点比较使低点由起点变为 24952.03。
+  - 回归：`validate-recurring-charges` 26/26（本仓 F3.2 零回归）、`validate-summary-cards` 42/42、`validate-alerts` 46/46；`validate-tx-review`/`validate-source-ledger` 为既有 `bun:` 环境崩溃（git stash 前后一致，与本轮无关）。
+  - 隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+- 局限：classifyCadence 笔数门槛按 F3.3 派工规格文字实现（在线函数体未逐字可见）；roundMoney 取标准到分；同日同商户多笔 tie-break 显示名取日期最大者（极端情形与生产侧可能差一笔显示名，不影响数值）；精确 artifact version 平台未提供；owner 视角实机以本人打开为准；`F3.3` 整项待 PM 验收（PM 暂停中），本条保持 [ ]。
+- 回滚：revert 本次提交（`git revert <本轮commit>`）；线上 artifact 未被改动，无需回滚。
+- 进度面板核对：「Life 进度」（slug life）——`F3.3` 条目状态仍为 [ ]（待 PM 验收），本轮仅完成其仓库回灌子项；面板是否需更新子项文案待只读核对后决定（见下）。
+- plans.md：本轮改动（`F3.3` 条目追加 11 时交付登记，保持 [ ]）。本轮未动 cron；修改文件：plans.md、本文件、weekly-finance/server/src/recurringCharges.ts、weekly-finance/server/src/cashFlowForecast.ts（新）、weekly-finance/validate-cash-flow-forecast.mjs（新）、weekly-finance/DATA-PLAN.md。

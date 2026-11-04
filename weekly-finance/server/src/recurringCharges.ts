@@ -26,6 +26,13 @@ export interface RecurringChargeInput {
   amount: number;
   /** 商户或描述原文 */
   merchant: string;
+  /**
+   * 在线契约别名（F3.3 安全回灌，2026-11-04，加法）：
+   * space-3 生产侧输入字段为 `name`（Plaid 口径），与本仓 `merchant` 同义。
+   * detectRecurringCharges 分组前取 `name ?? merchant` 归一，
+   * 仅传 merchant 的既有调用行为逐字不变。
+   */
+  name?: string;
   /** 可选：是否 pending */
   pending?: boolean | null;
   /** 可选：是否本人内部互转 */
@@ -166,7 +173,7 @@ export function detectRecurringCharges(
     const dayNum = dateToDayNumber(t.date);
     if (!Number.isFinite(dayNum)) continue;
     if (dayNum > todayNum) continue; // 未来日期不纳入
-    const key = normalizeMerchant(t.merchant);
+    const key = normalizeMerchant(t.name ?? t.merchant);
     if (!key) continue;
     const arr = groups.get(key);
     const row = { dateNum: dayNum, amount: Math.abs(t.amount), date: t.date };
@@ -221,4 +228,188 @@ export function detectRecurringCharges(
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/* ============================================================================
+ * 双端契约适配（F3.3 安全回灌，2026-11-04）
+ * ----------------------------------------------------------------------------
+ * 契约分歧（已实测确认）：
+ *   在线契约（space-3 生产）：输入字段 `name`；金额为 Plaid 口径（流出为正、
+ *     入账为负）；周期枚举 weekly|monthly|quarterly|yearly。
+ *   本仓契约（F3.2）：输入字段 `merchant`（本轮起加 `name` 别名）；
+ *     金额为流出为负；周期枚举 weekly|monthly|quarterly|annual。
+ * 适配原则：以下全部为加法，既有导出与 detectRecurringCharges 行为逐字不变
+ * （validate-recurring-charges.mjs 26/26 仍全过）。cashFlowForecast.ts 的
+ * 本仓回灌版经由本节的在线契约入口消费本仓检测逻辑。
+ * ========================================================================== */
+
+/** 在线周期枚举（space-3 生产侧） */
+export type RecurringCadence = "weekly" | "monthly" | "quarterly" | "yearly";
+
+/** 在线交易输入形状（space-3 生产侧：Plaid 口径） */
+export type RecurringTransactionInput = {
+  /** 交易日期，YYYY-MM-DD */
+  date: string;
+  /** 金额：Plaid 口径——流出为正，入账/退款为负 */
+  amount: number;
+  /** 商户或描述原文 */
+  name: string;
+  /** 可选：是否 pending */
+  pending?: boolean | null;
+  /** 可选：是否本人内部互转 */
+  internalTransfer?: boolean | null;
+  /** 可选：转账类标记 */
+  transferLike?: boolean | null;
+  /** 可选：方向标记（"in" | "out"，由上游标注） */
+  direction?: string | null;
+};
+
+/** 在线形状的周期扣费（供 cashFlowForecast.ts 消费；字段名与生产侧一致） */
+export type OnlineRecurringCharge = {
+  /** 最新一笔 name.trim()（生产侧 merchant 语义） */
+  merchant: string;
+  /** 归一化商户名（分组键） */
+  normalizedMerchant: string;
+  /** 周期（在线枚举） */
+  cadence: RecurringCadence;
+  /** 认定依据笔数 */
+  occurrences: number;
+  /** 最近一笔金额（绝对值） */
+  latestAmount: number;
+  /** 最近一笔日期 YYYY-MM-DD */
+  latestDate: string;
+  /** 中位数间隔（天） */
+  medianIntervalDays: number;
+  /** 下次预计扣费日 YYYY-MM-DD */
+  nextExpectedDate: string;
+};
+
+/** 本仓枚举 → 在线枚举（单点转换：annual↔yearly；其余恒等） */
+export function toOnlineCadence(c: Cadence): RecurringCadence {
+  return c === "annual" ? "yearly" : c;
+}
+
+/** 在线枚举 → 本仓枚举（toOnlineCadence 的逆） */
+export function toWarehouseCadence(c: RecurringCadence): Cadence {
+  return c === "yearly" ? "annual" : c;
+}
+
+/** 在线名 normalizeMerchantName → 本仓 normalizeMerchant（同规格） */
+export function normalizeMerchantName(name: string): string {
+  return normalizeMerchant(name ?? "");
+}
+
+/** YYYY-MM-DD 合法性（本仓 dateToDayNumber 语义） */
+export function isValidDateKey(value: string): boolean {
+  return (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(dateToDayNumber(value))
+  );
+}
+
+/** 两日期键相差天数（to - from） */
+export function daysBetweenDateKeys(fromKey: string, toKey: string): number {
+  return dateToDayNumber(toKey) - dateToDayNumber(fromKey);
+}
+
+/** 日期键加减天数 */
+export function addDaysToDateKey(dateKey: string, days: number): string {
+  return dayNumberToDate(dateToDayNumber(dateKey) + Math.round(days));
+}
+
+/** 中位数；空数组/非法返回 null（在线 medianNumber 语义） */
+export function medianNumber(values: number[]): number | null {
+  if (!values || values.length === 0) return null;
+  const m = median(values);
+  return Number.isFinite(m) ? m : null;
+}
+
+/** 金额取整到分 */
+export function roundMoney(value: number): number {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+/** 系统今天（YYYY-MM-DD） */
+export function systemTodayKey(): string {
+  return dayNumberToDate(Math.floor(Date.now() / 86400000));
+}
+
+/** 周期判定规则（在线 CadenceRule 形状；cadence 取在线枚举） */
+export type CadenceRule = {
+  cadence: RecurringCadence;
+  minIntervalDays: number;
+  maxIntervalDays: number;
+  minOccurrences: number;
+  annualizedFactor: number;
+};
+
+/**
+ * 按中位数间隔与笔数判定周期（在线 classifyCadence 语义）。
+ * 口径依据：F3.3 派工规格——同周期窗口（周 6–8/月 27–33/季 85–95/
+ * 年 360–370 天）与同证据门槛（周/月/季 ≥3 笔、年 ≥2 笔）；
+ * 落窗外或笔数不足返回 null。cadence 取在线枚举（annual→yearly 单点转换）。
+ */
+export function classifyCadence(
+  medianIntervalDays: number,
+  occurrences: number
+): CadenceRule | null {
+  if (typeof medianIntervalDays !== "number" || !Number.isFinite(medianIntervalDays))
+    return null;
+  const c = cadenceForMedianInterval(medianIntervalDays);
+  if (!c) return null;
+  if (typeof occurrences !== "number" || occurrences < MIN_OCCURRENCES[c])
+    return null;
+  const [lo, hi] = CADENCE_WINDOWS[c];
+  return {
+    cadence: toOnlineCadence(c),
+    minIntervalDays: lo,
+    maxIntervalDays: hi,
+    minOccurrences: MIN_OCCURRENCES[c],
+    annualizedFactor: ANNUALIZE_FACTOR[c],
+  };
+}
+
+/**
+ * 在线契约入口：接受在线形状交易（Plaid 口径），返回在线形状检测结果。
+ * 适配：金额翻转（Plaid 流出为正 → 本仓流出为负）、name 归一为 merchant；
+ * 内部窗口/门槛/因子逐字复用本仓 detectRecurringCharges；输出 cadence 经
+ * toOnlineCadence 单点转换（annual→yearly），merchant 取最新一笔 name.trim()
+ * （与生产侧输出语义一致），其余字段逐项映射。
+ */
+export function detectRecurringChargesOnline(
+  transactions: RecurringTransactionInput[] | null | undefined,
+  options: DetectOptions = {}
+): OnlineRecurringCharge[] {
+  const adapted: RecurringChargeInput[] = (transactions ?? []).map((t) => ({
+    date: t?.date,
+    amount: typeof t?.amount === "number" ? -t.amount : t.amount,
+    merchant: typeof t?.name === "string" ? t.name : "",
+    pending: t?.pending ?? null,
+    internalTransfer: t?.internalTransfer ?? null,
+  }));
+  const rows = detectRecurringCharges(adapted, options);
+
+  // 恢复在线 merchant（最新一笔 name.trim()）：按归一化键取该组日期最大的一笔。
+  const latestNameByKey = new Map<string, { dateNum: number; name: string }>();
+  for (const a of adapted) {
+    const key = normalizeMerchant(a.merchant ?? "");
+    if (!key) continue;
+    const dn = dateToDayNumber(a.date);
+    if (!Number.isFinite(dn)) continue;
+    const cur = latestNameByKey.get(key);
+    if (!cur || dn >= cur.dateNum)
+      latestNameByKey.set(key, { dateNum: dn, name: a.merchant ?? "" });
+  }
+
+  return rows.map((r) => ({
+    merchant: (latestNameByKey.get(r.merchant)?.name ?? r.merchant).trim(),
+    normalizedMerchant: r.merchant,
+    cadence: toOnlineCadence(r.cadence),
+    occurrences: r.occurrences,
+    latestAmount: r.lastAmount,
+    latestDate: r.lastDate,
+    medianIntervalDays: r.medianIntervalDays,
+    nextExpectedDate: r.nextExpectedDate,
+  }));
 }

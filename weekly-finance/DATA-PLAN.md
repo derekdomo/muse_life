@@ -203,3 +203,51 @@ Imagery not needed: this is a private numeric finance dashboard whose visual sub
 - 本次尝试与最后可用事实严格分列：attempt 只读刷新状态（含 payloadCorrupted / staleRunning 归一后的 effective status，与状态带同值），事实字段只读已保存快照；尝试失败（error）时 attempt 读「本次未成功，未写入新数据，保留上次成功数据」，四源事实字段逐字不变（验证脚本以同夹具 idle/error/running 三态断言事实字段序列化全等）。交易失败不覆盖旧成功事实、不阻断余额刷新：交易行 attempt 恒为「未知（平台未提供逐源结果）」，其证据缺失（零证明月份）不改变银行行的事实与 saved 尝试（专项断言）。依赖交易的推断明确降级：交易行 `degraded` 两类互不重叠点名——支出依据未证明月份（灵活支出等推断为降级口径）与支出已证明但完整性未核实月份（收入/投入依据未齐）。
 - 诚实门：空库/无快照时四行全部无成功证据（日期未知、覆盖未取得、最后成功时间 null、任何一行不得声称已保存）；asOf 非法（如 2099-13-40）时最后成功时间为 null，绝不回填；sourceMonth 非法时 Firance 数据日期读未知；无银行行时证据 missing、覆盖/尝试读「未提供」，不填 0。
 - Verification: 新增 `validate-source-ledger.mjs`（52 项合成断言：真实生产纯函数——严格日期规则/闰年、空库四行、完整夹具四源证据与覆盖、真实 0 计入、stale 降级 partial、非法日期计无效不充证据、非法 asOf/sourceMonth 不填成功、失败三态事实全等、交易不阻断余额、降级两类不重叠、旧 Top-10 partial；真实 getDashboard handler 在内存库（应用全部迁移）上断言——guest/同步通道 null、空库空台账、合法保存读回全台账、状态转 error 后事实不变仅尝试翻转；3 项变异真实执行且翻转——合法月份上限 12→99 使 2099-14 成为已知日期、Firance 证据无条件 proven 使零月份读 proven、未证明谓词反转使降级点名易主；接线断言覆盖模块零 import、服务端字段与描述、客户端纯渲染映射＋回退保留、CSS 子行规则）。既有回归全过：17 个 .mjs 套件（含 facts-card 149、design-b1a 235、color-vision 20、tx-review 58）＋ weekly-finance alerts 46 与 9 个 .ts 套件（refresh-chain 134 等）全绿，client + server typecheck 干净。隐私扫描零命中：全部夹具为合成数据（2099 年日期、虚构来源名与整数金额），仓库不含真实财务金额、密钥、UUID 或本机路径。本轮为 F0.5 本体首片，未勾选 F0.5（勾选由后续验收轮次裁决）。
+## F3.3 未来现金流日历预测（2026-11-04，本仓安全回灌）
+
+**需求**：基于已识别的周期收支与当前存款余额，生成未来 30–90 天逐日预计余额曲线，
+标注预计低点与每条假设的来源；必须标注"基于历史周期推断"，不包装成承诺。
+
+**实现**（space-3 生产侧上线代码的本仓回灌；inspection 2f3f4bb7 只读回读逐字）：
+- 新增纯函数模块 `server/src/cashFlowForecast.ts`（全部导出）：`forecastCashFlow({ transactions,
+  depositsBalance, today, horizonDays=90 })`、`detectRecurringIncome`、`recurringLandingDates`、
+  `forecastBasisText`、`forecastCadenceLabel`、`isOutflowTransaction`、`isIncomeTransaction` 及全部类型。
+  周期支出复用 F3.2 `detectRecurringCharges` 口径（不改其行为）；周期收入为对称口径新识别
+  （Plaid 口径入账<0 取绝对值；排除 pending/内部互转/direction "out"/未来日期；
+  同一归一化商户在窗口内出现过合格扣费时其入账按退款/冲正排除；同周期窗口与证据门槛）；
+  每条周期项自 nextExpectedDate 按 medianIntervalDays 等步长步进至 horizon 末日，
+  落点金额取最近金额（收入正/支出负）；逐日 delta 求和、余额自 depositsBalance 累加；
+  返回 `{ startDate, horizonDays, startBalance, days, lowPoint: { date, balance }, assumptions }`，
+  每条假设带 `merchant/kind/cadence/cadenceLabel/amount/occurrences/medianIntervalDays/
+  nextExpectedDate/basisText`（basisText 形如"基于 N 笔历史记录、中位间隔 X 天推断"）。
+- depositsBalance 口径：调用方传入的 dashboard `live.deposits`（depository 余额≥0 合计）；
+  `live.saving` 是 deposits−loans 的净额，不用作预测起点。
+- **双端契约适配**（H-SYNC-DIVERGE-001 财务分项；线上零改动）：生产侧输入字段 `name`、
+  金额 Plaid 口径（流出为正/入账为负）、周期枚举 `yearly`；本仓 F3.2 为字段 `merchant`、
+  流出为负、枚举 `annual`。适配点（`recurringCharges.ts` 末尾双端适配节，全部加法）：
+  (1) `RecurringChargeInput` 加可选 `name` 别名，分组前取 `name ?? merchant` 归一，
+  仅传 merchant 的既有调用行为逐字不变；(2) `toOnlineCadence`/`toWarehouseCadence`
+  在导出边界做 annual↔yearly 单点转换，内部窗口/门槛/因子不动；(3) 金额口径在
+  `detectRecurringChargesOnline` 入口翻转（Plaid 流出为正→本仓流出为负），输出
+  merchant 取最新一笔 `name.trim()`（与生产侧输出语义一致）；(4) 本仓回灌的
+  `cashFlowForecast.ts` 经 (D1) 改动 import `detectRecurringCharges` 为
+  `detectRecurringChargesOnline`（其余与生产侧逐字一致，文件头注明适配点）。
+- 未接线：`actions.ts`/`dashboardSchema` 的 `cashFlowForecast` 字段与 ingest 接线、
+  客户端 `CashFlowForecastPanel` 仍只在生产侧；本仓回灌范围为两纯函数模块＋验证器，
+  接线待后续轮次/PM 决定（F3.4/F3.5 已声明不依赖本模块）。
+
+**验证**：`validate-cash-flow-forecast.mjs` 88/88（本机实跑，合成数据）——
+forecastCadenceLabel×4、依据文案、isOutflow/isIncomeTransaction 矩阵、
+detectRecurringIncome（含扣费商户退款排除、门槛、年收入 yearly）、
+detectRecurringChargesOnline（含 name 字段、Plaid 口径、annual 专项 365天×2笔→yearly、
+门槛/不规律）、枚举与工具适配（toOnline/toWarehouse、classifyCadence 门槛）、
+recurringLandingDates、forecastCashFlow 端到端（90 天、余额逐日累加、低点、假设排序）、
+horizon 钳制、纯支出低点；2 项变异真实执行翻转（M1 删收入识别终值 24952.03→9952.03、
+M2 反转低点比较使低点离开起点）。`validate-recurring-charges.mjs` 26/26 仍全过
+（本仓 F3.2 行为零回归）。隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+
+**如实保留**：classifyCadence 的笔数门槛依据 F3.3 派工规格文字（"同证据门槛 周/月/季≥3笔、
+年≥2笔"）实现，在线函数体未逐字可见；roundMoney 取标准四舍五入到分；
+同日同商户多笔的 tie-break 显示名取日期最大者（极端情形与生产侧排序 tie-break
+可能差一笔的显示名，不影响数值）；精确 artifact version 平台未提供；
+owner 视角实机以本人打开为准。
