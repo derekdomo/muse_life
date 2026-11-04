@@ -4032,6 +4032,159 @@ function RecurringChargesPanel({ charges }: { charges: Dashboard["recurringCharg
   );
 }
 
+// F3.3 未来现金流预测 panel: renders ONLY the server-computed
+// forecast (dashboard.cashFlowForecast) — the client never
+// re-derives balances; the 90/60/30 range switch is a pure
+// array slice of the stored days, and the visible low point is
+// read off that same slice. No verdict words （充足/不足） are
+// emitted anywhere: curve, numbers and stated assumptions only.
+// Meaning rides on glyph + text + numbers (▼ low point, ＋/−
+// signs, the word 预测 next to the dashed line), never colour.
+export type CashFlowForecastData = NonNullable<Dashboard["cashFlowForecast"]>;
+export type CashFlowForecastDay = CashFlowForecastData["days"][number];
+
+export function forecastVisibleLowPoint(days: CashFlowForecastDay[]): { date: string; balance: number } | null {
+  let low: { date: string; balance: number } | null = null;
+  for (const day of days) {
+    if (!low || day.balance < low.balance) low = { date: day.date, balance: day.balance };
+  }
+  return low;
+}
+
+export function forecastChartPoints(
+  days: CashFlowForecastDay[],
+  startBalance: number,
+  width: number,
+  height: number,
+  padX: number,
+  padTop: number,
+  padBottom: number,
+): { points: string; lowX: number; lowY: number; startY: number } {
+  const balances = days.map((day) => day.balance);
+  let min = Math.min(startBalance, ...balances);
+  let max = Math.max(startBalance, ...balances);
+  if (min === max) { min -= 1; max += 1; }
+  const innerW = width - padX * 2;
+  const innerH = height - padTop - padBottom;
+  const x = (index: number) => padX + (days.length <= 1 ? innerW / 2 : (index / (days.length - 1)) * innerW);
+  const y = (value: number) => padTop + (1 - (value - min) / (max - min)) * innerH;
+  const points = days.map((day, index) => `${x(index).toFixed(1)},${y(day.balance).toFixed(1)}`).join(" ");
+  const low = forecastVisibleLowPoint(days);
+  const lowIndex = low ? days.findIndex((day) => day.date === low.date) : -1;
+  return {
+    points,
+    lowX: lowIndex >= 0 ? x(lowIndex) : 0,
+    lowY: low ? y(low.balance) : 0,
+    startY: y(startBalance),
+  };
+}
+
+function CashFlowForecastPanel({ forecast }: { forecast: Dashboard["cashFlowForecast"] }) {
+  const [rangeDays, setRangeDays] = useState<30 | 60 | 90>(90);
+  if (!forecast) {
+    return (
+      <section className="forecast-panel" aria-label="未来现金流预测">
+        <div className="recurring-panel__heading">
+          <h2>未来现金流预测</h2>
+          <span>暂无预测数据</span>
+        </div>
+        <p className="forecast-disclaimer">基于历史周期推断，不构成承诺</p>
+        <p className="recurring-panel__empty">暂无预测：下一次刷新后，会按最新交易识别的周期收支与当前存款余额生成未来 90 天逐日预计余额。</p>
+      </section>
+    );
+  }
+  const visibleDays = forecast.days.slice(0, rangeDays);
+  const low = forecastVisibleLowPoint(visibleDays);
+  const lastDay = visibleDays[visibleDays.length - 1];
+  const chartWidth = 640;
+  const chartHeight = 200;
+  const chart = forecastChartPoints(visibleDays, forecast.startBalance, chartWidth, chartHeight, 10, 20, 24);
+  const landingDays = visibleDays.filter((day) => day.items.length > 0);
+  return (
+    <section className="forecast-panel" aria-label="未来现金流预测">
+      <div className="recurring-panel__heading">
+        <h2>未来现金流预测</h2>
+        <span>未来 {rangeDays} 天 · 起点 {dateLabel.format(monthDate(forecast.startDate))}</span>
+      </div>
+      <p className="forecast-disclaimer">基于历史周期推断，不构成承诺：曲线只按已识别的周期收支与当前存款余额推演，未计入临时收支、金额变动与未识别的周期项。</p>
+      <div className="forecast-range" role="group" aria-label="预测范围">
+        {([90, 60, 30] as const).map((days) => (
+          <button
+            key={days}
+            type="button"
+            className={rangeDays === days ? "active" : ""}
+            aria-pressed={rangeDays === days}
+            onClick={() => setRangeDays(days)}
+          >
+            未来 {days} 天
+          </button>
+        ))}
+      </div>
+      <p className="forecast-summary">
+        今日存款余额 <b className="font-num">{currencyPrecise.format(forecast.startBalance)}</b>
+        {lastDay ? <> · {rangeDays} 天后预计 <b className="font-num">{currencyPrecise.format(lastDay.balance)}</b></> : null}
+        {low ? <> · <span className="forecast-lowpoint-text">▼ 预计低点 {dateLabel.format(monthDate(low.date))} · {currencyPrecise.format(low.balance)}</span></> : null}
+      </p>
+      <svg
+        className="forecast-chart"
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        role="img"
+        aria-label={low ? `未来 ${rangeDays} 天预计余额预测曲线，预计低点 ${dateLabel.format(monthDate(low.date))} ${currencyPrecise.format(low.balance)}` : `未来 ${rangeDays} 天预计余额预测曲线`}
+      >
+        <line x1="10" x2={chartWidth - 10} y1={chart.startY} y2={chart.startY} stroke="var(--border-strong)" strokeWidth="1" strokeDasharray="2 4" />
+        <text x="10" y={Math.max(10, chart.startY - 5)} fontSize="10" fill="var(--dim)">今日余额 {currency.format(forecast.startBalance)}</text>
+        <polyline points={chart.points} fill="none" stroke="var(--accent)" strokeWidth="2" strokeDasharray="6 4" strokeLinejoin="round" strokeLinecap="round" />
+        <text x="10" y="14" fontSize="11" fontWeight="700" fill="var(--accent)">┄ 预测余额曲线</text>
+        {low ? (
+          <>
+            <circle cx={chart.lowX} cy={chart.lowY} r="5" fill="var(--negative)" stroke="var(--surface)" strokeWidth="2" />
+            <text x={chart.lowX} y={Math.max(12, chart.lowY - 10)} fontSize="12" fontWeight="700" fill="var(--negative)" textAnchor="middle">▼</text>
+          </>
+        ) : null}
+        {visibleDays[0] ? <text x="10" y={chartHeight - 6} fontSize="10" fill="var(--dim)">{dateLabel.format(monthDate(visibleDays[0].date))}</text> : null}
+        {lastDay ? <text x={chartWidth - 10} y={chartHeight - 6} fontSize="10" fill="var(--dim)" textAnchor="end">{dateLabel.format(monthDate(lastDay.date))}</text> : null}
+      </svg>
+      {forecast.assumptions.length === 0 ? (
+        <p className="recurring-panel__empty">未识别出证据充足的周期收支，曲线按当前存款余额平直延伸；下次刷新后会按最新交易重新推断。</p>
+      ) : (
+        <>
+          <h3 className="forecast-subhead">预测假设（{forecast.assumptions.length} 项）</h3>
+          <div className="forecast-assumptions">
+            {forecast.assumptions.map((assumption) => (
+              <div className="forecast-assumption" key={`${assumption.kind}-${assumption.merchant}`}>
+                <div className="recurring-row__main">
+                  <strong>{assumption.merchant}</strong>
+                  <span>{assumption.kind === "income" ? "＋ 收入" : "− 支出"} · {assumption.cadenceLabel} · {signedCurrency(assumption.amount)}</span>
+                </div>
+                <div className="recurring-row__facts">
+                  <span>下次预计 <b className="font-num">{dateLabel.format(monthDate(assumption.nextExpectedDate))}</b></span>
+                  <span>{assumption.basisText}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <h3 className="forecast-subhead">预计落点（未来 {rangeDays} 天内）</h3>
+          {landingDays.length === 0 ? (
+            <p className="recurring-panel__empty">所选范围内没有预计落点日期。</p>
+          ) : (
+            <div className="forecast-landing-days">
+              {landingDays.map((day) => (
+                <div className="forecast-landing-day" key={day.date}>
+                  <span className="font-num">{dateLabel.format(monthDate(day.date))}</span>
+                  <span className="forecast-landing-day__items">
+                    {day.items.map((item) => `${item.merchant} ${signedCurrency(item.amount)}`).join("；")}
+                  </span>
+                  <b className="font-num">{currencyPrecise.format(day.balance)}</b>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 // F3.5 交易待复核队列：纯渲染服务端结果（getDashboard 的
 // txReviewQueue 字段）——客户端不自行判定候选、不重算异常。
 // 每行两个 owner 动作：确认为当前分类 / 改为新分类，两者都
@@ -4349,6 +4502,8 @@ function DetailTab({
       </div>
       {/* F3.2 订阅与周期支出体检：明细页签末尾加法式面板 */}
       <RecurringChargesPanel charges={data.recurringCharges} />
+      {/* F3.3 未来现金流预测：明细页签末尾加法式面板（服务端已算好的 forecast 只渲染） */}
+      <CashFlowForecastPanel forecast={data.cashFlowForecast} />
       {/* F3.5 交易待复核队列：明细页签末尾加法式面板 */}
       <TxReviewQueuePanel queue={txReviewQueue} />
     </>

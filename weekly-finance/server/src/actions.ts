@@ -5,6 +5,8 @@ import {
   detectRecurringCharges,
   type RecurringCharge as RecurringChargeResult,
 } from "./recurringCharges";
+// F3.3: 未来现金流日历预测纯函数模块（本轮接线；回灌自生产侧逐字＋D1 适配）。
+import { forecastCashFlow } from "./cashFlowForecast";
 import {
   applyCategoryRules,
   flagReviewCandidates,
@@ -114,6 +116,40 @@ const recurringChargeSchema = z.object({
   nextExpectedDate: z.string(),
   occurrences: z.number().int(),
   medianIntervalDays: z.number(),
+});
+
+// F3.3 additive: the future cash-flow forecast computed at
+// ingest by the pure forecastCashFlow module from the same
+// plaidTransactions plus the live deposits balance. Null on
+// legacy payloads written before F3.3 (their transactions were
+// never persisted, so no forecast can be re-derived on read —
+// the panel honestly shows none until the next refresh).
+const cashFlowForecastSchema = z.object({
+  startDate: z.string(),
+  horizonDays: z.number().int().positive(),
+  startBalance: z.number(),
+  days: z.array(z.object({
+    date: z.string(),
+    delta: z.number(),
+    balance: z.number(),
+    items: z.array(z.object({
+      merchant: z.string(),
+      amount: z.number(),
+      kind: z.enum(["income", "expense"]),
+    })),
+  })),
+  lowPoint: z.object({ date: z.string(), balance: z.number() }),
+  assumptions: z.array(z.object({
+    merchant: z.string(),
+    kind: z.enum(["income", "expense"]),
+    cadence: z.enum(["weekly", "monthly", "quarterly", "yearly"]),
+    cadenceLabel: z.string(),
+    amount: z.number(),
+    occurrences: z.number().int().nonnegative(),
+    medianIntervalDays: z.number(),
+    nextExpectedDate: z.string(),
+    basisText: z.string(),
+  })),
 });
 
 const transactionCoverageSchema = z.object({
@@ -1119,6 +1155,9 @@ const dashboardSchema = z.object({
   // ingest 时由 plaidTransactions 计算）。旧载荷缺字段时默认为空数组，
   // 客户端在空数组时诚实显示"暂无识别结果"，不编造。
   recurringCharges: z.array(recurringChargeSchema).default([]),
+  // F3.3 additive: 未来现金流预测（纯函数 forecastCashFlow 在 ingest 成功分支回填）。
+  // 旧载荷缺字段时默认为 null，客户端诚实显示空态，不编造。
+  cashFlowForecast: cashFlowForecastSchema.nullable().default(null),
   sourceMonth: z.string(),
   months: z.array(monthSchema),
   live: z.object({
@@ -5047,6 +5086,9 @@ function buildDashboard(
     archNetWorthSeries: [],
     // F3.2: 订阅与周期支出体检结果；旧载荷无此字段时 schema 默认为 []。
     recurringCharges,
+    // F3.3: 未来现金流预测；buildDashboard 只给 null 默认值（旧载荷语义），
+    // 真正计算在 ingestFinanceData 成功分支回填（线上同构）。
+    cashFlowForecast: null,
     sourceMonth: latestRaw.key,
     months,
     live: {
@@ -6361,6 +6403,21 @@ export const Actions = {
         ctx.invalidateQueries();
         return { ok: false, savedMonths: 0, issue: null };
       }
+      // F3.3 additive: attach the future cash-flow forecast,
+      // computed by the pure forecastCashFlow module from this
+      // ingest's delivered transactions, starting from the
+      // dashboard's own live.deposits fact (the sum of
+      // non-negative depository account balances — the current
+      // deposits balance; NOT live.saving, which nets loans
+      // out). Attached here rather than inside buildDashboard
+      // so buildDashboard stays import-free for the
+      // source-extraction validators (the F3.2 constraint) and
+      // the deposits caliber keeps exactly one source of truth.
+      dashboard.cashFlowForecast = forecastCashFlow({
+        transactions: args.plaidTransactions,
+        depositsBalance: dashboard.live.deposits ?? 0,
+        today: args.asOf.slice(0, 10),
+      });
       const published = await settleClaimed({
         payload: JSON.stringify(dashboard),
         previousLiveNetWorth: firstRead.previousLiveNetWorth,

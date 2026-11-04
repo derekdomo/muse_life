@@ -3718,3 +3718,23 @@
 - 回滚：revert 本次提交（`git revert <本轮commit>`）；线上 artifact 未被改动，无需回滚。
 - 进度面板核对：「Life 进度」（slug life）——`F3.3` 条目状态仍为 [ ]（待 PM 验收），本轮仅完成其仓库回灌子项；面板是否需更新子项文案待只读核对后决定（见下）。
 - plans.md：本轮改动（`F3.3` 条目追加 11 时交付登记，保持 [ ]）。本轮未动 cron；修改文件：plans.md、本文件、weekly-finance/server/src/recurringCharges.ts、weekly-finance/server/src/cashFlowForecast.ts（新）、weekly-finance/validate-cash-flow-forecast.mjs（新）、weekly-finance/DATA-PLAN.md。
+
+## 2026-11-04 11:55 PST（muse-life-plans-sync 11:55 轮次：`F3.3` 仓库侧接线执行；接线完成、`F3.3` 保持 [ ] 待 PM 验收）
+
+- 任务：`F3.3` 未来现金流日历预测 —— 执行 10:55 轮次留白的仓库侧接线（线上零改动）。本轮基线 `f64354c` == HEAD（`git pull` 已最新、零新提交、工作树干净，机械汇总门通过）；新编号条目 0、新 PM 记录 0，PM 仍按 PAUSE-LIFE-PM-001 暂停。P0/P1 可执行队列独立复核：`F0.5` 本体归主聊天 job、`F3.1` 因 F0.5 coverage 门禁暂缓、`H-SYNC-DIVERGE-001` 健康分项待 PM 裁决（财务分项已由 09:55/10:55 双端契约核对＋安全回灌闭环）、`W-HOMEB-002` 未到 11-16、`L0.x`/`L1.x`/`H0.x`/`H1.x`/`AUDIT-07` 运行待验须本人实机证据、（需用户确认）条目不动。按推荐执行顺序取 `F3.3` 接线余项。
+- 接线源码来源：space-3 只读 inspection 2ce216aa（`cashFlowForecastSchema` zod 定义、`ingestFinanceData` 回填接线、`CashFlowForecastPanel` 定义＋挂载位置逐字读回）与 09f52e03（`theme.css` 17 个 forecast-* 规则块逐字读回）；派工前经 artifact.status 确认 space-3 无构建在跑；线上未改动任何代码。
+- 改了什么（本仓，加法为主）：
+  (1) `weekly-finance/server/src/actions.ts`：`import { forecastCashFlow } from "./cashFlowForecast"`；新增 `cashFlowForecastSchema`（zod 逐字，cadence 枚举在线 `yearly`）；`dashboardSchema` 加 `cashFlowForecast: cashFlowForecastSchema.nullable().default(null)`；`buildDashboard` 返回字面量加 `cashFlowForecast: null`；`ingestFinanceData` 成功分支在 `buildDashboard` 返回后、`settleClaimed` 发布前回填（逐字，含线上注释）：`dashboard.cashFlowForecast = forecastCashFlow({ transactions: args.plaidTransactions, depositsBalance: dashboard.live.deposits ?? 0, today: args.asOf.slice(0, 10) })`。
+  (2) `weekly-finance/client/src/App.tsx`：`CashFlowForecastPanel` 逐字回灌（含 `forecastVisibleLowPoint`/`forecastChartPoints` 导出 helpers；90/60/30 天纯数组截取；SVG 虚线预测曲线＋▼低点＋「预测」文字；假设清单；预计落点；强制免责声明「基于历史周期推断，不构成承诺」；只渲染服务端结果）；挂载于明细页签 `RecurringChargesPanel` 之后、`TxReviewQueuePanel` 之前（线上同序）。
+  (3) `weekly-finance/client/src/theme.css`：17 个 forecast-* 规则块逐字追加（范围按钮 44px）。
+  (4) `weekly-finance/DATA-PLAN.md`：F3.3 章节「未接线」改为接线记录＋验证更新（109/109）。
+  (5) `weekly-finance/validate-cash-flow-forecast.mjs`：新增第 11 节接线断言 21 项。
+  未动：`recurringCharges.ts` 既有行为、`cashFlowForecast.ts` 纯函数、F-ARCH 日刷新链、drizzle（无 migration）、L0.1 例外；不提交 app.db/.env/密钥/真实数据。
+- 验证证据（本机实跑，全合成数据）：
+  - `validate-cash-flow-forecast` **109/109**（88 沿用＋21 新增接线断言：import/schema/回填三取值/挂载顺序/面板不重算源码检查/CSS 44px/真实输出形状兼容在线 schema/年付 yearly 检出/annual 负向拒绝；含 2 项既有变异真实执行翻转）。
+  - 回归：`validate-recurring-charges` 26/26、`validate-summary-cards` 42/42、`validate-alerts` 46/46、`validate-whatif` 52/52、`validate-fire-assumptions` 53/53、`validate-arch-preview` 149/149、`validate-design-b1a` 235/235、`validate-color-vision` 20/20、`validate-finance-arch` 154/154 全过。
+  - 隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+- 局限：client/server tsc 本机无工具链未执行（沿前例）；精确 artifact version 平台未提供；owner 视角实机以本人打开为准；`F3.3` 整项待 PM 验收（PM 暂停中），本条保持 [ ]。
+- 回滚：revert 本次提交；线上 artifact 未被改动，无需回滚。
+- 进度面板核对：「Life 进度」（slug life）——`F3.3` 条目状态仍为进行中（待 PM 验收），本轮完成其仓库接线子项；面板 F3.3 bullet 文案更新（接线完成＋验证 109/109），截至时间改为本轮。
+- plans.md：本轮改动（`F3.3` 条目追加 11:55 接线登记，保持 [ ]）。本轮未动 cron；修改文件：plans.md、本文件、weekly-finance/server/src/actions.ts、weekly-finance/client/src/App.tsx、weekly-finance/client/src/theme.css、weekly-finance/validate-cash-flow-forecast.mjs、weekly-finance/DATA-PLAN.md。

@@ -332,6 +332,81 @@ function bundleMutated(mutator, label) {
 
 rmSync(tmp, { recursive: true, force: true });
 
+// ---------- 11. 接线断言（F3.3 仓库接线轮次新增；源码文本＋真实函数输出形状） ----------
+{
+  const actionsSrc = readFileSync(join(srcDir, "actions.ts"), "utf8");
+  const appSrc = readFileSync(join(here, "client", "src", "App.tsx"), "utf8");
+  const cssSrc = readFileSync(join(here, "client", "src", "theme.css"), "utf8");
+
+  // 服务端：import / schema / buildDashboard 默认值 / ingest 回填
+  assert("接线 import forecastCashFlow", actionsSrc.includes('import { forecastCashFlow } from "./cashFlowForecast"'));
+  assert("接线 cashFlowForecastSchema 定义", actionsSrc.includes("const cashFlowForecastSchema = z.object({"));
+  assert("接线 schema 枚举用 yearly（在线契约）", actionsSrc.includes('cadence: z.enum(["weekly", "monthly", "quarterly", "yearly"])'));
+  assert("接线 dashboardSchema 字段", actionsSrc.includes("cashFlowForecast: cashFlowForecastSchema.nullable().default(null),"));
+  assert("接线 buildDashboard 默认 null", actionsSrc.includes("cashFlowForecast: null,"));
+  assert("接线 ingest 回填调用", actionsSrc.includes("dashboard.cashFlowForecast = forecastCashFlow({"));
+  assert("接线 transactions 原样透传", actionsSrc.includes("transactions: args.plaidTransactions,"));
+  assert("接线 depositsBalance 取 live.deposits", actionsSrc.includes("depositsBalance: dashboard.live.deposits ?? 0,"));
+  assert("接线 today 取 asOf 日历日", actionsSrc.includes("today: args.asOf.slice(0, 10),"));
+
+  // 客户端：面板定义＋导出 helpers＋挂载顺序（RecurringCharges 后、TxReviewQueue 前）
+  assert("接线 CashFlowForecastPanel 定义", appSrc.includes("function CashFlowForecastPanel({ forecast }"));
+  assert("接线 forecastVisibleLowPoint 导出", appSrc.includes("export function forecastVisibleLowPoint("));
+  assert("接线 forecastChartPoints 导出", appSrc.includes("export function forecastChartPoints("));
+  assert("接线面板挂载", appSrc.includes("<CashFlowForecastPanel forecast={data.cashFlowForecast} />"));
+  const iRec = appSrc.indexOf("<RecurringChargesPanel charges={data.recurringCharges} />");
+  const iFc = appSrc.indexOf("<CashFlowForecastPanel forecast={data.cashFlowForecast} />");
+  const iTx = appSrc.indexOf("<TxReviewQueuePanel queue={txReviewQueue} />");
+  assert("接线挂载顺序 Recurring→Forecast→TxReview", iRec > 0 && iFc > iRec && iTx > iFc, `idx=${iRec}/${iFc}/${iTx}`);
+  assert("接线面板只渲染服务端结果（无重算）", !/function CashFlowForecastPanel[\s\S]{0,4000}forecastCashFlow\(/.test(appSrc));
+
+  // 样式：forecast-* 规则块存在，范围按钮 44px
+  assert("接线 CSS .forecast-panel", cssSrc.includes(".forecast-panel {"));
+  assert("接线 CSS .forecast-disclaimer", cssSrc.includes(".forecast-disclaimer {"));
+  assert("接线 CSS 范围按钮 44px", /\.forecast-range button \{[^}]*min-height: 44px/.test(cssSrc));
+
+  // 真实函数输出与手写 schema 形状兼容（枚举必须是在线 yearly，仓库 annual 应被拒绝）
+  const ONLINE_CADENCES = ["weekly", "monthly", "quarterly", "yearly"];
+  function shapeMatchesOnlineSchema(f) {
+    if (!f || typeof f.startDate !== "string") return false;
+    if (!Number.isInteger(f.horizonDays) || f.horizonDays <= 0) return false;
+    if (typeof f.startBalance !== "number") return false;
+    if (!Array.isArray(f.days) || f.days.length === 0) return false;
+    for (const d of f.days) {
+      if (typeof d.date !== "string" || typeof d.delta !== "number" || typeof d.balance !== "number") return false;
+      if (!Array.isArray(d.items)) return false;
+      for (const it of d.items) {
+        if (typeof it.merchant !== "string" || typeof it.amount !== "number") return false;
+        if (it.kind !== "income" && it.kind !== "expense") return false;
+      }
+    }
+    if (!f.lowPoint || typeof f.lowPoint.date !== "string" || typeof f.lowPoint.balance !== "number") return false;
+    if (!Array.isArray(f.assumptions)) return false;
+    for (const a of f.assumptions) {
+      if (typeof a.merchant !== "string" || typeof a.cadenceLabel !== "string") return false;
+      if (a.kind !== "income" && a.kind !== "expense") return false;
+      if (!ONLINE_CADENCES.includes(a.cadence)) return false;
+      if (typeof a.amount !== "number" || !Number.isInteger(a.occurrences) || a.occurrences < 0) return false;
+      if (typeof a.medianIntervalDays !== "number" || typeof a.nextExpectedDate !== "string" || typeof a.basisText !== "string") return false;
+    }
+    return true;
+  }
+  const wireFixture = [
+    otx("2025-11-05", 899, "Netflix"),
+    otx("2026-11-04", 899, "Netflix"),
+    otx("2026-08-15", -5200, "Acme Payroll"),
+    otx("2026-09-15", -5200, "Acme Payroll"),
+    otx("2026-10-15", -5200, "Acme Payroll"),
+  ];
+  const wf = fc.forecastCashFlow({ transactions: wireFixture, depositsBalance: 20000, today: "2026-11-04" });
+  assert("接线真实输出符合在线 schema 形状", shapeMatchesOnlineSchema(wf));
+  assert("接线真实输出含 yearly 假设", wf.assumptions.some((a) => a.cadence === "yearly"));
+  // 负向：仓库枚举 annual 不应通过在线形状检查（双端契约映射的必要性）
+  const broken = JSON.parse(JSON.stringify(wf));
+  if (broken.assumptions.length > 0) broken.assumptions[0].cadence = "annual";
+  assert("接线 annual 枚举被在线形状拒绝", !shapeMatchesOnlineSchema(broken));
+}
+
 console.log(`\nvalidate-cash-flow-forecast: ${passed} passed, ${failed} failed`);
 if (failed > 0) {
   console.log("FAILURES:");

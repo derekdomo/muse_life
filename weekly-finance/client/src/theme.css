@@ -1050,3 +1050,63 @@ footer p { margin: 3px 0; }
   .chart-frame--small { height: 250px; }
   .account-groups { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* F3.3 未来现金流预测 panel (detail tab, directly after the
+   F3.2 recurring panel): server-computed forecast only; the
+   forecast segment is a DASHED line plus the word 预测, the
+   low point rides on a ▼ glyph + date + amount text, and
+   income/expense ride on ＋/− signs — never colour alone.
+   Range buttons are >=44px touch targets. */
+.forecast-panel {
+  margin-top: 10px;
+  padding: 18px 20px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.forecast-disclaimer {
+  margin: 12px 0 0;
+  padding: 11px 13px;
+  border: 1px solid var(--accent-soft-strong);
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.6;
+}
+.forecast-range { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 4px; margin-top: 12px; background: var(--surface-tint); border-radius: 14px; }
+.forecast-range button {
+  min-height: 44px;
+  padding: 8px 6px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.forecast-range button.active { background: var(--surface); color: var(--text); box-shadow: 0 2px 9px rgba(25,48,39,.1); }
+.forecast-range button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.forecast-summary { margin: 12px 0 0; font-size: 12px; font-weight: 650; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.forecast-lowpoint-text { font-weight: 720; }
+.forecast-chart { display: block; width: 100%; height: auto; margin-top: 8px; }
+.forecast-subhead { margin: 16px 0 0; font-size: 13px; letter-spacing: -.01em; }
+.forecast-assumptions { display: grid; margin-top: 4px; }
+.forecast-assumption { display: grid; gap: 4px; min-height: 44px; padding: 10px 0; border-top: 1px solid var(--border); }
+.forecast-landing-days { display: grid; margin-top: 4px; }
+.forecast-landing-day {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-height: 44px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.forecast-landing-day__items { color: var(--dim); overflow-wrap: anywhere; }
+.forecast-landing-day > b { font-size: 11px; text-align: right; }

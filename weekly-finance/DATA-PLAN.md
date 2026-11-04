@@ -232,11 +232,26 @@ Imagery not needed: this is a private numeric finance dashboard whose visual sub
   merchant 取最新一笔 `name.trim()`（与生产侧输出语义一致）；(4) 本仓回灌的
   `cashFlowForecast.ts` 经 (D1) 改动 import `detectRecurringCharges` 为
   `detectRecurringChargesOnline`（其余与生产侧逐字一致，文件头注明适配点）。
-- 未接线：`actions.ts`/`dashboardSchema` 的 `cashFlowForecast` 字段与 ingest 接线、
-  客户端 `CashFlowForecastPanel` 仍只在生产侧；本仓回灌范围为两纯函数模块＋验证器，
-  接线待后续轮次/PM 决定（F3.4/F3.5 已声明不依赖本模块）。
+- 接线（2026-11-04 11:55 轮次，本仓执行、线上零改动；接线源码经 space-3
+  只读 inspection 逐字读回）：(1) `actions.ts` 新增 `cashFlowForecastSchema`
+ （zod，逐字：startDate/horizonDays/startBalance/days/lowPoint/assumptions，
+  枚举为在线 `yearly`）＋ `dashboardSchema.cashFlowForecast`
+  （`.nullable().default(null)`，旧载荷兼容）；(2) `buildDashboard` 返回字面量
+  加 `cashFlowForecast: null`（旧载荷语义）；(3) `ingestFinanceData` 成功分支
+  在 `buildDashboard` 返回后、`settleClaimed` 发布前回填（逐字）：
+  `dashboard.cashFlowForecast = forecastCashFlow({ transactions: args.plaidTransactions,
+  depositsBalance: dashboard.live.deposits ?? 0, today: args.asOf.slice(0, 10) })`
+  ——transactions 原样透传（Plaid 口径 name/流出为正），depositsBalance 取本轮
+  live.deposits（非 live.saving）；(4) 客户端 `CashFlowForecastPanel` 逐字回灌
+  （forecastVisibleLowPoint/forecastChartPoints 导出 helpers、90/60/30 天纯数组截取、
+  SVG 虚线预测曲线＋▼低点、假设清单、预计落点、强制免责声明「基于历史周期推断，
+  不构成承诺」，只渲染服务端结果不重算），挂载于明细页签 RecurringChargesPanel
+  之后、TxReviewQueuePanel 之前（线上同序）；(5) `theme.css` 追加 17 个
+  forecast-* 规则块（逐字，范围按钮 44px）。
+  仓库结构差如实记录：本仓 F3.2 的 detectRecurringCharges 在 buildDashboard 内
+  计算（线上在 ingest 传入参数），F3.3 回填位置两边一致（ingest 成功分支）。
 
-**验证**：`validate-cash-flow-forecast.mjs` 88/88（本机实跑，合成数据）——
+**验证**：`validate-cash-flow-forecast.mjs` **109/109**（本机实跑，合成数据）——
 forecastCadenceLabel×4、依据文案、isOutflow/isIncomeTransaction 矩阵、
 detectRecurringIncome（含扣费商户退款排除、门槛、年收入 yearly）、
 detectRecurringChargesOnline（含 name 字段、Plaid 口径、annual 专项 365天×2笔→yearly、
@@ -244,7 +259,10 @@ detectRecurringChargesOnline（含 name 字段、Plaid 口径、annual 专项 36
 recurringLandingDates、forecastCashFlow 端到端（90 天、余额逐日累加、低点、假设排序）、
 horizon 钳制、纯支出低点；2 项变异真实执行翻转（M1 删收入识别终值 24952.03→9952.03、
 M2 反转低点比较使低点离开起点）。`validate-recurring-charges.mjs` 26/26 仍全过
-（本仓 F3.2 行为零回归）。隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
+（本仓 F3.2 行为零回归）；接线断言 21 项（import/schema/回填三取值/挂载顺序/
+CSS 44px/真实输出形状兼容在线 schema/annual 负向拒绝）；回归 summary-cards 42、
+alerts 46、whatif 52、fire-assumptions 53、arch-preview 149、design-b1a 235、
+color-vision 20、finance-arch 154 全过。隐私扫描：新增/改动文件零 UUID/密钥/路径命中。
 
 **如实保留**：classifyCadence 的笔数门槛依据 F3.3 派工规格文字（"同证据门槛 周/月/季≥3笔、
 年≥2笔"）实现，在线函数体未逐字可见；roundMoney 取标准四舍五入到分；
