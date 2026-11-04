@@ -144,6 +144,7 @@ main {
   cursor: pointer;
 }
 .refresh-band__ledger-rows p { margin: 4px 0; }
+.refresh-band__ledger-sub { margin: 2px 0 6px 12px; color: var(--dim); }
 .refresh-band__check { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 10px; }
 .refresh-band__check-button {
   min-height: 32px;

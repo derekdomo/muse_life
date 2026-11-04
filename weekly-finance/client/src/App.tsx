@@ -4040,6 +4040,13 @@ function RecurringChargesPanel({ charges }: { charges: Dashboard["recurringCharg
 // 失败时保留已输入文本并给出原因，可直接重试。分类只影响
 // 本面板展示（见顶部免责声明）。
 export type TxReviewQueueData = NonNullable<ApiResponse<typeof api, "getDashboard">["txReviewQueue"]>;
+
+// F0.5 本体（服务端四源台账）: getDashboard 的 sourceLedger 字段
+// 由服务端纯函数 buildSourceLedger 派生，客户端只渲染、不自算。
+// 服务端字段缺失时（旧服务端）回退到既有客户端 sourceLedgerRows
+// ——该函数保持现状，不在本轮改动。
+export type SourceLedgerData = NonNullable<ApiResponse<typeof api, "getDashboard">["sourceLedger"]>;
+export type SourceLedgerRowData = SourceLedgerData["rows"][number];
 export type TxReviewCandidateRow = TxReviewQueueData["candidates"][number];
 export type TxCategoryRuleRow = TxReviewQueueData["rules"][number];
 
@@ -4982,6 +4989,7 @@ function RefreshStatusBand({
   checking,
   checkFeedback,
   onCheckProgress,
+  serverLedger,
 }: {
   data: Dashboard | null;
   refresh: { status: RefreshStatus; updatedAt: string | null; startedAt: string | null };
@@ -4990,6 +4998,9 @@ function RefreshStatusBand({
   checking: boolean;
   checkFeedback: CheckProgressFeedback | null;
   onCheckProgress: () => void;
+  // F0.5 本体：服务端四源台账（getDashboard.sourceLedger)，客户
+  // 端只渲染。缺失时回退既有 sourceLedgerRows（保持现状）。
+  serverLedger?: SourceLedgerData | null;
 }) {
   const hasData = data != null;
   const formatInstant = (value: string | null, dateOnly: boolean): string => {
@@ -4999,7 +5010,26 @@ function RefreshStatusBand({
     return dateOnly ? dateLabel.format(date) : timestampLabel.format(date);
   };
   const facts = data ? monthAvailabilityFacts(data.months, new Date()) : [];
-  const ledger = sourceLedgerRows(data, refresh);
+  // F0.5 本体：优先渲染服务端台账（符号+文字的成功证据、逐源
+  // 最后成功时间、推断降级行都由服务端给出，客户端不自算）；
+  // 服务端字段缺失时回退既有客户端台账行（呈现保持现状，无
+  // 证据/降级附加行）。
+  const ledger = serverLedger
+    ? serverLedger.rows.map((row) => ({
+        source: row.label,
+        dataDate: row.dataDate,
+        range: row.coverage,
+        result: row.attemptText,
+        evidenceLine: `${row.evidenceSymbol} ${row.evidenceLabel} · ${row.evidenceText}`,
+        lastSuccessAt: row.lastSuccessAt,
+        degraded: row.degraded,
+      }))
+    : sourceLedgerRows(data, refresh).map((row) => ({
+        ...row,
+        evidenceLine: null as string | null,
+        lastSuccessAt: null as string | null,
+        degraded: [] as string[],
+      }));
   return (
     <section className="refresh-band" aria-label="刷新状态与数据可用性">
       <div className="refresh-band__row">
@@ -5051,12 +5081,23 @@ function RefreshStatusBand({
         <summary aria-label="来源台账（本地月度记录、银行余额、交易、持仓）">来源台账</summary>
         <div className="refresh-band__ledger-rows">
           {ledger.map((row) => (
-            <p key={row.source}>
-              <strong>{row.source}</strong>
-              {" · "}上次可用事实 — 数据日期：{row.dataDate}
-              {" · "}实际范围：{row.range}
-              {" · "}本次尝试：{row.result}
-            </p>
+            <div key={row.source}>
+              <p>
+                <strong>{row.source}</strong>
+                {" · "}上次可用事实 — 数据日期：{row.dataDate}
+                {" · "}实际范围：{row.range}
+                {" · "}本次尝试：{row.result}
+              </p>
+              {row.evidenceLine ? (
+                <p className="refresh-band__ledger-sub">
+                  {row.evidenceLine}
+                  {" · "}最后成功时间：{formatInstant(row.lastSuccessAt, false)}
+                </p>
+              ) : null}
+              {row.degraded.map((line) => (
+                <p key={line} className="refresh-band__ledger-sub">推断降级：{line}</p>
+              ))}
+            </div>
           ))}
         </div>
       </details>
@@ -5177,6 +5218,7 @@ export function App() {
             checking={checking}
             checkFeedback={checkFeedback}
             onCheckProgress={handleCheckProgress}
+            serverLedger={response.sourceLedger ?? null}
           />
         ) : null}
 

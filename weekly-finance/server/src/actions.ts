@@ -11,6 +11,11 @@ import {
   normalizeTxMerchant,
   type TxReviewTransactionInput,
 } from "./txReviewQueue";
+import {
+  buildSourceLedger,
+  type SourceLedgerAccountFact,
+  type SourceLedgerMonthFact,
+} from "./sourceLedger";
 
 const financeTypeSchema = z.enum([
   "investment",
@@ -5570,6 +5575,32 @@ const txReviewQueueSchema = z.object({
 
 type TxReviewQueueView = z.infer<typeof txReviewQueueSchema>;
 
+// F0.5 本体（服务端四源台账）: the ledger is derived SERVER-side
+// by the zero-import pure module server/src/sourceLedger.ts from
+// the read-back dashboard snapshot + the refresh attempt state;
+// the client only renders it. Additive sibling field on
+// getDashboard — null for guests; the empty-ledger shape (four
+// rows, no success evidence) when no snapshot exists yet.
+const sourceLedgerRowSchema = z.object({
+  key: z.enum(["firance", "plaid_accounts", "plaid_transactions", "plaid_holdings"]),
+  label: z.string(),
+  evidence: z.enum(["proven", "partial", "missing", "unknown"]),
+  evidenceSymbol: z.string(),
+  evidenceLabel: z.string(),
+  evidenceText: z.string(),
+  dataDate: z.string(),
+  coverage: z.string(),
+  lastSuccessAt: z.string().nullable(),
+  attempt: z.enum(["saved", "running", "failed_kept", "not_obtained", "not_provided", "unknown"]),
+  attemptText: z.string(),
+  degraded: z.array(z.string()),
+});
+
+const sourceLedgerSchema = z.object({
+  lastSuccessAt: z.string().nullable(),
+  rows: z.array(sourceLedgerRowSchema),
+});
+
 // getDashboard's F3.5 read: flagged candidates from the stored
 // feed rows (pure flagReviewCandidates), display categories
 // overridden by the owner's rules (pure applyCategoryRules).
@@ -5647,7 +5678,7 @@ const deleteCategoryRuleResponse = z.object({
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner.",
+    description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner. It also carries the F0.5 server-side four-source ledger (sourceLedger: Firance snapshots / Plaid accounts / Plaid transactions / Plaid holdings), derived server-side from the read-back snapshot and the refresh attempt state — per-source success evidence, data date and coverage, last success time, this attempt's result kept separate from the last usable facts, and transaction-dependent inferences explicitly degraded.",
     request: z.object({}),
     response: z.object({
       access: z.enum(["owner", "guest_denied"]),
@@ -5664,6 +5695,12 @@ export const Actions = {
       // there is no dashboard snapshot, or when the F3.5 tables
       // are unavailable on a legacy DB. Display layer only.
       txReviewQueue: txReviewQueueSchema.nullable().optional(),
+      // F0.5 本体 additive sibling field: the server-side
+      // four-source ledger (see sourceLedgerSchema above). Null
+      // for guests (the L0.1 exception is NOT widened); owners
+      // always receive the ledger — the empty shape when no
+      // snapshot exists yet.
+      sourceLedger: sourceLedgerSchema.nullable().optional(),
       refresh: z.object({
         status: z.enum(["idle", "running", "error"]),
         message: z.string().nullable(),
@@ -5682,6 +5719,7 @@ export const Actions = {
           data: null,
           trading: null,
           txReviewQueue: null,
+          sourceLedger: null,
           refresh: { status: "idle" as const, message: "财务数据仅所有者可查看", updatedAt: null, startedAt: null },
         };
       }
@@ -5791,6 +5829,40 @@ export const Actions = {
         trading = null;
       }
       const staleRunning = isStaleRunningState(state?.status, state?.updatedAt, new Date());
+      const effectiveRefreshStatus = payloadCorrupted ? "error" : staleRunning ? "error" : (state?.status ?? "idle");
+      // F0.5 本体： the four-source ledger is derived here, on the
+      // server, from the final read-back snapshot (post read-path
+      // normalization + overlays) and the effective attempt
+      // status — the same status the refresh band reports, so a
+      // stale-running or corrupted state reads as a failed
+      // attempt whose facts stay untouched. Facts are mapped
+      // field-by-field; no client computation is involved.
+      const sourceLedger = buildSourceLedger(
+        data
+          ? {
+              asOf: data.asOf,
+              sourceMonth: data.sourceMonth,
+              months: data.months.map((month): SourceLedgerMonthFact => ({
+                key: month.key,
+                integrity: month.integrity,
+                spendProven: month.spendProven,
+                incomeProven: month.incomeProven,
+                contributionProven: month.contributionProven,
+              })),
+              accounts: data.accounts.map((account): SourceLedgerAccountFact => ({
+                type: account.type,
+                live: account.live,
+                balanceDate: account.balanceDate,
+                value: account.value,
+              })),
+              holdingsSummaryCount: data.holdings.length,
+              holdingsAllCount: data.holdingsAll.length,
+              holdingsTotal: data.holdingsTotal,
+              holdingsComplete: data.holdingsComplete,
+            }
+          : null,
+        effectiveRefreshStatus,
+      );
       // F3.5: the review queue rides along only when a dashboard
       // snapshot exists (no snapshot -> null, per the additive
       // contract); buildTxReviewQueue itself never throws.
@@ -5800,8 +5872,9 @@ export const Actions = {
         data,
         trading,
         txReviewQueue,
+        sourceLedger,
         refresh: {
-          status: payloadCorrupted ? "error" : staleRunning ? "error" : (state?.status ?? "idle"),
+          status: effectiveRefreshStatus,
           message: payloadCorrupted
             ? "已保存数据损坏，重新更新可恢复"
             : staleRunning ? "上次更新未完成，可以重新更新" : (state?.message ?? null),
