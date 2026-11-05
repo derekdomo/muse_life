@@ -1,12 +1,12 @@
 /**
  * F3.2 订阅与周期支出体检 — 验证脚本（合成数据）。
  * 以真实生产纯函数（server/src/recurringCharges.ts，经 esbuild 打包为临时 cjs）
- * 跑断言；另含 2 项变异真实执行（必须翻转）。
+ * 跑断言；另含 3 项变异真实执行（必须翻转）。
  *
  * 运行：node validate-recurring-charges.mjs
  */
 import { execSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, copyFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -193,6 +193,42 @@ function tx(date, amount, merchant, extra = {}) {
   assert("季度年化=240", r[0]?.annualizedCost === 240);
 }
 
+// ---------- 13. 日历守卫（2026-11-05，F3.3）：不存在的日历日不得进入识别 ----------
+{
+  assert("坏日拒绝：2099-02-29/02-30/04-31 与 2023-02-29",
+    rc.isValidDateKey("2099-02-29") === false
+    && rc.isValidDateKey("2099-02-30") === false
+    && rc.isValidDateKey("2099-04-31") === false
+    && rc.isValidDateKey("2023-02-29") === false);
+  assert("合法日通过：闰日/月末/年末",
+    rc.isValidDateKey("2024-02-29") === true
+    && rc.isValidDateKey("2026-01-31") === true
+    && rc.isValidDateKey("2026-12-31") === true
+    && rc.isValidDateKey("2026-02-28") === true);
+}
+{
+  // 简报反例：同商户 2099-01-30、02-30、03-30 三笔流出 10，today=2099-04-01
+  // —— 02-30 不存在，合法笔数不足，假设为 0。
+  const t = [
+    tx("2099-01-30", -10, "BadDates"),
+    tx("2099-02-30", -10, "BadDates"),
+    tx("2099-03-30", -10, "BadDates"),
+  ];
+  const r = rc.detectRecurringCharges(t, { today: "2099-04-01" });
+  assert("坏日三笔不凑满周期（假设为0）", r.length === 0, JSON.stringify(r.length));
+}
+{
+  // 合法对照：2099-01-30、02-28、03-30 三笔（间隔 29/30 天，中位 29.5）→ monthly 成立。
+  const t = [
+    tx("2099-01-30", -10, "GoodDates"),
+    tx("2099-02-28", -10, "GoodDates"),
+    tx("2099-03-30", -10, "GoodDates"),
+  ];
+  const r = rc.detectRecurringCharges(t, { today: "2099-04-01" });
+  assert("合法对照三笔成周期", r.length === 1 && r[0].cadence === "monthly" && r[0].occurrences === 3, JSON.stringify(r.map((x) => x.cadence)));
+  assert("合法对照下次=2099-04-29", r[0]?.nextExpectedDate === "2099-04-29", r[0]?.nextExpectedDate);
+}
+
 // ---------- 变异测试（真实执行，必须翻转） ----------
 // 变异1：月度年化因子 12→1（改 ANNUALIZE_FACTOR.monthly）
 {
@@ -218,6 +254,42 @@ function tx(date, amount, merchant, extra = {}) {
     r.length === 0 && wouldListUnderMutation === true,
     `orig_len=${r.length} mutated_would_list=${wouldListUnderMutation}`
   );
+}
+// 变异3：日历守卫弱化（改源码副本、重打包）→ 简报反例应由不列出变列出。
+// 弱化点是识别路径的真正入口 dateToDayNumber（仅弱化 isValidDateKey
+// 翻不动：dateToDayNumber 已严格，isValidDateKey 的有限性判断仍为 false）。
+{
+  const mdir = mkdtempSync(join(tmpdir(), "f32-mut-"));
+  copyFileSync(
+    join(new URL(".", import.meta.url).pathname, "server/src/recurringCharges.ts"),
+    join(mdir, "recurringCharges.ts")
+  );
+  let src = readFileSync(join(mdir, "recurringCharges.ts"), "utf8");
+  const anchor = "  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return NaN;\n";
+  if (!src.includes(anchor)) {
+    console.error("变异 M3 未命中目标代码");
+    process.exit(2);
+  }
+  src = src.replace(anchor, "");
+  writeFileSync(join(mdir, "recurringCharges.ts"), src);
+  const out = join(mdir, "mut.cjs");
+  execSync(
+    `npx --yes esbuild "${join(mdir, "recurringCharges.ts")}" --bundle --platform=node --format=cjs --outfile="${out}" --log-level=error`,
+    { stdio: "pipe" }
+  );
+  const m = require(out);
+  const t = [
+    tx("2099-01-30", -10, "BadDates"),
+    tx("2099-02-30", -10, "BadDates"),
+    tx("2099-03-30", -10, "BadDates"),
+  ];
+  const r = m.detectRecurringCharges(t, { today: "2099-04-01" });
+  assert(
+    "变异3翻转：守卫弱化使坏日反例由不列出变列出",
+    r.length === 1 && r[0].cadence === "monthly",
+    `mut_len=${r.length} mut_cadence=${r[0]?.cadence}`
+  );
+  rmSync(mdir, { recursive: true, force: true });
 }
 
 rmSync(tmp, { recursive: true, force: true });

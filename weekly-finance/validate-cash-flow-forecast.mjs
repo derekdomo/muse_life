@@ -275,6 +275,58 @@ function e2eFixture() {
   assert("纯支出低点在末次落点", f.lowPoint.date === "2027-01-16" && f.lowPoint.balance === 400, JSON.stringify(f.lowPoint));
 }
 
+// ---------- 日历守卫（2026-11-05，F3.3）：不存在的日历日不得进入识别、门槛、中位间隔或预测落点 ----------
+{
+  // 简报反例：同商户 2099-01-30、02-30、03-30 三笔 Plaid 流出 10，today=2099-04-01、起点 100。
+  const bad = [
+    otx("2099-01-30", 10, "BadDates"),
+    otx("2099-02-30", 10, "BadDates"),
+    otx("2099-03-30", 10, "BadDates"),
+  ];
+  const f = fc.forecastCashFlow({ transactions: bad, depositsBalance: 100, today: "2099-04-01", horizonDays: 90 });
+  assert("坏日反例假设为0", f.assumptions.length === 0, JSON.stringify(f.assumptions.length));
+  assert("坏日反例无04-29落点、余额全程100", f.days.every((d) => d.balance === 100)
+    && f.days.find((d) => d.date === "2099-04-29")?.delta === 0
+    && f.lowPoint.date === "2099-04-01" && f.lowPoint.balance === 100);
+}
+{
+  // 合法对照：2099-01-30、02-28、03-30 三笔流出 10（间隔 29/30 天，中位 29.5）→ monthly 假设成立，04-29 落点扣 10。
+  const good = [
+    otx("2099-01-30", 10, "GoodDates"),
+    otx("2099-02-28", 10, "GoodDates"),
+    otx("2099-03-30", 10, "GoodDates"),
+  ];
+  const f = fc.forecastCashFlow({ transactions: good, depositsBalance: 100, today: "2099-04-01", horizonDays: 90 });
+  assert("合法对照假设1条monthly/29.5天/3笔",
+    f.assumptions.length === 1 && f.assumptions[0].cadence === "monthly"
+    && f.assumptions[0].medianIntervalDays === 29.5 && f.assumptions[0].occurrences === 3,
+    JSON.stringify(f.assumptions));
+  const byDate = new Map(f.days.map((d) => [d.date, d]));
+  assert("合法对照04-29落点扣10", byDate.get("2099-04-29")?.delta === -10 && byDate.get("2099-04-29")?.balance === 90,
+    JSON.stringify(byDate.get("2099-04-29")));
+}
+{
+  // 收入侧镜像：坏日入账不构成假设；合法入账照常落点。
+  const badIncome = [
+    otx("2099-01-30", -10, "BadPay"),
+    otx("2099-02-30", -10, "BadPay"),
+    otx("2099-03-30", -10, "BadPay"),
+  ];
+  const fBad = fc.forecastCashFlow({ transactions: badIncome, depositsBalance: 100, today: "2099-04-01", horizonDays: 90 });
+  assert("坏日入账假设为0", fBad.assumptions.length === 0, JSON.stringify(fBad.assumptions.length));
+  const goodIncome = [
+    otx("2099-01-30", -10, "GoodPay"),
+    otx("2099-02-28", -10, "GoodPay"),
+    otx("2099-03-30", -10, "GoodPay"),
+  ];
+  const fGood = fc.forecastCashFlow({ transactions: goodIncome, depositsBalance: 100, today: "2099-04-01", horizonDays: 90 });
+  assert("合法入账假设1条、04-29落点+10",
+    fGood.assumptions.length === 1 && fGood.assumptions[0].kind === "income"
+    && fGood.days.find((d) => d.date === "2099-04-29")?.delta === 10
+    && fGood.days.find((d) => d.date === "2099-04-29")?.balance === 110,
+    JSON.stringify(fGood.assumptions));
+}
+
 // ---------- 10. 变异测试（真实执行：改源码副本、重打包、必须翻转） ----------
 function bundleMutated(mutator, label) {
   const mdir = mkdtempSync(join(tmpdir(), "f33-mut-"));
@@ -327,6 +379,50 @@ function bundleMutated(mutator, label) {
     "变异2翻转：反转低点比较使低点离开起点",
     !(f.lowPoint.date === E2E_TODAY && f.lowPoint.balance === 10000) && f.lowPoint.balance === 24952.03,
     `mut_low=${JSON.stringify(f.lowPoint)}`
+  );
+}
+// 变异3：弱化 recurringCharges 的日历守卫（改副本、重打包）→ 简报反例应由假设0变假设1条且04-29落点
+function bundleMutatedRc(mutator, label) {
+  const mdir = mkdtempSync(join(tmpdir(), "f33-mut-rc-"));
+  copyFileSync(join(srcDir, "cashFlowForecast.ts"), join(mdir, "cashFlowForecast.ts"));
+  copyFileSync(join(srcDir, "recurringCharges.ts"), join(mdir, "recurringCharges.ts"));
+  const src = readFileSync(join(mdir, "recurringCharges.ts"), "utf8");
+  const mutatedSrc = mutator(src);
+  if (mutatedSrc === src) {
+    console.error(`变异 ${label} 未命中目标代码`);
+    process.exit(2);
+  }
+  writeFileSync(join(mdir, "recurringCharges.ts"), mutatedSrc);
+  const out = join(mdir, "mut.cjs");
+  execSync(
+    `npx --yes esbuild "${join(mdir, "cashFlowForecast.ts")}" --bundle --platform=node --format=cjs --outfile="${out}" --log-level=error`,
+    { stdio: "pipe" }
+  );
+  const m = require(out);
+  rmSync(mdir, { recursive: true, force: true });
+  return m;
+}
+{
+  const bad = [
+    otx("2099-01-30", 10, "BadDates"),
+    otx("2099-02-30", 10, "BadDates"),
+    otx("2099-03-30", 10, "BadDates"),
+  ];
+  const baseline = fc.forecastCashFlow({ transactions: bad, depositsBalance: 100, today: "2099-04-01", horizonDays: 90 });
+  assert("变异3基线：坏日反例假设为0", baseline.assumptions.length === 0);
+  const m = bundleMutatedRc(
+    (s) => s.replace(
+      "  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return NaN;\n",
+      ""
+    ),
+    "M3"
+  );
+  const f = m.forecastCashFlow({ transactions: bad, depositsBalance: 100, today: "2099-04-01", horizonDays: 90 });
+  assert(
+    "变异3翻转：守卫弱化使坏日反例假设0→1条且04-29落点扣10",
+    f.assumptions.length === 1 && f.assumptions[0].cadence === "monthly"
+    && f.days.find((d) => d.date === "2099-04-29")?.delta === -10,
+    `mut_assumptions=${f.assumptions.length}`
   );
 }
 

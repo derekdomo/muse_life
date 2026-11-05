@@ -18,6 +18,15 @@
 //     不提供逐源时间戳，恒为未知，不连累余额等其它源的事实
 //     与尝试（交易失败不阻断余额刷新）。
 //
+// F0.5 逐源溯源修复（2026-11-05）：逐源「最后成功时间」只认
+// 该源自身携带的成功时间证据（facts.sourceSuccessAt，逐源独
+// 立）；总快照 asOf 只是总快照的生成/保存时间（snapshotAsOf)，
+// 永不充当任何一源的成功时间——总 asOf 推进而来源事实不变时，
+// 逐源时间一字不动。本地沿用事实（live=false）与 Plaid 同步
+// 成功分开陈述：账户行原有的 verified / status 随事实保留进
+// 台账，沿用未核实（verified=false 或 status 为 unverified /
+// carried_forward_unverified）的银行行不得标 proven/已证明。
+//
 // 诚实规则（与既有 F0.5 呈现口径同一纪律，服务端为唯一计算点）:
 //   - 空库 / 无快照：每行无成功证据，日期未知、范围未取得，
 //     任何一行不得声称已保存；
@@ -77,12 +86,24 @@ export type SourceLedgerAccountFact = {
   // （null）严格区分。台账不呈现金额，此字段不进任何文案数字
   // 之外的计算。
   value: number | null;
+  // F0.5 溯源修复：账户行原有的核实事实随行保留——verified
+  // （null = 未提供，旧载荷的常态）与原始 status 字符串（如
+  // carried_forward_unverified)。缺失即未提供，永不回填为
+  // 已核实；任一银行行沿用未核实都会阻止银行源标 proven。
+  verified?: boolean | null;
+  status?: string | null;
 };
 
 export type SourceLedgerFacts = {
-  // 最后一次成功快照的生成时刻（ISO)。非法/缺失时台账的
-  // 最后成功时间为 null，绝不回填。
+  // 总快照的生成/保存时刻（ISO)——只称总快照时间，永不充当
+  // 任何一源的最后成功时间。非法/缺失时 snapshotAsOf 为
+  // null，绝不回填。
   asOf: string | null;
+  // F0.5 溯源修复：逐源成功时间证据——只有当载荷自身为某一
+  // 源携带了独立的成功时刻时才在此给出；缺失的源其最后成功
+  // 时间为 null（未知）。现行载荷不携带逐源时刻，故生产读回
+  // 恒为空——不由总 asOf、刷新状态时间或余额日期补造。
+  sourceSuccessAt?: Partial<Record<SourceLedgerKey, string | null>>;
   sourceMonth: string | null;
   months: SourceLedgerMonthFact[];
   accounts: SourceLedgerAccountFact[];
@@ -108,7 +129,9 @@ export type SourceLedgerRow = {
 };
 
 export type SourceLedger = {
-  lastSuccessAt: string | null;
+  // 总快照时间（总快照自身的生成/保存时刻）——与逐源最后
+  // 成功时间严格分列，命名不冒充任何一源的成功时间。
+  snapshotAsOf: string | null;
   rows: SourceLedgerRow[];
 };
 
@@ -181,10 +204,33 @@ export function datePartOfInstant(value: string | null | undefined): string | nu
   return isRealDateText(part) ? part : null;
 }
 
-// 合法保存读回的最后成功时间：asOf 日期部分合法才返回 asOf
+// 合法保存读回的总快照时间：asOf 日期部分合法才返回 asOf
 // 原文，否则 null（未知）——不修复、不回填。
 export function lastSuccessInstant(asOf: string | null | undefined): string | null {
   return datePartOfInstant(asOf) != null ? (asOf as string) : null;
+}
+
+// 逐源成功时间：只取该源自身携带的成功时刻证据，经同一合
+// 法性校验；缺失/非法 -> null（未知）。总快照 asOf、刷新状
+// 态时间与余额日期永不作逐源成功时间的来源。
+export function sourceSuccessInstant(
+  facts: SourceLedgerFacts,
+  key: SourceLedgerKey,
+): string | null {
+  return lastSuccessInstant(facts.sourceSuccessAt?.[key] ?? null);
+}
+
+// 沿用未核实判定（与 actions.ts entryUnverified /
+// isUnverifiedStatus 同一口径，本模块自包含实现）：显式
+// verified=false，或原始 status 为 unverified /
+// carried_forward_unverified。verified/status 未提供
+// （null/缺失，旧载荷）不算未核实——未知不造标记。
+export function accountUnverified(account: SourceLedgerAccountFact): boolean {
+  return (
+    account.verified === false ||
+    account.status === "unverified" ||
+    account.status === "carried_forward_unverified"
+  );
 }
 
 // 金额文案（仅用于持仓分母）：en-US 千分位 + 两位小数上限，
@@ -339,7 +385,7 @@ export function buildSourceLedger(
   refreshStatus: SourceLedgerRefreshStatus,
 ): SourceLedger {
   const hasData = facts != null;
-  const lastSuccess = hasData ? lastSuccessInstant(facts.asOf) : null;
+  const snapshotAsOf = hasData ? lastSuccessInstant(facts.asOf) : null;
   const attemptShared = sourceAttemptFor(refreshStatus, hasData);
 
   if (!facts) {
@@ -360,7 +406,7 @@ export function buildSourceLedger(
         degraded: [],
       };
     });
-    return { lastSuccessAt: null, rows };
+    return { snapshotAsOf: null, rows };
   }
 
   const months = [...facts.months].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
@@ -388,7 +434,7 @@ export function buildSourceLedger(
       first && last
         ? `${first.key} 至 ${last.key} · 共 ${months.length} 份月度快照`
         : "未取得",
-    lastSuccessAt: firanceHas ? lastSuccess : null,
+    lastSuccessAt: firanceHas ? sourceSuccessInstant(facts, "firance") : null,
     attempt: attemptShared.attempt,
     attemptText: attemptShared.attemptText,
     degraded: [],
@@ -402,17 +448,32 @@ export function buildSourceLedger(
   const zeroBalanceCount = facts.accounts.filter(
     (account) => account.type === "account" && account.value === 0,
   ).length;
+  // F0.5 溯源修复：银行行的已保存事实按来源分开陈述——Plaid
+  // 同步读取值（live) 与本地月度快照沿用值分列；沿用未核实
+  // 的行单独点名，且只要有一行沿用未核实，银行源不得标
+  // proven（本地沿用事实存在 ≠ 该源 Plaid 同步成功已证明）。
+  const bankRowsAll = facts.accounts.filter((account) => account.type === "account");
+  const carriedBankCount = bankRowsAll.filter((account) => !account.live).length;
+  const unverifiedBankCount = bankRowsAll.filter((account) => accountUnverified(account)).length;
+  const bankProven =
+    bank.total > 0 && bank.known === bank.total && bank.stale === 0 && unverifiedBankCount === 0;
   const bankEvidence: SourceLedgerEvidenceState =
-    bank.total === 0
-      ? "missing"
-      : bank.known === bank.total && bank.stale === 0
-        ? "proven"
-        : "partial";
+    bank.total === 0 ? "missing" : bankProven ? "proven" : "partial";
   const bankEvidenceParts: string[] = [];
   if (bank.total > 0) {
     bankEvidenceParts.push(`已保存 ${bank.total} 个银行账户余额行`);
     if (zeroBalanceCount > 0) {
       bankEvidenceParts.push(`其中 ${zeroBalanceCount} 个账户余额为真实 0（计入覆盖）`);
+    }
+    if (carriedBankCount > 0) {
+      bankEvidenceParts.push(
+        `${carriedBankCount} 个账户沿用本地月度快照值（非 Plaid 同步读取，本地已保存事实与同步成功分开陈述）`,
+      );
+    }
+    if (unverifiedBankCount > 0) {
+      bankEvidenceParts.push(
+        `${unverifiedBankCount} 个账户沿用未核实（verified=false 或状态为沿用未核实标记），不计为该源同步成功已证明`,
+      );
     }
     if (bank.stale > 0) {
       bankEvidenceParts.push(`${bank.stale} 个账户余额日期早于快照月份（沿用旧日期）`);
@@ -430,7 +491,7 @@ export function buildSourceLedger(
         : "成功证据：未保存银行账户余额行",
     dataDate: bank.dataDate,
     coverage: balanceCoverageText(facts.accounts),
-    lastSuccessAt: bank.total > 0 ? lastSuccess : null,
+    lastSuccessAt: bank.total > 0 ? sourceSuccessInstant(facts, "plaid_accounts") : null,
     attempt:
       balanceAccounts.length > 0 ? attemptShared.attempt : "not_provided",
     attemptText:
@@ -462,7 +523,7 @@ export function buildSourceLedger(
       provenKeys.length > 0
         ? `支出依据齐全的月份：${provenKeys.join("、")}（逐月依据见月度记录）`
         : "无月份具备完整交易覆盖依据",
-    lastSuccessAt: provenMonths.length > 0 ? lastSuccess : null,
+    lastSuccessAt: provenMonths.length > 0 ? sourceSuccessInstant(facts, "plaid_transactions") : null,
     attempt: "unknown",
     attemptText: TRANSACTIONS_ATTEMPT_TEXT,
     degraded: transactionDegradations(months),
@@ -491,14 +552,14 @@ export function buildSourceLedger(
     coverage: facts.holdingsComplete
       ? `全部持仓 ${facts.holdingsAllCount} 只${holdingsTotalText != null ? ` · 分母 ${holdingsTotalText}` : ""}`
       : "仅 Top 10 摘要（旧缓存，长尾未保存）",
-    lastSuccessAt: holdingsHas ? lastSuccess : null,
+    lastSuccessAt: holdingsHas ? sourceSuccessInstant(facts, "plaid_holdings") : null,
     attempt: holdingsHas ? attemptShared.attempt : "not_provided",
     attemptText: holdingsHas ? attemptShared.attemptText : "未提供",
     degraded: [],
   };
 
   return {
-    lastSuccessAt: lastSuccess,
+    snapshotAsOf,
     rows: [firanceRow, bankRow, txRow, holdingsRow],
   };
 }

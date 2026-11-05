@@ -383,7 +383,7 @@ check("ledger: bank saved + transaction unknown — transaction row keeps its pr
   && ledgerError[1].result.includes("未写入新数据"));
 check("ledger wiring: rows present the two groups separately (上次可用事实 vs 本次尝试）, asOf never a per-source date",
   appSrc.includes("上次可用事实") && appSrc.includes("本次尝试：{row.result}")
-  && appSrc.includes("最后成功快照时间"));
+  && appSrc.includes("总快照时间"));
 check("band wiring: rendered only after the access check, fed the sanitized message",
   appSrc.includes("!guestDenied && response") && appSrc.includes("<RefreshStatusBand") && appSrc.includes("message={visibleMessage}"));
 check("band wiring: the running copy is explicit （正在更新，当前显示上次成功数据）",
@@ -391,7 +391,7 @@ check("band wiring: the running copy is explicit （正在更新，当前显示�
 check("band wiring: updatedAt is labelled 状态写入时刻， never a heartbeat or data date",
   appSrc.includes("状态写入时刻") && !appSrc.includes("心跳"));
 check("band wiring: last-success snapshot time and attempt start are separate fields (asOf labelled as the snapshot time only)",
-  appSrc.includes("最后成功快照时间") && appSrc.includes("本次尝试开始") && appSrc.includes("最近一次尝试开始")
+  appSrc.includes("总快照时间") && appSrc.includes("本次尝试开始") && appSrc.includes("最近一次尝试开始")
   && appSrc.includes("formatInstant(refresh.startedAt, false)"));
 check("band wiring: server stamps and returns the attempt start (startedAt), distinct from updatedAt",
   serverSrc.includes("startedAt: new Date()") && serverSrc.includes("startedAt: state?.startedAt?.toISOString() ?? null"));

@@ -5639,7 +5639,9 @@ const sourceLedgerRowSchema = z.object({
 });
 
 const sourceLedgerSchema = z.object({
-  lastSuccessAt: z.string().nullable(),
+  // F0.5 溯源修复：总快照时间只以总快照时间命名（snapshotAsOf);
+  // 逐源最后成功时间在各行内，只来自该源自身的成功时间证据。
+  snapshotAsOf: z.string().nullable(),
   rows: z.array(sourceLedgerRowSchema),
 });
 
@@ -5720,7 +5722,7 @@ const deleteCategoryRuleResponse = z.object({
 
 export const Actions = {
   getDashboard: defineAction({
-    description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner. It also carries the F0.5 server-side four-source ledger (sourceLedger: Firance snapshots / Plaid accounts / Plaid transactions / Plaid holdings), derived server-side from the read-back snapshot and the refresh attempt state — per-source success evidence, data date and coverage, last success time, this attempt's result kept separate from the last usable facts, and transaction-dependent inferences explicitly degraded.",
+    description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner. It also carries the F0.5 server-side four-source ledger (sourceLedger: Firance snapshots / Plaid accounts / Plaid transactions / Plaid holdings), derived server-side from the read-back snapshot and the refresh attempt state — per-source success evidence, data date and coverage, the total snapshot time labelled as snapshot time only (per-source last-success times come only from that source's own success-time evidence, null when the payload carries none), this attempt's result kept separate from the last usable facts, and transaction-dependent inferences explicitly degraded.",
     request: z.object({}),
     response: z.object({
       access: z.enum(["owner", "guest_denied"]),
@@ -5896,6 +5898,12 @@ export const Actions = {
                 live: account.live,
                 balanceDate: account.balanceDate,
                 value: account.value,
+                // F0.5 溯源修复：账户行原有的核实事实（verified /
+                // 原始 status）随事实带入台账——沿用未核实的银行
+                // 行不得被标为该源同步成功已证明。旧载荷缺失时
+                // 为 null（未提供），不回填。
+                verified: account.verified ?? null,
+                status: account.status ?? null,
               })),
               holdingsSummaryCount: data.holdings.length,
               holdingsAllCount: data.holdingsAll.length,

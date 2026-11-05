@@ -5,7 +5,7 @@
 // in-memory database built from the app's own migrations
 // (legal save -> read-back, failure-keeps-old, guest denied),
 // checks the source wiring (server field, client render-only,
-// CSS), and runs three source mutations that are really
+// CSS), and runs five source mutations that are really
 // executed and must flip behaviour. No real financial data:
 // every source name, date and amount below is synthetic.
 // Run: bun validate-source-ledger.mjs
@@ -27,6 +27,8 @@ const {
   isLegalBalanceDateText,
   datePartOfInstant,
   lastSuccessInstant,
+  sourceSuccessInstant,
+  accountUnverified,
   formatLedgerAmount,
   SOURCE_LEDGER_ORDER,
   TRANSACTIONS_ATTEMPT_TEXT,
@@ -73,7 +75,7 @@ check("amount format: en-US currency, null-safe",
     empty.rows.map((row) => row.key).join(",") === SOURCE_LEDGER_ORDER.join(",")
     && empty.rows.map((row) => row.label).join(",") === "本地月度记录,银行余额,交易,持仓");
   check("empty: no success evidence, dates unknown, coverage not obtained, last success null",
-    empty.lastSuccessAt === null
+    empty.snapshotAsOf === null
     && empty.rows.every((row) => row.evidence === "missing" && row.dataDate === "未知"
       && row.coverage === "未取得" && row.lastSuccessAt === null));
   check("empty + idle: NO row claims a save",
@@ -111,8 +113,8 @@ const fullFacts = {
   check("firance: proven from the read-back snapshots, data date is the source month (never the asOf date)",
     firance.evidence === "proven" && firance.dataDate === "2099-09-30" && !firance.dataDate.includes("2099-10-18")
     && firance.coverage === "2099-08-31 至 2099-09-30 · 共 2 份月度快照"
-    && firance.evidenceText.includes("共 2 份月度记录") && firance.lastSuccessAt === fullFacts.asOf
-    && ledger.lastSuccessAt === fullFacts.asOf);
+    && firance.evidenceText.includes("共 2 份月度记录") && firance.lastSuccessAt === null
+    && ledger.snapshotAsOf === fullFacts.asOf);
   const bank = rowOf(ledger, "plaid_accounts");
   check("bank: differing valid dates state the span with full date coverage 2/2",
     bank.dataDate === "2099-08-31 至 2099-09-30（各账户余额日期不一致；日期已知 2/2）");
@@ -129,7 +131,7 @@ const fullFacts = {
     && tx.attemptText === TRANSACTIONS_ATTEMPT_TEXT && tx.coverage.includes("2099-08"));
   check("transactions: the unproven month's transaction-dependent inferences are explicitly degraded by name",
     tx.degraded.length === 1 && tx.degraded[0].includes("2099-09") && tx.degraded[0].includes("降级")
-    && tx.lastSuccessAt === fullFacts.asOf);
+    && tx.lastSuccessAt === null);
   const holdings = rowOf(ledger, "plaid_holdings");
   check("holdings: complete set is proven with the fixed denominator stated; date stays unknown",
     holdings.evidence === "proven" && holdings.dataDate === "未知"
@@ -183,7 +185,7 @@ const fullFacts = {
     && !bank.dataDate.includes("2099-14-01") && bank.evidence === "partial");
   const badAsOf = buildSourceLedger({ ...fullFacts, asOf: "2099-13-40T00:00:00Z" }, "idle");
   check("invalid asOf: last success time is null on the ledger and every row (never filled with success)",
-    badAsOf.lastSuccessAt === null && badAsOf.rows.every((row) => row.lastSuccessAt === null)
+    badAsOf.snapshotAsOf === null && badAsOf.rows.every((row) => row.lastSuccessAt === null)
     && rowOf(badAsOf, "firance").dataDate === "2099-09-30");
   const badMonth = buildSourceLedger({ ...fullFacts, sourceMonth: "2099-13-01" }, "idle");
   check("invalid source month: the firance data date reads 未知 instead of the illegal value",
@@ -197,6 +199,71 @@ const fullFacts = {
     && rowOf(noBank, "plaid_accounts").dataDate === "未知"
     && rowOf(noBank, "plaid_accounts").coverage === "未提供"
     && rowOf(noBank, "plaid_accounts").attempt === "not_provided");
+}
+
+// ---------- F0.5 溯源修复（2026-11-05）：逐源最后成功时间只认该源自身证据 ----------
+{
+  // 简报缺陷夹具：Plaid 空输入时本地沿用的 synthetic_bank 行
+  // （live=false、余额真 0、verified=false、status 沿用未核实），
+  // 加一行同日同步读取值作对照。
+  const defectFacts = {
+    asOf: "2099-11-05T12:00:00Z",
+    sourceMonth: "2099-09-30",
+    months: [month("2099-09-30")],
+    accounts: [
+      { type: "account", live: false, balanceDate: "2099-09-30", value: 0, verified: false, status: "carried_forward_unverified" },
+      acct({ balanceDate: "2099-09-30", value: 100 }),
+    ],
+    holdingsSummaryCount: 0,
+    holdingsAllCount: 0,
+    holdingsTotal: null,
+    holdingsComplete: false,
+  };
+  const defect = buildSourceLedger(defectFacts, "idle");
+  check("provenance defect: a carried-forward unverified bank row blocks proven and is named separately",
+    rowOf(defect, "plaid_accounts").evidence === "partial"
+    && rowOf(defect, "plaid_accounts").evidenceText.includes("沿用未核实")
+    && rowOf(defect, "plaid_accounts").evidenceText.includes("不计为该源同步成功已证明")
+    && rowOf(defect, "plaid_accounts").evidenceText.includes("沿用本地月度快照值"));
+  check("provenance: with no per-source success-time evidence every row's last success is null while the total snapshot time is the asOf",
+    defect.snapshotAsOf === defectFacts.asOf
+    && defect.rows.every((row) => row.lastSuccessAt === null));
+  check("provenance invariance: advancing the total asOf by one day leaves every row's fact fields byte-identical",
+    (() => {
+      const next = buildSourceLedger({ ...defectFacts, asOf: "2099-11-06T12:00:00Z" }, "idle");
+      return next.snapshotAsOf === "2099-11-06T12:00:00Z"
+        && defect.rows.every((row, i) => factFields(row) === factFields(next.rows[i]));
+    })());
+  check("per-source evidence advances only its own source (bank gets its own instant; the other rows stay null)",
+    (() => {
+      const withEvidence = buildSourceLedger({
+        ...defectFacts,
+        sourceSuccessAt: { plaid_accounts: "2099-10-17T10:00:00Z" },
+      }, "idle");
+      return rowOf(withEvidence, "plaid_accounts").lastSuccessAt === "2099-10-17T10:00:00Z"
+        && rowOf(withEvidence, "firance").lastSuccessAt === null
+        && rowOf(withEvidence, "plaid_transactions").lastSuccessAt === null
+        && rowOf(withEvidence, "plaid_holdings").lastSuccessAt === null
+        && withEvidence.snapshotAsOf === defectFacts.asOf;
+    })());
+  check("per-source evidence: an illegal per-source instant and a missing sourceSuccessAt both read null (unknown, never fabricated)",
+    sourceSuccessInstant({ ...defectFacts, sourceSuccessAt: { plaid_accounts: "2099-13-40T00:00:00Z" } }, "plaid_accounts") === null
+    && sourceSuccessInstant(defectFacts, "firance") === null
+    && sourceSuccessInstant({ ...defectFacts, sourceSuccessAt: { firance: "2099-10-17T10:00:00Z" } }, "firance") === "2099-10-17T10:00:00Z");
+  check("accountUnverified: explicit false / unverified statuses count; true / missing do not",
+    accountUnverified({ type: "account", live: false, balanceDate: "2099-09-30", value: 0, verified: false, status: null }) === true
+    && accountUnverified({ type: "account", live: false, balanceDate: "2099-09-30", value: 0, verified: null, status: "carried_forward_unverified" }) === true
+    && accountUnverified({ type: "account", live: false, balanceDate: "2099-09-30", value: 0, verified: null, status: "unverified" }) === true
+    && accountUnverified({ type: "account", live: true, balanceDate: "2099-09-30", value: 100, verified: true, status: null }) === false
+    && accountUnverified({ type: "account", live: true, balanceDate: "2099-09-30", value: 100 }) === false);
+  check("provenance control: the same carried row WITH verification does not block proven (only unverified carry does)",
+    rowOf(buildSourceLedger({
+      ...defectFacts,
+      accounts: [
+        { type: "account", live: false, balanceDate: "2099-09-30", value: 0, verified: true, status: null },
+        acct({ balanceDate: "2099-09-30", value: 100 }),
+      ],
+    }, "idle"), "plaid_accounts").evidence === "proven");
 }
 
 // ---------- partial / legacy shapes ----------
@@ -269,6 +336,44 @@ async function mutatedModule(replacements) {
   check("mutation M3 (unproven predicate inverted) flips: degradations name the proven month instead",
     m3.transactionDegradations(fixture()).some((line) => line.includes("2099-08")));
 }
+{
+  // M4: the unverified-carry gate removed from the bank proven rule.
+  const fixture = () => ({
+    asOf: "2099-11-05T12:00:00Z",
+    sourceMonth: "2099-09-30",
+    months: [month("2099-09-30")],
+    accounts: [
+      { type: "account", live: false, balanceDate: "2099-09-30", value: 0, verified: false, status: "carried_forward_unverified" },
+      acct({ balanceDate: "2099-09-30", value: 100 }),
+    ],
+    holdingsSummaryCount: 0, holdingsAllCount: 0, holdingsTotal: null, holdingsComplete: false,
+  });
+  check("mutation baseline: the carried-forward unverified bank row keeps the bank at partial",
+    rowOf(buildSourceLedger(fixture(), "idle"), "plaid_accounts").evidence === "partial");
+  const m4 = await mutatedModule([["bank.total > 0 && bank.known === bank.total && bank.stale === 0 && unverifiedBankCount === 0", "bank.total > 0 && bank.known === bank.total && bank.stale === 0"]]);
+  check("mutation M4 (unverified-carry gate removed) flips: the same defect fixture reads proven",
+    m4.buildSourceLedger(fixture(), "idle").rows.find((row) => row.key === "plaid_accounts").evidence === "proven");
+}
+{
+  // M5: per-source success time falls back to the total asOf.
+  const fixture = () => ({
+    asOf: "2099-11-05T12:00:00Z",
+    sourceMonth: "2099-09-30",
+    months: [month("2099-09-30")],
+    accounts: [acct({ balanceDate: "2099-09-30", value: 100 })],
+    holdingsSummaryCount: 0, holdingsAllCount: 0, holdingsTotal: null, holdingsComplete: false,
+  });
+  check("mutation baseline: with no per-source evidence every row's last success is null",
+    buildSourceLedger(fixture(), "idle").rows.every((row) => row.lastSuccessAt === null));
+  const m5 = await mutatedModule([["return lastSuccessInstant(facts.sourceSuccessAt?.[key] ?? null);", "return lastSuccessInstant(facts.sourceSuccessAt?.[key] ?? facts.asOf);"]]);
+  check("mutation M5 (per-source time falls back to total asOf) flips: rows with facts inherit the total snapshot time",
+    (() => {
+      const mutated = m5.buildSourceLedger(fixture(), "idle");
+      return ["firance", "plaid_accounts", "plaid_transactions"].every(
+        (key) => mutated.rows.find((row) => row.key === key).lastSuccessAt === fixture().asOf)
+        && mutated.rows.find((row) => row.key === "plaid_holdings").lastSuccessAt === null;
+    })());
+}
 
 // ---------- action handlers over an in-memory DB ----------
 const appRequire = createRequire(join(APP_DIR, "package.json"));
@@ -337,7 +442,7 @@ const syntheticPayload = {
   const emptyDash = await Actions.getDashboard.handler(ownerCtx(db), {});
   check("getDashboard: owner with an empty store -> the empty ledger (no evidence, no success time, no save claim)",
     emptyDash.data === null && emptyDash.sourceLedger !== null
-    && emptyDash.sourceLedger.lastSuccessAt === null
+    && emptyDash.sourceLedger.snapshotAsOf === null
     && emptyDash.sourceLedger.rows.length === 4
     && emptyDash.sourceLedger.rows.every((row) => row.evidence === "missing" && row.lastSuccessAt === null)
     && emptyDash.sourceLedger.rows.every((row) => row.attempt !== "saved"));
@@ -350,7 +455,7 @@ const syntheticPayload = {
   const dash = await Actions.getDashboard.handler(ownerCtx(db), {});
   const ledger = dash.sourceLedger;
   check("read-back: the legally saved snapshot yields the full server ledger",
-    dash.data !== null && ledger !== null && ledger.lastSuccessAt === syntheticPayload.asOf
+    dash.data !== null && ledger !== null && ledger.snapshotAsOf === syntheticPayload.asOf
     && ledger.rows.length === 4);
   check("read-back: firance proven on the source month; bank proven with the true-0 account counted",
     rowOf(ledger, "firance").evidence === "proven" && rowOf(ledger, "firance").dataDate === "2099-09-30"
@@ -370,6 +475,30 @@ const syntheticPayload = {
     && rowOf(dashErr.sourceLedger, "firance").attempt === "failed_kept"
     && rowOf(dashErr.sourceLedger, "firance").attemptText.includes("保留上次成功数据")
     && dashErr.refresh.status === "error");
+}
+{
+  // Read-back of the same provenance defect through the real handler:
+  // the stored snapshot carries the carried-forward unverified
+  // synthetic_bank row (live=false, true 0) plus one synced row.
+  const { db } = freshDb();
+  const defectPayload = {
+    ...syntheticPayload,
+    months: [minimalMonth("2099-09-30", { integrity: "complete", spendProven: true, incomeProven: true, contributionProven: true })],
+    accounts: [
+      { source: "synthetic_bank", label: "Synthetic Bank", type: "account", value: 0, live: false, institution: null, mask: null, balanceDate: "2099-09-30", verified: false, status: "carried_forward_unverified" },
+      { source: "synthetic_bank", label: "Synthetic Bank", type: "account", value: 100, live: true, institution: null, mask: null, balanceDate: "2099-09-30" },
+    ],
+  };
+  await db.insert(schema.financeState).values({ id: 1, payload: JSON.stringify(defectPayload), status: "idle" });
+  const dash = await Actions.getDashboard.handler(ownerCtx(db), {});
+  const ledger = dash.sourceLedger;
+  check("read-back defect: the carried-forward unverified bank row is partial and named, never proven",
+    ledger !== null && rowOf(ledger, "plaid_accounts").evidence === "partial"
+    && rowOf(ledger, "plaid_accounts").evidenceText.includes("沿用未核实")
+    && rowOf(ledger, "plaid_accounts").evidenceText.includes("不计为该源同步成功已证明"));
+  check("read-back defect: no row inherits the total snapshot time as its last success; the total time stands alone",
+    ledger !== null && ledger.snapshotAsOf === defectPayload.asOf
+    && ledger.rows.every((row) => row.lastSuccessAt === null));
 }
 
 // ---------- wiring ----------

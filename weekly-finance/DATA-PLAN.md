@@ -269,3 +269,23 @@ color-vision 20、finance-arch 154 全过。隐私扫描：新增/改动文件�
 同日同商户多笔的 tie-break 显示名取日期最大者（极端情形与生产侧排序 tie-break
 可能差一笔的显示名，不影响数值）；精确 artifact version 平台未提供；
 owner 视角实机以本人打开为准。
+
+## F0.5 逐源台账溯源修复（2026-11-05）
+
+**缺陷**：`buildSourceLedger` 把各行 `lastSuccessAt` 取总快照 `asOf`（银行行 `bank.total > 0 ? lastSuccess : null`），且 `SourceLedgerAccountFact` 只含 type/live/balanceDate/value、无 status/verified——Plaid 空输入时本地沿用的 synthetic_bank 行（live=false、余额真 0、verified=false/status=carried_forward_unverified）会被标为 proven/已证明，总快照 asOf 被标为该源“最后成功时间”；仅把总 asOf 改到次日不能修复（逐源时间仍跟着推进）。
+
+**修复**：总快照时间改名 `snapshotAsOf`（状态带标签改为「总快照时间」）；逐源最后成功时间只认该源自身证据（`facts.sourceSuccessAt`，逐源独立；现行载荷不携带逐源时刻，故生产读回恒为空/未知，不由总 asOf、刷新状态时间或余额日期补造）；`getDashboard` 把账户行已有的 verified/status 带入台账（旧载荷缺失为 null、不回填）；沿用未核实（verified=false 或 status 为 unverified/carried_forward_unverified）的银行行阻止银行源标 proven，证据文案把本地沿用事实与 Plaid 同步成功分开陈述；总 asOf 推进时逐源事实一字不动；逐源成功时间缺失时客户端渲染为「未知」。
+
+**验证**：`validate-source-ledger.mjs` **65/65**（本机实跑，合成数据；bun，含 in-memory DB 的真实 getDashboard 保存读回与 guest/viewer-less 拒绝）——新增缺陷夹具/逐源只推进对应源/总 asOf 推进不变性/`accountUnverified` 与 `sourceSuccessInstant` 单元/读回缺陷场景，变异 M4（去掉未核实门禁）与 M5（逐源时间回退总 asOf）真实执行翻转，原 M1–M3 不变。`validate-facts-card.mjs` 与 `validate-check-progress.mjs` 的状态带标签断言随改名同步为「总快照时间」（意图不变）。
+
+**如实保留**：逐源成功时间生产证据通道 `sourceSuccessAt` 目前无载荷来源，为诚实缺省（各行最后成功时间恒为未知，直到载荷自身携带逐源时刻）；工件侧上线为构建方登记，精确平台版本及所有者本人打开确认未取得。
+
+## F3.3 日历守卫双端核对（2026-11-05）
+
+**缺陷**：`recurringCharges.isValidDateKey` 只以 `dateToDayNumber` 有限性判断，`Date.UTC` 把 2099-02-29/02-30、2099-04-31 滚入下月；简报反例（同商户 2099-01-30、02-30、03-30 三笔 Plaid 流出 10，today=2099-04-01、起点 100）在旧逻辑下得到 monthly/3 笔/29.5 天假设并于 04-29 扣 10。
+
+**双端核对**：工件侧 `isValidDateKey` 本已是严格往返校验，三坏日均被拒、简报反例假设为 0——工件侧同缺陷不存在（构建方实测，未声称线上已复现）。仓库侧修复两处：(1) `isValidDateKey` 改为往返比对（与工件侧及 Firance 本地 `monthlyRecords.isValidDateKey` 同一规则；输入字段 merchant、周期枚举 annual 不动）；(2) `dateToDayNumber` 改为严格校验（不存在的日历日返回 NaN）——仓库侧实测发现仅修 (1) 盖不住识别路径：`detectRecurringCharges` 以 `dateToDayNumber` 有限性过滤（不调 `isValidDateKey`），补丁前反例仍被列出；`dateToDayNumber` 文档原已承诺“非法返回 NaN”，本次是兑现该承诺，合法日期行为一字不变。收入侧（`detectRecurringIncome` 经 `isValidDateKey` 守卫）与支出侧现均受保护；未来、pending、内部互转、退款/负收益与真 0 守卫不回归；旧载荷 forecast=null、低点/30/60/90 范围及假设口径保留。
+
+**验证**：`validate-recurring-charges.mjs` **32/32**（本机实跑，合成数据）——新增三坏日拒绝＋闰日/月末/跨年对照、简报反例不凑周期、合法对照成周期，变异 M3（弱化 `dateToDayNumber` 守卫）真实执行翻转；`validate-cash-flow-forecast.mjs` **117/117**——新增简报反例全链（假设 0、无 04-29 落点）、合法对照（04-29 落点扣 10）、收入侧镜像、变异 M3 真实翻转。
+
+**如实保留**：本仓两套验证器为同步方重建（覆盖回灌包点名的全部夹具与变异），非工件逐字复制——工件计数为 recurring 41、forecast 58，本仓为 recurring 32、forecast 117：差异源于两端文件本就不同（工件版含在线 name/yearly 契约断言、本仓版为 merchant/annual 仓库变体且 forecast 文件含 109 项既有断言）；计数不同不代表覆盖缺失，夹具与变异均按回灌包逐项落地并本机实跑通过。工件侧上线为构建方登记，所有者本人打开确认未取得。

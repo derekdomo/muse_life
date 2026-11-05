@@ -473,8 +473,9 @@ export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ labe
 // transaction coverage is only ever stated through the per-month
 // spend provenance the months themselves carry.
 // F0.5 rework (per-source dates): the snapshot asOf is ONLY the
-// snapshot generation / last-success time (the band labels it
-// as such) — it is never a per-source data date. The bank row's
+// total snapshot generation time （总快照时间， the band labels it
+// as such) — it is never a per-source data date or a per-source
+// last-success time. The bank row's
 // date is the balanceDate evidence the account rows themselves
 // retain, ALWAYS stated with its date coverage （日期已知 x/y):
 // a known date describes only the accounts that carry date
@@ -5192,7 +5193,7 @@ function RefreshStatusBand({
           <span aria-hidden="true">{refreshStatusSymbol(refresh.status)}</span>
           {refreshStatusText(refresh.status, hasData)}
         </span>
-        <span>最后成功快照时间：{hasData ? formatInstant(data.asOf, true) : "尚无成功数据"}</span>
+        <span>总快照时间：{hasData ? formatInstant(data.asOf, true) : "尚无成功数据"}</span>
         <span>{refresh.status === "running" ? "本次尝试开始" : "最近一次尝试开始"}：{formatInstant(refresh.startedAt, false)}</span>
         <span>状态写入时刻：{formatInstant(refresh.updatedAt, false)}</span>
         <span>下一可用操作：{nextRefreshActionText(refresh.status, hasData)}</span>
@@ -5246,7 +5247,7 @@ function RefreshStatusBand({
               {row.evidenceLine ? (
                 <p className="refresh-band__ledger-sub">
                   {row.evidenceLine}
-                  {" · "}最后成功时间：{formatInstant(row.lastSuccessAt, false)}
+                  {" · "}最后成功时间：{row.lastSuccessAt ? formatInstant(row.lastSuccessAt, false) : "未知"}
                 </p>
               ) : null}
               {row.degraded.map((line) => (

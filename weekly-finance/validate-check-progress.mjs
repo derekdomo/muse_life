@@ -491,7 +491,7 @@ check("wiring: the band renders all three feedback layers and the honesty note v
   && appSrc.includes("checkFeedback.refreshResultLine") && appSrc.includes("checkFeedback.dataFactLine")
   && appSrc.includes("checkFeedback.note") && appSrc.includes("checkProgressFeedback({"));
 check("wiring: the band's three source moments are untouched (asOf / startedAt / updatedAt keep their real fields)",
-  appSrc.includes("最后成功快照时间") && appSrc.includes("formatInstant(refresh.startedAt, false)")
+  appSrc.includes("总快照时间") && appSrc.includes("formatInstant(refresh.startedAt, false)")
   && appSrc.includes("状态写入时刻：{formatInstant(refresh.updatedAt, false)}"));
 check("wiring: feedback is symbol + text, never colour alone (✓/▲ markers in the produced lines)",
   running.dashboardLine.includes("✓") && allFail.dashboardLine.includes("▲"));

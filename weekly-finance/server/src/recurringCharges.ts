@@ -120,6 +120,13 @@ export function dateToDayNumber(dateStr: string): number {
   const mo = Number(m[2]);
   const d = Number(m[3]);
   if (mo < 1 || mo > 12 || d < 1 || d > 31) return NaN;
+  // F3.3 日历守卫（2026-11-05）：不存在的日历日（2099-02-29/02-30、
+  // 2099-04-31 等）不得滚入下月——往返比对，不存在即 NaN。本函数是
+  // 识别路径的日期入口（detectRecurringCharges 只以有限性过滤），
+  // 仅修 isValidDateKey 盖不住该路径；本函数文档原已承诺“非法返回
+  // NaN”，此处是兑现该承诺。合法日期行为一字不变。
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return NaN;
   return Math.floor(Date.UTC(y, mo - 1, d) / 86400000);
 }
 
@@ -299,13 +306,13 @@ export function normalizeMerchantName(name: string): string {
   return normalizeMerchant(name ?? "");
 }
 
-/** YYYY-MM-DD 合法性（本仓 dateToDayNumber 语义） */
+/** YYYY-MM-DD 合法性（严格真实日历校验：格式 + 月 01..12 + 日真实存在，含闰年判定；与工件侧及 Firance 本地 monthlyRecords.isValidDateKey 同一规则） */
 export function isValidDateKey(value: string): boolean {
-  return (
-    typeof value === "string" &&
-    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-    Number.isFinite(dateToDayNumber(value))
-  );
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day;
 }
 
 /** 两日期键相差天数（to - from） */
