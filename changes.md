@@ -1,5 +1,12 @@
 # Changes
 
+## 2026-11-05 10:51 PST（muse-life-plans-sync 09:55 轮次续：plans.md 登记位置纠正＋面板只读核对 e59aee87 回传）
+
+- 面板只读核对回传（inspection e59aee87，repair_authorized=false；回灌提交 `d3ac53a` 后另派）：面板四组计数全部与标题相符（条目 127、实现方队列 16、PM 反馈 15、等用户决定 7），全文 11 处「PM 已验收」均为否定式、无肯定式。唯一实质不一致是面板滞后当前 main HEAD：`F0.5` 仍写旧 validate-source-ledger 52/52、`F3.3` 仍写旧 validate-cash-flow-forecast 109/109，均未反映 changes.md 顶部记录的 2026-11-05 10 时 PST 已交付回灌（仓库实跑 65/65、117/117，另 recurring 32/32；两条仍未勾选、待 PM 验收）；页眉/页脚指针 main @ `aaab58b`、截至 10:00 PST 落后于当前 HEAD `d3ac53a`。另发现 `F3.2` 的 recurring 26/26 同样滞后（本仓版现为 32/32）。
+- 登记位置错置（核对发现、实现方以 git 实查确认属实）：`F0.5` 的 10 时交付登记落在了 `W6.1` 条目之下（原第 361 行），而非 `F0.5` 节下。成因：登记编辑的锚文本是多处共用的回滚套话（「回滚：构建未交付前无仓库变更可回滚；派工可经 artifact.cancel 取消（本轮未取消）。）」），该句同时出现在 `W6.1` 的 11-03 派工登记末尾与 `F0.5` 的 09:55 派工登记末尾，编辑工具替换了第一个匹配处。`F3.3` 的 10 时登记经核查位置正确（第 532 行，位于 `F3.3` 条目 529 行之下、下一条目 `F3.4` 之前）。纠正：纯移动——将该登记行移至 `F0.5` 的 09:55 派工登记之后（现第 388 行，`F0.5` 条目 384 行之下、下一条目 `F0.7` 之前）；`W6.1` 条目下不再含该登记；登记内容逐字未变，验证计数不受影响；git diff 仅 1 行插入＋1 行删除。教训（后续轮次照此执行）：plans.md 登记编辑必须以条目特有文本为锚、不得以共用套话为锚；每次登记后须以 grep 核查父条目标题，确认登记落在正确条目之下。
+- 面板刷新：按核对建议与既往 B 类呈现刷新先例，本纠正提交落地后另行刷新——页眉/页脚指针与截至时间重建为新 HEAD 的真实提交时间；`F0.5` 条目末尾补 2026-11-05 10 时 PST 溯源修复已交付回灌、validate-source-ledger 65/65；`F3.3` 条目末尾补 2026-11-05 10 时 PST 日历守卫修复已交付回灌、validate-cash-flow-forecast 117/117；`F3.2` 条目内 validate-recurring-charges 26/26 更新为 32/32；三条保持进行中、未勾选、待 PM 验收；其余条目与计数一律不动。面板刷新本身按规则不单独向用户汇报。
+- plans.md：本轮改动仅为上述一处登记位置移动。机械汇总门：`git log --oneline d3ac53a..HEAD` 为本次纠正提交，`git status --short` 仅 plans.md 与本文件，无其余改动。本轮未动 cron；修改文件：plans.md、本文件。
+
 ## 2026-11-05 10 时 PST（muse-life-plans-sync 09:55 轮次续：F0.5＋F3.3 回灌与交付登记；面板只读核对）
 
 - 构建回传（space-3 合并构建，verification_status SUCCEEDED，worker_completed_at 2026-11-05T18:08:45Z）：`F0.5` 逐源台账溯源修复＋`F3.3` 日历守卫修复已上线；回灌包 `~/workspace/ts-spaces/space-3/BACKFILL-F05-F33-2026-11-05.md`（10 项清单；`sourceLedger.ts` 改后全文、`actions.ts`/`App.tsx` 逐字片段、仓库侧 `isValidDateKey` 逐字补丁；验证记录 source-ledger 69、recurring 41、forecast 58；既有回归 .mjs 18 套 1,473 项＋.ts 9 套 477 项；双 typecheck 干净；隐私扫描零命中）。关键工件侧事实：`isValidDateKey` 本已是严格往返校验，三坏日均被拒、简报反例假设为 0——工件侧同缺陷不存在（构建方实测，未声称线上已复现）。
