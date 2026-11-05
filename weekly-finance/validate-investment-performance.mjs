@@ -17,6 +17,16 @@ import ts from "typescript";
 
 const src = readFileSync(new URL("./server/src/actions.ts", import.meta.url), "utf8");
 const appSrc = readFileSync(new URL("./client/src/App.tsx", import.meta.url), "utf8");
+// F3.2 (2026-11-02) wired buildDashboard to the real detectRecurringCharges
+// from ./recurringCharges (a zero-import pure module). The extracted bundle
+// must carry that module verbatim, or buildDashboard throws
+// "ReferenceError: detectRecurringCharges is not defined" (seen at HEAD
+// 2026-11-05). Transpiling the whole module keeps the real function plus
+// its helpers/consts in scope; no stub, no behaviour change.
+const recurringSrc = readFileSync(new URL("./server/src/recurringCharges.ts", import.meta.url), "utf8");
+const recurringBundle = ts.transpileModule(recurringSrc, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText;
 let passed = 0, failed = 0;
 function check(name, cond) {
   if (cond) { passed++; } else { failed++; console.log("FAIL:", name); }
@@ -47,7 +57,9 @@ const NAMES = [
 // the one module-level constant the extracted server functions read
 const excludedDecl = src.slice(src.indexOf("const excludedLiveSources"), src.indexOf("]);", src.indexOf("const excludedLiveSources")) + 3);
 const bundle = NAMES.map(extractFn).join("\n");
-const api = new Function(`${excludedDecl}\n${bundle}; return { ${NAMES.join(", ")} };`)();
+// The transpiled ./recurringCharges module writes `exports.*`, so the eval
+// scope needs the exports object (mirrors validate-available-cash.mjs).
+const api = new Function(`const exports = {};\n${excludedDecl}\n${recurringBundle}\n${bundle}; return { ${NAMES.join(", ")} };`)();
 const { normalizeRawMonths, aggregateMonths, computeInvestmentPerformance, normalizeFireMetrics, buildDashboard } = api;
 
 // --- fixtures (synthetic) ---
@@ -612,6 +624,23 @@ function fireBuild(extraSepEntries, holdings = []) {
   );
 }
 const fireBase = fireBuild([]);
+
+// --- F3.2 wiring regression (2026-11-05): buildDashboard must run the real
+// detectRecurringCharges from server/src/recurringCharges.ts, not a stub —
+// three monthly outflows for one merchant must be detected.
+const wiringMonths = normalizeRawMonths([{ key: "2026-09-30", entries: [E("bank_1234", "account", 10000)] }]);
+if (!wiringMonths.ok) throw new Error("fixture failed to normalize");
+const wiring = buildDashboard(AS_OF, wiringMonths.months, [], [], [
+  { date: "2026-08-10", amount: -1500, name: "Netflix", pending: false, internalTransfer: false },
+  { date: "2026-09-10", amount: -1500, name: "Netflix", pending: false, internalTransfer: false },
+  { date: "2026-10-10", amount: -1500, name: "Netflix", pending: false, internalTransfer: false },
+], null, null);
+check("F3.2 wiring: buildDashboard detects the real monthly charge (merchant/cadence/annualized)",
+  wiring !== null && wiring.recurringCharges.length === 1
+  && wiring.recurringCharges[0].merchant === "netflix"
+  && wiring.recurringCharges[0].cadence === "monthly"
+  && wiring.recurringCharges[0].lastAmount === 1500
+  && wiring.recurringCharges[0].annualizedCost === 18000);
 check("FIRE principal: progress uses the investment balance (110000 / 270000)",
   fireBase.fire.target === 270000 && Math.abs(fireBase.fire.progress - 110000 / 270000) < 1e-12
   && fireBase.fire.gap === 270000 - 110000 && fireBase.live.netWorth === 120000);

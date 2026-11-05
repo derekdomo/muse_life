@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-11-05 10:55 PST（muse-life-plans-sync 10:55 轮次：两验证器 F3.2 接线崩溃修复；面板只读核对）
+
+- 本轮队列核对（独立复核）：`git pull` 已最新（Already up to date）；基线 `d005b63` == HEAD，`git log --oneline d005b63..HEAD` 为空，工作树干净（临时验证软链已移除，见下）。新增编号条目 0，新增 PM 记录 0，PM 仍按 PAUSE-LIFE-PM-001 暂停。P0/P1 可执行队列：`F0.5`/`F3.3` 上轮（09:55）已交付溯源/日历守卫修复并回灌（65/65、117/117），两条仍 [ ] 待 PM 验收；`F3.1` 因 F0.5 coverage 门禁未齐备继续暂缓；`H-SYNC-DIVERGE-001` 待 PM 裁决（健康分项）；`W-HOMEB-002` 未到 11-16；`L0.x`/`L1.x`/`H0.x`/`H1.x` 等运行待验须本人实机证据；（需用户确认）条目不动。
+- 任务：修复 `validate-available-cash` / `validate-investment-performance` 在 HEAD 即崩溃（`ReferenceError: detectRecurringCharges is not defined`；自 2026-11-02 F3.2 接线后，`buildDashboard` 调用的 `detectRecurringCharges` 未进入 AST 抽取的 eval 作用域；09:55 轮次已记录、未修）。修复：两验证器在抽取 actions.ts 函数前，先将零 import 的 `server/src/recurringCharges.ts` 整模块转译并入 eval 作用域（真实函数＋helpers/consts，不用 stub、不改产品代码）；`validate-investment-performance.mjs` 另补 `const exports = {};`（转译模块写 `exports.*`）。各新增 1 项 F3.2 接线回归断言（3 笔月付 Netflix 流出 → merchant netflix / monthly / lastAmount 1500 / annualizedCost 18000）。
+- 验证（本机实跑，全合成数据；typescript 取自 space-3 现成 node_modules 的临时软链，验证后已移除、不入库）：validate-available-cash **102/102**、validate-investment-performance **107/107**（此前两套均在 `buildDashboard` 调用时崩溃）；回归 recurring-charges 32/32、cash-flow-forecast 117/117、monthly-facts 73/73、summary-cards 42/42、alerts 46/46、facts-card 149/149；source-ledger 65/65 与 tx-review 58/58 须 bun 运行（node 下 `bun:` import 既有限制，沿前例）。其余 `buildDashboard` 引用方：cash-flow-forecast 自有接线已过、monthly-facts 仅源码字符串断言，无同类崩溃。
+- 进度面板核对：「Life 进度」（slug life）本轮只读核对已派（inspection 待回传）；上轮已记录面板指针滞后一个纯登记提交（`a27dd60`/10:52 PST），刷新待核对回传后按先例处理。面板刷新本身按规则不单独向用户汇报。
+- plans.md：本轮未改动（无编号条目状态变化）。本轮未动 cron；修改文件：两验证器、本文件。
+
 ## 2026-11-05 10:51 PST（muse-life-plans-sync 09:55 轮次续：plans.md 登记位置纠正＋面板只读核对 e59aee87 回传）
 
 - 面板只读核对回传（inspection e59aee87，repair_authorized=false；回灌提交 `d3ac53a` 后另派）：面板四组计数全部与标题相符（条目 127、实现方队列 16、PM 反馈 15、等用户决定 7），全文 11 处「PM 已验收」均为否定式、无肯定式。唯一实质不一致是面板滞后当前 main HEAD：`F0.5` 仍写旧 validate-source-ledger 52/52、`F3.3` 仍写旧 validate-cash-flow-forecast 109/109，均未反映 changes.md 顶部记录的 2026-11-05 10 时 PST 已交付回灌（仓库实跑 65/65、117/117，另 recurring 32/32；两条仍未勾选、待 PM 验收）；页眉/页脚指针 main @ `aaab58b`、截至 10:00 PST 落后于当前 HEAD `d3ac53a`。另发现 `F3.2` 的 recurring 26/26 同样滞后（本仓版现为 32/32）。
