@@ -5753,7 +5753,13 @@ const deleteCategoryRuleResponse = z.object({
 // degrading honestly rather than blocking the tab):
 //   option_legs   [{ticker,type,exp,strike,contracts,premium,opened}]
 //   option_closes [{ticker,type,exp,strike,contracts,kind,closed,price?}]
-//   option_quotes {TICKER: {spot, iv, rv}}
+//   option_quotes {TICKER: {spot, iv, rv, rv30?}}
+//   earnings      {TICKER: {date, note}}
+//   gex           the gex_result payload ({_meta, symbols}; symbol
+//                 rows may carry callWall / putWall for the ladder)
+// F-DASH-P0-5: the dataset's own current_total feeds the
+// concentration section's denominator; rv30 feeds the vol /
+// edge panel. Both stay null when the push carries neither.
 //   earnings      {TICKER: {date, note}}
 //   gex           the gex_result payload ({_meta, symbols})
 // Without pushed legs, each open short row contributes one
@@ -5779,10 +5785,18 @@ const optionsTabOpenPositionSchema = z.object({
   spot: z.number().nullable(),
   iv: z.number().nullable(),
   strikeDistancePct: z.number().nullable(),
+  // F-DASH-P0-5 additive: uniform OTM caliber, BS Greeks,
+  // captured target marker, assignment obligation.
+  otmPct: z.number().nullable(),
   modelPrice: z.number().nullable(),
   modelNote: z.string(),
   capturedPct: z.number().nullable(),
+  capturedTargetReached: z.boolean(),
   unrealizedPnl: z.number().nullable(),
+  deltaShares: z.number().nullable(),
+  thetaPerDay: z.number().nullable(),
+  vegaPerPoint: z.number().nullable(),
+  assignmentObligation: z.number(),
   dataNote: z.string(),
   earningsDate: z.string().nullable(),
   earningsLocked: z.boolean(),
@@ -5824,6 +5838,20 @@ const optionsTabLotSchema = z.object({
   ccPremiumKnown: z.boolean(),
   calledAway: z.boolean(),
   statusText: z.string(),
+  // F-DASH-P0-5 additive: assigned-holdings market fields.
+  spot: z.number().nullable(),
+  marketValue: z.number().nullable(),
+  unrealizedPnl: z.number().nullable(),
+  unrealizedPct: z.number().nullable(),
+  ccAnchor: z.number(),
+  coveredCalls: z.array(
+    z.object({
+      strike: z.number(),
+      exp: z.string(),
+      contracts: z.number(),
+      shares: z.number(),
+    }),
+  ),
 });
 
 const optionsTabSchema = z.object({
@@ -5877,9 +5905,145 @@ const optionsTabSchema = z.object({
         flip: z.number().nullable(),
         spot: z.number().nullable(),
         flipDistancePct: z.number().nullable(),
+        // F-DASH-P0-5 additive: regime text, walls, ladder.
+        regimeText: z.string().nullable(),
+        callWall: z.number().nullable(),
+        putWall: z.number().nullable(),
+        ladder: z
+          .object({
+            min: z.number(),
+            max: z.number(),
+            markers: z.array(
+              z.object({
+                value: z.number(),
+                pct: z.number(),
+                side: z.enum(["above", "below"]),
+                tier: z.union([z.literal(0), z.literal(1)]),
+                kind: z.enum(["spot", "flip", "callWall", "putWall", "strike"]),
+                label: z.string(),
+                sub: z.string(),
+              }),
+            ),
+          })
+          .nullable(),
         stale: z.boolean(),
         dataState: z.enum(["ok", "zeroed"]),
         dataText: z.string(),
+      }),
+    ),
+  }),
+  // F-DASH-P0-5 additive: the eight merged wheel sections.
+  actions: z.array(
+    z.object({
+      kind: z.enum(["expiry", "gate", "earnings"]),
+      rank: z.number(),
+      symbol: z.string(),
+      text: z.string(),
+    }),
+  ),
+  volPanel: z.array(
+    z.object({
+      ticker: z.string(),
+      spot: z.number().nullable(),
+      iv30: z.number().nullable(),
+      rv20: z.number().nullable(),
+      rv30: z.number().nullable(),
+      spreadPp: z.number().nullable(),
+      state: z.enum(["positive", "negative", "unknown"]),
+      edgeText: z.string(),
+      verdict: z.string(),
+      earningsDate: z.string().nullable(),
+      earningsLocked: z.boolean(),
+    }),
+  ),
+  portfolioGreeks: z.object({
+    available: z.boolean(),
+    pricedContracts: z.number(),
+    openContracts: z.number(),
+    deltaShares: z.number().nullable(),
+    thetaPerDay: z.number().nullable(),
+    vegaPerPoint: z.number().nullable(),
+    unrealizedPnl: z.number().nullable(),
+  }),
+  concentration: z.object({
+    factorTickers: z.array(z.string()),
+    putObligation: z.number(),
+    putObligationLines: z.array(z.object({ ticker: z.string(), amount: z.number() })),
+    nonFactorPutObligation: z.number(),
+    assignedMarketValue: z.number().nullable(),
+    assignedMissingSpotTickers: z.array(z.string()),
+    exposure: z.number().nullable(),
+    portfolioTotal: z.number().nullable(),
+    exposurePct: z.number().nullable(),
+    capFraction: z.number(),
+    capAmount: z.number().nullable(),
+    headroom: z.number().nullable(),
+    overLimit: z.boolean(),
+  }),
+  dualLedger: z.object({
+    caliberA: z.object({
+      realizedOptionsPnl: z.number(),
+      realizedComplete: z.boolean(),
+      realizedLines: z.array(
+        z.object({
+          ticker: z.string(),
+          exp: z.string(),
+          strike: z.number(),
+          type: z.enum(["put", "call"]),
+          outcomeText: z.string(),
+          amount: z.number().nullable(),
+          complete: z.boolean(),
+        }),
+      ),
+      basisPremiumTotal: z.number(),
+      basisLines: z.array(
+        z.object({
+          ticker: z.string(),
+          strike: z.number(),
+          effectiveCost: z.number(),
+          amount: z.number(),
+        }),
+      ),
+    }),
+    caliberB: z.object({
+      realizedOptionsPnl: z.number(),
+      assignedUnrealized: z.number().nullable(),
+      openUnrealizedPut: z.number().nullable(),
+      openUnrealizedCall: z.number().nullable(),
+      openUnrealized: z.number().nullable(),
+      total: z.number().nullable(),
+    }),
+  }),
+  management: z.object({
+    rows: z.array(
+      z.object({
+        key: z.string(),
+        ticker: z.string(),
+        kindLabel: z.string(),
+        exp: z.string(),
+        strike: z.number(),
+        contracts: z.number(),
+        daysToExpiry: z.number(),
+        rolls: z.number(),
+        rollLimit: z.number(),
+        rollsSource: z.string(),
+        nodePassed: z.boolean(),
+        nodeText: z.string(),
+        capturedPct: z.number().nullable(),
+        capturedTargetReached: z.boolean(),
+        otmPct: z.number().nullable(),
+        unrealizedPnl: z.number().nullable(),
+      }),
+    ),
+    earningsWindow: z.array(
+      z.object({
+        ticker: z.string(),
+        date: z.string().nullable(),
+        daysUntil: z.number().nullable(),
+        state: z.enum(["inside", "outside", "unrecorded"]),
+        stateText: z.string(),
+        gateSpreadPp: z.number().nullable(),
+        gateText: z.string(),
       }),
     ),
   }),
@@ -5967,6 +6131,7 @@ function buildOptionsTabViewFromTrading(
         spot: optionsFinite(quote["spot"]),
         iv: optionsFinite(quote["iv"]),
         rv: optionsFinite(quote["rv"]),
+        rv30: optionsFinite(quote["rv30"]) ?? optionsFinite(quote["rv_30"]),
       };
     }
   }
@@ -5981,7 +6146,7 @@ function buildOptionsTabViewFromTrading(
     if (existing) {
       if (existing.spot == null) existing.spot = price;
     } else {
-      quotes[ticker] = { spot: price, iv: null, rv: null };
+      quotes[ticker] = { spot: price, iv: null, rv: null, rv30: null };
     }
   }
 
@@ -6087,6 +6252,8 @@ function buildOptionsTabViewFromTrading(
         netGex: optionsFinite(symbol["netGex"]) ?? optionsFinite(symbol["net_gex"]) ?? optionsFinite(symbol["gex"]),
         flip: optionsFinite(symbol["flip"]) ?? optionsFinite(symbol["gamma_flip"]) ?? optionsFinite(symbol["flip_price"]),
         spot: optionsFinite(symbol["spot"]) ?? optionsFinite(symbol["price"]),
+        callWall: optionsFinite(symbol["callWall"]) ?? optionsFinite(symbol["call_wall"]),
+        putWall: optionsFinite(symbol["putWall"]) ?? optionsFinite(symbol["put_wall"]),
         stale: symbol["stale"] === true,
       };
     }
@@ -6108,6 +6275,7 @@ function buildOptionsTabViewFromTrading(
     earnings,
     gex,
     rollsOverride: { ...ROLLS_OVERRIDE },
+    portfolioTotal: optionsFinite(trading["current_total"]),
     structuredLegs,
   });
 }

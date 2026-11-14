@@ -1118,6 +1118,37 @@ footer p { margin: 3px 0; }
 .options-row { min-height: 44px; }
 .options-gate--blocked { opacity: 0.55; }
 
+/* F-DASH-P0-5 GEX price ladder: one horizontal track, markers
+   for spot / flip / both walls / open strikes. Labels live in
+   two rows (above / below) with a near and a far tier per row
+   — the server assigns side + tier so labels never overlap.
+   Colour only assists: every marker carries its price and a
+   text sub-label. */
+.gex-ladder { position: relative; height: 148px; margin-top: 10px; }
+.gex-ladder-track {
+  position: absolute; left: 0; right: 0; top: 71px; height: 3px;
+  border-radius: 2px; background: var(--border);
+}
+.gex-marker { position: absolute; top: 0; height: 148px; width: 0; }
+.gex-marker-line { position: absolute; left: -1px; width: 2px; background: var(--dim); }
+.gex-marker--above .gex-marker-line { top: 61px; height: 10px; }
+.gex-marker--below .gex-marker-line { top: 74px; height: 10px; }
+.gex-marker--above.gex-marker--tier1 .gex-marker-line { top: 35px; height: 36px; opacity: .55; }
+.gex-marker--below.gex-marker--tier1 .gex-marker-line { top: 74px; height: 36px; opacity: .55; }
+.gex-marker--spot .gex-marker-line { background: var(--text); }
+.gex-marker--flip .gex-marker-line { background: var(--accent); }
+.gex-marker--strike .gex-marker-line { background: var(--down); }
+.gex-marker-tag {
+  position: absolute; left: 0; width: 88px; text-align: center;
+  font-size: 11px; line-height: 1.3;
+}
+.gex-marker-tag b { display: block; font-size: 11px; white-space: nowrap; }
+.gex-marker-tag small { display: block; color: var(--dim); font-size: 10px; white-space: nowrap; }
+.gex-marker--above .gex-marker-tag { top: 27px; }
+.gex-marker--above.gex-marker--tier1 .gex-marker-tag { top: 1px; }
+.gex-marker--below .gex-marker-tag { top: 88px; }
+.gex-marker--below.gex-marker--tier1 .gex-marker-tag { top: 114px; }
+
 /* F-DASH-P0-4: overview upgrade blocks — freshness line,
    dual net-worth hero, fact action bar, TWR/MWR pair with
    the three-factor split. Display-only; meaning rides on
