@@ -271,7 +271,7 @@ export type RecurringTransactionInput = {
   direction?: string | null;
 };
 
-/** 在线形状的周期扣费（供 cashFlowForecast.ts 消费；字段名与生产侧一致） */
+/** 在线形状的周期扣费（供 cashFlowForecast.ts 消费；完整线上形状，13 字段与 space-3 生产侧 RecurringCharge 逐字段一致——2026-11-14 F-DASH-P0-1 对齐补齐 previousAmount/annualizedCost/priceDelta/pricePercent/priceDirection 五字段） */
 export type OnlineRecurringCharge = {
   /** 最新一笔 name.trim()（生产侧 merchant 语义） */
   merchant: string;
@@ -283,10 +283,20 @@ export type OnlineRecurringCharge = {
   occurrences: number;
   /** 最近一笔金额（绝对值） */
   latestAmount: number;
+  /** 上一笔金额（绝对值；由 lastAmount − priceChange.amountDelta 反推，金额 ≤2 位小数时与线上逐笔取整一致） */
+  previousAmount: number;
   /** 最近一笔日期 YYYY-MM-DD */
   latestDate: string;
   /** 中位数间隔（天） */
   medianIntervalDays: number;
+  /** 年化成本（最近金额 × 因子，与本仓值相同） */
+  annualizedCost: number;
+  /** 价格变化金额（最近 − 上一笔，与 priceChange.amountDelta 相同） */
+  priceDelta: number;
+  /** 价格变化比例（分数口径，与线上一致：priceDelta / previousAmount；上一笔为 0 时 null） */
+  pricePercent: number | null;
+  /** 价格方向（与 priceChange.direction 相同） */
+  priceDirection: "up" | "down" | "flat";
   /** 下次预计扣费日 YYYY-MM-DD */
   nextExpectedDate: string;
 };
@@ -382,7 +392,14 @@ export function classifyCadence(
  * 适配：金额翻转（Plaid 流出为正 → 本仓流出为负）、name 归一为 merchant；
  * 内部窗口/门槛/因子逐字复用本仓 detectRecurringCharges；输出 cadence 经
  * toOnlineCadence 单点转换（annual→yearly），merchant 取最新一笔 name.trim()
- * （与生产侧输出语义一致），其余字段逐项映射。
+ * （与生产侧输出语义一致），其余字段逐项映射。输出为完整线上形状（13 字段，
+ * 与生产侧 RecurringCharge 逐字段一致；2026-11-14 F-DASH-P0-1 对齐补齐）：
+ * previousAmount 由 lastAmount − amountDelta 反推（金额 ≤2 位小数时与线上
+ * 逐笔取整一致）；pricePercent 为分数口径、上一笔为 0 时 null（线上语义，
+ * 本仓 pctDelta 在该情形为 0，不采用）；输出顺序为年化成本降序、年化相等时
+ * 按归一化商户名升序（与生产侧一致）。已知边界差异（与生产侧逐字实现相比）：
+ * 同日同商户多笔时，生产侧按（日期，金额）排序取最大额为最新一笔，本仓按
+ * 日期稳定排序取输入序最后一位——生产金额极少同日多笔，差异仅存于人造输入。
  */
 export function detectRecurringChargesOnline(
   transactions: RecurringTransactionInput[] | null | undefined,
@@ -409,14 +426,31 @@ export function detectRecurringChargesOnline(
       latestNameByKey.set(key, { dateNum: dn, name: a.merchant ?? "" });
   }
 
-  return rows.map((r) => ({
-    merchant: (latestNameByKey.get(r.merchant)?.name ?? r.merchant).trim(),
-    normalizedMerchant: r.merchant,
-    cadence: toOnlineCadence(r.cadence),
-    occurrences: r.occurrences,
-    latestAmount: r.lastAmount,
-    latestDate: r.lastDate,
-    medianIntervalDays: r.medianIntervalDays,
-    nextExpectedDate: r.nextExpectedDate,
-  }));
+  // 线上输出顺序：年化成本降序，年化相等时按归一化商户名升序（与生产侧一致）。
+  return rows
+    .map((r) => {
+      // previousAmount 由本仓输出反推：lastAmount 与 amountDelta 均为分取整，
+      // 金额 ≤2 位小数时与线上逐笔取整逐字一致；超 2 位小数的人造输入可能差 1 分。
+      const previousAmount = round2(r.lastAmount - r.priceChange.amountDelta);
+      return {
+        merchant: (latestNameByKey.get(r.merchant)?.name ?? r.merchant).trim(),
+        normalizedMerchant: r.merchant,
+        cadence: toOnlineCadence(r.cadence),
+        occurrences: r.occurrences,
+        latestAmount: r.lastAmount,
+        previousAmount,
+        latestDate: r.lastDate,
+        medianIntervalDays: r.medianIntervalDays,
+        annualizedCost: r.annualizedCost,
+        priceDelta: r.priceChange.amountDelta,
+        // 线上语义：分数口径（非百分点）；上一笔为 0 时 null（本仓 pctDelta 在该情形为 0，不采用）。
+        pricePercent: previousAmount === 0 ? null : r.priceChange.amountDelta / previousAmount,
+        priceDirection: r.priceChange.direction,
+        nextExpectedDate: r.nextExpectedDate,
+      };
+    })
+    .sort((a, b) => {
+      if (b.annualizedCost !== a.annualizedCost) return b.annualizedCost - a.annualizedCost;
+      return a.normalizedMerchant.localeCompare(b.normalizedMerchant);
+    });
 }

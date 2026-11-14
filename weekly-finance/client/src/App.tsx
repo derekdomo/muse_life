@@ -473,9 +473,9 @@ export function monthAvailabilityFacts(months: Month[], now: Date): Array<{ labe
 // transaction coverage is only ever stated through the per-month
 // spend provenance the months themselves carry.
 // F0.5 rework (per-source dates): the snapshot asOf is ONLY the
-// total snapshot generation time （总快照时间， the band labels it
-// as such) — it is never a per-source data date or a per-source
-// last-success time. The bank row's
+// total snapshot generation time （总快照时间， the band labels
+// it as such) — it is never a per-source data date or a
+// per-source last-success time. The bank row's
 // date is the balanceDate evidence the account rows themselves
 // retain, ALWAYS stated with its date coverage （日期已知 x/y):
 // a known date describes only the accounts that carry date

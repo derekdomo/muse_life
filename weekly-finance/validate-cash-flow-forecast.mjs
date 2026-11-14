@@ -181,6 +181,75 @@ assert(
   assert("name别名可分组识别", r.length === 1 && r[0].cadence === "monthly", JSON.stringify(r.length));
 }
 
+// ---------- 6b. detectRecurringChargesOnline 完整线上形状（F-DASH-P0-1 对齐，2026-11-14） ----------
+// 线上 RecurringCharge 为 13 字段；本节逐项断言适配器输出与线上逐字段一致
+// （previousAmount/annualizedCost/priceDelta/pricePercent/priceDirection 为本轮补齐）。
+{
+  const T = "2026-10-20";
+  const liveKeys = ["merchant", "normalizedMerchant", "cadence", "occurrences", "latestAmount", "previousAmount", "latestDate", "medianIntervalDays", "annualizedCost", "priceDelta", "pricePercent", "priceDirection", "nextExpectedDate"];
+  const t = [
+    otx("2026-08-15", 14.99, "Netflix"),
+    otx("2026-09-15", 15.99, "Netflix"),
+    otx("2026-10-15", 17.99, "Netflix"),
+  ];
+  const r = rc.detectRecurringChargesOnline(t, { today: T });
+  assert("涨价识别1项", r.length === 1, JSON.stringify(r.length));
+  assert("输出键集=线上13字段", JSON.stringify(Object.keys(r[0]).sort()) === JSON.stringify([...liveKeys].sort()), JSON.stringify(Object.keys(r[0])));
+  assert("previousAmount=15.99", r[0]?.previousAmount === 15.99, String(r[0]?.previousAmount));
+  assert("priceDelta=2", r[0]?.priceDelta === 2, String(r[0]?.priceDelta));
+  assert("pricePercent为分数口径2/15.99", Math.abs(r[0]?.pricePercent - 0.1250781738586614) < 1e-9, String(r[0]?.pricePercent));
+  assert("priceDirection=up", r[0]?.priceDirection === "up", r[0]?.priceDirection);
+  assert("annualizedCost=215.88", r[0]?.annualizedCost === 215.88, String(r[0]?.annualizedCost));
+}
+{
+  // 持平：delta 0、percent 0（分数）、direction flat
+  const T = "2026-10-20";
+  const t = [
+    otx("2026-08-15", 10, "Hulu"),
+    otx("2026-09-15", 10, "Hulu"),
+    otx("2026-10-15", 10, "Hulu"),
+  ];
+  const r = rc.detectRecurringChargesOnline(t, { today: T });
+  assert("持平priceDelta=0", r[0]?.priceDelta === 0, String(r[0]?.priceDelta));
+  assert("持平pricePercent=0", r[0]?.pricePercent === 0, String(r[0]?.pricePercent));
+  assert("持平priceDirection=flat", r[0]?.priceDirection === "flat", r[0]?.priceDirection);
+}
+{
+  // 降价：delta −1、direction down、percent 为负分数
+  const T = "2026-10-20";
+  const t = [
+    otx("2026-08-15", 17.99, "HBO"),
+    otx("2026-09-15", 15.99, "HBO"),
+    otx("2026-10-15", 14.99, "HBO"),
+  ];
+  const r = rc.detectRecurringChargesOnline(t, { today: T });
+  assert("降价priceDelta=-1", r[0]?.priceDelta === -1, String(r[0]?.priceDelta));
+  assert("降价priceDirection=down", r[0]?.priceDirection === "down", r[0]?.priceDirection);
+  assert("降价pricePercent为负分数", Math.abs(r[0]?.pricePercent - -0.06253908692933083) < 1e-9, String(r[0]?.pricePercent));
+}
+{
+  // 年化相等时按归一化商户名升序（线上排序口径）
+  const T = "2026-10-20";
+  const t = [
+    otx("2026-08-15", 10, "BetaSvc"), otx("2026-09-15", 10, "BetaSvc"), otx("2026-10-15", 10, "BetaSvc"),
+    otx("2026-08-15", 10, "AlphaSvc"), otx("2026-09-15", 10, "AlphaSvc"), otx("2026-10-15", 10, "AlphaSvc"),
+  ];
+  const r = rc.detectRecurringChargesOnline(t, { today: T });
+  assert("年化相等按商户名升序", r.length === 2 && r[0].normalizedMerchant === "alphasvc" && r[1].normalizedMerchant === "betasvc", JSON.stringify(r.map((x) => x.normalizedMerchant)));
+}
+{
+  // 上一笔约 0（0.001 取整为 0）：previousAmount=0、pricePercent=null（线上语义；本仓 pctDelta 在该情形为 0，不采用）
+  const T = "2026-10-20";
+  const t = [
+    otx("2026-08-15", 10, "EdgeSvc"),
+    otx("2026-09-15", 0.001, "EdgeSvc"),
+    otx("2026-10-15", 10, "EdgeSvc"),
+  ];
+  const r = rc.detectRecurringChargesOnline(t, { today: T });
+  assert("上一笔取整为0", r.length === 1 && r[0].previousAmount === 0, JSON.stringify(r.map((x) => x.previousAmount)));
+  assert("上一笔为0时pricePercent=null", r[0]?.pricePercent === null, String(r[0]?.pricePercent));
+}
+
 // ---------- 7. 双端枚举/工具适配 ----------
 assert("annual→yearly", rc.toOnlineCadence("annual") === "yearly");
 assert("monthly恒等", rc.toOnlineCadence("monthly") === "monthly");
