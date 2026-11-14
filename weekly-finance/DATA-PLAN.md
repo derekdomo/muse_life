@@ -289,3 +289,25 @@ owner 视角实机以本人打开为准。
 **验证**：`validate-recurring-charges.mjs` **32/32**（本机实跑，合成数据）——新增三坏日拒绝＋闰日/月末/跨年对照、简报反例不凑周期、合法对照成周期，变异 M3（弱化 `dateToDayNumber` 守卫）真实执行翻转；`validate-cash-flow-forecast.mjs` **117/117**——新增简报反例全链（假设 0、无 04-29 落点）、合法对照（04-29 落点扣 10）、收入侧镜像、变异 M3 真实翻转。
 
 **如实保留**：本仓两套验证器为同步方重建（覆盖回灌包点名的全部夹具与变异），非工件逐字复制——工件计数为 recurring 41、forecast 58，本仓为 recurring 32、forecast 117：差异源于两端文件本就不同（工件版含在线 name/yearly 契约断言、本仓版为 merchant/annual 仓库变体且 forecast 文件含 109 项既有断言）；计数不同不代表覆盖缺失，夹具与变异均按回灌包逐项落地并本机实跑通过。工件侧上线为构建方登记，所有者本人打开确认未取得。
+
+## F-DASH-P0-1 口径统一：新看板唯一的「总资产」定义（2026-11-14）
+
+**背景**：`vol_panel.json` 的 `portfolio.portfolio_total_usd` 与 trading-journal `data.json` 的 `current_total` 口径不同，差额原因此前未核实（调研报告第五节遗留问题）。本轮以同一 Plaid 拉取（trading-journal `raw/holdings.json` 缓存，与 `data.json` 同一次拉取）逐项对账，差额逐项分解后残差为 0。本节只记口径定义与一致性结论，真实金额不入仓。
+
+**两口径的实际定义（实测确认）**：
+- vol_panel 口径（`portfolio.portfolio_total_usd`，`portfolio_asof: "live"`）：`vol_panel.py` 本身不计算该值，由调用方经 `--portfolio-usd` 命令行参数传入（未传时用脚本内 `PORTFOLIO_FALLBACK_USD` 旧值）；调用方（wheel-gex 每日刷新任务）传入的是 Plaid investments-holdings 全部 investment-type 账户 `balances.current` 合计（全部 subtype：brokerage / ira / roth / 401k / hsa / crypto exchange）。不含银行存款、不含房贷与信用卡、不含自住房、不含非 Plaid 账户；期权名义义务（`open_put_obligations_usd`）是独立的因子敞口字段，不计入该总额。
+- trading-journal 口径（`current_total`）：`build_data.py` 对 scope 账户（`type=investment` 且 `subtype ∈ {brokerage, ira, roth, crypto exchange}`）的全部 holdings 行 `institution_value` 求和（含期权市值、含加密持仓、含 `CUR:USD` 等现金类持仓行）。不含 401k/HSA 账户；不含未以持仓行呈现的账户内现金。
+
+**差额分解（逐项，残差为 0）**：
+1. 401k 三账户＋HSA 一账户：计入 vol_panel、不计入 trading-journal scope——差额的主要部分（约 99.6%）。
+2. 两 scope 账户内未以持仓行呈现的现金（Self-Directed、Crypto）：计入账户余额、不计入持仓市值——差额的其余部分。
+3. 其余 scope 账户（RH individual、Individual、RH IRA、BrokerageLink ×2）余额与持仓市值逐项相等，差额为 0；两拉取均为同一收盘价时点，无日期口径差。
+
+**新看板唯一的「总资产」定义（F-DASH-P0-1 定案，沿 F-ARCH-001 §1 延续）**：
+- 总资产 ＝ 全部资产账户最新余额之和：Plaid investment-type 账户 `balances.current` 合计 ＋ Plaid depository 账户 `balances.current` 合计 ＋ Firance 快照层非 Plaid 账户余额（沿用定期快照值、逐条标注日期）＋ 自住房估值（Firance 快照值，不称实时）。负债不计入总资产。
+- 净资产 ＝ 总资产 − 负债合计（房贷＋信用卡余额；沿现行 `liveNetWorth = liveInvestment + liveDeposits − liveLoans` 口径，信用卡余额同列扣减）。
+- 可投资资产 ＝ vol_panel 口径（全部 Plaid investment-type 账户 `balances.current` 合计；含 401k/HSA、含投资账户内现金）。可投资净值现行等于可投资资产（无投资相关负债），口径保留。
+- 交易持仓市值 ＝ trading-journal 口径（scope 账户证券 holdings 市值合计），仅用于交易页签，不作总资产或净资产；其与可投资资产的差额恒等于「401k/HSA 余额 ＋ 未以持仓行呈现的现金」，看板须在口径说明中写清该恒等式，不得把两者混称为总资产。
+- 新鲜度：总资产各层沿 F-ARCH 两层日期范围呈现（Plaid 层最新 asOf、快照层最旧 asOf）；未知/缺失账户不当 0，列入 `missing` 并明示；总资产不得用单一时点冒充全账户实时。
+
+**验证**：同一 Plaid 拉取逐项对账——投资账户余额合计与 vol_panel 总额逐项相等；持仓市值合计与 trading-journal `current_total` 逐项相等（差 0）；差额两项分解合计等于差额，残差 0。逐项数字由协调员侧存档，本仓只记口径定义与一致性结论。另核实：调研报告所引 vol_panel 总额实为 `portfolio.portfolio_total_usd`（嵌套字段，非顶层字段）；父代理提及的 `gex-scheduled-2026-11-05/vol_panel.json` 实际位于 `goals/wheel-put/hidden_files/gex-scheduled-2026-11-05/`（不在 `gex/` 下），其总额与该日 run_notes.md 所记 `--portfolio-usd` 传入值一致。
