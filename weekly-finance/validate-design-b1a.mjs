@@ -537,8 +537,8 @@ check("tabs: order is 总览 / FIRE / 明细 (FIRE-TAB-001)",
   && appSrc.indexOf(">总览</button>") < appSrc.indexOf(">FIRE</button>")
   && appSrc.indexOf(">FIRE</button>") < appSrc.indexOf(">明细</button>"));
 check("tabs: tab state is mount-time state in DashboardView, default overview",
-  appSrc.includes('useState<"overview" | "fire" | "detail" | "trading">("overview")')
-  && componentSlice("DashboardView").includes('useState<"overview" | "fire" | "detail" | "trading">("overview")'));
+  appSrc.includes('useState<"overview" | "fire" | "detail" | "trading" | "options">("overview")')
+  && componentSlice("DashboardView").includes('useState<"overview" | "fire" | "detail" | "trading" | "options">("overview")'));
 check("tabs: OverviewTab, FireTab and DetailTab components exist and render once each",
   appSrc.includes("function OverviewTab") && appSrc.includes("function FireTab") && appSrc.includes("function DetailTab")
   && (appSrc.split("<OverviewTab").length - 1) === 1 && (appSrc.split("<FireTab").length - 1) === 1 && (appSrc.split("<DetailTab").length - 1) === 1);

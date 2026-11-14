@@ -1110,3 +1110,48 @@ footer p { margin: 3px 0; }
 }
 .forecast-landing-day__items { color: var(--dim); overflow-wrap: anywhere; }
 .forecast-landing-day > b { font-size: 11px; text-align: right; }
+
+/* F-DASH-P0-3 options tab: rows keep the 44px touch rhythm;
+   a blocked IV−RV gate row is dimmed as a third channel next
+   to its ○ symbol and its full text (meaning never rides on
+   the dimming alone). */
+.options-row { min-height: 44px; }
+.options-gate--blocked { opacity: 0.55; }
+
+/* F-DASH-P0-4: overview upgrade blocks — freshness line,
+   dual net-worth hero, fact action bar, TWR/MWR pair with
+   the three-factor split. Display-only; meaning rides on
+   symbol + text + digits (never colour alone) and rows keep
+   a 44px rhythm. */
+.overview-freshness { margin: 0 0 10px; padding: 10px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.dual-hero { display: grid; gap: 10px 16px; margin-bottom: 10px; padding: 14px 16px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+@media (min-width: 720px) { .dual-hero { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); } .dual-hero__diff { grid-column: 1 / -1; } }
+.dual-hero h3 { margin: 0; font-size: 13px; letter-spacing: -.01em; color: var(--dim); }
+.dual-hero__main strong { display: block; margin-top: 4px; font-size: 30px; font-weight: 760; letter-spacing: -.02em; line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.dual-hero__side { display: grid; align-content: start; gap: 4px; }
+.dual-hero__total { font-size: 19px; font-weight: 720; line-height: 1.25; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.dual-hero p { margin: 4px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.dual-hero__diff { margin: 0; padding-top: 8px; border-top: 1px solid var(--border); color: var(--text); font-size: 12px; }
+.overview-actions { margin-bottom: 10px; padding: 2px 16px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.overview-actions__list { display: grid; margin: 0; padding: 0; list-style: none; }
+.overview-action { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 12px; line-height: 1.55; }
+.overview-action:first-child { border-top: none; }
+.overview-action__symbol { flex: none; width: 16px; text-align: center; font-weight: 720; }
+.return-metrics { margin-bottom: 10px; padding: 14px 16px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.return-metrics h3 { margin: 0 0 8px; font-size: 14px; letter-spacing: -.01em; }
+.return-metrics__pair { display: grid; gap: 10px 16px; }
+@media (min-width: 720px) { .return-metrics__pair { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.return-metric { display: grid; gap: 3px; }
+.return-metric__label { font-size: 12px; font-weight: 720; }
+.return-metric strong { font-size: 20px; font-weight: 740; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.return-metric p { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.return-metrics__interval { margin: 8px 0 0; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.return-factors { margin-top: 10px; border-top: 1px solid var(--border); }
+.return-factor { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; min-height: 44px; border-top: 1px solid var(--border); font-size: 12px; }
+.return-factor:first-child { border-top: none; }
+.return-factor__label { display: grid; gap: 2px; font-weight: 650; overflow-wrap: anywhere; }
+.return-factor__note { color: var(--dim); font-size: 10px; font-weight: 400; }
+.return-factor > b { font-variant-numeric: tabular-nums; text-align: right; }
+.return-factor__share { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.return-factors__total, .return-factors__diff { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
+.return-factors__diff { color: var(--dim); }

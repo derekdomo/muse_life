@@ -17,6 +17,7 @@ YAxis,
 } from "recharts";
 import { api, type ApiResponse } from "./api";
 import { TradingTab } from "./TradingTab";
+import { OptionsTab, type OptionsTabData } from "./OptionsTab";
 
 type Dashboard = NonNullable<ApiResponse<typeof api, "getDashboard">["data"]>;
 type Month = Dashboard["months"][number];
@@ -3760,6 +3761,132 @@ function TopSummaryCards({
 // folded) → one-line FIRE summary → net-worth daily series
 // (with its near-7-day change row) → daily-spend summary strip
 // (near-7-day row + coverage meta + 查看日历明细 jump).
+// F-DASH-P0-4 overview upgrade (purely additive): the dual
+// net-worth hero, the fact action bar, the TWR/MWR return
+// pair with its three-factor split, and the Plaid freshness
+// line. Every figure is computed SERVER-side by the pure
+// overviewUpgrade module and rides getDashboard's additive
+// `overviewUpgrade` field; these components render it
+// verbatim and compute nothing. Missing components read
+// 暂无可比数据 / 暂无可比 / 新鲜度未核实 — never a filled-in
+// number. Meaning rides on symbol + text + digits together,
+// never on colour alone.
+export type OverviewUpgradeData = NonNullable<ApiResponse<typeof api, "getDashboard">["overviewUpgrade"]>;
+
+const freshnessTimeLabel = new Intl.DateTimeFormat("zh-CN", {
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZoneName: "short",
+});
+
+function OverviewFreshnessLine({ view }: { view: OverviewUpgradeData }) {
+  const freshness = view.freshness;
+  const priceRange =
+    freshness.priceDateMin != null && freshness.priceDateMax != null
+      ? `持仓价格日期 ${freshness.priceDateMin.slice(5)} 至 ${freshness.priceDateMax.slice(5)}`
+      : "持仓价格日期未收录";
+  const pulled =
+    freshness.generatedAt != null
+      ? `数据拉取时间 ${freshnessTimeLabel.format(new Date(freshness.generatedAt))}`
+      : "数据拉取时间未收录";
+  const volPanel =
+    freshness.volPanelAsOf != null ? `vol_panel asof ${freshness.volPanelAsOf}` : "vol_panel asof 未收录";
+  return (
+    <p className="overview-freshness" aria-label="数据新鲜度">
+      {freshness.verified ? "● " : `○ ${freshness.unverifiedText} · `}
+      {priceRange} · {pulled} · {volPanel}
+    </p>
+  );
+}
+
+function DualNetWorthHero({ dual }: { dual: OverviewUpgradeData["dualNetWorth"] }) {
+  return (
+    <section className="dual-hero" aria-label="双净值">
+      <div className="dual-hero__main">
+        <h3>可投资净值</h3>
+        <strong>{dual.investableAvailable && dual.investable != null ? currency.format(dual.investable) : "暂无可比数据"}</strong>
+        <p>{dual.investableNote}</p>
+      </div>
+      <div className="dual-hero__side">
+        <h3>总净值</h3>
+        <span className="dual-hero__total">{dual.totalAvailable && dual.total != null ? currency.format(dual.total) : "暂无可比数据"}</span>
+        <p>{dual.totalNote}</p>
+      </div>
+      {dual.difference != null && dual.bankDeposits != null && dual.loans != null ? (
+        <p className="dual-hero__diff">
+          差额 {signedCurrency(dual.difference)}：银行存款 {currency.format(dual.bankDeposits)}
+          {dual.homeValue != null ? ` + 自住房估值 ${currency.format(dual.homeValue)}` : ""} − 负债 {currency.format(dual.loans)}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+// The action bar renders NOTHING when no fact qualifies —
+// no empty block, no placeholder.
+function OverviewActionBar({ items }: { items: OverviewUpgradeData["actions"] }) {
+  if (items.length === 0) return null;
+  return (
+    <section className="overview-actions" aria-label="行动条">
+      <ul className="overview-actions__list">
+        {items.map((item, index) => (
+          <li className="overview-action" key={`${item.kind}-${index}`}>
+            <span className="overview-action__symbol" aria-hidden="true">{item.symbol}</span>
+            <span>{item.text}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ReturnMetricsSection({ view }: { view: OverviewUpgradeData }) {
+  const returns = view.returns;
+  const factors = view.factors;
+  const interval =
+    returns.startDate != null && returns.endDate != null
+      ? `计算区间 ${returns.startDate} 至 ${returns.endDate} · ${returns.days} 天`
+      : "计算区间未收录";
+  return (
+    <section className="return-metrics" aria-label="回报口径">
+      <h3>回报口径</h3>
+      <div className="return-metrics__pair">
+        <div className="return-metric">
+          <span className="return-metric__label">时间加权回报率 TWR</span>
+          <strong>{returns.twr != null ? `${trendIndicator(returns.twr)} ${percent.format(returns.twr)}` : "暂无可比"}</strong>
+          <p>{returns.twrNote}</p>
+        </div>
+        <div className="return-metric">
+          <span className="return-metric__label">资金加权回报率 MWR</span>
+          <strong>{returns.mwr != null ? `${trendIndicator(returns.mwr)} ${percent.format(returns.mwr)}` : "暂无可比"}</strong>
+          <p>{returns.mwrNote}</p>
+        </div>
+      </div>
+      <p className="return-metrics__interval">{interval}</p>
+      <div className="return-factors" aria-label="回报三因子拆分">
+        {factors.factors.map((factor) => (
+          <div className="return-factor" key={factor.key}>
+            <span className="return-factor__label">
+              {factor.label}
+              {factor.note != null ? <span className="return-factor__note">{factor.note}</span> : null}
+            </span>
+            <b>{factor.amount != null ? signedCurrency(factor.amount) : "暂无可比"}</b>
+            <span className="return-factor__share">{factor.share != null ? `占比 ${percent.format(factor.share)}` : "占比 —"}</span>
+          </div>
+        ))}
+        {factors.totalReturn != null ? (
+          <p className="return-factors__total">区间总回报 {signedCurrency(factors.totalReturn)}</p>
+        ) : null}
+        {factors.difference != null && factors.differenceReason != null ? (
+          <p className="return-factors__diff">勾稽差 {signedCurrency(factors.difference)} · {factors.differenceReason}</p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function OverviewTab({
   data,
   refreshFailed,
@@ -3771,6 +3898,7 @@ function OverviewTab({
   emergencyShortNote,
   anomalyMonths,
   excludedCashSources,
+  overviewUpgrade,
   onOpenFireTab,
   onViewCalendar,
 }: {
@@ -3784,11 +3912,15 @@ function OverviewTab({
   emergencyShortNote: string | null;
   anomalyMonths: Month[];
   excludedCashSources: ReadonlySet<string>;
+  overviewUpgrade: OverviewUpgradeData | null;
   onOpenFireTab: () => void;
   onViewCalendar: () => void;
 }) {
   return (
     <>
+      {overviewUpgrade ? <OverviewFreshnessLine view={overviewUpgrade} /> : null}
+      {overviewUpgrade ? <DualNetWorthHero dual={overviewUpgrade.dualNetWorth} /> : null}
+      {overviewUpgrade ? <OverviewActionBar items={overviewUpgrade.actions} /> : null}
       <TopSummaryCards data={data} current={current} coverage={coverage} spendBasis={spendBasis} trialActive={excludedCashSources.size > 0} />
       <FactAlertsSection data={data} coverageMonths={coverage.months} />
       <TotalAssetsConclusionCard data={data} refreshFailed={refreshFailed} />
@@ -3816,6 +3948,7 @@ function OverviewTab({
           <NetWorthDailySeries months={data.months} series={data.archNetWorthSeries} />
         </div>
       ) : null}
+      {overviewUpgrade ? <ReturnMetricsSection view={overviewUpgrade} /> : null}
       <DailySpendSummaryStrip data={data} onViewCalendar={onViewCalendar} />
     </>
   );
@@ -4511,17 +4644,19 @@ function DetailTab({
   );
 }
 
-// DAILY-MERGE-001 corrected + FIRE-TAB-001 + TRADING-MERGE-001:
-// DashboardView is the state-holding parent shell for the four
-// tabs （总览 / FIRE / 明细 / 交易）. It owns the tab state
-// (mount-time only, default 「总览」, never persisted), the
-// trend range and the available-cash trial selection, so
-// switching tabs never loses either; every feature keeps
-// exactly one rendering home in exactly one tab. The 交易 tab
-// renders only the trading dataset (getDashboard's optional
-// `trading` field) — none of the finance sections move.
-function DashboardView({ data, refreshFailed, trading, txReviewQueue }: { data: Dashboard; refreshFailed: boolean; trading: Record<string, unknown> | null; txReviewQueue: TxReviewQueueData | null }) {
-  const [activeTab, setActiveTab] = useState<"overview" | "fire" | "detail" | "trading">("overview");
+// DAILY-MERGE-001 corrected + FIRE-TAB-001 + TRADING-MERGE-001
+// + F-DASH-P0-3: DashboardView is the state-holding parent
+// shell for the five tabs （总览 / FIRE / 明细 / 交易 / 期权）. It
+// owns the tab state (mount-time only, default 「总览」, never
+// persisted), the trend range and the available-cash trial
+// selection, so switching tabs never loses either; every
+// feature keeps exactly one rendering home in exactly one tab.
+// The 交易 tab renders only the trading dataset (getDashboard's
+// optional `trading` field) and the 期权 tab only the
+// server-computed options view (the additive `optionsTab`
+// field) — none of the finance sections move.
+function DashboardView({ data, refreshFailed, trading, txReviewQueue, optionsTab, overviewUpgrade }: { data: Dashboard; refreshFailed: boolean; trading: Record<string, unknown> | null; txReviewQueue: TxReviewQueueData | null; optionsTab: OptionsTabData | null; overviewUpgrade: OverviewUpgradeData | null }) {
+  const [activeTab, setActiveTab] = useState<"overview" | "fire" | "detail" | "trading" | "options">("overview");
   const [range, setRange] = useState<Range>("12m");
   // F1.1: the owner's available-cash trial selection. Page-local
   // state only — never persisted, never sent to the server.
@@ -4612,6 +4747,7 @@ function DashboardView({ data, refreshFailed, trading, txReviewQueue }: { data: 
         <button type="button" role="tab" aria-selected={activeTab === "fire"} className={activeTab === "fire" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("fire")}>FIRE</button>
         <button type="button" role="tab" aria-selected={activeTab === "detail"} className={activeTab === "detail" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("detail")}>明细</button>
         <button type="button" role="tab" aria-selected={activeTab === "trading"} className={activeTab === "trading" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("trading")}>交易</button>
+        <button type="button" role="tab" aria-selected={activeTab === "options"} className={activeTab === "options" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("options")}>期权</button>
       </div>
       {activeTab === "overview" ? (
         <OverviewTab
@@ -4625,6 +4761,7 @@ function DashboardView({ data, refreshFailed, trading, txReviewQueue }: { data: 
           emergencyShortNote={emergencyShortNote}
           anomalyMonths={anomalyMonths}
           excludedCashSources={excludedCashSources}
+          overviewUpgrade={overviewUpgrade}
           onOpenFireTab={openFireTab}
           onViewCalendar={viewCalendar}
         />
@@ -4632,6 +4769,8 @@ function DashboardView({ data, refreshFailed, trading, txReviewQueue }: { data: 
         <FireTab data={data} spendBasis={spendBasis} />
       ) : activeTab === "trading" ? (
         <TradingTab trading={trading} />
+      ) : activeTab === "options" ? (
+        <OptionsTab view={optionsTab} />
       ) : (
         <DetailTab
           data={data}
@@ -5385,7 +5524,7 @@ export function App() {
         ) : guestDenied ? (
           <div className="state-screen private-state"><div className="private-state__mark" aria-hidden="true">$</div><h1>财务数据仅所有者可查看</h1><p>此看板包含私人账户与持仓信息，已停止向共享访客展示。</p></div>
         ) : response?.data ? (
-          <DashboardView data={response.data} refreshFailed={status === "error"} trading={response.trading ?? null} txReviewQueue={response.txReviewQueue ?? null} />
+          <DashboardView data={response.data} refreshFailed={status === "error"} trading={response.trading ?? null} txReviewQueue={response.txReviewQueue ?? null} optionsTab={response.optionsTab ?? null} overviewUpgrade={response.overviewUpgrade ?? null} />
         ) : status === "error" ? (
           <div className="empty-state">
             <div className="empty-state__rule" />

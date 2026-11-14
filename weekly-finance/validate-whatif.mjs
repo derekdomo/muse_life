@@ -154,11 +154,11 @@ function sliceFn(name, next) {
 const fireTab = sliceFn("FireTab", "ArchDemoPreviewSection");
 check("wiring: panel renders inside the FIRE tab, tab structure untouched",
   fireTab.includes("<WhatIfPanel") && fireTab.includes('id="fire-panel"') && !fireTab.includes("<details")
-  && appSrc.includes('useState<"overview" | "fire" | "detail" | "trading">("overview")'));
+  && appSrc.includes('useState<"overview" | "fire" | "detail" | "trading" | "options">("overview")'));
 const panel = sliceFn("WhatIfPanel", "FireProgress");
+const goalBlock = sliceFn("WhatIfGoalBlock", "WhatIfPanel");
 check("wiring: panel is pure UI state — no action call, no storage, no persistence",
   !panel.includes("api.") && !panel.includes("localStorage") && !panel.includes("sessionStorage") && panel.includes("useState"));
-const goalBlock = sliceFn("WhatIfGoalBlock", "WhatIfPanel");
 check("wiring: assumptions printed next to the results (F1.1 / F1.3 calibers + linear label)",
   panel.includes("F1.1 口径") && panel.includes("F1.3 口径一致") && panel.includes("线性估算，不含投资回报")
   && goalBlock.includes("whatif-assumption") && panel.includes("未在目标之间分配"));

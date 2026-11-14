@@ -18,6 +18,26 @@ import {
   type SourceLedgerAccountFact,
   type SourceLedgerMonthFact,
 } from "./sourceLedger";
+import {
+  buildOptionsTabView,
+  campaignKeyOf,
+  isRealDateText as isRealOptionsDateText,
+  ROLLS_OVERRIDE,
+  type OptionsTabCloseInput,
+  type OptionsTabCloseKind,
+  type OptionsTabGexInput,
+  type OptionsTabInput,
+  type OptionsTabLegInput,
+  type OptionsTabOpenOptionInput,
+  type OptionsTabOptionType,
+  type OptionsTabView,
+} from "./optionsTab";
+import {
+  buildOverviewUpgrade,
+  type OverviewActionClosedTrade,
+  type OverviewDailyPoint,
+  type OverviewUpgradeView,
+} from "./overviewUpgrade";
 
 const financeTypeSchema = z.enum([
   "investment",
@@ -5720,9 +5740,604 @@ const deleteCategoryRuleResponse = z.object({
   deleted: z.boolean(),
 });
 
+// ---------- F-DASH-P0-3 「期权」页签 (additive, render-only) ----------
+//
+// The view is computed SERVER-side by the zero-import pure
+// module server/src/optionsTab.ts from the stored trading
+// dataset; the client renders it verbatim. Additive sibling
+// field on getDashboard — null for guests and until the first
+// trading push. No schema/migration: the dataset document is
+// the same free-form record the trading pipeline already
+// pushes. Optional document keys the adapter reads when a push
+// carries them (all absent in the current push contract, each
+// degrading honestly rather than blocking the tab):
+//   option_legs   [{ticker,type,exp,strike,contracts,premium,opened}]
+//   option_closes [{ticker,type,exp,strike,contracts,kind,closed,price?}]
+//   option_quotes {TICKER: {spot, iv, rv}}
+//   earnings      {TICKER: {date, note}}
+//   gex           the gex_result payload ({_meta, symbols})
+// Without pushed legs, each open short row contributes one
+// open lot (its average premium) so open campaigns still form;
+// historical buy-back / assignment legs stay unrecorded until
+// the push carries them (structuredLegs=false says so on the
+// page). Spot falls back to the dataset's own stock-position
+// prices; IV/RV/GEX/earnings stay null/unavailable rather than
+// invented.
+const optionsTabOpenPositionSchema = z.object({
+  key: z.string(),
+  ticker: z.string(),
+  kind: z.enum(["CSP", "CC", "LONG_PUT", "LONG_CALL"]),
+  kindLabel: z.string(),
+  side: z.enum(["short", "long"]),
+  exp: z.string(),
+  strike: z.number(),
+  contracts: z.number(),
+  premium: z.number(),
+  opened: z.string(),
+  account: z.string(),
+  daysToExpiry: z.number(),
+  spot: z.number().nullable(),
+  iv: z.number().nullable(),
+  strikeDistancePct: z.number().nullable(),
+  modelPrice: z.number().nullable(),
+  modelNote: z.string(),
+  capturedPct: z.number().nullable(),
+  unrealizedPnl: z.number().nullable(),
+  dataNote: z.string(),
+  earningsDate: z.string().nullable(),
+  earningsLocked: z.boolean(),
+});
+
+const optionsTabCampaignSchema = z.object({
+  key: z.string(),
+  ticker: z.string(),
+  type: z.enum(["put", "call"]),
+  kindLabel: z.string(),
+  exp: z.string(),
+  strike: z.number(),
+  rolls: z.number(),
+  rollsSource: z.string(),
+  openedContracts: z.number(),
+  openContracts: z.number(),
+  assignedContracts: z.number(),
+  closedContracts: z.number(),
+  grossPremiumReceived: z.number(),
+  realizedPremium: z.number(),
+  realizedComplete: z.boolean(),
+  status: z.enum(["open", "assigned", "closed"]),
+  statusText: z.string(),
+  lotIds: z.array(z.string()),
+  coveredCallKeys: z.array(z.string()),
+});
+
+const optionsTabLotSchema = z.object({
+  id: z.string(),
+  campaignKey: z.string(),
+  ticker: z.string(),
+  strike: z.number(),
+  exp: z.string(),
+  shares: z.number(),
+  premiumPerShare: z.number(),
+  effectiveCost: z.number(),
+  assignedDate: z.string(),
+  ccPremiumTotal: z.number(),
+  ccPremiumKnown: z.boolean(),
+  calledAway: z.boolean(),
+  statusText: z.string(),
+});
+
+const optionsTabSchema = z.object({
+  asOf: z.string(),
+  disclaimer: z.string(),
+  structuredLegs: z.boolean(),
+  openPositions: z.array(optionsTabOpenPositionSchema),
+  campaigns: z.array(optionsTabCampaignSchema),
+  lots: z.array(optionsTabLotSchema),
+  acbDisclaimer: z.string(),
+  timeline: z.array(
+    z.object({
+      date: z.string(),
+      kind: z.enum(["expiry", "earnings"]),
+      ticker: z.string(),
+      text: z.string(),
+      note: z.string().nullable(),
+      locked: z.boolean(),
+    }),
+  ),
+  earnings: z.array(
+    z.object({
+      ticker: z.string(),
+      date: z.string(),
+      note: z.string().nullable(),
+      daysUntil: z.number(),
+      locked: z.boolean(),
+    }),
+  ),
+  gates: z.array(
+    z.object({
+      ticker: z.string(),
+      iv: z.number().nullable(),
+      rv: z.number().nullable(),
+      spreadPp: z.number().nullable(),
+      state: z.enum(["met", "blocked", "unknown"]),
+      symbol: z.string(),
+      text: z.string(),
+      earningsDate: z.string().nullable(),
+      earningsLocked: z.boolean(),
+    }),
+  ),
+  gex: z.object({
+    state: z.enum(["fresh", "stale", "unavailable", "unverified"]),
+    bannerText: z.string(),
+    sourceDate: z.string().nullable(),
+    rows: z.array(
+      z.object({
+        ticker: z.string(),
+        netGex: z.number().nullable(),
+        flip: z.number().nullable(),
+        spot: z.number().nullable(),
+        flipDistancePct: z.number().nullable(),
+        stale: z.boolean(),
+        dataState: z.enum(["ok", "zeroed"]),
+        dataText: z.string(),
+      }),
+    ),
+  }),
+});
+
+function optionsRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function optionsFinite(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function optionsTicker(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim().toUpperCase() : null;
+}
+
+function optionsOptionType(value: unknown): OptionsTabOptionType | null {
+  return value === "put" || value === "call" ? value : null;
+}
+
+const OPTIONS_CLOSE_KINDS: readonly OptionsTabCloseKind[] = [
+  "buy_to_close",
+  "assigned",
+  "expired",
+  "exercised",
+  "sell_to_close",
+  "other",
+];
+
+function optionsKeyFields(
+  row: Record<string, unknown>,
+): { ticker: string; type: OptionsTabOptionType; exp: string; strike: number } | null {
+  const ticker = optionsTicker(row["ticker"]);
+  const type = optionsOptionType(row["type"]);
+  const exp = row["exp"];
+  const strike = optionsFinite(row["strike"]);
+  if (!ticker || !type || !isRealOptionsDateText(exp) || strike == null || strike <= 0) {
+    return null;
+  }
+  return { ticker, type, exp, strike };
+}
+
+function buildOptionsTabViewFromTrading(
+  trading: Record<string, unknown> | null,
+): OptionsTabView | null {
+  if (!trading) return null;
+  const generatedAt = typeof trading["generated_at"] === "string" ? trading["generated_at"] : "";
+  const asOf = isRealOptionsDateText(generatedAt.slice(0, 10))
+    ? generatedAt.slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
+
+  const openOptions: OptionsTabOpenOptionInput[] = [];
+  const openRows = Array.isArray(trading["open_options"]) ? trading["open_options"] : [];
+  for (const raw of openRows) {
+    const row = optionsRecord(raw);
+    if (!row) continue;
+    const keyFields = optionsKeyFields(row);
+    const contracts = optionsFinite(row["contracts"]);
+    const avgPremium = optionsFinite(row["avg_premium"]);
+    if (!keyFields || contracts == null || contracts === 0 || avgPremium == null || avgPremium < 0) {
+      continue;
+    }
+    openOptions.push({
+      ...keyFields,
+      contracts,
+      avgPremium,
+      opened: typeof row["opened"] === "string" ? row["opened"] : "",
+      account: typeof row["account"] === "string" ? row["account"] : "",
+    });
+  }
+
+  // Quotes: pushed option_quotes win; a ticker's spot falls
+  // back to the dataset's own non-option position price.
+  const quotes: OptionsTabInput["quotes"] = {};
+  const pushedQuotes = optionsRecord(trading["option_quotes"]);
+  if (pushedQuotes) {
+    for (const [rawTicker, rawQuote] of Object.entries(pushedQuotes)) {
+      const ticker = optionsTicker(rawTicker);
+      const quote = optionsRecord(rawQuote);
+      if (!ticker || !quote) continue;
+      quotes[ticker] = {
+        spot: optionsFinite(quote["spot"]),
+        iv: optionsFinite(quote["iv"]),
+        rv: optionsFinite(quote["rv"]),
+      };
+    }
+  }
+  const positionRows = Array.isArray(trading["positions"]) ? trading["positions"] : [];
+  for (const raw of positionRows) {
+    const row = optionsRecord(raw);
+    if (!row || row["is_option"] === true) continue;
+    const ticker = optionsTicker(row["ticker"]);
+    const price = optionsFinite(row["price"]);
+    if (!ticker || price == null || price <= 0) continue;
+    const existing = quotes[ticker];
+    if (existing) {
+      if (existing.spot == null) existing.spot = price;
+    } else {
+      quotes[ticker] = { spot: price, iv: null, rv: null };
+    }
+  }
+
+  // Legs: pushed structured lots win per contract key; open
+  // short rows without a pushed key contribute one open lot
+  // each at their average premium.
+  const legs: OptionsTabLegInput[] = [];
+  const pushedLegKeys = new Set<string>();
+  const rawLegs = trading["option_legs"];
+  const rawCloses = trading["option_closes"];
+  const structuredLegs = Array.isArray(rawLegs) || Array.isArray(rawCloses);
+  if (Array.isArray(rawLegs)) {
+    for (const raw of rawLegs) {
+      const row = optionsRecord(raw);
+      if (!row) continue;
+      const keyFields = optionsKeyFields(row);
+      const contracts = optionsFinite(row["contracts"]);
+      const premium = optionsFinite(row["premium"]);
+      const opened = row["opened"];
+      if (!keyFields || contracts == null || contracts <= 0 || premium == null || premium < 0 || !isRealOptionsDateText(opened)) {
+        continue;
+      }
+      legs.push({ ...keyFields, contracts, premium, opened });
+      pushedLegKeys.add(campaignKeyOf(keyFields.ticker, keyFields.type, keyFields.exp, keyFields.strike));
+    }
+  }
+  for (const option of openOptions) {
+    if (option.contracts >= 0) continue;
+    const key = campaignKeyOf(option.ticker, option.type, option.exp, option.strike);
+    if (pushedLegKeys.has(key)) continue;
+    legs.push({
+      ticker: option.ticker,
+      type: option.type,
+      exp: option.exp,
+      strike: option.strike,
+      contracts: Math.abs(option.contracts),
+      premium: option.avgPremium,
+      opened: isRealOptionsDateText(option.opened) ? option.opened : asOf,
+    });
+  }
+
+  const closes: OptionsTabCloseInput[] = [];
+  if (Array.isArray(rawCloses)) {
+    for (const raw of rawCloses) {
+      const row = optionsRecord(raw);
+      if (!row) continue;
+      const keyFields = optionsKeyFields(row);
+      const contracts = optionsFinite(row["contracts"]);
+      const kind = row["kind"];
+      const closed = row["closed"];
+      if (
+        !keyFields ||
+        contracts == null ||
+        contracts <= 0 ||
+        typeof kind !== "string" ||
+        !OPTIONS_CLOSE_KINDS.includes(kind as OptionsTabCloseKind) ||
+        !isRealOptionsDateText(closed)
+      ) {
+        continue;
+      }
+      closes.push({
+        ...keyFields,
+        contracts,
+        kind: kind as OptionsTabCloseKind,
+        closed,
+        price: optionsFinite(row["price"]),
+      });
+    }
+  }
+
+  const earnings: OptionsTabInput["earnings"] = {};
+  const pushedEarnings = optionsRecord(trading["earnings"]);
+  if (pushedEarnings) {
+    for (const [rawTicker, rawEntry] of Object.entries(pushedEarnings)) {
+      const ticker = optionsTicker(rawTicker);
+      const entry = optionsRecord(rawEntry);
+      if (!ticker || !entry) continue;
+      const date = entry["date"];
+      if (!isRealOptionsDateText(date)) continue;
+      earnings[ticker] = {
+        date,
+        note: typeof entry["note"] === "string" && entry["note"] !== "" ? entry["note"] : null,
+      };
+    }
+  }
+
+  // GEX: the gex_result payload. The health header lives in
+  // _meta ({status, asOf|date}); symbols under `symbols` /
+  // `tickers`, or as top-level ticker entries beside _meta.
+  let gex: OptionsTabGexInput | null = null;
+  const pushedGex = optionsRecord(trading["gex"]);
+  if (pushedGex) {
+    const meta = optionsRecord(pushedGex["_meta"]);
+    const symbolSource =
+      optionsRecord(pushedGex["symbols"]) ?? optionsRecord(pushedGex["tickers"]) ?? pushedGex;
+    const symbols: OptionsTabGexInput["symbols"] = {};
+    for (const [rawTicker, rawSymbol] of Object.entries(symbolSource)) {
+      if (rawTicker === "_meta" || rawTicker === "symbols" || rawTicker === "tickers") continue;
+      const ticker = optionsTicker(rawTicker);
+      const symbol = optionsRecord(rawSymbol);
+      if (!ticker || !symbol) continue;
+      symbols[ticker] = {
+        netGex: optionsFinite(symbol["netGex"]) ?? optionsFinite(symbol["net_gex"]) ?? optionsFinite(symbol["gex"]),
+        flip: optionsFinite(symbol["flip"]) ?? optionsFinite(symbol["gamma_flip"]) ?? optionsFinite(symbol["flip_price"]),
+        spot: optionsFinite(symbol["spot"]) ?? optionsFinite(symbol["price"]),
+        stale: symbol["stale"] === true,
+      };
+    }
+    const metaDate = meta?.["asOf"] ?? meta?.["date"] ?? meta?.["generated_at"];
+    gex = {
+      hasMeta: meta != null,
+      status: typeof meta?.["status"] === "string" ? meta["status"] : null,
+      sourceDate: typeof metaDate === "string" ? metaDate.slice(0, 10) : null,
+      symbols,
+    };
+  }
+
+  return buildOptionsTabView({
+    asOf,
+    openOptions,
+    legs,
+    closes,
+    quotes,
+    earnings,
+    gex,
+    rollsOverride: { ...ROLLS_OVERRIDE },
+    structuredLegs,
+  });
+}
+
+// ---------- F-DASH-P0-4 总览升级 (additive, render-only) ----------
+//
+// The view is computed SERVER-side by the zero-import pure
+// module server/src/overviewUpgrade.ts from facts getDashboard
+// already returns — the dashboard's live facts (dual net
+// worth), the F-DASH-P0-3 options view (nearest expiry, IV−RV
+// gates, earnings locks), the F3.5 review queue count, and
+// the stored trading dataset (action-bar wash-sale window,
+// the daily series behind TWR/MWR and the three-factor
+// split, generated_at freshness). Additive sibling field on
+// getDashboard — null for guests and when neither a finance
+// snapshot nor a trading dataset exists. No schema/migration
+// and no new caliber: every number is an existing fact or
+// the overview module's single canonical derivation from
+// the journal's daily series.
+const overviewUpgradeSchema = z.object({
+  dualNetWorth: z.object({
+    investable: z.number().nullable(),
+    investableAvailable: z.boolean(),
+    investableNote: z.string(),
+    total: z.number().nullable(),
+    totalAvailable: z.boolean(),
+    totalNote: z.string(),
+    difference: z.number().nullable(),
+    bankDeposits: z.number().nullable(),
+    homeValue: z.number().nullable(),
+    loans: z.number().nullable(),
+  }),
+  actions: z.array(
+    z.object({
+      kind: z.enum(["expiry", "gate", "earnings", "review", "wash"]),
+      rank: z.number(),
+      symbol: z.string(),
+      text: z.string(),
+    }),
+  ),
+  returns: z.object({
+    twr: z.number().nullable(),
+    mwr: z.number().nullable(),
+    startDate: z.string().nullable(),
+    endDate: z.string().nullable(),
+    days: z.number(),
+    twrNote: z.string(),
+    mwrNote: z.string(),
+  }),
+  factors: z.object({
+    totalReturn: z.number().nullable(),
+    factors: z.array(
+      z.object({
+        key: z.enum(["stock", "premium", "dividends"]),
+        label: z.string(),
+        note: z.string().nullable(),
+        amount: z.number().nullable(),
+        share: z.number().nullable(),
+      }),
+    ),
+    knownSum: z.number().nullable(),
+    difference: z.number().nullable(),
+    differenceReason: z.string().nullable(),
+  }),
+  freshness: z.object({
+    priceDateMin: z.string().nullable(),
+    priceDateMax: z.string().nullable(),
+    generatedAt: z.string().nullable(),
+    volPanelAsOf: z.string().nullable(),
+    verified: z.boolean(),
+    unverifiedText: z.string(),
+  }),
+});
+
+function overviewFinite(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function buildOverviewUpgradeViewFromDashboard(
+  data: Dashboard | null,
+  trading: Record<string, unknown> | null,
+  optionsView: OptionsTabView | null,
+  reviewQueue: TxReviewQueueView | null,
+): OverviewUpgradeView | null {
+  if (!data && !trading) return null;
+
+  // Dual net worth: the pre-existing live facts only. The
+  // home valuation, when separately recorded, is an
+  // account-type row whose label/source names the home; it
+  // stays inside the deposits fact and is only split out for
+  // the difference breakdown — never invented when absent.
+  let homeValue: number | null = null;
+  if (data) {
+    const homeRows = data.accounts.filter(
+      (account) =>
+        account.type === "account" &&
+        account.value > 0 &&
+        /房|住宅|house|home|property/i.test(`${account.label} ${account.source}`),
+    );
+    if (homeRows.length > 0) {
+      homeValue = homeRows.reduce((sum, account) => sum + account.value, 0);
+    }
+  }
+
+  // Trading-journal facts (daily series, closed trades,
+  // positions, dividends) — all absent when no push exists.
+  const dailyPoints: OverviewDailyPoint[] = [];
+  const closedTrades: OverviewActionClosedTrade[] = [];
+  let stockPriceChange: number | null = null;
+  let optionPremium: number | null = null;
+  let dividendsInterest: number | null = null;
+  let tradingAsOf = "";
+  let generatedAt: string | null = null;
+  let volPanelAsOf: string | null = null;
+  if (trading) {
+    const generated = trading["generated_at"];
+    if (typeof generated === "string" && generated !== "") {
+      generatedAt = generated;
+      tradingAsOf = isRealOptionsDateText(generated.slice(0, 10)) ? generated.slice(0, 10) : "";
+    }
+    const dailyRows = Array.isArray(trading["daily"]) ? trading["daily"] : [];
+    for (const raw of dailyRows) {
+      const row = optionsRecord(raw);
+      if (!row) continue;
+      const date = row["date"];
+      const value = overviewFinite(row["value"]);
+      const flow = overviewFinite(row["flow"]);
+      if (typeof date !== "string" || value == null || flow == null) continue;
+      dailyPoints.push({ date, value, flow });
+    }
+    const closedRows = Array.isArray(trading["closed_trades"]) ? trading["closed_trades"] : [];
+    let stockRealized = 0;
+    let premiumRealized = 0;
+    for (const raw of closedRows) {
+      const row = optionsRecord(raw);
+      if (!row) continue;
+      const kind = typeof row["kind"] === "string" ? row["kind"] : "";
+      const ticker = optionsTicker(row["ticker"]);
+      const closed = typeof row["closed"] === "string" ? row["closed"] : "";
+      const pnl = overviewFinite(row["pnl"]);
+      if (ticker && closed) {
+        closedTrades.push({ kind, ticker, closed, pnl });
+      }
+      if (pnl == null) continue;
+      if (kind === "stock") stockRealized += pnl;
+      else if (kind === "option") premiumRealized += pnl;
+    }
+    let stockUnrealized = 0;
+    const positionRows = Array.isArray(trading["positions"]) ? trading["positions"] : [];
+    for (const raw of positionRows) {
+      const row = optionsRecord(raw);
+      if (!row || row["is_option"] === true) continue;
+      const value = overviewFinite(row["value"]);
+      const cost = overviewFinite(row["cost"]);
+      if (value == null || cost == null) continue;
+      stockUnrealized += value - cost;
+    }
+    stockPriceChange = stockRealized + stockUnrealized;
+    optionPremium = premiumRealized;
+    dividendsInterest = overviewFinite(trading["dividends_total"]) ?? 0;
+    const volPanel = optionsRecord(trading["vol_panel"]);
+    const volRaw =
+      volPanel?.["asof"] ?? volPanel?.["asOf"] ?? volPanel?.["date"] ?? trading["vol_panel_asof"];
+    if (typeof volRaw === "string" && volRaw !== "") volPanelAsOf = volRaw;
+  }
+
+  // Freshness price-date range: the F-ARCH Plaid-layer as-of
+  // range wins; otherwise the account rows' own balance dates.
+  let priceDateMin: string | null = null;
+  let priceDateMax: string | null = null;
+  if (data?.archNetWorth?.plaidRange) {
+    priceDateMin = data.archNetWorth.plaidRange.oldest;
+    priceDateMax = data.archNetWorth.plaidRange.newest;
+  } else if (data) {
+    const dates = data.accounts
+      .map((account) => account.balanceDate)
+      .filter((value): value is string => isRealOptionsDateText(value))
+      .sort();
+    priceDateMin = dates[0] ?? null;
+    priceDateMax = dates[dates.length - 1] ?? null;
+  }
+
+  return buildOverviewUpgrade({
+    dualNetWorth: {
+      investable: data?.live.investment ?? null,
+      deposits: data?.live.deposits ?? null,
+      loans: data?.live.loans ?? null,
+      totalNetWorth: data?.live.netWorth ?? null,
+      homeValue,
+    },
+    actions: {
+      asOf: tradingAsOf,
+      openPositions: (optionsView?.openPositions ?? []).map((row) => ({
+        ticker: row.ticker,
+        kindLabel: row.kindLabel,
+        exp: row.exp,
+        daysToExpiry: row.daysToExpiry,
+      })),
+      gates: (optionsView?.gates ?? []).map((gate) => ({
+        ticker: gate.ticker,
+        state: gate.state,
+        spreadPp: gate.spreadPp,
+      })),
+      earnings: (optionsView?.earnings ?? []).map((row) => ({
+        ticker: row.ticker,
+        date: row.date,
+        daysUntil: row.daysUntil,
+        locked: row.locked,
+      })),
+      reviewPendingTotal: reviewQueue?.pendingTotal ?? null,
+      closedTrades,
+    },
+    dailyPoints,
+    factors: {
+      stockPriceChange,
+      optionPremium,
+      dividendsInterest,
+    },
+    freshness: {
+      priceDateMin,
+      priceDateMax,
+      generatedAt: generatedAt ?? data?.asOf ?? null,
+      volPanelAsOf,
+    },
+  });
+}
+
 export const Actions = {
   getDashboard: defineAction({
-    description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner. The dashboard also carries the F3.3 future cash-flow forecast (cashFlowForecast), inferred at ingest from historical recurring income and charges against the current deposits balance. It also carries the F0.5 server-side four-source ledger (sourceLedger: Firance snapshots / Plaid accounts / Plaid transactions / Plaid holdings), derived server-side from the read-back snapshot and the refresh attempt state — per-source success evidence, data date and coverage, the total snapshot time labelled as snapshot time only (per-source last-success times come only from that source's own success-time evidence, null when the payload carries none), this attempt's result kept separate from the last usable facts, and transaction-dependent inferences explicitly degraded.",
+    description: "Read the finance dashboard (monthly snapshots, live net worth, arch overlays and the trading dataset) for the owner. The dashboard also carries the F3.3 future cash-flow forecast (cashFlowForecast), inferred at ingest from historical recurring income and charges against the current deposits balance. It also carries the F0.5 server-side four-source ledger (sourceLedger: Firance snapshots / Plaid accounts / Plaid transactions / Plaid holdings), derived server-side from the read-back snapshot and the refresh attempt state — per-source success evidence, data date and coverage, the total snapshot time labelled as snapshot time only (per-source last-success times come only from that source's own success-time evidence, null when the payload carries none), this attempt's result kept separate from the last usable facts, and transaction-dependent inferences  It also carries the F-DASH-P0-3 options tab view (optionsTab), computed server-side by the pure optionsTab module from the stored trading dataset — open positions with Black-Scholes model estimates, campaign chains with FIFO-paired assignment lots and wheel effective costs, the expiry/earnings timeline, IV−RV gate states and the GEX panel with its freshness state; null for guests and until the first trading push. It also carries the F-DASH-P0-4 overview upgrade view (overviewUpgrade), computed server-side by the pure overviewUpgrade module from facts this action already returns — the dual net worth (investable vol_panel caliber beside total net worth, with the difference broken into bank deposits, home valuation and liabilities), a fact-only action bar (nearest expiry, IV−RV gate state, earnings locks, pending review count, wash-sale windows; at most five, hidden when empty), the TWR/MWR return pair with its three-factor split derived from the trading journal's daily series, and the Plaid freshness line (price-date range, generated_at, vol_panel asof; unverified when any field is missing); null for guests.",
     request: z.object({}),
     response: z.object({
       access: z.enum(["owner", "guest_denied"]),
@@ -5745,6 +6360,19 @@ export const Actions = {
       // always receive the ledger — the empty shape when no
       // snapshot exists yet.
       sourceLedger: sourceLedgerSchema.nullable().optional(),
+      // F-DASH-P0-3 additive sibling field: the 「期权」 tab
+      // view, computed server-side from the trading dataset
+      // (see optionsTabSchema above). Null for guests and
+      // until the first trading push.
+      optionsTab: optionsTabSchema.nullable().optional(),
+      // F-DASH-P0-4 additive sibling field: the overview tab
+      // upgrade view (dual net worth, fact action bar, TWR/MWR
+      // pair, three-factor split, Plaid freshness), computed
+      // server-side by the pure overviewUpgrade module from
+      // facts this action already returns. Null for guests and
+      // when neither a finance snapshot nor a trading dataset
+      // exists.
+      overviewUpgrade: overviewUpgradeSchema.nullable().optional(),
       refresh: z.object({
         status: z.enum(["idle", "running", "error"]),
         message: z.string().nullable(),
@@ -5764,6 +6392,8 @@ export const Actions = {
           trading: null,
           txReviewQueue: null,
           sourceLedger: null,
+          optionsTab: null,
+          overviewUpgrade: null,
           refresh: { status: "idle" as const, message: "财务数据仅所有者可查看", updatedAt: null, startedAt: null },
         };
       }
@@ -5917,12 +6547,23 @@ export const Actions = {
       // snapshot exists (no snapshot -> null, per the additive
       // contract); buildTxReviewQueue itself never throws.
       const txReviewQueue = data ? await buildTxReviewQueue(ctx) : null;
+      // F-DASH-P0-3: the options view derives from the trading
+      // dataset alone — no finance snapshot is required, and a
+      // missing dataset keeps the field null (the 「期权」 tab
+      // shows its empty state).
+      const optionsTab = buildOptionsTabViewFromTrading(trading);
+      // F-DASH-P0-4: the overview upgrade view derives from
+      // the final dashboard facts + the options view + the
+      // review queue + the trading dataset assembled above.
+      const overviewUpgrade = buildOverviewUpgradeViewFromDashboard(data, trading, optionsTab, txReviewQueue);
       return {
         access: "owner" as const,
         data,
         trading,
         txReviewQueue,
         sourceLedger,
+        optionsTab,
+        overviewUpgrade,
         refresh: {
           status: effectiveRefreshStatus,
           message: payloadCorrupted

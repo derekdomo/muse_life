@@ -234,10 +234,11 @@ check("demo is never dressed up as a full-history balance rebuild",
   app.includes("不构成全账户历史余额重建"));
 check("net-worth isolation note is the exact line",
   app.includes("净资产卡不受本演示控件影响，仍显示自身最新已知值与两层日期。"));
-check("four tabs unchanged (overview / fire / detail / trading)",
-  (app.match(/role="tab"/g) ?? []).length === 4
-  && app.includes(">总览</button>") && app.includes(">FIRE</button>") && app.includes(">明细</button>") && app.includes(">交易</button>"));
-check("default tab is still overview", app.includes('useState<"overview" | "fire" | "detail" | "trading">("overview")'));
+check("five tabs per F-DASH-P0-3 (overview / fire / detail / trading / options), original four unchanged and in order",
+  (app.match(/role="tab"/g) ?? []).length === 5
+  && app.includes(">总览</button>") && app.includes(">FIRE</button>") && app.includes(">明细</button>") && app.includes(">交易</button>") && app.includes(">期权</button>")
+  && app.indexOf(">交易</button>") < app.indexOf(">期权</button>"));
+check("default tab is still overview", app.includes('useState<"overview" | "fire" | "detail" | "trading" | "options">("overview")'));
 check("demo controls meet the 44px touch target",
   css.includes(".arch-demo-switch button") && css.includes(".arch-demo-txn__toggle") && css.includes("min-height: 44px"));
 check("demo controls have a visible focus outline",
