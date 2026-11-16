@@ -124,7 +124,7 @@ export const DEFAULT_PLAN_TEMPLATES: Record<RoutineKey, SeedPlanExercise[]> = {
   home_snowboard: [
     { key: "single-leg-balance", name: "单腿平衡触点", sets: 2, target: "60秒" },
     { key: "home-bulgarian-split-squat", name: "保加利亚分腿蹲 · Bench 抱片", sets: 3, target: "12" },
-    { key: "bench-step-up", name: "Bench 登阶", sets: 2, target: "10" },
+    { key: "lateral-lunge", name: "侧向弓步", sets: 2, target: "10 每侧" }, // W-HOMEB-002 (2026-11-16): replaces bench-step-up at equal volume
     { key: "home-calf-raise", name: "提踵 · 抱片", sets: 3, target: "20" },
     { key: "tibialis-raise", name: "靠墙胫骨前肌抬脚尖", sets: 2, target: "20" },
     { key: "wall-sit", name: "靠墙静蹲", sets: 3, target: "45秒" },
@@ -136,7 +136,7 @@ export const DEFAULT_PLAN_TEMPLATES: Record<RoutineKey, SeedPlanExercise[]> = {
 export const DEFAULT_PLAN_SCHEDULE: { day_index: number; routine_code: string; note: string }[] = [
   { day_index: 0, routine_code: "home_posture", note: "在家 A · 体态 20 分钟" },
   { day_index: 1, routine_code: "push", note: "健身房重练" },
-  { day_index: 2, routine_code: "home_snowboard", note: "在家 B · 单板 25 分钟，与腿日隔 48 小时以上；【2026-11-16 起至出行前】Bench 登阶换侧向弓步（侧向弓步→脉冲弓步渐进，等量 2 组），出行周停练" },
+  { day_index: 2, routine_code: "home_snowboard", note: "在家 B · 单板 25 分钟，与腿日隔 48 小时以上；侧向弓步已替换 Bench 登阶（2026-11-16 起生效，侧向弓步→脉冲弓步渐进，等量 2 组），出行周停练" },
   { day_index: 3, routine_code: "pull", note: "健身房重练" },
   { day_index: 4, routine_code: "home_posture", note: "在家 A · 体态 20 分钟" },
   { day_index: 5, routine_code: "swim", note: "游泳 1–2 次安排在本日或休息日" },

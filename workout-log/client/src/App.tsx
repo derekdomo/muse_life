@@ -552,12 +552,12 @@ const EXERCISE_GUIDES: Record<string, ExerciseGuide> = {
     mistakes: ["后脚猛蹬借力", "膝盖向内塌", "下放直接掉落"],
     demo: EXERCISE_DEMOS["bench-step-up"],
   },
-  // W-HOMEB-001: text-only guide, prepared ahead of the dated swap —
-  // from 2026-11-16 until the first snowboard trip this replaces the
-  // bench-step-up slot in Home B at equal volume (2 sets); the stored
-  // plan itself is unchanged until then (see the day-2 schedule note).
-  // No demo image and no video: no verified real demonstration exists
-  // for this movement, so it ships text cues only.
+  // W-HOMEB-002 (effective 2026-11-16, migration 0013): text-only
+  // guide — this now occupies the bench-step-up slot in Home B at
+  // equal volume (2 sets) until the first snowboard trip (see the
+  // day-2 schedule note). No demo image and no video: no verified
+  // real demonstration exists for this movement, so it ships text
+  // cues only.
   "lateral-lunge": {
     title: "侧向弓步",
     focus: "横向力量与耐力 · 单板横向重心转移",

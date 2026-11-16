@@ -96,7 +96,7 @@ For the remaining 9 movements no accurate, cleanly licensed real video was found
 - Reverse pec deck (`reverse-pec-deck`): the one pec-deck video downloaded and checked second-by-second (Pexels 4921622) is the FORWARD fly — arms closing in front of the chest, the exact opposite direction. Rejected.
 - Push-up plus (`push-up-plus`): available push-up videos (e.g. Pexels 4367576) are regular push-ups with bent elbows; the plus is a straight-arm scapular movement, so they would teach the guide's own listed mistake. Rejected.
 
-- Lateral lunge (`lateral-lunge`, added 2026-10-24, W-HOMEB-001): text-only guide prepared ahead of the dated Home B swap — from 2026-11-16 until the first snowboard trip it takes the `bench-step-up` slot at equal volume (2 sets), progressing bodyweight lateral lunge → pulse lunge over three weeks. No demo image, no generated imagery, no video link: no verified real demonstration was sourced for this movement, so it ships text cues only under the same accuracy rule as the 9 above. The stored plan itself is unchanged until the window opens — the swap exists only as the dated annotation appended to the day-2 (`home_snowboard`) schedule note by migration 0007, mirrored in `DEFAULT_PLAN_SCHEDULE`.
+- Lateral lunge (`lateral-lunge`, added 2026-10-24, W-HOMEB-001): text-only guide prepared ahead of the dated Home B swap — from 2026-11-16 until the first snowboard trip it takes the `bench-step-up` slot at equal volume (2 sets), progressing bodyweight lateral lunge → pulse lunge over three weeks. No demo image, no generated imagery, no video link: no verified real demonstration was sourced for this movement, so it ships text cues only under the same accuracy rule as the 9 above. The swap took effect 2026-11-16 (W-HOMEB-002, migration 0013): the stored `plan_exercises` row is now `lateral-lunge` (2 sets, target '10 每侧'), the day-2 note reads as effective, and `DEFAULT_PLAN_TEMPLATES` / `DEFAULT_PLAN_SCHEDULE` match; see the W-HOMEB-002 chapter at the end of this file.
 
 Also rejected while sourcing the four shipped pairs: seated dumbbell/machine presses (Pexels 4367541, 29569376, 7187395; CDC Commons machine press) for the standing barbell press; a standing dumbbell press (Pexels 5837705, cropped close-up, wrong implement for a barbell guide); biceps-curl videos surfaced under "lateral raise" (Pexels 6326722, 16368952); an outdoor resistance-band row (Pexels 6022753) for the cable row; and a distant calf-machine video with a water-drinking break (Pexels 10315443) in favour of the close-up step video above.
 
@@ -1064,3 +1064,66 @@ and computes no coverage of its own.
   2026-10-17; W6.1 added one read-only computed field behind
   `getPlan`'s existing strict owner-only gate and did not widen
   any channel.
+
+## Home B lateral-lunge swap executed (W-HOMEB-002, effective 2026-11-16)
+
+- What changed: the Home B (`home_snowboard`) bench-step-up slot was
+  replaced by the lateral-lunge series at equal volume, on the
+  owner-decided automatic schedule (window opened 2026-11-16).
+- Before / after (stored plan, migration 0013):
+  - Before: `bench-step-up` / Bench 登阶 / 2 sets / target `10`,
+    third slot of `home_snowboard`.
+  - After: `lateral-lunge` / 侧向弓步 / 2 sets / target `10 每侧`,
+    same slot position. The other 7 exercises are untouched;
+    wall-sit stays 3 sets / `45秒`. Home B remains 8 exercises,
+    20 sets, ~25 minutes; taper rule (no Home B in the trip week)
+    unchanged; all other routines and daily micro-routine items
+    unchanged.
+- Day-2 schedule note before / after:
+  - Before (post-0008): `在家 B · 单板 25 分钟，与腿日隔 48 小时以上；【2026-11-16 起至出行前】Bench 登阶换侧向弓步（侧向弓步→脉冲弓步渐进，等量 2 组），出行周停练`
+  - After: `在家 B · 单板 25 分钟，与腿日隔 48 小时以上；侧向弓步已替换 Bench 登阶（2026-11-16 起生效，侧向弓步→脉冲弓步渐进，等量 2 组），出行周停练`
+  - `DEFAULT_PLAN_TEMPLATES` and `DEFAULT_PLAN_SCHEDULE` in
+    `server/src/actions.ts` match the stored rows.
+- Progression (per the existing lateral-lunge guide, text-only, no
+  demo image or video): three weeks, bodyweight lateral lunge in
+  week 1 → 1–2 small pulses at the bottom in week 2 → pulse lunge
+  dominant in week 3. No jumping variant.
+- Versioning: content migration, same precedent as 0007/0008 — it
+  rewrites the live `plan_exercises` / `plan_schedule` rows directly
+  and creates no `plan_versions` row and no history rows; affected
+  rows keep their current `plan_version`. Past sessions keep
+  rendering from their own `workout_sets` snapshots, so history is
+  untouched. Both 0013 statements are guarded by exact-match
+  predicates (routine + exercise_key; day_index + routine_code +
+  exact old note), so a re-run or an already-manually-swapped plan
+  changes zero rows.
+- Verification (this round, repo-side, real runs on synthetic data
+  only): `0013` semantics checked with node:sqlite — apply
+  0001..0012, seed the pre-swap stored plan, apply 0013, assert
+  lateral-lunge 2 sets / '10 每侧', no bench-step-up, wall-sit
+  3 sets, 8 rows / 20 sets, day-2 note byte-exact, re-run changes
+  0 rows — PASS. Regression sweep (modified vs pristine
+  pre-change copy, same VM): validate-plan-safe 218 passed /
+  8 failed with an identical fail set in the pristine copy
+  (C4 x2, PM-b x2, E3 x4 — concurrency timing under this VM's
+  bun 1.4.4; the migration-sequence check passes 0001..0013);
+  validate-plan-versioning 38/0, validate-plan-coverage 19/0,
+  validate-d1 36/36 (node), and all 21 other validators identical
+  between copies with 0 failures. Privacy scan of the new/changed
+  files: zero hits. The artifact-side storage read-back (builder):
+  pre-swap audit confirmed bench-step-up present and no
+  lateral-lunge plan row; post-swap audit shows 侧向弓步 2 组 /
+  weekly 1x and 靠墙静蹲 3 组, with bench-step-up remaining only
+  as a muscle-map directory entry (not a plan member).
+- Standing gaps (not hidden): (1) the platform v27–v29 upgrades
+  the builder applied in the same build — in particular the v29
+  FIELDS change to `App.tsx` inputs — live only in the artifact;
+  the handoff carried no verbatim diff, so they are NOT reinfused
+  here and remain repo/artifact drift to reconcile later.
+  (2) `bun.lock` changed in the artifact build; not reinfused.
+  (3) The artifact's `DATA-PLAN.md` is ahead of this repo copy
+  (builder cited lines 1248→1300; this file is shorter) — known
+  online/repo drift, same category as H-SYNC-DIVERGE-001.
+  (4) Owner-eyes confirmation is still the final bar: the audit
+  sandbox is not the owner, so the owner opening the plan editor
+  is the last check.
