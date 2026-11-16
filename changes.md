@@ -5653,3 +5653,16 @@
 - 队列状态（与 05:55 轮次一致，本轮区间内无变化）：P0/P1 可执行队列仍空（`F0.5` 本体归原 Muse/主聊天 job；`F3.1` 因 F0.5 coverage 门禁未满足继续暂缓；`F3.3` 回灌已完成、保持 [ ] 待 PM 验收；`H-SYNC-DIVERGE-001` 待 PM 裁决；`W6.2-PM-IMG` 属 PM 执行范围；`LIFE-DESIGN-001` 待 PM 出稿；`CWEB-LEVEL-001` 待 PM 方向；`H-FRESH-001` 归因须所有者实机量测；`H-UI-002` 承接未交付的 `H-UI-001`；`H-LOAD-001`/`F-ARCH-001` 标注（需用户确认）；`F-DASH-P0-3/4/5` 协调员所有、同步轮次不接单；其余 [ ] 项为 L0/L1/H0/H1 运行待验、须本人实机证据或（需用户确认），均不动；推荐执行顺序第 7 步 13 项 P2（`H4.x`/`W5.x`/`F3.x`）均已交付或落至上述暂缓/阻塞状态；无实现方提案小增量开工。本轮独立计数：未完成编号条目 53 项（`[完成]` 106 项、`[x]` 9 项），与 05:55 轮次计数一致，本轮区间内无变化。F-DASH-P0-2/P0-4 四组 P0 返工目标时点 2026-11-14 18:00 PST 已过，本轮区间内仓库仍无相关交付提交（仍归协调员 → Muse builder 实现，同步轮次不接单、不派工）。机械汇总门：`git log --oneline bc9ee29..HEAD` 零输出、`git status --short` 干净，与本轮汇总（0 新任务、0 派工、0 交付）一致。
 - 进度面板核对：「Life 进度」（slug life）与仓库现状一致，无需改动——自 04:12 轮次面板刷新（`W-HOMEB-002` 已交付，截至 2026-11-16 04:12 PST）以来 `git diff af8b877..HEAD -- plans.md` 为空，无编号条目状态或数据变化；经 artifact.status 确认 life 无构建在跑。面板刷新本身按规则不单独向用户汇报。
 - plans.md：本轮未改动。sync-state.json：muse_life 一节 last_seen_sha 已为当前 HEAD（`bc9ee297e6bdd95803e4621ed493d7e31bfadde0`），无需更新。本轮未动 cron；修改文件：本文件。
+
+## 2026-11-16 08:39 PST — homeb-lateral-swap 执行复核（W-HOMEB-002 独立读回验证，无重复改动）
+
+- 本轮基线：`git pull` 已最新（Already up to date）；HEAD `e3038565ff43956e8ade59ac595a720684c1b09d`（完整 40 位 SHA）== 本轮起步基线，工作树干净。任务书第 1–3 步所指的替换已由 2026-11-16 04:12 plans-sync 轮次执行完毕（builder 04:05 交付、回灌提交 `af8b877`）；按任务书第 2 步「已是 lateral-lunge 只复核、不重复改动」，本轮未再派工、未再改动线上计划与仓库模板，仅做独立读回验证并登记。
+- 独立读回（本轮实测，`artifact.invoke_action` space-6 `getplan`，2026-11-16 约 08:45 PST）：直接返回已存计划全文。纠正 04:12 登记中「getPlan 严格 owner-only」的口径——本轮 agent 通道经 `invoke_action` 可直接读回 `getplan`（非经 getDashboard 审计渲染），本次验证即以该直接读回为准；所有者本人打开 plan editor 仍为最终确认。
+- 复核结果（全部 PASS）：
+  - Home B（`home_snowboard`）：8 个动作、总组数 20（2+3+2+3+2+3+3+2）；第 3 槽位为 `lateral-lunge` 侧向弓步、2 组、目标「10 每侧」，与换前 `bench-step-up`（Bench 登阶、2 组、目标「10」）同一顺序位置；靠墙静蹲 `wall-sit` 3 组 45 秒保留；其余 7 行与换前种子逐字一致。
+  - 全计划无 `bench-step-up` 动作 key（仅 day-2 note 文本与代码注释含历史提及）；plan_coverage 中侧向弓步已列入核心/股四头肌/臀大肌次要动作。
+  - day-2 note 已是已执行表述，与 0013 迁移目标逐字一致：「在家 B · 单板 25 分钟，与腿日隔 48 小时以上；侧向弓步已替换 Bench 登阶（2026-11-16 起生效，侧向弓步→脉冲弓步渐进，等量 2 组），出行周停练」；出行周停练 taper 规则保留。
+  - 其余 routine 与训练记录未被本次替换动过：push 8 / pull 7 / legs 6 / home_posture 4 个动作、每日微练 4 项（daily_done 空）、schedule 7 条、plan version 1（created 2026-11-03）、全计划 33 个动作 = version exercise_count；仓库侧 `git diff af8b877^..HEAD -- workout-log/server/src/actions.ts` 仅两行模板改动（Home B 槽位＋day-2 note），0013 迁移为两条精确匹配守卫 UPDATE（重跑零改动）。
+- 既存线上/种子漂移（非本次替换造成，发生于 11-16 之前，本轮不改、留作后补）：线上 push 含 `cable-pushdown` 与 `cable-lateral-raise`（所有者 2026-11-03 在 app 内加的绳索下压/绳索侧平举，`git log -S` 证实种子从未含此二者）；线上罗马尼亚硬拉目标「10–12」vs 种子「8–10」。0013 的守卫谓词无法触及这两处，换前/换后状态一致。
+- 局限与回滚：本轮未重跑 04:12 的全量回归（该轮已跑：validate-plan-safe 218/8、8 失败与改前 pristine 一致，余者全过）；回滚口径不变——重跑 0013 改动 0 行，真回滚需新建逆向迁移，本轮无回滚需求未执行；04:12 留下的 standing gaps（v29 FIELDS 的 App.tsx 改动与 bun.lock 未回灌）本轮无新证据，仍待后补。
+- plans.md：`W-HOMEB-002` 已于 04:12 标 [完成]（实现方已交付；PM 暂停中，待验收），本轮不改状态。修改文件：本文件。
